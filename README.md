@@ -4,7 +4,7 @@ Windows専用の、AI CLIと一緒に使う小さなコードビューアーで�
 
 C++17 / Win32 / GDI / ConPTYで実装し、ブラウザー、WebView、Node.js、.NETランタイム、エディターエンジンを常駐させません。LSP、拡張機能、編集機能は入れていません。
 
-**初期実装です。Windows上での動作、実際のAI CLIとの互換性、メモリ使用量は未検証です。** Docker向けのビルド構成とC++テストを用意していますが、現時点では実ビルド・テストもまだ実行していません。メモリ使用量の達成値は記載していません。
+**初期実装です。Windows上での動作、実際のAI CLIとの互換性、メモリ使用量は未検証です。** Docker上でのWindows向けクロスビルドとLinux用コアテストは実行済みです。メモリ使用量の達成値は記載していません。
 
 ## ビルド
 
@@ -42,7 +42,7 @@ make artifact
 ```ini
 docker-proxy-name=poppy-docker-proxy
 docker-proxy-containers=poppy-dev
-docker-proxy-allow=/usr/local/bin/poppy-build
+docker-proxy-allow=sh /usr/local/bin/poppy-build
 docker-proxy-allow=cmake
 docker-proxy-allow=ctest
 docker-proxy-allow=ninja
@@ -50,13 +50,13 @@ docker-proxy-allow=g++
 docker-proxy-allow=x86_64-w64-mingw32-g++-posix
 ```
 
-既存の`docker-proxy-allow=sh docker/build.sh`は削除してください。設定を反映するため、AIコンテナを作り直して起動します。`.aicontainer`はローカル設定としてGit管理から除外されています。
+既存の`docker-proxy-allow=sh docker/build.sh`や`docker-proxy-allow=/usr/local/bin/poppy-build`は、上記の`sh`と固定パスを指定する設定に置き換えてください。設定を反映するため、AIコンテナを作り直して起動します。`.aicontainer`はローカル設定としてGit管理から除外されています。
 
 AIコンテナ内でもリポジトリのルートから実行します。
 
 ```sh
 # コアテストからWindows実行ファイルの生成まで実行
-dp /usr/local/bin/poppy-build
+dp sh /usr/local/bin/poppy-build
 
 # 初回ビルド後、Windows向けの差分コンパイルだけを実行
 dp cmake --build /build/windows --parallel 2
@@ -150,7 +150,7 @@ Windows Terminal相当の互換性はまだありません。結合文字・ZWJ�
 
 ## 検証と計測
 
-`tests/core_tests.cpp`は、エンコーディング、不正・分割UTF-8、複数行ハイライト、分割VTシーケンス、色、全角文字の上書き、画面切り替え、スクロール領域、入力モード、履歴上限、リサイズを検証するテストです。現環境では未実行です。
+`tests/core_tests.cpp`は、エンコーディング、不正・分割UTF-8、複数行ハイライト、分割VTシーケンス、色、全角文字の上書き、画面切り替え、スクロール領域、入力モード、履歴上限、リサイズを検証するテストです。Docker上のLinux環境で実行し、通過を確認しました。
 
 WindowsではReleaseビルド後、次の順で確認します。
 

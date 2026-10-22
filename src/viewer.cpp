@@ -14,7 +14,8 @@ void Viewer::create(HWND parent, HINSTANCE instance) {
     setDpi(GetDpiForWindow(parent));
 }
 void Viewer::setDpi(UINT dpi) {
-    if (font_) DeleteObject(font_); if (uiFont_) DeleteObject(uiFont_);
+    if (font_) DeleteObject(font_);
+    if (uiFont_) DeleteObject(uiFont_);
     font_ = makeFont(MulDiv(15, dpi, 96)); uiFont_ = makeFont(MulDiv(13, dpi, 96), false);
     HDC dc = GetDC(window_); const auto old = SelectObject(dc, font_); TEXTMETRICW metrics{}; GetTextMetricsW(dc, &metrics); SelectObject(dc, old); ReleaseDC(window_, dc);
     cellWidth_ = metrics.tmAveCharWidth; cellHeight_ = metrics.tmHeight + MulDiv(3, dpi, 96);

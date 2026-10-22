@@ -49,7 +49,8 @@ std::shared_ptr<FileResult> readDocument(const fs::path& path) {
     while (offset < bytes.size()) {
         DWORD count = 0;
         if (!ReadFile(file.value, bytes.data() + offset, static_cast<DWORD>(bytes.size() - offset), &count, nullptr)) { result->error = winError(); return result; }
-        if (!count) break; offset += count;
+        if (!count) break;
+        offset += count;
     }
     bytes.resize(offset); auto document = std::make_shared<Document>(); std::string error;
     if (!decodeText(std::move(bytes), document->text, document->encoding, error)) { result->error = wide(error); return result; }
@@ -363,7 +364,8 @@ void App::refreshGit() {
     gitWorker_->submit(L"git", [this, root, generation] {
         auto result = readGit(root, gitWorker_->cancellation());
         gitWorker_->complete([this, generation, result] {
-            if (generation != generation_) return; git_ = result;
+            if (generation != generation_) return;
+            git_ = result;
             for (const auto& pair : nodes_) updateLabel(pair.second);
             if (!result->error.empty()) status(L"Git: " + result->error);
             else if (result->truncated) status(L"Git badges limited to 50,000 paths.");
@@ -385,7 +387,8 @@ void App::watch() {
     watchOperation_ = {}; watchOperation_.hEvent = watchEvent_.value; armWatch();
 }
 void App::armWatch() {
-    if (!watchDirectory_) return; ResetEvent(watchEvent_.value);
+    if (!watchDirectory_) return;
+    ResetEvent(watchEvent_.value);
     watchPending_ = ReadDirectoryChangesW(watchDirectory_.value, watchBuffer_.data(), static_cast<DWORD>(watchBuffer_.size()), TRUE, FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_DIR_NAME | FILE_NOTIFY_CHANGE_SIZE | FILE_NOTIFY_CHANGE_LAST_WRITE, nullptr, &watchOperation_, nullptr) != FALSE;
     if (!watchPending_) status(L"Folder watching unavailable; use F5 to refresh.");
 }
@@ -403,7 +406,8 @@ void App::pollWatch() {
                 const auto changed = pathKey(root_ / name), selected = pathKey(selected_);
                 if (changed == selected || selected.rfind(changed + L"\\", 0) == 0) fileDirty_ = true;
             }
-            if (!info->NextEntryOffset) break; offset += info->NextEntryOffset;
+            if (!info->NextEntryOffset) break;
+            offset += info->NextEntryOffset;
         }
         if (relevant) { if (!dirty_) { dirtySince_ = now; SetTimer(window_, timerId, 200, nullptr); } dirty_ = true; lastEvent_ = now; }
         watchPending_ = false; armWatch();
@@ -437,12 +441,14 @@ LRESULT App::handle(UINT m, WPARAM a, LPARAM b) {
     case WM_LBUTTONDOWN: {
         const int x = MulDiv(GET_X_LPARAM(b), 96, dpi_), y = GET_Y_LPARAM(b);
         if (y < toolbar_) {
-            if (x >= 98 && x < 210) chooseFolder(); else if (x >= 220 && x < 292) refresh(); else if (x >= 305 && x < 360) showDiff(); else if (x >= 374 && x < 460) toggleTerminal(); return 0;
+            if (x >= 98 && x < 210) chooseFolder(); else if (x >= 220 && x < 292) refresh(); else if (x >= 305 && x < 360) showDiff(); else if (x >= 374 && x < 460) toggleTerminal();
+            return 0;
         }
         RECT r{}; GetClientRect(window_, &r); RECT term{}; GetWindowRect(terminal_.window(), &term); MapWindowPoints(nullptr, window_, reinterpret_cast<POINT*>(&term), 2);
         if (y < r.bottom - footer_ && x >= sidebar_ && x <= sidebar_ + 8) dragging_ = 1;
         else if (terminalVisible_ && y >= term.top - splitter_ && y < term.top) dragging_ = 2;
-        if (dragging_) SetCapture(window_); return 0;
+        if (dragging_) SetCapture(window_);
+        return 0;
     }
     case WM_MOUSEMOVE:
         if (dragging_) {
@@ -506,5 +512,6 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
     int result = 1;
     try { poppy::App app; result = app.run(instance, show, std::move(initial)); }
     catch (const std::exception& error) { MessageBoxW(nullptr, poppy::wide(error.what()).c_str(), L"Poppy", MB_OK | MB_ICONERROR); }
-    if (SUCCEEDED(com)) CoUninitialize(); return result;
+    if (SUCCEEDED(com)) CoUninitialize();
+    return result;
 }

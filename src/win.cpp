@@ -96,7 +96,8 @@ bool copyText(HWND owner, const std::wstring& text) {
     if (!buffer) { GlobalFree(data); CloseClipboard(); return false; }
     memcpy(buffer, text.c_str(), (text.size() + 1) * sizeof(wchar_t)); GlobalUnlock(data);
     EmptyClipboard(); const bool success = SetClipboardData(CF_UNICODETEXT, data) != nullptr;
-    if (!success) GlobalFree(data); CloseClipboard(); return success;
+    if (!success) GlobalFree(data);
+    CloseClipboard(); return success;
 }
 std::wstring clipboardText(HWND owner) {
     if (!OpenClipboard(owner)) return {};
