@@ -81,12 +81,66 @@ struct Application {
                 if (std::wstring(name) != L"PoppyMain") return TRUE;
                 app.window = candidate; return FALSE;
             }, reinterpret_cast<LPARAM>(this));
-            if (window) result = FindWindowExW(window, nullptr, WC_TREEVIEWW, nullptr);
+            if (window) result = FindWindowExW(window, nullptr, WC_TREEVIEWW, L"Files");
             return result != nullptr;
         }, "Poppy did not create its file tree");
         return result;
     }
 };
+RECT bounds(HWND parent, HWND child) {
+    RECT rect{};
+    check(GetWindowRect(child, &rect) != FALSE, "Could not read a pane's bounds");
+    MapWindowPoints(nullptr, parent, reinterpret_cast<POINT*>(&rect), 2);
+    return rect;
+}
+void sidebarTests(const fs::path& executable) {
+    Fixture fixture;
+    const auto folder = fixture.root / L"nested";
+    fs::create_directory(folder); writeFile(folder / L"file.txt");
+    Application app(executable, fixture.root);
+    const auto tree = app.tree();
+    const auto explorer = FindWindowExW(app.window, nullptr, L"BUTTON", L"Explorer");
+    const auto git = FindWindowExW(app.window, nullptr, L"BUTTON", L"Source Control");
+    const auto viewer = FindWindowExW(app.window, nullptr, L"PoppyViewer", nullptr);
+    check(explorer && git && viewer, "Activity buttons or editor pane are missing");
+    HTREEITEM nested = nullptr;
+    waitFor([&] {
+        nested = nextItem(tree, TVGN_CHILD, nextItem(tree, TVGN_ROOT));
+        return nested != nullptr;
+    }, "Explorer did not load its folder");
+    expand(tree, nested);
+    waitFor([&] { return expanded(tree, nested) && nextItem(tree, TVGN_CHILD, nested); }, "Explorer did not expand its folder");
+    const UINT dpi = GetDpiForWindow(app.window);
+    check(SetWindowPos(app.window, nullptr, 0, 0, MulDiv(1180, dpi, 96), MulDiv(820, dpi, 96), SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE) != FALSE,
+          "Could not size the test window for its DPI");
+    const auto activityRect = bounds(app.window, explorer), treeRect = bounds(app.window, tree), viewerRect = bounds(app.window, viewer);
+    check(activityRect.left == 0 && activityRect.right <= treeRect.left && treeRect.right < viewerRect.left,
+          "Activity bar, sidebar and editor are not arranged from left to right");
+    check(treeRect.top > viewerRect.top, "Explorer is missing its sidebar heading");
+    send(git, BM_CLICK);
+    check(!IsWindowVisible(tree), "Git activity did not hide Explorer");
+    const auto gitViewer = bounds(app.window, viewer);
+    check(gitViewer.left == viewerRect.left && gitViewer.top == viewerRect.top,
+          "Switching sidebars moved the editor");
+    // Refresh while Explorer is hidden: WM_SETREDRAW must not make it visible.
+    writeFile(fixture.root / L"added.txt");
+    check(PostMessageW(app.window, WM_KEYDOWN, VK_F5, 0) != FALSE, "Could not refresh the hidden Explorer");
+    waitFor([&] { return send(tree, TVM_GETCOUNT) == 4; }, "Hidden Explorer did not refresh");
+    check(!IsWindowVisible(tree), "Refreshing Explorer covered the Git sidebar");
+    send(explorer, BM_CLICK);
+    check(IsWindowVisible(tree) && expanded(tree, nested), "Switching back lost Explorer's expansion state");
+
+    const int delta = MulDiv(48, dpi, 96);
+    const int x = (treeRect.right + viewerRect.left) / 2, y = treeRect.top + 20;
+    send(app.window, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(x, y));
+    send(app.window, WM_MOUSEMOVE, MK_LBUTTON, MAKELPARAM(x + delta, y));
+    send(app.window, WM_LBUTTONUP, 0, MAKELPARAM(x + delta, y));
+    const auto resizedTree = bounds(app.window, tree), resizedViewer = bounds(app.window, viewer);
+    check(resizedTree.right >= treeRect.right + delta - 1 && resizedTree.right <= treeRect.right + delta + 1,
+          "Dragging the sidebar boundary did not resize the sidebar");
+    check(resizedViewer.left - resizedTree.right == viewerRect.left - treeRect.right && resizedTree.left == treeRect.left,
+          "Resizing moved the activity bar or overlapped the editor");
+}
 void folderTests(const fs::path& executable) {
     Fixture fixture;
     const auto empty = fixture.root / L"a empty";
@@ -139,8 +193,10 @@ void folderTests(const fs::path& executable) {
 int wmain(int argc, wchar_t** argv) {
     try {
         check(argc == 2, "Pass the path to Poppy.exe");
+        SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         folderTests(fs::absolute(argv[1]));
-        std::cout << "Folder tests passed.\n"; return 0;
+        sidebarTests(fs::absolute(argv[1]));
+        std::cout << "Folder and sidebar tests passed.\n"; return 0;
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n'; return 1;
     }
