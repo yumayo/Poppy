@@ -51,6 +51,12 @@ void writeFile(const fs::path& path) {
     file.close();
     check(!file.fail(), "Could not create a test file");
 }
+void writeLines(const fs::path& path, int lines) {
+    std::ofstream file(path);
+    for (int i = 0; i < lines; ++i) file << i << ' ' << std::string(240, 'x') << '\n';
+    file.close();
+    check(!file.fail(), "Could not create a tab test file");
+}
 struct Application {
     PROCESS_INFORMATION process{};
     HWND window = nullptr;
@@ -92,6 +98,93 @@ RECT bounds(HWND parent, HWND child) {
     check(GetWindowRect(child, &rect) != FALSE, "Could not read a pane's bounds");
     MapWindowPoints(nullptr, parent, reinterpret_cast<POINT*>(&rect), 2);
     return rect;
+}
+SCROLLINFO scrollInfo(HWND window, int bar = SB_VERT) {
+    SCROLLINFO info{}; info.cbSize = sizeof(info); info.fMask = SIF_ALL;
+    check(GetScrollInfo(window, bar, &info) != FALSE, "Could not read the viewer's scroll position");
+    return info;
+}
+void waitLines(HWND viewer, int lines) {
+    waitFor([&] { return scrollInfo(viewer).nMax == lines; }, "The selected tab did not load the expected document");
+}
+void click(HWND window, int x, int y, bool middle = false) {
+    send(window, middle ? WM_MBUTTONDOWN : WM_LBUTTONDOWN, middle ? MK_MBUTTON : MK_LBUTTON, MAKELPARAM(x, y));
+    send(window, middle ? WM_MBUTTONUP : WM_LBUTTONUP, 0, MAKELPARAM(x, y));
+}
+void tabTests(const fs::path& executable) {
+    Fixture fixture;
+    writeLines(fixture.root / L"a 日本語.txt", 200); writeLines(fixture.root / L"b.txt", 300);
+    Application app(executable, fixture.root);
+    const auto tree = app.tree(), viewer = FindWindowExW(app.window, nullptr, L"PoppyViewer", nullptr);
+    check(viewer != nullptr, "The viewer is missing");
+    HTREEITEM first = nullptr, second = nullptr;
+    waitFor([&] {
+        first = nextItem(tree, TVGN_CHILD, nextItem(tree, TVGN_ROOT));
+        second = nextItem(tree, TVGN_NEXT, first);
+        return first && second;
+    }, "The tab test files did not appear");
+    const UINT dpi = GetDpiForWindow(app.window);
+    const auto px = [dpi](int value) { return MulDiv(value, dpi, 96); };
+    const auto empty = bounds(app.window, viewer);
+    send(tree, TVM_SELECTITEM, TVGN_CARET, reinterpret_cast<LPARAM>(first)); waitLines(viewer, 200);
+    const auto pane = bounds(app.window, viewer);
+    check(pane.top == empty.top + px(34), "Opening a file did not make room for tabs");
+    for (int i = 0; i < 12; ++i) { send(viewer, WM_VSCROLL, SB_LINEDOWN); send(viewer, WM_HSCROLL, SB_LINEDOWN); }
+    const auto firstTop = scrollInfo(viewer).nPos, firstLeft = scrollInfo(viewer, SB_HORZ).nPos;
+    check(firstTop > 0 && firstLeft > 0, "The test document did not scroll");
+    send(tree, TVM_SELECTITEM, TVGN_CARET, reinterpret_cast<LPARAM>(second)); waitLines(viewer, 300);
+    check(scrollInfo(viewer).nPos == 0 && scrollInfo(viewer, SB_HORZ).nPos == 0, "A new tab inherited another tab's scroll position");
+    send(viewer, WM_VSCROLL, SB_PAGEDOWN); const auto secondTop = scrollInfo(viewer).nPos;
+    const int tabY = pane.top - px(17);
+    click(app.window, pane.left + px(30), tabY); waitLines(viewer, 200);
+    check(scrollInfo(viewer).nPos == firstTop && scrollInfo(viewer, SB_HORZ).nPos == firstLeft, "Switching tabs lost the first tab's scroll position");
+    // The tree still selects b.txt. Enter must reactivate its existing tab.
+    send(tree, WM_KEYDOWN, VK_RETURN); waitLines(viewer, 300);
+    check(scrollInfo(viewer).nPos == secondTop, "Reopening a file reset its existing tab");
+    writeLines(fixture.root / L"a 日本語.txt", 220);
+    click(app.window, pane.left + px(30), tabY); waitLines(viewer, 220);
+    check(scrollInfo(viewer).nPos == firstTop, "Reloading a hidden tab lost its position");
+    // Closing an inactive tab must keep the active document and position.
+    click(app.window, pane.left + px(180 + 166), tabY);
+    check(scrollInfo(viewer).nMax == 220 && scrollInfo(viewer).nPos == firstTop, "Closing an inactive tab changed the active document");
+    click(app.window, pane.left + px(30), tabY, true);
+    check(bounds(app.window, viewer).top == empty.top && scrollInfo(viewer).nMax == 0, "Closing the last tab left a duplicate tab or document");
+    // Reopen, then close a newly loading tab and its neighbor. Older results
+    // must not repopulate the viewer or replace the next selected document.
+    send(tree, TVM_SELECTITEM, TVGN_CARET, reinterpret_cast<LPARAM>(first)); waitLines(viewer, 220);
+    send(tree, TVM_SELECTITEM, TVGN_CARET, reinterpret_cast<LPARAM>(second));
+    click(app.window, pane.left + px(180 + 30), tabY, true);
+    click(app.window, pane.left + px(30), tabY, true);
+    check(bounds(app.window, viewer).top == empty.top, "Closing tabs during loading did not clear the tab strip");
+    // b.txt is still selected in the tree, so reopening also exercises Enter.
+    send(tree, WM_KEYDOWN, VK_RETURN); waitLines(viewer, 300);
+    click(app.window, pane.left + px(30), tabY, true);
+    check(bounds(app.window, viewer).top == empty.top && scrollInfo(viewer).nMax == 0, "A stale load restored a closed tab");
+}
+void overflowingTabTests(const fs::path& executable) {
+    Fixture fixture;
+    for (int i = 0; i < 8; ++i) writeLines(fixture.root / (L"tab-" + std::to_wstring(i) + L".txt"), 100 + i);
+    Application app(executable, fixture.root);
+    const auto tree = app.tree(), viewer = FindWindowExW(app.window, nullptr, L"PoppyViewer", nullptr);
+    check(viewer != nullptr, "The viewer is missing");
+    const UINT dpi = GetDpiForWindow(app.window);
+    const auto px = [dpi](int value) { return MulDiv(value, dpi, 96); };
+    check(SetWindowPos(app.window, nullptr, 0, 0, px(820), px(820), SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE) != FALSE,
+          "Could not resize the tab test window");
+    waitFor([&] { return send(tree, TVM_GETCOUNT) == 9; }, "The overflow test files did not appear");
+    auto item = nextItem(tree, TVGN_CHILD, nextItem(tree, TVGN_ROOT));
+    for (int i = 0; i < 8; ++i) {
+        check(item != nullptr, "A tab test tree item is missing");
+        send(tree, TVM_SELECTITEM, TVGN_CARET, reinterpret_cast<LPARAM>(item)); waitLines(viewer, 100 + i);
+        item = nextItem(tree, TVGN_NEXT, item);
+    }
+    const auto pane = bounds(app.window, viewer); const int tabY = pane.top - px(17);
+    click(app.window, pane.right - px(42), tabY);
+    check(scrollInfo(viewer).nMax == 107, "Scrolling the tab strip changed the active file");
+    click(app.window, pane.left + px(30), tabY);
+    waitFor([&] { const int lines = scrollInfo(viewer).nMax; return lines >= 100 && lines < 107; }, "The previous tab button did not reveal older tabs");
+    for (int i = 0; i < 8; ++i) click(app.window, pane.right - px(14), tabY);
+    click(app.window, pane.left + px(180 + 30), tabY); waitLines(viewer, 107);
 }
 void sidebarTests(const fs::path& executable) {
     Fixture fixture;
@@ -196,7 +289,9 @@ int wmain(int argc, wchar_t** argv) {
         SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         folderTests(fs::absolute(argv[1]));
         sidebarTests(fs::absolute(argv[1]));
-        std::cout << "Folder and sidebar tests passed.\n"; return 0;
+        tabTests(fs::absolute(argv[1]));
+        overflowingTabTests(fs::absolute(argv[1]));
+        std::cout << "Folder, sidebar and tab tests passed.\n"; return 0;
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n'; return 1;
     }

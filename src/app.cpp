@@ -23,6 +23,7 @@ struct Node {
 };
 struct DirectoryResult { std::vector<Entry> entries; std::wstring error; bool truncated = false; };
 struct FileResult { std::shared_ptr<Document> document; std::wstring error; };
+struct Tab { fs::path path; bool diff = false; Viewer::State fileView, diffView; };
 struct GitEntry { fs::path path; wchar_t state; };
 struct GitResult { fs::path root; std::wstring branch, error; std::map<std::wstring, wchar_t> states; std::vector<GitEntry> entries; size_t changed = 0, untracked = 0; bool truncated = false; };
 
@@ -140,7 +141,7 @@ private:
     LRESULT handle(UINT, WPARAM, LPARAM);
     void create();
     void dpi(UINT value);
-    void layout();
+    void layout(bool revealTab = true);
     void paint();
     void drawActivity(const DRAWITEMSTRUCT& item);
     void selectSidebar(Sidebar sidebar);
@@ -155,7 +156,16 @@ private:
     void clearChildren(HTREEITEM parent);
     void updateLabel(HTREEITEM item);
     wchar_t stateFor(const fs::path& path) const;
-    void openFile(const fs::path& path, bool preserve = false);
+    void openFile(const fs::path& path, bool diff = false);
+    void saveTab();
+    void selectTab(size_t index);
+    void closeTab(size_t index);
+    void loadTab(bool preserve = false);
+    void updateTabs(bool reveal = true);
+    size_t tabCapacity() const;
+    RECT tabBounds(size_t index) const;
+    size_t tabAt(POINT point) const;
+    fs::path selectedPath() const { return tabs_.empty() ? fs::path{} : tabs_[activeTab_].path; }
     void showDiff();
     void refresh(bool force = true);
     void refreshGit();
@@ -171,15 +181,17 @@ private:
     UINT dpi_ = 96;
     int sidebar_ = 245, terminalHeight_ = 260, toolbar_ = 44, footer_ = 26, splitter_ = 5;
     int activityWidth_ = 48, sidebarHeader_ = 34, gitHeader_ = 56;
-    RECT sidebarRect_{}, sidebarSplitter_{}, terminalSplitter_{};
+    RECT sidebarRect_{}, sidebarSplitter_{}, terminalSplitter_{}, tabsRect_{};
     int dragging_ = 0, dragOffset_ = 0;
-    bool terminalVisible_ = true, diffMode_ = false;
+    bool terminalVisible_ = true;
     bool updatingGitFiles_ = false;
     Sidebar activeSidebar_ = Sidebar::Explorer;
     Viewer viewer_;
     Terminal terminal_;
     std::unique_ptr<Worker> worker_, gitWorker_;
-    fs::path root_, selected_;
+    fs::path root_;
+    std::vector<Tab> tabs_;
+    size_t activeTab_ = 0, firstTab_ = 0, tabTools_ = 0;
     HTREEITEM rootItem_ = nullptr;
     uint64_t generation_ = 0, serial_ = 0, nextId_ = 1;
     std::map<uint64_t, HTREEITEM> nodes_;
@@ -214,6 +226,8 @@ int App::run(HINSTANCE instance, int show, fs::path initial) {
         if (key && ctrl && shift && msg.wParam == 'G') { selectSidebar(Sidebar::Git); continue; }
         if (key && ctrl && msg.wParam == 'O') { chooseFolder(); continue; }
         if (key && ctrl && msg.wParam == VK_OEM_3) { toggleTerminal(); continue; }
+        if (key && ctrl && msg.wParam == VK_TAB && !tabs_.empty()) { selectTab((activeTab_ + (shift ? tabs_.size() - 1 : 1)) % tabs_.size()); SetFocus(viewer_.window()); continue; }
+        if (key && ctrl && msg.wParam == 'W' && GetFocus() != terminal_.window()) { closeTab(activeTab_); continue; }
         if (key && msg.wParam == VK_F5 && GetFocus() != terminal_.window()) { refresh(); continue; }
         if (key && msg.wParam == VK_F6 && GetFocus() != terminal_.window()) { showDiff(); continue; }
         if (key && msg.wParam == VK_TAB && GetFocus() != terminal_.window()) {
@@ -253,7 +267,7 @@ void App::dpi(UINT value) {
     activityWidth_ = MulDiv(48, dpi_, 96); sidebarHeader_ = MulDiv(34, dpi_, 96); gitHeader_ = MulDiv(56, dpi_, 96);
     viewer_.setDpi(dpi_); terminal_.setDpi(dpi_); layout();
 }
-void App::layout() {
+void App::layout(bool revealTab) {
     if (!tree_) return;
     RECT r{}; GetClientRect(window_, &r);
     const int width = static_cast<int>(r.right), height = static_cast<int>(r.bottom);
@@ -272,7 +286,10 @@ void App::layout() {
     const bool showGitFiles = activeSidebar_ == Sidebar::Git && git_ && git_->error.empty() && !git_->root.empty() && !git_->entries.empty();
     ShowWindow(gitTree_, showGitFiles ? SW_SHOWNA : SW_HIDE);
     MoveWindow(gitTree_, activityWidth_, gitTop, side, std::max(0, toolbar_ + content - gitTop), TRUE);
-    MoveWindow(viewer_.window(), right, toolbar_, std::max(0, width - right), viewerSize, TRUE);
+    const int tabHeight = tabs_.empty() ? 0 : MulDiv(34, dpi_, 96);
+    tabsRect_ = {right, toolbar_, width, toolbar_ + tabHeight};
+    updateTabs(revealTab);
+    MoveWindow(viewer_.window(), right, toolbar_ + tabHeight, std::max(0, width - right), std::max(0, viewerSize - tabHeight), TRUE);
     ShowWindow(terminal_.window(), terminalVisible_ ? SW_SHOWNA : SW_HIDE);
     if (terminalVisible_) MoveWindow(terminal_.window(), right, toolbar_ + viewerSize + splitter_, std::max(0, width - right), terminalSize, TRUE);
     InvalidateRect(window_, nullptr, FALSE);
@@ -309,6 +326,25 @@ void App::paint() {
     } else if (root_.empty()) {
         label(dc, {left, top + scaled(16), edge, sidebarRect_.bottom - scaled(12)}, L"Open a folder with Ctrl+O to browse files.", muted, DT_LEFT | DT_TOP | DT_WORDBREAK);
     }
+    if (!tabs_.empty()) {
+        fill(dc, tabsRect_, background);
+        for (size_t i = firstTab_; i < std::min(tabs_.size(), firstTab_ + tabCapacity()); ++i) {
+            const auto rect = tabBounds(i);
+            const bool active = i == activeTab_;
+            fill(dc, rect, active ? panel : background);
+            if (active) fill(dc, {rect.left, rect.top, rect.right, rect.top + scaled(2)}, accent);
+            const auto title = tabs_[i].path.filename().native() + (tabs_[i].diff ? L" (diff)" : L"");
+            label(dc, {rect.left + scaled(12), rect.top, rect.right - scaled(28), rect.bottom}, title, active ? foreground : muted);
+            label(dc, {rect.right - scaled(28), rect.top, rect.right - scaled(4), rect.bottom}, L"×", muted, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            fill(dc, {rect.right - 1, rect.top, rect.right, rect.bottom}, border);
+        }
+        if (tabs_.size() > tabCapacity()) {
+            const int edge = tabsRect_.right, button = scaled(28);
+            label(dc, {edge - 2 * button, tabsRect_.top, edge - button, tabsRect_.bottom}, L"‹", firstTab_ ? foreground : muted, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            label(dc, {edge - button, tabsRect_.top, edge, tabsRect_.bottom}, L"›", firstTab_ + tabCapacity() < tabs_.size() ? foreground : muted, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        }
+        fill(dc, {tabsRect_.left, tabsRect_.bottom - 1, tabsRect_.right, tabsRect_.bottom}, border);
+    }
     SelectObject(dc, old); EndPaint(window_, &ps);
 }
 void App::drawActivity(const DRAWITEMSTRUCT& item) {
@@ -337,21 +373,20 @@ void App::updateGitFiles() {
             TVINSERTSTRUCTW value{}; value.hParent = TVI_ROOT; value.hInsertAfter = TVI_LAST; value.item.mask = TVIF_TEXT | TVIF_PARAM;
             value.item.pszText = text.data(); value.item.lParam = static_cast<LPARAM>(i);
             const auto item = TreeView_InsertItem(gitTree_, &value);
-            if (pathKey(entry.path) == pathKey(selected_)) selection = item;
+            if (pathKey(entry.path) == pathKey(selectedPath())) selection = item;
         }
     }
     TreeView_SelectItem(gitTree_, selection);
     if (visible) SendMessageW(gitTree_, WM_SETREDRAW, TRUE, 0);
     updatingGitFiles_ = false;
-    layout(); InvalidateRect(gitTree_, nullptr, FALSE);
+    layout(false); InvalidateRect(gitTree_, nullptr, FALSE);
 }
 void App::openGitFile(HTREEITEM item) {
     if (updatingGitFiles_ || !git_ || !item) return;
     TVITEMW value{}; value.mask = TVIF_PARAM; value.hItem = item;
     if (!TreeView_GetItem(gitTree_, &value) || static_cast<size_t>(value.lParam) >= git_->entries.size()) return;
     const auto entry = git_->entries[static_cast<size_t>(value.lParam)];
-    if (entry.state == L'?') openFile(entry.path);
-    else { selected_ = entry.path; diffMode_ = false; showDiff(); }
+    openFile(entry.path, entry.state != L'?');
 }
 void App::status(std::wstring message) { status_ = std::move(message); RECT r{}; GetClientRect(window_, &r); r.top = r.bottom - footer_; InvalidateRect(window_, &r, FALSE); }
 void App::chooseFolder() {
@@ -391,7 +426,7 @@ HTREEITEM App::insert(HTREEITEM parent, const Entry& entry) {
 void App::openFolder(fs::path path) {
     std::error_code error; path = fs::absolute(path, error).lexically_normal();
     if (error || !fs::is_directory(path, error)) { status(L"Cannot open folder: " + path.native()); return; }
-    stopWatch(); ++generation_; ++serial_; worker_->cancelPending(); gitWorker_->cancelPending(); selected_.clear(); diffMode_ = false; git_.reset();
+    stopWatch(); ++generation_; ++serial_; worker_->cancelPending(); gitWorker_->cancelPending(); tabs_.clear(); activeTab_ = firstTab_ = 0; git_.reset();
     root_ = std::move(path); TreeView_DeleteAllItems(tree_); nodes_.clear(); updateGitFiles();
     rootItem_ = insert(TVI_ROOT, {root_, true, false});
     requestDirectory(rootItem_);
@@ -446,27 +481,103 @@ void App::applyDirectory(HTREEITEM item, Node*, const DirectoryResult& result) {
     InvalidateRect(tree_, nullptr, FALSE);
     if (result.truncated || nodes_.size() >= maxTreeNodes) status(L"Explorer limit: 10,000 items/folder, 50,000 visible nodes.");
 }
-void App::openFile(const fs::path& path, bool preserve) {
-    selected_ = path; diffMode_ = false; const auto serial = ++serial_, generation = generation_;
-    // Drop the previous document before a user-initiated load; no hidden tab cache.
-    if (!preserve) viewer_.message(L"Loading…", path);
-    status(L"Loading " + path.filename().native());
-    worker_->submit(L"file", [this, path, serial, generation, preserve] {
-        auto result = readDocument(path);
-        worker_->complete([this, result, path, serial, generation, preserve] {
-            if (generation != generation_ || serial != serial_) return;
-            if (result->document) { viewer_.show(result->document, path, preserve); status(std::to_wstring(result->document->lines.size()) + L" lines  ·  read only  ·  F6: diff"); }
-            else { viewer_.message(result->error, path); status(L"Preview unavailable"); }
-        });
-    });
+size_t App::tabCapacity() const {
+    const int width = std::max(0L, tabsRect_.right - tabsRect_.left), tabWidth = MulDiv(180, dpi_, 96);
+    const int arrows = tabs_.size() > static_cast<size_t>(width / tabWidth) ? MulDiv(56, dpi_, 96) : 0;
+    return static_cast<size_t>(std::max(1, (width - arrows) / tabWidth));
 }
-void App::showDiff() {
-    if (selected_.empty()) { status(L"Select a file to view its Git diff."); return; }
-    if (diffMode_) { openFile(selected_); return; }
-    if (!git_ || git_->root.empty() || !git_->error.empty()) { status(L"Git repository unavailable. Refresh after installing Git for Windows."); return; }
-    diffMode_ = true; const auto serial = ++serial_, generation = generation_; const auto path = selected_, root = git_->root;
-    viewer_.message(L"Loading Git diff…", path); status(L"Git diff: " + path.filename().native());
-    gitWorker_->submit(L"diff", [this, serial, generation, path, root] {
+RECT App::tabBounds(size_t index) const {
+    const int left = tabsRect_.left + static_cast<int>(index - firstTab_) * MulDiv(180, dpi_, 96);
+    return {left, tabsRect_.top, left + MulDiv(180, dpi_, 96), tabsRect_.bottom};
+}
+size_t App::tabAt(POINT point) const {
+    if (PtInRect(&tabsRect_, point)) {
+        for (size_t i = firstTab_; i < std::min(tabs_.size(), firstTab_ + tabCapacity()); ++i) {
+            const auto rect = tabBounds(i);
+            if (PtInRect(&rect, point)) return i;
+        }
+    }
+    return tabs_.size();
+}
+void App::updateTabs(bool reveal) {
+    const size_t capacity = tabCapacity();
+    firstTab_ = std::min(firstTab_, tabs_.size() > capacity ? tabs_.size() - capacity : 0);
+    if (reveal && !tabs_.empty()) {
+        if (activeTab_ < firstTab_) firstTab_ = activeTab_;
+        else if (activeTab_ >= firstTab_ + capacity) firstTab_ = activeTab_ - capacity + 1;
+    }
+    // Only visible tabs need tooltip regions. Resolve their paths on demand.
+    for (size_t i = 0; i < tabTools_; ++i) {
+        TOOLINFOW tip{}; tip.cbSize = sizeof(tip); tip.hwnd = window_; tip.uId = 100 + i;
+        SendMessageW(tooltips_, TTM_DELTOOLW, 0, reinterpret_cast<LPARAM>(&tip));
+    }
+    tabTools_ = 0;
+    for (size_t i = firstTab_; i < std::min(tabs_.size(), firstTab_ + capacity); ++i) {
+        TOOLINFOW tip{}; tip.cbSize = sizeof(tip); tip.uFlags = TTF_SUBCLASS; tip.hwnd = window_; tip.uId = 100 + tabTools_++;
+        tip.rect = tabBounds(i); tip.lpszText = LPSTR_TEXTCALLBACKW;
+        SendMessageW(tooltips_, TTM_ADDTOOLW, 0, reinterpret_cast<LPARAM>(&tip));
+    }
+    InvalidateRect(window_, &tabsRect_, FALSE);
+}
+void App::saveTab() {
+    if (!tabs_.empty() && viewer_.hasDocument()) {
+        auto& tab = tabs_[activeTab_];
+        (tab.diff ? tab.diffView : tab.fileView) = viewer_.state();
+    }
+}
+void App::openFile(const fs::path& path, bool diff) {
+    const auto key = pathKey(path);
+    const auto found = std::find_if(tabs_.begin(), tabs_.end(), [&](const Tab& tab) { return pathKey(tab.path) == key; });
+    const size_t index = static_cast<size_t>(found - tabs_.begin());
+    if (found != tabs_.end() && index == activeTab_ && (!diff || found->diff)) { updateTabs(); return; }
+    saveTab();
+    if (found == tabs_.end()) { Tab tab; tab.path = path; tab.diff = diff; tabs_.push_back(std::move(tab)); }
+    else if (diff) found->diff = true;
+    activeTab_ = index; layout(); loadTab();
+}
+void App::selectTab(size_t index) {
+    if (index >= tabs_.size() || index == activeTab_) return;
+    saveTab(); activeTab_ = index; updateTabs(); loadTab();
+}
+void App::closeTab(size_t index) {
+    if (index >= tabs_.size()) return;
+    saveTab(); const bool active = index == activeTab_;
+    tabs_.erase(tabs_.begin() + static_cast<std::ptrdiff_t>(index));
+    if (index < activeTab_) --activeTab_;
+    else if (activeTab_ >= tabs_.size()) activeTab_ = tabs_.empty() ? 0 : tabs_.size() - 1;
+    layout();
+    if (active) {
+        ++serial_;
+        if (!tabs_.empty()) loadTab();
+        else { viewer_.message(L"Select a file on the left.\n\nFiles are read only. Your AI CLI can edit them from the terminal."); status(L"Ready"); }
+    }
+    SetFocus(viewer_.window());
+}
+void App::loadTab(bool preserve) {
+    if (tabs_.empty()) return;
+    preserve = preserve && viewer_.hasDocument();
+    const auto& tab = tabs_[activeTab_]; const auto path = tab.path;
+    const auto state = tab.diff ? tab.diffView : tab.fileView;
+    const auto serial = ++serial_, generation = generation_;
+    // Retain only tab metadata and view positions; reload the active document.
+    if (!preserve) viewer_.message(tab.diff ? L"Loading Git diff…" : L"Loading…", path);
+    status((tab.diff ? L"Git diff: " : L"Loading ") + path.filename().native());
+    if (!tab.diff) {
+        worker_->submit(L"file", [this, path, serial, generation, preserve, state] {
+            auto result = readDocument(path);
+            worker_->complete([this, result, path, serial, generation, preserve, state] {
+                if (generation != generation_ || serial != serial_) return;
+                if (result->document) {
+                    viewer_.show(result->document, path, preserve); if (!preserve) viewer_.restore(state);
+                    status(std::to_wstring(result->document->lines.size()) + L" lines  ·  read only  ·  F6: diff");
+                } else { viewer_.message(result->error, path); status(L"Preview unavailable"); }
+            });
+        });
+        return;
+    }
+    if (!git_ || git_->root.empty() || !git_->error.empty()) { viewer_.message(L"Git repository unavailable. Refresh after installing Git for Windows.", path); return; }
+    const auto root = git_->root;
+    gitWorker_->submit(L"diff", [this, serial, generation, path, root, preserve, state] {
         const auto relative = path.lexically_relative(root).native();
         auto result = runProcess({L"git.exe", L"--no-optional-locks", L"diff", L"--no-ext-diff", L"--no-textconv", L"--color=never", L"--", relative}, root, 5000, gitWorker_->cancellation());
         bool staged = false;
@@ -475,14 +586,20 @@ void App::showDiff() {
         if (result.code == 0 && static_cast<size_t>(std::count(result.output.begin(), result.output.end(), '\n')) >= maxLines) { result.code = 1; result.error = L"Diff exceeds the 1,000,000-line preview limit."; }
         if (result.code == 0) { doc->text = std::move(result.output); doc->language = Language::Diff; indexDocument(*doc); }
         const auto error = result.error; const auto code = result.code;
-        gitWorker_->complete([this, serial, generation, path, doc, code, error, staged] {
+        gitWorker_->complete([this, serial, generation, path, doc, code, error, staged, preserve, state] {
             if (generation != generation_ || serial != serial_) return;
             if (code) viewer_.message(error, path);
             else if (doc->text.empty()) viewer_.message(L"No tracked changes for this file.\nUntracked files can be read in the normal preview.\n\nPress F6 to return to the file.", path);
-            else viewer_.show(doc, path);
+            else { viewer_.show(doc, path, preserve); if (!preserve) viewer_.restore(state); }
             status(staged ? L"Staged diff  ·  F6: return to file" : L"Working tree diff  ·  F6: return to file");
         });
     });
+}
+void App::showDiff() {
+    if (tabs_.empty()) { status(L"Select a file to view its Git diff."); return; }
+    auto& tab = tabs_[activeTab_];
+    if (!tab.diff && (!git_ || git_->root.empty() || !git_->error.empty())) { status(L"Git repository unavailable. Refresh after installing Git for Windows."); return; }
+    saveTab(); tab.diff = !tab.diff; updateTabs(); loadTab();
 }
 void App::refreshGit() {
     if (root_.empty()) return;
@@ -504,7 +621,7 @@ void App::refresh(bool force) {
     if (root_.empty()) return;
     for (const auto& pair : nodes_) { const auto n = node(pair.second); if (n && n->expandRequested) requestDirectory(pair.second); }
     refreshGit();
-    if (!selected_.empty() && (force || fileDirty_)) { if (diffMode_) { diffMode_ = false; showDiff(); } else openFile(selected_, true); }
+    if (!tabs_.empty() && (force || fileDirty_)) { saveTab(); loadTab(true); }
     fileDirty_ = false;
 }
 void App::watch() {
@@ -529,8 +646,8 @@ void App::pollWatch() {
             const std::wstring name(info->FileName, info->FileNameLength / sizeof(wchar_t));
             const bool gitNoise = name.rfind(L".git\\", 0) == 0 && name != L".git\\HEAD" && name != L".git\\index" && name.rfind(L".git\\refs\\", 0) != 0;
             if (!gitNoise) relevant = true;
-            if (!selected_.empty()) {
-                const auto changed = pathKey(root_ / name), selected = pathKey(selected_);
+            if (!tabs_.empty()) {
+                const auto changed = pathKey(root_ / name), selected = pathKey(selectedPath());
                 if (changed == selected || selected.rfind(changed + L"\\", 0) == 0) fileDirty_ = true;
             }
             if (!info->NextEntryOffset) break;
@@ -581,11 +698,26 @@ LRESULT App::handle(UINT m, WPARAM a, LPARAM b) {
             return 0;
         }
         const POINT point{GET_X_LPARAM(b), y};
+        if (PtInRect(&tabsRect_, point)) {
+            const auto index = tabAt(point);
+            if (index < tabs_.size()) {
+                const auto rect = tabBounds(index);
+                if (point.x >= rect.right - MulDiv(28, dpi_, 96)) closeTab(index);
+                else { selectTab(index); SetFocus(viewer_.window()); }
+            } else if (tabs_.size() > tabCapacity()) {
+                const int button = MulDiv(28, dpi_, 96);
+                if (point.x >= tabsRect_.right - button && firstTab_ + tabCapacity() < tabs_.size()) ++firstTab_;
+                else if (point.x >= tabsRect_.right - 2 * button && point.x < tabsRect_.right - button && firstTab_) --firstTab_;
+                updateTabs(false);
+            }
+            return 0;
+        }
         if (PtInRect(&sidebarSplitter_, point)) { dragging_ = 1; dragOffset_ = point.x - sidebarSplitter_.left; }
         else if (terminalVisible_ && PtInRect(&terminalSplitter_, point)) dragging_ = 2;
         if (dragging_) SetCapture(window_);
         return 0;
     }
+    case WM_MBUTTONDOWN: { closeTab(tabAt({GET_X_LPARAM(b), GET_Y_LPARAM(b)})); return 0; }
     case WM_MOUSEMOVE:
         if (dragging_) {
             RECT r{}; GetClientRect(window_, &r);
@@ -604,8 +736,19 @@ LRESULT App::handle(UINT m, WPARAM a, LPARAM b) {
         break;
     case WM_NOTIFY: {
         const auto header = reinterpret_cast<NMHDR*>(b);
+        if (header->hwndFrom == tooltips_ && header->code == TTN_GETDISPINFOW && header->idFrom >= 100 && header->idFrom - 100 < tabTools_) {
+            const size_t index = firstTab_ + header->idFrom - 100;
+            if (index < tabs_.size()) reinterpret_cast<NMTTDISPINFOW*>(b)->lpszText = const_cast<wchar_t*>(tabs_[index].path.c_str());
+            return 0;
+        }
         if (header->hwndFrom == gitTree_) {
             if (header->code == TVN_SELCHANGEDW) openGitFile(reinterpret_cast<NMTREEVIEWW*>(b)->itemNew.hItem);
+            else if (header->code == NM_RETURN) openGitFile(TreeView_GetSelection(gitTree_));
+            else if (header->code == NM_CLICK) {
+                const DWORD position = GetMessagePos(); TVHITTESTINFO hit{}; hit.pt = {GET_X_LPARAM(position), GET_Y_LPARAM(position)};
+                ScreenToClient(gitTree_, &hit.pt); TreeView_HitTest(gitTree_, &hit);
+                if (hit.hItem == TreeView_GetSelection(gitTree_)) openGitFile(hit.hItem);
+            }
             else if (header->code == NM_CUSTOMDRAW) {
                 const auto draw = reinterpret_cast<NMTVCUSTOMDRAW*>(b);
                 if (draw->nmcd.dwDrawStage == CDDS_PREPAINT) return CDRF_NOTIFYITEMDRAW;
@@ -614,7 +757,15 @@ LRESULT App::handle(UINT m, WPARAM a, LPARAM b) {
             return 0;
         }
         if (header->hwndFrom != tree_) break;
-        if (header->code == TVN_ITEMEXPANDINGW) {
+        if (header->code == NM_CLICK || header->code == NM_RETURN) {
+            auto item = TreeView_GetSelection(tree_);
+            if (header->code == NM_CLICK) {
+                const DWORD position = GetMessagePos(); TVHITTESTINFO hit{}; hit.pt = {GET_X_LPARAM(position), GET_Y_LPARAM(position)};
+                ScreenToClient(tree_, &hit.pt); TreeView_HitTest(tree_, &hit);
+                if (!(hit.flags & TVHT_ONITEM) || hit.hItem != item) return 0;
+            }
+            if (const auto n = node(item); n && !n->directory) openFile(n->path);
+        } else if (header->code == TVN_ITEMEXPANDINGW) {
             const auto change = reinterpret_cast<NMTREEVIEWW*>(b);
             if (change->action == TVE_EXPAND) {
                 auto n = node(change->itemNew.hItem);
