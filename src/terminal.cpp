@@ -11,7 +11,8 @@ void Terminal::create(HWND parent, HINSTANCE instance) {
     setDpi(GetDpiForWindow(parent));
 }
 void Terminal::setDpi(UINT dpi) {
-    if (font_) DeleteObject(font_); if (uiFont_) DeleteObject(uiFont_);
+    if (font_) DeleteObject(font_);
+    if (uiFont_) DeleteObject(uiFont_);
     font_ = makeFont(MulDiv(15, dpi, 96)); uiFont_ = makeFont(MulDiv(13, dpi, 96), false);
     HDC dc = GetDC(window_); const auto old = SelectObject(dc, font_); TEXTMETRICW metrics{}; GetTextMetricsW(dc, &metrics); SelectObject(dc, old); ReleaseDC(window_, dc);
     cellWidth_ = metrics.tmAveCharWidth; cellHeight_ = metrics.tmHeight + MulDiv(2, dpi, 96); header_ = MulDiv(30, dpi, 96);
@@ -158,7 +159,8 @@ void Terminal::copy() {
         const int first = y == begin / model_.columns() ? begin % model_.columns() : 0;
         const int last = y == end / model_.columns() ? end % model_.columns() + 1 : model_.columns();
         for (int x = first; x < last && x < static_cast<int>(line.size()); ++x) if (!line[x].continuation) appendUtf8(part, line[x].ch);
-        while (!part.empty() && part.back() == ' ') part.pop_back(); result += part;
+        while (!part.empty() && part.back() == ' ') part.pop_back();
+        result += part;
         if (y != end / model_.columns()) result += "\r\n";
     }
     copyText(window_, wide(result));
@@ -254,7 +256,8 @@ LRESULT Terminal::handle(UINT m, WPARAM a, LPARAM b) {
             const auto context = ImmGetContext(window_);
             const LONG bytes = context ? ImmGetCompositionStringW(context, GCS_RESULTSTR, nullptr, 0) : 0;
             if (bytes > 0) { std::wstring text(static_cast<size_t>(bytes) / sizeof(wchar_t), L'\0'); ImmGetCompositionStringW(context, GCS_RESULTSTR, text.data(), bytes); send(utf8(text)); }
-            if (context) ImmReleaseContext(window_, context); return 0;
+            if (context) ImmReleaseContext(window_, context);
+            return 0;
         } break;
     default: break;
     }
