@@ -15,20 +15,58 @@ C++17 / Win32 / GDI / ConPTYで実装し、ブラウザー、WebView、Node.js�
 GNU Makeを用意し、Docker DesktopをLinuxコンテナモードで起動して、リポジトリのルートで実行します。ホスト側のVisual StudioやCMakeは不要です。
 
 ```sh
+make dev
 make artifact
 ```
 
-`artifact`ターゲットは`docker compose run --build --rm build`を実行します。Docker内でLinux用のコアテストを実行した後、MinGW-w64でWindows x64向けReleaseビルドを行い、`out/docker/Poppy.exe`に出力します。C++とwinpthreadsのランタイムは静的リンクします。生成した実行ファイルをWindows上で起動してください。
+`make dev`は`docker compose up -d --build dev`を実行し、`poppy-dev`コンテナを常駐させます。Dockerの再起動後も自動起動します。明示的に停止した場合は`make dev`で再開できます。
+
+`make artifact`は`dev`を起動した後、`docker compose exec -T dev /usr/local/bin/poppy-build`を実行します。Docker内でLinux用のコアテストを実行した後、MinGW-w64でWindows x64向けReleaseビルドを行い、`out/docker/Poppy.exe`に出力します。ビルド終了後もコンテナは起動したままです。C++とwinpthreadsのランタイムは静的リンクします。生成した実行ファイルをWindows上で起動してください。
 
 ```powershell
 .\out\docker\Poppy.exe "C:\work\project"
 ```
 
-初回のイメージ作成にはDocker HubとDebianパッケージ配布元への接続が必要です。イメージ作成後のテスト・コンパイルはネットワークなしで実行します。ソースを読み取り専用でマウントし、中間生成物はComposeの`build-cache`ボリューム、完成した実行ファイルはホストの`out/docker`に保存します。並列コンパイル数は既定で2、`POPPY_BUILD_JOBS`環境変数で変更できます。
+初回のイメージ作成にはDocker HubとDebianパッケージ配布元への接続が必要です。イメージ作成後のテスト・コンパイルは、外部接続できない内部ネットワーク（`internal: true`）で実行します。ソースを読み取り専用でマウントし、中間生成物はComposeの`build-cache`ボリューム、完成した実行ファイルはホストの`out/docker`に保存します。並列コンパイル数は既定で2、`POPPY_BUILD_JOBS`環境変数で変更できます。
 
-中間生成物のキャッシュを破棄して作り直す場合は、`docker compose down --volumes`を実行します。
+`docker/build.sh`はイメージ作成時に`/usr/local/bin/poppy-build`へコピーし、実行権限`0555`で固定します。コンテナのルートファイルシステムも読み取り専用にし、実行中のスクリプト差し替えを防ぎます。ビルドには書き込み可能な`/build`・`/output`と、一時ファイル用の`/tmp`（tmpfs）を使います。リポジトリ側の`docker/build.sh`を編集しても、ホストで`make dev`を実行してイメージを再ビルドするまで、許可済みの実行内容は変わりません。
+
+コンテナを停止する場合は`docker compose stop dev`、削除する場合は`docker compose down`を実行します。中間生成物のキャッシュも破棄して作り直す場合は、`docker compose down --volumes`を実行します。旧`build`サービスから移行する場合は、`docker compose down --remove-orphans --volumes`で旧コンテナと旧マウント先を記録したCMakeキャッシュを削除してから、`make dev`を実行してください。
 
 コンテナ内で実行するテストはLinux版のコアテストです。Windows実行ファイルの起動、GUI、ConPTYの動作確認はWindows実機で行います。
+
+### AIコンテナからビルド・コンパイルチェック
+
+ホスト側のWSL / Linuxでリポジトリのルートから`make dev`を実行し、`.aicontainer`に次の設定を追加します。
+
+```ini
+docker-proxy-name=poppy-docker-proxy
+docker-proxy-containers=poppy-dev
+docker-proxy-allow=/usr/local/bin/poppy-build
+docker-proxy-allow=cmake
+docker-proxy-allow=ctest
+docker-proxy-allow=ninja
+docker-proxy-allow=g++
+docker-proxy-allow=x86_64-w64-mingw32-g++-posix
+```
+
+既存の`docker-proxy-allow=sh docker/build.sh`は削除してください。設定を反映するため、AIコンテナを作り直して起動します。`.aicontainer`はローカル設定としてGit管理から除外されています。
+
+AIコンテナ内でもリポジトリのルートから実行します。
+
+```sh
+# コアテストからWindows実行ファイルの生成まで実行
+dp /usr/local/bin/poppy-build
+
+# 初回ビルド後、Windows向けの差分コンパイルだけを実行
+dp cmake --build /build/windows --parallel 2
+
+# Linux用コアの差分コンパイルとテスト
+dp cmake --build /build/linux --parallel 2
+dp ctest --test-dir /build/linux --output-on-failure
+```
+
+Composeはホストの`PWD`と同じ絶対パスにソースをマウントします。`dp`はAIコンテナの作業ディレクトリをそのまま引き継ぐため、`dev`とAIコンテナでリポジトリの絶対パスを揃えてください。
 
 ### Windowsで直接ビルド
 
