@@ -12,13 +12,13 @@ C++17 / Win32 / GDI / ConPTYで実装し、ブラウザー、WebView、Node.js�
 
 ### Dockerでビルド
 
-Docker DesktopをLinuxコンテナモードで起動し、リポジトリのルートで実行します。ホスト側のVisual StudioやCMakeは不要です。
+GNU Makeを用意し、Docker DesktopをLinuxコンテナモードで起動して、リポジトリのルートで実行します。ホスト側のVisual StudioやCMakeは不要です。
 
 ```sh
-docker compose run --build --rm build
+make artifact
 ```
 
-Linux用のコアテストを実行した後、MinGW-w64でWindows x64向けReleaseビルドを行い、`out/docker/Poppy.exe`に出力します。C++とwinpthreadsのランタイムは静的リンクします。生成した実行ファイルをWindows上で起動してください。
+`artifact`ターゲットは`docker compose run --build --rm build`を実行します。Docker内でLinux用のコアテストを実行した後、MinGW-w64でWindows x64向けReleaseビルドを行い、`out/docker/Poppy.exe`に出力します。C++とwinpthreadsのランタイムは静的リンクします。生成した実行ファイルをWindows上で起動してください。
 
 ```powershell
 .\out\docker\Poppy.exe "C:\work\project"
