@@ -14,7 +14,12 @@ namespace {
 constexpr UINT_PTR timerId = 1;
 constexpr size_t maxEntries = 10000, maxTreeNodes = 50000, maxLines = 1000000;
 struct Entry { fs::path path; bool directory = false, reparse = false; };
-struct Node { fs::path path; uint64_t id; bool directory, loaded = false, loading = false, reparse = false; };
+struct Node {
+    fs::path path; uint64_t id;
+    bool directory, loaded = false, loading = false, reparse = false;
+    // Keep expansion intent while loading, even when an empty item cannot expand.
+    bool expandRequested = false;
+};
 struct DirectoryResult { std::vector<Entry> entries; std::wstring error; bool truncated = false; };
 struct FileResult { std::shared_ptr<Document> document; std::wstring error; };
 struct GitResult { fs::path root; std::wstring branch, error; std::map<std::wstring, wchar_t> states; std::set<std::wstring> untrackedDirectories; size_t changed = 0, untracked = 0; bool truncated = false; };
@@ -276,13 +281,15 @@ void App::openFolder(fs::path path) {
     stopWatch(); ++generation_; ++serial_; worker_->cancelPending(); gitWorker_->cancelPending(); selected_.clear(); diffMode_ = false; git_.reset();
     root_ = std::move(path); TreeView_DeleteAllItems(tree_); nodes_.clear();
     rootItem_ = insert(TVI_ROOT, {root_, true, false});
-    TreeView_Expand(tree_, rootItem_, TVE_EXPAND); requestDirectory(rootItem_);
+    requestDirectory(rootItem_);
     viewer_.message(L"Select a file on the left.\n\nFiles are read only. Your AI CLI can edit them from the terminal.");
     terminal_.setDirectory(root_); watch(); refreshGit();
     SetWindowTextW(window_, (L"Poppy — " + root_.native()).c_str()); status(L"F5: refresh  ·  F6: diff  ·  Ctrl+`: terminal"); InvalidateRect(window_, nullptr, FALSE);
 }
 void App::requestDirectory(HTREEITEM item) {
-    const auto n = node(item); if (!n || !n->directory || n->reparse || n->loading) return;
+    const auto n = node(item); if (!n || !n->directory || n->reparse) return;
+    n->expandRequested = true;
+    if (n->loading) return;
     n->loading = true; const auto path = n->path; const auto id = n->id, generation = generation_;
     worker_->submit(L"dir:" + std::to_wstring(id), [this, path, id, generation] {
         auto result = listDirectory(path);
@@ -290,9 +297,12 @@ void App::requestDirectory(HTREEITEM item) {
             if (generation != generation_) return;
             const auto found = nodes_.find(id); if (found == nodes_.end()) return;
             auto n = node(found->second); if (!n) return; n->loading = false;
-            if (!(TreeView_GetItemState(tree_, found->second, TVIS_EXPANDED) & TVIS_EXPANDED)) { n->loaded = false; return; }
-            n->loaded = true;
+            if (!n->expandRequested) { n->loaded = false; return; }
+            n->loaded = result->error.empty();
             applyDirectory(found->second, n, *result);
+            // A tree item without children cannot expand. Populate it before
+            // expanding instead of discarding the first asynchronous result.
+            if (n->loaded) TreeView_Expand(tree_, found->second, TVE_EXPAND);
         });
     });
 }
@@ -375,7 +385,7 @@ void App::refreshGit() {
 }
 void App::refresh(bool force) {
     if (root_.empty()) return;
-    for (const auto& pair : nodes_) { const auto n = node(pair.second); if (n && n->directory && (TreeView_GetItemState(tree_, pair.second, TVIS_EXPANDED) & TVIS_EXPANDED)) requestDirectory(pair.second); }
+    for (const auto& pair : nodes_) { const auto n = node(pair.second); if (n && n->expandRequested) requestDirectory(pair.second); }
     refreshGit();
     if (!selected_.empty() && (force || fileDirty_)) { if (diffMode_) { diffMode_ = false; showDiff(); } else openFile(selected_, true); }
     fileDirty_ = false;
@@ -472,13 +482,16 @@ LRESULT App::handle(UINT m, WPARAM a, LPARAM b) {
         const auto header = reinterpret_cast<NMHDR*>(b); if (header->hwndFrom != tree_) break;
         if (header->code == TVN_ITEMEXPANDINGW) {
             const auto change = reinterpret_cast<NMTREEVIEWW*>(b);
-            if (change->action == TVE_EXPAND) { auto n = node(change->itemNew.hItem); if (n && !n->loaded) requestDirectory(change->itemNew.hItem); }
+            if (change->action == TVE_EXPAND) {
+                auto n = node(change->itemNew.hItem);
+                if (n && !n->loaded) { requestDirectory(change->itemNew.hItem); return TRUE; }
+            }
         } else if (header->code == TVN_ITEMEXPANDEDW) {
             const auto change = reinterpret_cast<NMTREEVIEWW*>(b);
             if (change->action == TVE_COLLAPSE) {
                 auto n = node(change->itemNew.hItem);
                 if (n) {
-                    clearChildren(change->itemNew.hItem); n->loaded = false;
+                    n->expandRequested = false; clearChildren(change->itemNew.hItem); n->loaded = false;
                     TVITEMW value{}; value.mask = TVIF_CHILDREN; value.hItem = change->itemNew.hItem; value.cChildren = n->directory && !n->reparse ? 1 : 0; TreeView_SetItem(tree_, &value);
                 }
             }
