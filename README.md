@@ -4,11 +4,35 @@ Windows専用の、AI CLIと一緒に使う小さなコードビューアーで�
 
 C++17 / Win32 / GDI / ConPTYで実装し、ブラウザー、WebView、Node.js、.NETランタイム、エディターエンジンを常駐させません。LSP、拡張機能、編集機能は入れていません。
 
-**初期実装です。Windows上でのビルド、GUI、実際のAI CLIとの互換性、メモリ使用量は未検証です。** この作業環境にはコンパイラーとWindows SDKがなく、外部コンテナの実行プロキシも未設定のため、用意したC++テストもまだ実行していません。メモリ使用量の達成値は記載していません。
+**初期実装です。Windows上での動作、実際のAI CLIとの互換性、メモリ使用量は未検証です。** Docker向けのビルド構成とC++テストを用意していますが、現時点では実ビルド・テストもまだ実行していません。メモリ使用量の達成値は記載していません。
 
 ## ビルド
 
-Windows 10 version 1809以降のx64環境が対象です。Visual Studio 2022の「C++によるデスクトップ開発」、Windows SDK、CMakeを用意し、Developer PowerShellで実行します。Git表示には、別途Git for WindowsをPATHに追加してください。AI CLIも利用するものを別途インストールします。
+生成するアプリはWindows 10 version 1809以降のx64環境が対象です。Git表示には、別途Git for WindowsをPATHに追加してください。AI CLIも利用するものを別途インストールします。
+
+### Dockerでビルド
+
+Docker DesktopをLinuxコンテナモードで起動し、リポジトリのルートで実行します。ホスト側のVisual StudioやCMakeは不要です。
+
+```sh
+docker compose run --build --rm build
+```
+
+Linux用のコアテストを実行した後、MinGW-w64でWindows x64向けReleaseビルドを行い、`out/docker/Poppy.exe`に出力します。C++とwinpthreadsのランタイムは静的リンクします。生成した実行ファイルをWindows上で起動してください。
+
+```powershell
+.\out\docker\Poppy.exe "C:\work\project"
+```
+
+初回のイメージ作成にはDocker HubとDebianパッケージ配布元への接続が必要です。イメージ作成後のテスト・コンパイルはネットワークなしで実行します。ソースを読み取り専用でマウントし、中間生成物はComposeの`build-cache`ボリューム、完成した実行ファイルはホストの`out/docker`に保存します。並列コンパイル数は既定で2、`POPPY_BUILD_JOBS`環境変数で変更できます。
+
+中間生成物のキャッシュを破棄して作り直す場合は、`docker compose down --volumes`を実行します。
+
+コンテナ内で実行するテストはLinux版のコアテストです。Windows実行ファイルの起動、GUI、ConPTYの動作確認はWindows実機で行います。
+
+### Windowsで直接ビルド
+
+Visual Studio 2022の「C++によるデスクトップ開発」、Windows SDK、CMakeを用意し、Developer PowerShellで実行します。
 
 ```powershell
 cmake -S . -B out -A x64 -DBUILD_TESTING=ON
@@ -19,15 +43,15 @@ ctest --test-dir out -C Release --output-on-failure
 
 フォルダー指定を省略すると空のウィンドウが開きます。Release版はCRTを静的リンクし、配布物は`Poppy.exe`単体です。通常利用にVisual StudioやCMakeは必要ありません。
 
-Windows以外ではGUIを作らず、ポータブルなテキスト処理・ターミナルモデルのテストのみをビルドできます。
+### コアテストだけを直接実行
+
+Windows以外でも、ポータブルなテキスト処理・ターミナルモデルのテストをネイティブビルドできます。
 
 ```sh
 cmake -S . -B out -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
 cmake --build out
 ctest --test-dir out --output-on-failure
 ```
-
-GitHub ActionsにもWindows / Linuxのビルド・コアテストと、Windows実行ファイルのartifact出力を定義しています。CIの実行結果はまだ確認していません。
 
 ## 操作
 
@@ -112,5 +136,3 @@ $app = Start-Process .\out\Release\Poppy.exe -PassThru
 ```
 
 Working Setはその時点で物理メモリに載っている領域、Private Bytesはプロセス専用のコミット量です。スクリプトは両方の平均とサンプル内最大値を出します。瞬間的なピークを取りこぼす場合があります。Poppy単体と、AI CLIなどを含む合計を分けて記録してください。計測のためにWorking Setを強制的に削る処理は行いません。
-
-このAIコンテナからの実行を用意する場合は、ホスト側でビルド用コンテナと共有マウントを準備し、`.aicontainer`に`docker-proxy-name`、`docker-proxy-containers`、必要な`docker-proxy-allow`を設定してコンテナを再作成します。Linux用コンテナで実行できるのはコアテストだけで、Win32 GUIにはWindowsのビルド・実行環境が必要です。直接Windowsで上記のコマンドを実行しても構いません。

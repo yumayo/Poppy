@@ -1,0 +1,26 @@
+services:
+  build:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    platform: linux/amd64
+    init: true
+    working_dir: /workspace
+    network_mode: none
+    environment:
+      BUILD_JOBS: "${POPPY_BUILD_JOBS:-2}"
+    volumes:
+      - type: bind
+        source: .
+        target: /workspace
+        read_only: true
+      - type: bind
+        source: ./out/docker
+        target: /output
+      - type: volume
+        source: build-cache
+        target: /build
+    command: ["sh", "/workspace/docker/build.sh"]
+
+volumes:
+  build-cache:

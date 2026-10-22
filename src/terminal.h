@@ -31,7 +31,7 @@ private:
     HPCON console_ = nullptr;
     Handle input_, output_, process_, job_;
     std::atomic<bool> stopping_{false};
-    std::thread reader_, writer_;
+    NativeThread reader_, writer_;
     std::mutex mutex_;
     std::condition_variable condition_;
     std::string received_;

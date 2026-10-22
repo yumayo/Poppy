@@ -14,7 +14,6 @@
 #include <filesystem>
 #include <functional>
 #include <mutex>
-#include <thread>
 #include <utility>
 
 namespace poppy {
@@ -32,6 +31,24 @@ struct Handle {
     Handle& operator=(Handle&& h) noexcept { if (this != &h) reset(std::exchange(h.value, nullptr)); return *this; }
     void reset(HANDLE v = nullptr) { if (value) CloseHandle(value); value = v == INVALID_HANDLE_VALUE ? nullptr : v; }
     explicit operator bool() const { return value != nullptr; }
+};
+
+// A real Windows thread HANDLE is required by CancelSynchronousIo. MinGW's
+// std::thread::native_handle() is a pthread_t when using the POSIX runtime.
+class NativeThread {
+public:
+    NativeThread() = default;
+    explicit NativeThread(std::function<void()> task) { start(std::move(task)); }
+    ~NativeThread() { join(); }
+    NativeThread(const NativeThread&) = delete;
+    NativeThread& operator=(const NativeThread&) = delete;
+    void start(std::function<void()> task);
+    bool joinable() const { return static_cast<bool>(handle_); }
+    HANDLE native_handle() const { return handle_.value; }
+    void join();
+private:
+    static unsigned __stdcall entry(void* task);
+    Handle handle_;
 };
 std::wstring wide(std::string_view utf8);
 std::string utf8(std::wstring_view text);
@@ -66,6 +83,6 @@ private:
     std::deque<std::pair<std::wstring, std::function<void()>>> jobs_;
     std::deque<std::function<void()>> completions_;
     std::atomic<bool> stopping_{false};
-    std::thread thread_;
+    NativeThread thread_;
 };
 }
