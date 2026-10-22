@@ -32,6 +32,12 @@ void Viewer::message(const std::wstring& text, const fs::path& path) {
     document_.reset(); path_ = path; message_ = text; top_ = left_ = 0; anchor_ = caret_ = 0;
     scrollbars(); InvalidateRect(window_, nullptr, FALSE);
 }
+void Viewer::restore(const State& state) {
+    if (!document_) return;
+    top_ = state.top; left_ = state.left;
+    anchor_ = std::min(state.anchor, document_->text.size()); caret_ = std::min(state.caret, document_->text.size());
+    scrollbars(); InvalidateRect(window_, nullptr, FALSE);
+}
 int Viewer::visibleRows() const { RECT r{}; GetClientRect(window_, &r); return std::max(1, (static_cast<int>(r.bottom) - header_) / cellHeight_); }
 void Viewer::scrollbars() {
     if (!window_) return;

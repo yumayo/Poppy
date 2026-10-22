@@ -5,11 +5,15 @@
 namespace poppy {
 class Viewer {
 public:
+    struct State { int top = 0, left = 0; size_t anchor = 0, caret = 0; };
     ~Viewer();
     void create(HWND parent, HINSTANCE instance);
     void setDpi(UINT dpi);
     void show(std::shared_ptr<const Document> document, const fs::path& path, bool preserve = false);
     void message(const std::wstring& text, const fs::path& path = {});
+    State state() const { return {top_, left_, anchor_, caret_}; }
+    void restore(const State& state);
+    bool hasDocument() const { return document_ != nullptr; }
     HWND window() const { return window_; }
 private:
     static LRESULT CALLBACK procedure(HWND, UINT, WPARAM, LPARAM);
