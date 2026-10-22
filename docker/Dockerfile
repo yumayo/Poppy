@@ -9,4 +9,7 @@ RUN apt-get update \
         ninja-build \
     && rm -rf /var/lib/apt/lists/*
 
+# Install the allowlisted entry point outside the source bind mount.
+COPY --chmod=0555 docker/build.sh /usr/local/bin/poppy-build
+
 WORKDIR /workspace

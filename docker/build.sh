@@ -1,6 +1,8 @@
 #!/bin/sh
 set -eu
 
+# The entry point is installed in the image; run it from the repository root.
+source_dir=$(pwd -P)
 build_jobs=${BUILD_JOBS:-2}
 case "$build_jobs" in
     ''|*[!0-9]*|0)
@@ -10,15 +12,15 @@ case "$build_jobs" in
 esac
 
 # Run the portable core tests as native Linux executables before cross-compiling.
-cmake -S /workspace -B /build/linux -G Ninja \
+cmake -S "$source_dir" -B /build/linux -G Ninja \
     -DCMAKE_BUILD_TYPE=Release \
     -DBUILD_TESTING=ON
 cmake --build /build/linux --parallel "$build_jobs"
 ctest --test-dir /build/linux --output-on-failure
 
 # Windows executables cannot be tested natively in this Linux container.
-cmake -S /workspace -B /build/windows -G Ninja \
-    -DCMAKE_TOOLCHAIN_FILE=/workspace/cmake/mingw-w64-x86_64.cmake \
+cmake -S "$source_dir" -B /build/windows -G Ninja \
+    "-DCMAKE_TOOLCHAIN_FILE=$source_dir/cmake/mingw-w64-x86_64.cmake" \
     -DCMAKE_BUILD_TYPE=Release \
     -DBUILD_TESTING=OFF
 cmake --build /build/windows --parallel "$build_jobs"

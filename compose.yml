@@ -1,18 +1,24 @@
 services:
-  build:
+  dev:
+    container_name: poppy-dev
     build:
       context: .
       dockerfile: docker/Dockerfile
     platform: linux/amd64
     init: true
-    working_dir: /workspace
-    network_mode: none
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp
+    working_dir: "${PWD:-/workspace}"
+    networks:
+      - internal
     environment:
       BUILD_JOBS: "${POPPY_BUILD_JOBS:-2}"
     volumes:
       - type: bind
         source: .
-        target: /workspace
+        target: "${PWD:-/workspace}"
         read_only: true
       - type: bind
         source: ./out/docker
@@ -20,7 +26,11 @@ services:
       - type: volume
         source: build-cache
         target: /build
-    command: ["sh", "/workspace/docker/build.sh"]
+    command: ["sleep", "infinity"]
+
+networks:
+  internal:
+    internal: true
 
 volumes:
   build-cache:
