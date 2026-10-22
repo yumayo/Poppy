@@ -34,7 +34,7 @@ bool Terminal::start() {
     childInput.reset(); childOutput.reset();
     // Read concurrently even during creation/teardown, as ClosePseudoConsole can emit output.
     stopping_ = false;
-    reader_ = std::thread([this] {
+    reader_.start([this] {
         char buffer[8192]; DWORD count = 0;
         while (ReadFile(output_.value, buffer, sizeof(buffer), &count, nullptr) && count) {
             std::unique_lock<std::mutex> lock(mutex_);
@@ -62,7 +62,7 @@ bool Terminal::start() {
     if (!ok) { error_ = winError(error); stop(); return false; }
     process_.reset(pi.hProcess); Handle thread(pi.hThread);
     if (!AssignProcessToJobObject(job_.value, process_.value)) { error_ = winError(); TerminateProcess(process_.value, 1); stop(); return false; }
-    writer_ = std::thread([this] {
+    writer_.start([this] {
         for (;;) {
             std::string text; bool changeSize = false; COORD size{};
             { std::unique_lock<std::mutex> lock(mutex_); condition_.wait(lock, [&] { return stopping_ || resizePending_ || !writes_.empty(); }); if (stopping_) return;

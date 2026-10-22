@@ -1,0 +1,7 @@
+.git
+.aicontainer
+.vs
+build
+out
+*.user
+*.pdb

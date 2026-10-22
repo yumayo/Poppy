@@ -2,9 +2,29 @@
 #include <algorithm>
 #include <cwctype>
 #include <cstring>
+#include <cerrno>
+#include <memory>
+#include <process.h>
 #include <stdexcept>
+#include <system_error>
 
 namespace poppy {
+unsigned __stdcall NativeThread::entry(void* argument) {
+    std::unique_ptr<std::function<void()>> task(static_cast<std::function<void()>*>(argument));
+    (*task)();
+    return 0;
+}
+void NativeThread::start(std::function<void()> task) {
+    if (joinable()) throw std::logic_error("Thread is already running.");
+    auto argument = std::make_unique<std::function<void()>>(std::move(task));
+    const uintptr_t thread = _beginthreadex(nullptr, 0, entry, argument.get(), 0, nullptr);
+    if (!thread) throw std::system_error(errno, std::generic_category(), "_beginthreadex");
+    argument.release(); handle_.reset(reinterpret_cast<HANDLE>(thread));
+}
+void NativeThread::join() {
+    if (!joinable()) return;
+    WaitForSingleObject(handle_.value, INFINITE); handle_.reset();
+}
 std::wstring wide(std::string_view text) {
     if (text.empty()) return {};
     const int length = MultiByteToWideChar(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), nullptr, 0);
