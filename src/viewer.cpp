@@ -34,16 +34,19 @@ void Viewer::restore(const State& state) {
     anchor_ = std::min(state.anchor, document_->text.size()); caret_ = std::min(state.caret, document_->text.size());
     scrollbars(); InvalidateRect(window_, nullptr, FALSE);
 }
-int Viewer::visibleRows() const { RECT r{}; GetClientRect(window_, &r); return std::max(1, (static_cast<int>(r.bottom) - header_) / cellHeight_); }
+int Viewer::visibleRows() const { const auto r = Scrollbars::contentRect(window_); return std::max(1, (static_cast<int>(r.bottom) - header_) / cellHeight_); }
 void Viewer::scrollbars() {
     if (!window_) return;
-    RECT r{}; GetClientRect(window_, &r);
     const int rows = document_ ? static_cast<int>(document_->lines.size()) : 1;
     const int cols = document_ ? static_cast<int>(document_->maxColumns) : 1;
-    const int pageRows = visibleRows(), pageCols = std::max(1, (static_cast<int>(r.right) - gutter_) / cellWidth_);
-    top_ = std::clamp(top_, 0, std::max(0, rows - pageRows)); left_ = std::clamp(left_, 0, std::max(0, cols - pageCols));
-    SCROLLINFO vertical{sizeof(vertical), SIF_RANGE | SIF_PAGE | SIF_POS, 0, rows - 1, static_cast<UINT>(pageRows), top_, 0}; SetScrollInfo(window_, SB_VERT, &vertical, TRUE);
-    SCROLLINFO horizontal{sizeof(horizontal), SIF_RANGE | SIF_PAGE | SIF_POS, 0, cols - 1, static_cast<UINT>(pageCols), left_, 0}; SetScrollInfo(window_, SB_HORZ, &horizontal, TRUE);
+    // Each bar can change the space available to the other.
+    for (int pass = 0; pass < 3; ++pass) {
+        const auto r = Scrollbars::contentRect(window_);
+        const int pageRows = visibleRows(), pageCols = std::max(1, (static_cast<int>(r.right) - gutter_) / cellWidth_);
+        top_ = std::clamp(top_, 0, std::max(0, rows - pageRows)); left_ = std::clamp(left_, 0, std::max(0, cols - pageCols));
+        SCROLLINFO vertical{sizeof(vertical), SIF_RANGE | SIF_PAGE | SIF_POS, 0, rows - 1, static_cast<UINT>(pageRows), top_, 0}; SetScrollInfo(window_, SB_VERT, &vertical, FALSE);
+        SCROLLINFO horizontal{sizeof(horizontal), SIF_RANGE | SIF_PAGE | SIF_POS, 0, cols - 1, static_cast<UINT>(pageCols), left_, 0}; SetScrollInfo(window_, SB_HORZ, &horizontal, FALSE);
+    }
 }
 void Viewer::scroll(int vertical, int horizontal) { top_ += vertical; left_ += horizontal; scrollbars(); InvalidateRect(window_, nullptr, FALSE); }
 size_t Viewer::position(int x, int y) const {
@@ -66,7 +69,7 @@ void Viewer::copy() {
 void Viewer::paint() {
     Renderer::Paint paint(renderer_, window_); if (!paint) return;
     auto& dc = renderer_; dc.font(Renderer::Font::Ui);
-    RECT r{}; GetClientRect(window_, &r);
+    const auto r = Scrollbars::contentRect(window_);
     RECT header{0, 0, r.right, header_}; dc.fill(header, panel);
     RECT title{14, 0, std::max<LONG>(14, r.right - 175), header_};
     dc.label(title, path_.empty() ? L"POPPY" : path_.filename().native(), foreground);
@@ -112,6 +115,7 @@ void Viewer::paint() {
             RECT clip{gutter_, header_, r.right, r.bottom}; dc.cells(gutter_, y, cellWidth_, cellHeight_, cells, columns, clip);
         }
     }
+    scrollbars_.paint(window_, dc, background);
 }
 LRESULT CALLBACK Viewer::procedure(HWND w, UINT m, WPARAM a, LPARAM b) {
     auto* self = reinterpret_cast<Viewer*>(GetWindowLongPtrW(w, GWLP_USERDATA));
@@ -119,6 +123,8 @@ LRESULT CALLBACK Viewer::procedure(HWND w, UINT m, WPARAM a, LPARAM b) {
     return self ? self->handle(m, a, b) : DefWindowProcW(w, m, a, b);
 }
 LRESULT Viewer::handle(UINT m, WPARAM a, LPARAM b) {
+    LRESULT result = 0;
+    if (scrollbars_.handle(window_, m, a, b, result)) return result;
     switch (m) {
     case WM_PAINT: paint(); return 0;
     case WM_ERASEBKGND: return 1;
@@ -138,7 +144,8 @@ LRESULT Viewer::handle(UINT m, WPARAM a, LPARAM b) {
         switch (LOWORD(a)) {
         case SB_LINEUP: --pos; break; case SB_LINEDOWN: ++pos; break;
         case SB_PAGEUP: pos -= static_cast<int>(info.nPage); break; case SB_PAGEDOWN: pos += static_cast<int>(info.nPage); break;
-        case SB_THUMBTRACK: pos = info.nTrackPos; break; case SB_TOP: pos = 0; break; case SB_BOTTOM: pos = info.nMax; break;
+        case SB_THUMBTRACK: case SB_THUMBPOSITION: pos = scrollbars_.trackPosition(vertical ? SB_VERT : SB_HORZ, info.nTrackPos); break;
+        case SB_TOP: pos = 0; break; case SB_BOTTOM: pos = info.nMax; break;
         default: break;
         }
         scrollbars(); InvalidateRect(window_, nullptr, FALSE); return 0;

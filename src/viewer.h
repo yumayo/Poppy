@@ -1,5 +1,5 @@
 #pragma once
-#include "render.h"
+#include "scrollbars.h"
 #include <memory>
 
 namespace poppy {
@@ -25,6 +25,7 @@ private:
     int visibleRows() const;
     HWND window_ = nullptr;
     Renderer renderer_;
+    Scrollbars scrollbars_;
     int cellWidth_ = 8, cellHeight_ = 20, header_ = 34, gutter_ = 66;
     int top_ = 0, left_ = 0;
     size_t anchor_ = 0, caret_ = 0;
