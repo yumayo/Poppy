@@ -1,0 +1,84 @@
+#include "tree_model.h"
+#include <algorithm>
+#include <iostream>
+#include <stdexcept>
+
+using namespace poppy;
+namespace {
+void check(bool condition, const char* message) { if (!condition) throw std::runtime_error(message); }
+void hierarchy() {
+    TreeModel tree;
+    const auto root = tree.insert(0, L"workspace 日本語", true, 10, 1);
+    check(root && !tree.insert(99999, L"invalid", false, 0, 0), "Invalid parent accepted");
+    check(tree.expand(root, true) && tree.visible().size() == 1, "An empty folder must remain expanded while loading");
+    const auto dir = tree.insert(root, L"folder", true, 20, 2);
+    const auto file = tree.insert(root, L"file.txt", false, 30, 3);
+    const auto nested = tree.insert(dir, L"nested.txt", false, 40, 4);
+    check(tree.child() == root && tree.child(root) == dir && tree.next(dir) == file && !tree.next(file), "Sibling ordering is incorrect");
+    check(tree.visible().size() == 3 && !tree.expand(file, true), "Collapsed descendants or leaf expansion are incorrect");
+    tree.expand(dir, true);
+    const auto rows = tree.visible();
+    check(rows.size() == 4 && rows[2].item == nested && rows[2].depth == 2 && rows[3].item == file, "Visible rows are not in preorder");
+    tree.select(nested);
+    check(!tree.select(99999) && tree.selection() == nested, "Invalid selection replaced the current item");
+    tree.expand(dir, false);
+    check(tree.selection() == dir && tree.visible().size() == 3, "Collapsing a selected descendant did not select its ancestor");
+    tree.label(file, L"renamed 日本語.txt", 55);
+    check(tree.get(file)->text == L"renamed 日本語.txt" && tree.get(file)->color == 55, "Label or Git color update was lost");
+    tree.expand(dir, true);
+    check(tree.visible().size() == 4, "Re-expansion lost the retained hierarchy");
+    tree.select(nested);
+    const auto removed = tree.eraseChildren(dir);
+    check(removed.size() == 1 && removed[0].second == 40 && tree.selection() == dir && !tree.child(dir), "Removing descendants did not release data or restore selection");
+    check(tree.get(dir)->expanded && tree.get(dir)->expandable, "An empty expanded directory lost its expansion intent");
+    const auto replacement = tree.insert(dir, L"new.txt", false, 50, 5);
+    check(replacement != nested && !tree.get(nested) && tree.visible().size() == 4, "A stale ID was reused or a new child stayed hidden");
+    const auto cleared = tree.clear();
+    check(cleared.size() == 4 && tree.visible().empty() && !tree.selection() && !tree.child(), "Clearing a workspace retained tree state");
+    check(tree.insert(0, L"other", true, 0, 0) > replacement, "Clearing the tree reused asynchronous item IDs");
+}
+void orderingAndRemoval() {
+    TreeModel tree;
+    const auto root = tree.insert(0, L"root", true, 0, 0);
+    const auto third = tree.insert(root, L"third", false, 3, 0);
+    const auto first = tree.insert(root, L"first", false, 1, 0);
+    const auto second = tree.insert(root, L"second", true, 2, 0);
+    const auto nested = tree.insert(second, L"nested", false, 4, 0);
+    tree.expand(root, true); tree.expand(second, true); tree.select(nested);
+    tree.sort(root, [](uintptr_t a, uintptr_t b) { return a < b; });
+    check(tree.child(root) == first && tree.next(first) == second && tree.next(second) == third && !tree.next(third), "Sorting did not update sibling traversal");
+    check(tree.visible()[2].item == second && tree.selection() == nested, "Sorting changed selection or expansion state");
+    check(tree.erase(second).size() == 2 && tree.selection() == root, "Subtree removal lost its data or selected a deleted item");
+    check(tree.next(first) == third && !tree.get(nested), "Subtree removal left broken siblings or descendants");
+    tree.erase(first);
+    check(tree.child(root) == third && !tree.next(third), "Removing the first sibling broke traversal");
+    tree.erase(third);
+    check(!tree.child(root) && tree.visible().size() == 1, "Removing the last sibling left a visible row");
+    check(tree.erase(99999).empty(), "Removing an unknown item changed the model");
+}
+void largeAndDeepTrees() {
+    TreeModel tree;
+    const auto root = tree.insert(0, L"root", true, 0, 0); tree.expand(root, true);
+    for (uintptr_t i = 1; i <= 50000; ++i) tree.insert(root, L"file.txt", false, i, 0);
+    check(tree.visible().size() == 50001, "A large folder lost visible rows");
+    size_t count = 0;
+    for (auto item = tree.child(root); item; item = tree.next(item)) ++count;
+    check(count == 50000, "Large-folder sibling traversal failed");
+    const auto released = tree.eraseChildren(root);
+    check(released.size() == 50000 && tree.size() == 1 && tree.visible().size() == 1, "Collapsing a large folder did not release all descendants");
+    tree.clear();
+    TreeItem parent = 0, top = 0;
+    for (uintptr_t i = 0; i < 10000; ++i) {
+        parent = tree.insert(parent, L"nested", true, i, 0); tree.expand(parent, true);
+        if (!top) top = parent;
+    }
+    check(tree.visible().size() == 10000 && tree.visible().back().depth == 9999, "Deep-tree traversal failed");
+    tree.select(parent); tree.expand(top, false);
+    check(tree.selection() == top && tree.visible().size() == 1, "Deep-tree collapse failed");
+    check(tree.erase(top).size() == 10000 && tree.size() == 0, "Deep-tree removal failed");
+}
+}
+int main() {
+    try { hierarchy(); orderingAndRemoval(); largeAndDeepTrees(); std::cout << "Tree model tests passed.\n"; return 0; }
+    catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
+}

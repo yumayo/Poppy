@@ -1,5 +1,7 @@
 #include "viewer.h"
 #include "terminal.h"
+#include "tree.h"
+#include "activity_button.h"
 #include <commctrl.h>
 #include <dwmapi.h>
 #include <shobjidl.h>
@@ -29,23 +31,6 @@ struct GitResult { fs::path root; std::wstring branch, error; std::map<std::wstr
 
 COLORREF stateColor(wchar_t state) {
     return state == L'U' || state == L'D' ? RGB(231,112,118) : state == L'?' || state == L'A' ? accent : RGB(224,192,128);
-}
-
-void activityIcon(Renderer& dc, const RECT& rect, bool git, COLORREF color, UINT dpi) {
-    const int size = MulDiv(24, dpi, 96), x = (rect.left + rect.right - size) / 2, y = (rect.top + rect.bottom - size) / 2;
-    auto px = [&](int value) { return x + MulDiv(value, dpi, 96); };
-    auto py = [&](int value) { return y + MulDiv(value, dpi, 96); };
-    const float stroke = static_cast<float>(std::max(1, MulDiv(2, dpi, 96)));
-    auto line = [&](int x1, int y1, int x2, int y2) { dc.line(static_cast<float>(px(x1)), static_cast<float>(py(y1)), static_cast<float>(px(x2)), static_cast<float>(py(y2)), color, stroke); };
-    if (git) {
-        line(6, 6, 6, 18); line(18, 6, 18, 9); line(18, 9, 6, 15);
-        dc.ellipse({px(3), py(1), px(9), py(7)}, color, stroke);
-        dc.ellipse({px(15), py(1), px(21), py(7)}, color, stroke);
-        dc.ellipse({px(3), py(17), px(9), py(23)}, color, stroke);
-    } else {
-        line(6, 17, 2, 17); line(2, 17, 2, 2); line(2, 2, 15, 2); line(15, 2, 15, 5);
-        dc.outline({px(7), py(7), px(21), py(23)}, color, stroke);
-    }
 }
 
 std::shared_ptr<DirectoryResult> listDirectory(const fs::path& path) {
@@ -142,18 +127,17 @@ private:
     void dpi(UINT value);
     void layout(bool revealTab = true);
     void paint();
-    void drawActivity(const DRAWITEMSTRUCT& item);
     void selectSidebar(Sidebar sidebar);
     void updateGitFiles();
-    void openGitFile(HTREEITEM item);
+    void openGitFile(TreeItem item);
     void chooseFolder();
     void openFolder(fs::path path);
-    void requestDirectory(HTREEITEM item);
-    void applyDirectory(HTREEITEM item, Node* node, const DirectoryResult& result);
-    HTREEITEM insert(HTREEITEM parent, const Entry& entry);
-    Node* node(HTREEITEM item) const;
-    void clearChildren(HTREEITEM parent);
-    void updateLabel(HTREEITEM item);
+    void requestDirectory(TreeItem item);
+    void applyDirectory(TreeItem item, Node* node, const DirectoryResult& result);
+    TreeItem insert(TreeItem parent, const Entry& entry);
+    Node* node(TreeItem item) const;
+    void clearChildren(TreeItem parent);
+    void updateLabel(TreeItem item);
     wchar_t stateFor(const fs::path& path) const;
     void openFile(const fs::path& path, bool diff = false);
     void saveTab();
@@ -176,8 +160,9 @@ private:
     void toggleTerminal();
     HWND window_ = nullptr, tree_ = nullptr, gitTree_ = nullptr, explorerButton_ = nullptr, gitButton_ = nullptr, tooltips_ = nullptr;
     HINSTANCE instance_ = nullptr;
-    HFONT uiFont_ = nullptr;
-    Renderer renderer_, explorerRenderer_, gitRenderer_;
+    Tree explorer_, changes_;
+    Renderer renderer_;
+    ActivityButton explorerActivity_, gitActivity_;
     UINT dpi_ = 96;
     int sidebar_ = 245, terminalHeight_ = 260, toolbar_ = 44, footer_ = 26, splitter_ = 5;
     int activityWidth_ = 48, sidebarHeader_ = 34, gitHeader_ = 56;
@@ -192,9 +177,9 @@ private:
     fs::path root_;
     std::vector<Tab> tabs_;
     size_t activeTab_ = 0, firstTab_ = 0, tabTools_ = 0;
-    HTREEITEM rootItem_ = nullptr;
+    TreeItem rootItem_ = 0;
     uint64_t generation_ = 0, serial_ = 0, nextId_ = 1;
-    std::map<uint64_t, HTREEITEM> nodes_;
+    std::map<uint64_t, TreeItem> nodes_;
     std::shared_ptr<GitResult> git_;
     std::wstring status_ = L"Ready  ·  Ctrl+O: open folder";
     Handle watchDirectory_, watchEvent_;
@@ -206,7 +191,7 @@ private:
 int App::run(HINSTANCE instance, int show, fs::path initial) {
     initializeRendering();
     instance_ = instance;
-    INITCOMMONCONTROLSEX common{sizeof(common), ICC_TREEVIEW_CLASSES | ICC_WIN95_CLASSES}; InitCommonControlsEx(&common);
+    INITCOMMONCONTROLSEX common{sizeof(common), ICC_WIN95_CLASSES}; InitCommonControlsEx(&common);
     WNDCLASSW cls{}; cls.lpfnWndProc = procedure; cls.hInstance = instance; cls.lpszClassName = L"PoppyMain"; cls.hCursor = LoadCursorW(nullptr, IDC_ARROW); cls.hIcon = LoadIconW(nullptr, IDI_APPLICATION); RegisterClassW(&cls);
     window_ = CreateWindowExW(0, cls.lpszClassName, L"Poppy", WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN, CW_USEDEFAULT, CW_USEDEFAULT, 1180, 820, nullptr, nullptr, instance, this);
     if (!window_) return 1;
@@ -242,12 +227,21 @@ int App::run(HINSTANCE instance, int show, fs::path initial) {
 void App::create() {
     worker_ = std::make_unique<Worker>(window_);
     gitWorker_ = std::make_unique<Worker>(window_);
-    tree_ = CreateWindowExW(0, WC_TREEVIEWW, L"Files", WS_CHILD | WS_VISIBLE | WS_TABSTOP | TVS_HASBUTTONS | TVS_HASLINES | TVS_LINESATROOT | TVS_SHOWSELALWAYS | TVS_DISABLEDRAGDROP, 0, 0, 0, 0, window_, reinterpret_cast<HMENU>(1), instance_, nullptr);
-    TreeView_SetBkColor(tree_, panel); TreeView_SetTextColor(tree_, foreground); TreeView_SetLineColor(tree_, border);
-    gitTree_ = CreateWindowExW(0, WC_TREEVIEWW, L"Git changes", WS_CHILD | WS_TABSTOP | TVS_SHOWSELALWAYS | TVS_DISABLEDRAGDROP | TVS_FULLROWSELECT, 0, 0, 0, 0, window_, reinterpret_cast<HMENU>(4), instance_, nullptr);
-    TreeView_SetBkColor(gitTree_, panel); TreeView_SetTextColor(gitTree_, foreground);
-    explorerButton_ = CreateWindowExW(0, L"BUTTON", L"Explorer", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW, 0, 0, 0, 0, window_, reinterpret_cast<HMENU>(explorerCommand), instance_, nullptr);
-    gitButton_ = CreateWindowExW(0, L"BUTTON", L"Source Control", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW, 0, 0, 0, 0, window_, reinterpret_cast<HMENU>(gitCommand), instance_, nullptr);
+    explorer_.create(window_, instance_, L"Files", 1); tree_ = explorer_.window();
+    changes_.create(window_, instance_, L"Git changes", 4); gitTree_ = changes_.window();
+    explorer_.activated = [this](TreeItem item) { if (const auto n = node(item); n && !n->directory) openFile(n->path); };
+    explorer_.expanded = [this](TreeItem item, bool value) {
+        const auto n = node(item); if (!n) return;
+        if (value) { if (!n->loaded) requestDirectory(item); }
+        else { n->expandRequested = false; clearChildren(item); n->loaded = false; }
+    };
+    explorer_.removed = [this](uintptr_t data) { const auto n = reinterpret_cast<Node*>(data); if (n) { nodes_.erase(n->id); delete n; } };
+    changes_.activated = [this](TreeItem item) { openGitFile(item); };
+    explorerActivity_.create(window_, instance_, L"Explorer", explorerCommand, false); explorerButton_ = explorerActivity_.window();
+    gitActivity_.create(window_, instance_, L"Source Control", gitCommand, true); gitButton_ = gitActivity_.window();
+    explorerActivity_.clicked = [this] { selectSidebar(Sidebar::Explorer); };
+    gitActivity_.clicked = [this] { selectSidebar(Sidebar::Git); };
+    explorerActivity_.select(true);
     tooltips_ = CreateWindowExW(WS_EX_TOPMOST, TOOLTIPS_CLASSW, nullptr, WS_POPUP | TTS_ALWAYSTIP | TTS_NOPREFIX, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, window_, nullptr, instance_, nullptr);
     for (const auto button : {explorerButton_, gitButton_}) {
         TOOLINFOW tip{}; tip.cbSize = sizeof(tip); tip.uFlags = TTF_IDISHWND | TTF_SUBCLASS; tip.hwnd = window_; tip.uId = reinterpret_cast<UINT_PTR>(button);
@@ -260,12 +254,8 @@ void App::create() {
 }
 void App::dpi(UINT value) {
     dpi_ = value; renderer_.setDpi(dpi_);
-    if (uiFont_) DeleteObject(uiFont_);
-    uiFont_ = makeControlFont(MulDiv(13, dpi_, 96));
-    SendMessageW(tree_, WM_SETFONT, reinterpret_cast<WPARAM>(uiFont_), TRUE);
-    SendMessageW(gitTree_, WM_SETFONT, reinterpret_cast<WPARAM>(uiFont_), TRUE);
-    TreeView_SetItemHeight(tree_, MulDiv(26, dpi_, 96));
-    TreeView_SetItemHeight(gitTree_, MulDiv(28, dpi_, 96));
+    explorer_.setDpi(dpi_); changes_.setDpi(dpi_, 28);
+    explorerActivity_.setDpi(dpi_); gitActivity_.setDpi(dpi_);
     toolbar_ = MulDiv(44, dpi_, 96); footer_ = MulDiv(26, dpi_, 96); splitter_ = MulDiv(5, dpi_, 96);
     activityWidth_ = MulDiv(48, dpi_, 96); sidebarHeader_ = MulDiv(34, dpi_, 96); gitHeader_ = MulDiv(56, dpi_, 96);
     viewer_.setDpi(dpi_); terminal_.setDpi(dpi_); layout();
@@ -351,48 +341,36 @@ void App::paint() {
         dc.fill({tabsRect_.left, tabsRect_.bottom - 1, tabsRect_.right, tabsRect_.bottom}, border);
     }
 }
-void App::drawActivity(const DRAWITEMSTRUCT& item) {
-    const bool git = item.CtlID == gitCommand;
-    const bool selected = activeSidebar_ == (git ? Sidebar::Git : Sidebar::Explorer);
-    auto& dc = git ? gitRenderer_ : explorerRenderer_;
-    if (!dc.begin(item.hDC, item.rcItem, item.hwndItem)) return;
-    dc.fill(item.rcItem, selected || (item.itemState & ODS_SELECTED) ? panel : background);
-    activityIcon(dc, item.rcItem, git, selected ? foreground : muted, dpi_);
-    if (selected) dc.fill({item.rcItem.left, item.rcItem.top + MulDiv(8, dpi_, 96), item.rcItem.left + MulDiv(3, dpi_, 96), item.rcItem.bottom - MulDiv(8, dpi_, 96)}, accent);
-    if ((item.itemState & ODS_FOCUS) && !(item.itemState & ODS_NOFOCUSRECT)) { RECT focus = item.rcItem; InflateRect(&focus, -4, -4); dc.outline(focus, muted); }
-    dc.end();
-}
 void App::selectSidebar(Sidebar sidebar) {
     activeSidebar_ = sidebar; layout();
-    InvalidateRect(explorerButton_, nullptr, FALSE); InvalidateRect(gitButton_, nullptr, FALSE);
+    explorerActivity_.select(sidebar == Sidebar::Explorer); gitActivity_.select(sidebar == Sidebar::Git);
     SetFocus(sidebar == Sidebar::Explorer ? (IsWindowVisible(tree_) ? tree_ : explorerButton_) : (IsWindowVisible(gitTree_) ? gitTree_ : gitButton_));
 }
 void App::updateGitFiles() {
     updatingGitFiles_ = true;
-    const bool visible = IsWindowVisible(gitTree_) != FALSE;
-    if (visible) SendMessageW(gitTree_, WM_SETREDRAW, FALSE, 0);
-    TreeView_DeleteAllItems(gitTree_);
-    HTREEITEM selection = nullptr;
-    if (git_ && git_->error.empty()) {
-        for (size_t i = 0; i < git_->entries.size(); ++i) {
-            const auto& entry = git_->entries[i];
-            std::wstring text = std::wstring(1, entry.state) + L"  " + entry.path.lexically_relative(root_).native();
-            TVINSERTSTRUCTW value{}; value.hParent = TVI_ROOT; value.hInsertAfter = TVI_LAST; value.item.mask = TVIF_TEXT | TVIF_PARAM;
-            value.item.pszText = text.data(); value.item.lParam = static_cast<LPARAM>(i);
-            const auto item = TreeView_InsertItem(gitTree_, &value);
-            if (pathKey(entry.path) == pathKey(selectedPath())) selection = item;
+    {
+        Tree::Batch batch(changes_);
+        changes_.clear();
+        TreeItem selection = 0;
+        if (git_ && git_->error.empty()) {
+            const auto selected = pathKey(selectedPath());
+            for (size_t i = 0; i < git_->entries.size(); ++i) {
+                const auto& entry = git_->entries[i];
+                auto text = std::wstring(1, entry.state) + L"  " + entry.path.lexically_relative(root_).native();
+                const auto item = changes_.insert(0, std::move(text), false, i, stateColor(entry.state));
+                if (pathKey(entry.path) == selected) selection = item;
+            }
         }
+        changes_.select(selection, false);
     }
-    TreeView_SelectItem(gitTree_, selection);
-    if (visible) SendMessageW(gitTree_, WM_SETREDRAW, TRUE, 0);
     updatingGitFiles_ = false;
-    layout(false); InvalidateRect(gitTree_, nullptr, FALSE);
+    layout(false);
 }
-void App::openGitFile(HTREEITEM item) {
-    if (updatingGitFiles_ || !git_ || !item) return;
-    TVITEMW value{}; value.mask = TVIF_PARAM; value.hItem = item;
-    if (!TreeView_GetItem(gitTree_, &value) || static_cast<size_t>(value.lParam) >= git_->entries.size()) return;
-    const auto entry = git_->entries[static_cast<size_t>(value.lParam)];
+void App::openGitFile(TreeItem item) {
+    if (updatingGitFiles_ || !git_) return;
+    const auto value = changes_.item(item);
+    if (!value || value->data >= git_->entries.size()) return;
+    const auto entry = git_->entries[value->data];
     openFile(entry.path, entry.state != L'?');
 }
 void App::status(std::wstring message) { status_ = std::move(message); RECT r{}; GetClientRect(window_, &r); r.top = r.bottom - footer_; InvalidateRect(window_, &r, FALSE); }
@@ -408,25 +386,25 @@ void App::chooseFolder() {
     }
     dialog->Release();
 }
-Node* App::node(HTREEITEM item) const { if (!item) return nullptr; TVITEMW value{}; value.mask = TVIF_PARAM; value.hItem = item; return TreeView_GetItem(tree_, &value) ? reinterpret_cast<Node*>(value.lParam) : nullptr; }
-void App::clearChildren(HTREEITEM parent) { while (const auto child = TreeView_GetChild(tree_, parent)) TreeView_DeleteItem(tree_, child); }
+Node* App::node(TreeItem item) const { const auto value = explorer_.item(item); return value ? reinterpret_cast<Node*>(value->data) : nullptr; }
+void App::clearChildren(TreeItem parent) { explorer_.clearChildren(parent); }
 wchar_t App::stateFor(const fs::path& path) const {
     if (!git_) return 0;
     const auto direct = git_->states.find(pathKey(path));
     return direct != git_->states.end() ? direct->second : 0;
 }
-void App::updateLabel(HTREEITEM item) {
+void App::updateLabel(TreeItem item) {
     const auto n = node(item); if (!n) return;
     std::wstring text = n->path.filename().empty() ? n->path.native() : n->path.filename().native();
     if (const wchar_t state = stateFor(n->path)) text = std::wstring(1, state) + L"  " + text;
     if (n->directory) text += n->reparse ? L"  [link]" : L"\\";
-    TVITEMW value{}; value.mask = TVIF_TEXT; value.hItem = item; value.pszText = text.data(); TreeView_SetItem(tree_, &value);
+    const auto state = stateFor(n->path);
+    explorer_.label(item, std::move(text), state ? stateColor(state) : foreground);
 }
-HTREEITEM App::insert(HTREEITEM parent, const Entry& entry) {
-    if (nodes_.size() >= maxTreeNodes) return nullptr;
+TreeItem App::insert(TreeItem parent, const Entry& entry) {
+    if (nodes_.size() >= maxTreeNodes) return 0;
     auto n = std::make_unique<Node>(); n->path = entry.path; n->id = nextId_++; n->directory = entry.directory; n->reparse = entry.reparse;
-    TVINSERTSTRUCTW value{}; value.hParent = parent; value.hInsertAfter = TVI_LAST; value.item.mask = TVIF_TEXT | TVIF_PARAM | TVIF_CHILDREN; value.item.pszText = const_cast<wchar_t*>(L""); value.item.lParam = reinterpret_cast<LPARAM>(n.get()); value.item.cChildren = n->directory && !n->reparse ? 1 : 0;
-    const auto item = TreeView_InsertItem(tree_, &value);
+    const auto item = explorer_.insert(parent, L"", n->directory && !n->reparse, reinterpret_cast<uintptr_t>(n.get()));
     if (item) { nodes_[n->id] = item; n.release(); updateLabel(item); }
     return item;
 }
@@ -434,14 +412,14 @@ void App::openFolder(fs::path path) {
     std::error_code error; path = fs::absolute(path, error).lexically_normal();
     if (error || !fs::is_directory(path, error)) { status(L"Cannot open folder: " + path.native()); return; }
     stopWatch(); ++generation_; ++serial_; worker_->cancelPending(); gitWorker_->cancelPending(); tabs_.clear(); activeTab_ = firstTab_ = 0; git_.reset();
-    root_ = std::move(path); TreeView_DeleteAllItems(tree_); nodes_.clear(); updateGitFiles();
-    rootItem_ = insert(TVI_ROOT, {root_, true, false});
+    root_ = std::move(path); explorer_.clear(); updateGitFiles();
+    rootItem_ = insert(0, {root_, true, false});
     requestDirectory(rootItem_);
     viewer_.message(L"Select a file on the left.\n\nFiles are read only. Your AI CLI can edit them from the terminal.");
     terminal_.setDirectory(root_); watch(); refreshGit();
     SetWindowTextW(window_, (L"Poppy — " + root_.native()).c_str()); status(L"F5: refresh  ·  F6: diff  ·  Ctrl+`: terminal"); InvalidateRect(window_, nullptr, FALSE);
 }
-void App::requestDirectory(HTREEITEM item) {
+void App::requestDirectory(TreeItem item) {
     const auto n = node(item); if (!n || !n->directory || n->reparse) return;
     n->expandRequested = true;
     if (n->loading) return;
@@ -455,37 +433,30 @@ void App::requestDirectory(HTREEITEM item) {
             if (!n->expandRequested) { n->loaded = false; return; }
             n->loaded = result->error.empty();
             applyDirectory(found->second, n, *result);
-            // A tree item without children cannot expand. Populate it before
-            // expanding instead of discarding the first asynchronous result.
-            if (n->loaded) TreeView_Expand(tree_, found->second, TVE_EXPAND);
+            if (n->loaded) explorer_.expand(found->second, true);
         });
     });
 }
-void App::applyDirectory(HTREEITEM item, Node*, const DirectoryResult& result) {
+void App::applyDirectory(TreeItem item, Node*, const DirectoryResult& result) {
     if (!result.error.empty()) { status(L"Folder: " + result.error); return; }
-    std::map<std::wstring, HTREEITEM> existing;
-    for (auto child = TreeView_GetChild(tree_, item); child; child = TreeView_GetNextSibling(tree_, child)) if (const auto n = node(child)) existing[pathKey(n->path)] = child;
-    const bool visible = IsWindowVisible(tree_) != FALSE;
-    if (visible) SendMessageW(tree_, WM_SETREDRAW, FALSE, 0);
+    std::map<std::wstring, TreeItem> existing;
+    for (auto child = explorer_.child(item); child; child = explorer_.next(child)) if (const auto n = node(child)) existing[pathKey(n->path)] = child;
+    Tree::Batch batch(explorer_);
     for (const auto& entry : result.entries) {
         const auto found = existing.find(pathKey(entry.path));
         if (found != existing.end()) {
             auto n = node(found->second);
             if (n && n->directory == entry.directory && n->reparse == entry.reparse) { existing.erase(found); continue; }
-            TreeView_DeleteItem(tree_, found->second); existing.erase(found);
+            explorer_.erase(found->second); existing.erase(found);
         }
         insert(item, entry);
     }
-    for (const auto& stale : existing) TreeView_DeleteItem(tree_, stale.second);
-    TVSORTCB sort{}; sort.hParent = item;
-    sort.lpfnCompare = [](LPARAM a, LPARAM b, LPARAM) -> int {
+    for (const auto& stale : existing) explorer_.erase(stale.second);
+    explorer_.sort(item, [](uintptr_t a, uintptr_t b) {
         const auto x = reinterpret_cast<Node*>(a), y = reinterpret_cast<Node*>(b);
-        if (x->directory != y->directory) return x->directory ? -1 : 1;
-        return CompareStringOrdinal(x->path.filename().c_str(), -1, y->path.filename().c_str(), -1, TRUE) - CSTR_EQUAL;
-    };
-    TreeView_SortChildrenCB(tree_, &sort, FALSE);
-    if (visible) SendMessageW(tree_, WM_SETREDRAW, TRUE, 0);
-    InvalidateRect(tree_, nullptr, FALSE);
+        if (x->directory != y->directory) return x->directory;
+        return CompareStringOrdinal(x->path.filename().c_str(), -1, y->path.filename().c_str(), -1, TRUE) == CSTR_LESS_THAN;
+    });
     if (result.truncated || nodes_.size() >= maxTreeNodes) status(L"Explorer limit: 10,000 items/folder, 50,000 visible nodes.");
 }
 size_t App::tabCapacity() const {
@@ -616,7 +587,7 @@ void App::refreshGit() {
         gitWorker_->complete([this, generation, result] {
             if (generation != generation_) return;
             git_ = result;
-            for (const auto& pair : nodes_) updateLabel(pair.second);
+            { Tree::Batch batch(explorer_); for (const auto& pair : nodes_) updateLabel(pair.second); }
             updateGitFiles();
             if (!result->error.empty()) status(L"Git: " + result->error);
             else if (result->truncated) status(L"Git display limited to 50,000 files and badge paths.");
@@ -682,15 +653,6 @@ LRESULT App::handle(UINT m, WPARAM a, LPARAM b) {
     switch (m) {
     case WM_CREATE: create(); return 0;
     case WM_PAINT: paint(); return 0;
-    case WM_DRAWITEM:
-        if (a == explorerCommand || a == gitCommand) { drawActivity(*reinterpret_cast<DRAWITEMSTRUCT*>(b)); return TRUE; }
-        break;
-    case WM_COMMAND:
-        if (HIWORD(a) == BN_CLICKED) {
-            if (LOWORD(a) == explorerCommand) { selectSidebar(Sidebar::Explorer); return 0; }
-            if (LOWORD(a) == gitCommand) { selectSidebar(Sidebar::Git); return 0; }
-        }
-        break;
     case WM_ERASEBKGND: return 1;
     case WM_SIZE: layout(); return 0;
     case WM_GETMINMAXINFO: { auto info = reinterpret_cast<MINMAXINFO*>(b); info->ptMinTrackSize = {MulDiv(720, dpi_, 96), MulDiv(480, dpi_, 96)}; return 0; }
@@ -748,63 +710,12 @@ LRESULT App::handle(UINT m, WPARAM a, LPARAM b) {
             if (index < tabs_.size()) reinterpret_cast<NMTTDISPINFOW*>(b)->lpszText = const_cast<wchar_t*>(tabs_[index].path.c_str());
             return 0;
         }
-        if (header->hwndFrom == gitTree_) {
-            if (header->code == TVN_SELCHANGEDW) openGitFile(reinterpret_cast<NMTREEVIEWW*>(b)->itemNew.hItem);
-            else if (header->code == NM_RETURN) openGitFile(TreeView_GetSelection(gitTree_));
-            else if (header->code == NM_CLICK) {
-                const DWORD position = GetMessagePos(); TVHITTESTINFO hit{}; hit.pt = {GET_X_LPARAM(position), GET_Y_LPARAM(position)};
-                ScreenToClient(gitTree_, &hit.pt); TreeView_HitTest(gitTree_, &hit);
-                if (hit.hItem == TreeView_GetSelection(gitTree_)) openGitFile(hit.hItem);
-            }
-            else if (header->code == NM_CUSTOMDRAW) {
-                const auto draw = reinterpret_cast<NMTVCUSTOMDRAW*>(b);
-                if (draw->nmcd.dwDrawStage == CDDS_PREPAINT) return CDRF_NOTIFYITEMDRAW;
-                if (draw->nmcd.dwDrawStage == CDDS_ITEMPREPAINT && !(draw->nmcd.uItemState & CDIS_SELECTED) && git_ && static_cast<size_t>(draw->nmcd.lItemlParam) < git_->entries.size()) draw->clrText = stateColor(git_->entries[static_cast<size_t>(draw->nmcd.lItemlParam)].state);
-            }
-            return 0;
-        }
-        if (header->hwndFrom != tree_) break;
-        if (header->code == NM_CLICK || header->code == NM_RETURN) {
-            auto item = TreeView_GetSelection(tree_);
-            if (header->code == NM_CLICK) {
-                const DWORD position = GetMessagePos(); TVHITTESTINFO hit{}; hit.pt = {GET_X_LPARAM(position), GET_Y_LPARAM(position)};
-                ScreenToClient(tree_, &hit.pt); TreeView_HitTest(tree_, &hit);
-                if (!(hit.flags & TVHT_ONITEM) || hit.hItem != item) return 0;
-            }
-            if (const auto n = node(item); n && !n->directory) openFile(n->path);
-        } else if (header->code == TVN_ITEMEXPANDINGW) {
-            const auto change = reinterpret_cast<NMTREEVIEWW*>(b);
-            if (change->action == TVE_EXPAND) {
-                auto n = node(change->itemNew.hItem);
-                if (n && !n->loaded) { requestDirectory(change->itemNew.hItem); return TRUE; }
-            }
-        } else if (header->code == TVN_ITEMEXPANDEDW) {
-            const auto change = reinterpret_cast<NMTREEVIEWW*>(b);
-            if (change->action == TVE_COLLAPSE) {
-                auto n = node(change->itemNew.hItem);
-                if (n) {
-                    n->expandRequested = false; clearChildren(change->itemNew.hItem); n->loaded = false;
-                    TVITEMW value{}; value.mask = TVIF_CHILDREN; value.hItem = change->itemNew.hItem; value.cChildren = n->directory && !n->reparse ? 1 : 0; TreeView_SetItem(tree_, &value);
-                }
-            }
-        } else if (header->code == TVN_SELCHANGEDW) {
-            const auto change = reinterpret_cast<NMTREEVIEWW*>(b); if (const auto n = node(change->itemNew.hItem); n && !n->directory) openFile(n->path);
-        } else if (header->code == TVN_DELETEITEMW) {
-            const auto change = reinterpret_cast<NMTREEVIEWW*>(b); const auto n = reinterpret_cast<Node*>(change->itemOld.lParam); if (n) { nodes_.erase(n->id); delete n; }
-        } else if (header->code == NM_CUSTOMDRAW) {
-            const auto draw = reinterpret_cast<NMTVCUSTOMDRAW*>(b);
-            if (draw->nmcd.dwDrawStage == CDDS_PREPAINT) return CDRF_NOTIFYITEMDRAW;
-            if (draw->nmcd.dwDrawStage == CDDS_ITEMPREPAINT && !(draw->nmcd.uItemState & CDIS_SELECTED)) {
-                const auto n = reinterpret_cast<Node*>(draw->nmcd.lItemlParam); const auto state = n ? stateFor(n->path) : 0;
-                if (state) draw->clrText = stateColor(state);
-            }
-        }
         return 0;
     }
     case WM_CLOSE: DestroyWindow(window_); return 0;
     case WM_DESTROY:
-        KillTimer(window_, timerId); stopWatch(); if (gitWorker_) gitWorker_->stop(); if (worker_) worker_->stop(); terminal_.stop(); TreeView_DeleteAllItems(tree_);
-        if (uiFont_) { DeleteObject(uiFont_); uiFont_ = nullptr; } PostQuitMessage(0); return 0;
+        KillTimer(window_, timerId); stopWatch(); if (gitWorker_) gitWorker_->stop(); if (worker_) worker_->stop(); terminal_.stop(); explorer_.clear(); changes_.clear();
+        PostQuitMessage(0); return 0;
     default: break;
     }
     return DefWindowProcW(window_, m, a, b);
