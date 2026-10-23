@@ -6,7 +6,6 @@ namespace poppy {
 namespace {
 constexpr std::array<Color, 6> styles{foreground, rgb(191,151,220), rgb(151,195,121), rgb(107,129,145), rgb(224,192,128), rgb(231,112,118)};
 }
-Viewer::~Viewer() { if (font_) DeleteObject(font_); if (uiFont_) DeleteObject(uiFont_); }
 void Viewer::create(HWND parent, HINSTANCE instance) {
     WNDCLASSW cls{}; cls.lpfnWndProc = procedure; cls.hInstance = instance; cls.lpszClassName = L"PoppyViewer"; cls.hCursor = LoadCursorW(nullptr, IDC_IBEAM);
     RegisterClassW(&cls);
@@ -14,11 +13,8 @@ void Viewer::create(HWND parent, HINSTANCE instance) {
     setDpi(GetDpiForWindow(parent));
 }
 void Viewer::setDpi(UINT dpi) {
-    if (font_) DeleteObject(font_);
-    if (uiFont_) DeleteObject(uiFont_);
-    font_ = makeFont(MulDiv(15, dpi, 96)); uiFont_ = makeFont(MulDiv(13, dpi, 96), false);
-    HDC dc = GetDC(window_); const auto old = SelectObject(dc, font_); TEXTMETRICW metrics{}; GetTextMetricsW(dc, &metrics); SelectObject(dc, old); ReleaseDC(window_, dc);
-    cellWidth_ = metrics.tmAveCharWidth; cellHeight_ = metrics.tmHeight + MulDiv(3, dpi, 96);
+    renderer_.setDpi(dpi);
+    cellWidth_ = renderer_.cellWidth(); cellHeight_ = renderer_.textHeight() + MulDiv(3, dpi, 96);
     header_ = MulDiv(34, dpi, 96); gutter_ = MulDiv(70, dpi, 96);
     scrollbars(); InvalidateRect(window_, nullptr, FALSE);
 }
@@ -68,30 +64,31 @@ void Viewer::copy() {
     copyText(window_, wide(std::string_view(document_->text).substr(start, end - start)));
 }
 void Viewer::paint() {
-    PAINTSTRUCT ps{}; HDC dc = BeginPaint(window_, &ps); RECT r{}; GetClientRect(window_, &r);
-    const auto oldFont = SelectObject(dc, uiFont_);
-    RECT header{0, 0, r.right, header_}; fill(dc, header, panel);
+    Renderer::Paint paint(renderer_, window_); if (!paint) return;
+    auto& dc = renderer_; dc.font(Renderer::Font::Ui);
+    RECT r{}; GetClientRect(window_, &r);
+    RECT header{0, 0, r.right, header_}; dc.fill(header, panel);
     RECT title{14, 0, std::max<LONG>(14, r.right - 175), header_};
-    label(dc, title, path_.empty() ? L"POPPY" : path_.filename().native(), foreground);
+    dc.label(title, path_.empty() ? L"POPPY" : path_.filename().native(), foreground);
     RECT tag{std::max<LONG>(14, r.right - 175), 0, r.right - 12, header_};
-    label(dc, tag, document_ ? wide(document_->encoding) + L"  ·  READ ONLY" : L"READ ONLY", muted, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
-    fill(dc, {0, header_ - 1, r.right, header_}, border);
+    dc.label(tag, document_ ? wide(document_->encoding) + L"  ·  READ ONLY" : L"READ ONLY", muted, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+    dc.fill({0, header_ - 1, r.right, header_}, border);
     if (!document_) {
-        fill(dc, {0, header_, r.right, r.bottom}, background);
+        dc.fill({0, header_, r.right, r.bottom}, background);
         RECT text{32, header_ + 48, std::max<LONG>(32, r.right - 32), r.bottom};
-        label(dc, text, message_, muted, DT_LEFT | DT_TOP | DT_WORDBREAK);
+        dc.label(text, message_, muted, DT_LEFT | DT_TOP | DT_WORDBREAK);
     } else {
-        SelectObject(dc, font_);
+        dc.font(Renderer::Font::Code);
         const int columns = std::max(0, (static_cast<int>(r.right) - gutter_) / cellWidth_ + 1);
         const int rows = std::max(0, (static_cast<int>(r.bottom) - header_ + cellHeight_ - 1) / cellHeight_);
         const size_t selectionStart = std::min(anchor_, caret_), selectionEnd = std::max(anchor_, caret_);
         std::vector<Token> tokens; std::vector<Cell> cells(static_cast<size_t>(columns));
         for (int screenRow = 0; screenRow < rows; ++screenRow) {
             const int y = header_ + screenRow * cellHeight_; const size_t row = static_cast<size_t>(top_ + screenRow);
-            fill(dc, {0, y, gutter_, y + cellHeight_}, background);
-            fill(dc, {gutter_, y, r.right, y + cellHeight_}, background);
+            dc.fill({0, y, gutter_, y + cellHeight_}, background);
+            dc.fill({gutter_, y, r.right, y + cellHeight_}, background);
             if (row >= document_->lines.size()) continue;
-            RECT number{0, y, gutter_ - 14, y + cellHeight_}; label(dc, number, std::to_wstring(row + 1), muted, DT_RIGHT | DT_SINGLELINE);
+            RECT number{0, y, gutter_ - 14, y + cellHeight_}; dc.label(number, std::to_wstring(row + 1), muted, DT_RIGHT | DT_SINGLELINE);
             auto line = document_->line(row); line = line.substr(0, std::min(line.size(), maxLineColumns * 4));
             LexState state = document_->states[row]; lexLine(line, document_->language, state, &tokens);
             std::fill(cells.begin(), cells.end(), Cell{});
@@ -112,10 +109,9 @@ void Viewer::paint() {
                 }
                 col += width;
             }
-            RECT clip{gutter_, header_, r.right, r.bottom}; paintCells(dc, gutter_, y, cellWidth_, cellHeight_, cells, columns, clip);
+            RECT clip{gutter_, header_, r.right, r.bottom}; dc.cells(gutter_, y, cellWidth_, cellHeight_, cells, columns, clip);
         }
     }
-    SelectObject(dc, oldFont); EndPaint(window_, &ps);
 }
 LRESULT CALLBACK Viewer::procedure(HWND w, UINT m, WPARAM a, LPARAM b) {
     auto* self = reinterpret_cast<Viewer*>(GetWindowLongPtrW(w, GWLP_USERDATA));
