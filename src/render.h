@@ -2,6 +2,7 @@
 #include "win.h"
 #include <d2d1.h>
 #include <dwrite.h>
+#include <wincodec.h>
 
 namespace poppy {
 // Small COM owner, also supported by the MinGW build.
@@ -47,11 +48,12 @@ public:
     int textHeight() const { return textHeight_; }
     void font(Font value) { font_ = value; }
     bool begin(HWND window);
-    // Owner-drawn native buttons supply a DC; their drawing still uses Direct2D.
-    bool begin(HDC dc, const RECT& bounds, HWND window);
+    // Offscreen rendering uses WIC, including the pixel regression tests.
+    bool begin(IWICBitmap* bitmap);
     HRESULT end();
     void discard();
     void fill(const RECT& rect, COLORREF color);
+    int textWidth(const std::wstring& text) const;
     void label(const RECT& rect, const std::wstring& text, COLORREF color,
                UINT flags = DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
     void cells(int x, int y, int cellWidth, int cellHeight,
@@ -64,7 +66,8 @@ private:
     void color(COLORREF value);
     HWND window_ = nullptr;
     ComPtr<ID2D1HwndRenderTarget> windowTarget_;
-    ComPtr<ID2D1DCRenderTarget> dcTarget_;
+    ComPtr<ID2D1RenderTarget> bitmapTarget_;
+    IWICBitmap* bitmap_ = nullptr; // Retained by bitmapTarget_.
     ID2D1RenderTarget* target_ = nullptr;
     ComPtr<ID2D1SolidColorBrush> brush_;
     ComPtr<IDWriteTextFormat> uiFont_, codeFont_;

@@ -1,5 +1,6 @@
 #include <windows.h>
-#include <commctrl.h>
+#include "tree_messages.h"
+#include "activity_button.h"
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -7,6 +8,7 @@
 #include <string>
 
 namespace fs = std::filesystem;
+using namespace poppy;
 namespace {
 void check(bool condition, const char* message) {
     if (!condition) throw std::runtime_error(message);
@@ -26,16 +28,15 @@ LRESULT send(HWND window, UINT message, WPARAM a = 0, LPARAM b = 0) {
           "Poppy did not respond to a tree message");
     return static_cast<LRESULT>(result);
 }
-HTREEITEM nextItem(HWND tree, UINT relation, HTREEITEM item = nullptr) {
-    return reinterpret_cast<HTREEITEM>(send(tree, TVM_GETNEXTITEM, relation, reinterpret_cast<LPARAM>(item)));
+TreeItem nextItem(HWND tree, TreeRelation relation, TreeItem item = 0) {
+    return static_cast<TreeItem>(send(tree, treeGetNext, static_cast<WPARAM>(relation), static_cast<LPARAM>(item)));
 }
-bool expanded(HWND tree, HTREEITEM item) {
-    return (send(tree, TVM_GETITEMSTATE, reinterpret_cast<WPARAM>(item), TVIS_EXPANDED) & TVIS_EXPANDED) != 0;
+bool expanded(HWND tree, TreeItem item) {
+    return send(tree, treeGetExpanded, static_cast<WPARAM>(item)) != 0;
 }
-void expand(HWND tree, HTREEITEM item, bool value = true) {
-    // Exercise user expansion: TVM_EXPAND can suppress repeat notifications
-    // once TVIS_EXPANDEDONCE is set. The first key press may defer expansion.
-    send(tree, TVM_SELECTITEM, TVGN_CARET, reinterpret_cast<LPARAM>(item));
+void expand(HWND tree, TreeItem item, bool value = true) {
+    // Exercise keyboard navigation and the asynchronous expansion callback.
+    send(tree, treeSelect, static_cast<WPARAM>(item));
     send(tree, WM_KEYDOWN, value ? VK_RIGHT : VK_LEFT);
 }
 struct Fixture {
@@ -87,7 +88,7 @@ struct Application {
                 if (std::wstring(name) != L"PoppyMain") return TRUE;
                 app.window = candidate; return FALSE;
             }, reinterpret_cast<LPARAM>(this));
-            if (window) result = FindWindowExW(window, nullptr, WC_TREEVIEWW, L"Files");
+            if (window) result = FindWindowExW(window, nullptr, treeClassName, L"Files");
             return result != nullptr;
         }, "Poppy did not create its file tree");
         return result;
@@ -117,22 +118,22 @@ void tabTests(const fs::path& executable) {
     Application app(executable, fixture.root);
     const auto tree = app.tree(), viewer = FindWindowExW(app.window, nullptr, L"PoppyViewer", nullptr);
     check(viewer != nullptr, "The viewer is missing");
-    HTREEITEM first = nullptr, second = nullptr;
+    TreeItem first = 0, second = 0;
     waitFor([&] {
-        first = nextItem(tree, TVGN_CHILD, nextItem(tree, TVGN_ROOT));
-        second = nextItem(tree, TVGN_NEXT, first);
+        first = nextItem(tree, TreeRelation::Child, nextItem(tree, TreeRelation::Root));
+        second = nextItem(tree, TreeRelation::Next, first);
         return first && second;
     }, "The tab test files did not appear");
     const UINT dpi = GetDpiForWindow(app.window);
     const auto px = [dpi](int value) { return MulDiv(value, dpi, 96); };
     const auto empty = bounds(app.window, viewer);
-    send(tree, TVM_SELECTITEM, TVGN_CARET, reinterpret_cast<LPARAM>(first)); waitLines(viewer, 200);
+    send(tree, treeSelect, static_cast<WPARAM>(first)); waitLines(viewer, 200);
     const auto pane = bounds(app.window, viewer);
     check(pane.top == empty.top + px(34), "Opening a file did not make room for tabs");
     for (int i = 0; i < 12; ++i) { send(viewer, WM_VSCROLL, SB_LINEDOWN); send(viewer, WM_HSCROLL, SB_LINEDOWN); }
     const auto firstTop = scrollInfo(viewer).nPos, firstLeft = scrollInfo(viewer, SB_HORZ).nPos;
     check(firstTop > 0 && firstLeft > 0, "The test document did not scroll");
-    send(tree, TVM_SELECTITEM, TVGN_CARET, reinterpret_cast<LPARAM>(second)); waitLines(viewer, 300);
+    send(tree, treeSelect, static_cast<WPARAM>(second)); waitLines(viewer, 300);
     check(scrollInfo(viewer).nPos == 0 && scrollInfo(viewer, SB_HORZ).nPos == 0, "A new tab inherited another tab's scroll position");
     send(viewer, WM_VSCROLL, SB_PAGEDOWN); const auto secondTop = scrollInfo(viewer).nPos;
     const int tabY = pane.top - px(17);
@@ -151,8 +152,8 @@ void tabTests(const fs::path& executable) {
     check(bounds(app.window, viewer).top == empty.top && scrollInfo(viewer).nMax == 0, "Closing the last tab left a duplicate tab or document");
     // Reopen, then close a newly loading tab and its neighbor. Older results
     // must not repopulate the viewer or replace the next selected document.
-    send(tree, TVM_SELECTITEM, TVGN_CARET, reinterpret_cast<LPARAM>(first)); waitLines(viewer, 220);
-    send(tree, TVM_SELECTITEM, TVGN_CARET, reinterpret_cast<LPARAM>(second));
+    send(tree, treeSelect, static_cast<WPARAM>(first)); waitLines(viewer, 220);
+    send(tree, treeSelect, static_cast<WPARAM>(second));
     click(app.window, pane.left + px(180 + 30), tabY, true);
     click(app.window, pane.left + px(30), tabY, true);
     check(bounds(app.window, viewer).top == empty.top, "Closing tabs during loading did not clear the tab strip");
@@ -171,12 +172,12 @@ void overflowingTabTests(const fs::path& executable) {
     const auto px = [dpi](int value) { return MulDiv(value, dpi, 96); };
     check(SetWindowPos(app.window, nullptr, 0, 0, px(820), px(820), SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE) != FALSE,
           "Could not resize the tab test window");
-    waitFor([&] { return send(tree, TVM_GETCOUNT) == 9; }, "The overflow test files did not appear");
-    auto item = nextItem(tree, TVGN_CHILD, nextItem(tree, TVGN_ROOT));
+    waitFor([&] { return send(tree, treeGetCount) == 9; }, "The overflow test files did not appear");
+    auto item = nextItem(tree, TreeRelation::Child, nextItem(tree, TreeRelation::Root));
     for (int i = 0; i < 8; ++i) {
-        check(item != nullptr, "A tab test tree item is missing");
-        send(tree, TVM_SELECTITEM, TVGN_CARET, reinterpret_cast<LPARAM>(item)); waitLines(viewer, 100 + i);
-        item = nextItem(tree, TVGN_NEXT, item);
+        check(item != 0, "A tab test tree item is missing");
+        send(tree, treeSelect, static_cast<WPARAM>(item)); waitLines(viewer, 100 + i);
+        item = nextItem(tree, TreeRelation::Next, item);
     }
     const auto pane = bounds(app.window, viewer); const int tabY = pane.top - px(17);
     click(app.window, pane.right - px(42), tabY);
@@ -192,17 +193,17 @@ void sidebarTests(const fs::path& executable) {
     fs::create_directory(folder); writeFile(folder / L"file.txt");
     Application app(executable, fixture.root);
     const auto tree = app.tree();
-    const auto explorer = FindWindowExW(app.window, nullptr, L"BUTTON", L"Explorer");
-    const auto git = FindWindowExW(app.window, nullptr, L"BUTTON", L"Source Control");
+    const auto explorer = FindWindowExW(app.window, nullptr, activityButtonClassName, L"Explorer");
+    const auto git = FindWindowExW(app.window, nullptr, activityButtonClassName, L"Source Control");
     const auto viewer = FindWindowExW(app.window, nullptr, L"PoppyViewer", nullptr);
     check(explorer && git && viewer, "Activity buttons or editor pane are missing");
-    HTREEITEM nested = nullptr;
+    TreeItem nested = 0;
     waitFor([&] {
-        nested = nextItem(tree, TVGN_CHILD, nextItem(tree, TVGN_ROOT));
-        return nested != nullptr;
+        nested = nextItem(tree, TreeRelation::Child, nextItem(tree, TreeRelation::Root));
+        return nested != 0;
     }, "Explorer did not load its folder");
     expand(tree, nested);
-    waitFor([&] { return expanded(tree, nested) && nextItem(tree, TVGN_CHILD, nested); }, "Explorer did not expand its folder");
+    waitFor([&] { return expanded(tree, nested) && nextItem(tree, TreeRelation::Child, nested); }, "Explorer did not expand its folder");
     const UINT dpi = GetDpiForWindow(app.window);
     check(SetWindowPos(app.window, nullptr, 0, 0, MulDiv(1180, dpi, 96), MulDiv(820, dpi, 96), SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE) != FALSE,
           "Could not size the test window for its DPI");
@@ -210,18 +211,30 @@ void sidebarTests(const fs::path& executable) {
     check(activityRect.left == 0 && activityRect.right <= treeRect.left && treeRect.right < viewerRect.left,
           "Activity bar, sidebar and editor are not arranged from left to right");
     check(treeRect.top > viewerRect.top, "Explorer is missing its sidebar heading");
-    send(git, BM_CLICK);
+    send(git, WM_KEYDOWN, VK_SPACE);
+    check(IsWindowVisible(tree), "Space activated the activity button before key release");
+    send(git, WM_KEYUP, VK_SPACE);
     check(!IsWindowVisible(tree), "Git activity did not hide Explorer");
     const auto gitViewer = bounds(app.window, viewer);
     check(gitViewer.left == viewerRect.left && gitViewer.top == viewerRect.top,
           "Switching sidebars moved the editor");
-    // Refresh while Explorer is hidden: WM_SETREDRAW must not make it visible.
+    // Refreshing the hidden custom control must not change its visibility.
     writeFile(fixture.root / L"added.txt");
     check(PostMessageW(app.window, WM_KEYDOWN, VK_F5, 0) != FALSE, "Could not refresh the hidden Explorer");
-    waitFor([&] { return send(tree, TVM_GETCOUNT) == 4; }, "Hidden Explorer did not refresh");
+    waitFor([&] { return send(tree, treeGetCount) == 4; }, "Hidden Explorer did not refresh");
     check(!IsWindowVisible(tree), "Refreshing Explorer covered the Git sidebar");
-    send(explorer, BM_CLICK);
+    send(explorer, WM_KEYDOWN, VK_RETURN);
     check(IsWindowVisible(tree) && expanded(tree, nested), "Switching back lost Explorer's expansion state");
+    send(git, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(10, 10));
+    send(git, WM_CANCELMODE);
+    send(git, WM_LBUTTONUP, 0, MAKELPARAM(10, 10));
+    check(IsWindowVisible(tree), "A cancelled activity-button press changed the sidebar");
+    send(git, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(10, 10));
+    send(git, WM_LBUTTONUP, 0, MAKELPARAM(-10, -10));
+    check(IsWindowVisible(tree), "Releasing outside an activity button changed the sidebar");
+    click(git, 10, 10);
+    check(!IsWindowVisible(tree), "Clicking the custom activity button did not switch sidebars");
+    send(explorer, BM_CLICK);
 
     const int delta = MulDiv(48, dpi, 96);
     const int x = (treeRect.right + viewerRect.left) / 2, y = treeRect.top + 20;
@@ -234,6 +247,52 @@ void sidebarTests(const fs::path& executable) {
     check(resizedViewer.left - resizedTree.right == viewerRect.left - treeRect.right && resizedTree.left == treeRect.left,
           "Resizing moved the activity bar or overlapped the editor");
 }
+void treeInteractionTests(const fs::path& executable) {
+    Fixture fixture;
+    const auto folder = fixture.root / L"000 folder";
+    fs::create_directory(folder); writeFile(folder / L"nested.txt");
+    for (int i = 0; i < 120; ++i) writeFile(fixture.root / (L"file-" + std::to_wstring(1000 + i) + L".txt"));
+    writeFile(fixture.root / (std::wstring(100, L'x') + L".txt"));
+    Application app(executable, fixture.root);
+    const auto tree = app.tree();
+    waitFor([&] { return send(tree, treeGetCount) == 123; }, "The large tree did not load");
+    const auto root = nextItem(tree, TreeRelation::Root), directory = nextItem(tree, TreeRelation::Child, root);
+    const auto firstFile = nextItem(tree, TreeRelation::Next, directory);
+    check(root && directory && firstFile, "Tree interaction fixtures are missing");
+    send(tree, treeSelect, directory); send(tree, WM_KEYDOWN, VK_RIGHT);
+    waitFor([&] { return nextItem(tree, TreeRelation::Child, directory) != 0; }, "Right arrow did not expand the custom tree");
+    const auto nested = nextItem(tree, TreeRelation::Child, directory);
+    send(tree, WM_KEYDOWN, VK_RIGHT);
+    check(static_cast<TreeItem>(send(tree, treeGetSelection)) == nested, "Right arrow did not move to the first child");
+    send(tree, WM_KEYDOWN, VK_LEFT);
+    check(static_cast<TreeItem>(send(tree, treeGetSelection)) == directory, "Left arrow did not move to the parent");
+    send(tree, WM_KEYDOWN, VK_LEFT);
+    check(!expanded(tree, directory) && send(tree, treeGetCount) == 123, "Collapsing the custom tree retained child nodes");
+    send(tree, WM_KEYDOWN, VK_END);
+    check(scrollInfo(tree).nPos > 0, "End did not scroll the selection into view");
+    send(tree, WM_KEYDOWN, VK_HOME);
+    check(static_cast<TreeItem>(send(tree, treeGetSelection)) == root && scrollInfo(tree).nPos == 0, "Home did not return to the root");
+    send(tree, WM_KEYDOWN, VK_DOWN);
+    check(static_cast<TreeItem>(send(tree, treeGetSelection)) == directory, "Down did not select the next visible row");
+    send(tree, WM_KEYDOWN, VK_NEXT);
+    check(scrollInfo(tree).nPos > 0, "Page Down did not keep the selection visible");
+    send(tree, WM_KEYDOWN, VK_HOME);
+    send(tree, WM_CHAR, L'f');
+    check(static_cast<TreeItem>(send(tree, treeGetSelection)) == firstFile, "Typing did not select a matching file");
+    send(tree, WM_CHAR, L'f');
+    check(static_cast<TreeItem>(send(tree, treeGetSelection)) == nextItem(tree, TreeRelation::Next, firstFile), "Repeated typing did not cycle matching files");
+    const auto horizontal = scrollInfo(tree, SB_HORZ);
+    check(horizontal.nMax >= static_cast<int>(horizontal.nPage), "Long labels did not enable horizontal scrolling");
+    send(tree, WM_HSCROLL, SB_BOTTOM);
+    check(scrollInfo(tree, SB_HORZ).nPos > 0, "The tree did not scroll horizontally");
+    send(tree, WM_HSCROLL, SB_TOP); send(tree, WM_KEYDOWN, VK_HOME);
+    const int row = static_cast<int>(send(tree, treeGetRow, directory)), height = static_cast<int>(send(tree, treeGetRowHeight));
+    const int arrowX = MulDiv(27, GetDpiForWindow(app.window), 96), y = row * height + height / 2;
+    click(tree, arrowX, y);
+    waitFor([&] { return expanded(tree, directory) && nextItem(tree, TreeRelation::Child, directory); }, "Clicking the arrow did not expand the custom tree");
+    click(tree, arrowX, y);
+    check(!expanded(tree, directory) && !nextItem(tree, TreeRelation::Child, directory), "Clicking the arrow did not collapse and release children");
+}
 void folderTests(const fs::path& executable) {
     Fixture fixture;
     const auto empty = fixture.root / L"a empty";
@@ -243,42 +302,42 @@ void folderTests(const fs::path& executable) {
     {
         Application app(executable, fixture.root);
         const auto tree = app.tree();
-        HTREEITEM root = nullptr;
+        TreeItem root = 0;
         waitFor([&] {
-            root = nextItem(tree, TVGN_ROOT);
-            return root && expanded(tree, root) && nextItem(tree, TVGN_CHILD, root);
+            root = nextItem(tree, TreeRelation::Root);
+            return root && expanded(tree, root) && nextItem(tree, TreeRelation::Child, root);
         }, "Opening a workspace did not display its files");
-        const auto emptyItem = nextItem(tree, TVGN_CHILD, root);
-        const auto nestedItem = nextItem(tree, TVGN_NEXT, emptyItem);
-        check(nestedItem && !nextItem(tree, TVGN_NEXT, nestedItem), "Workspace should contain two directories");
+        const auto emptyItem = nextItem(tree, TreeRelation::Child, root);
+        const auto nestedItem = nextItem(tree, TreeRelation::Next, emptyItem);
+        check(nestedItem && !nextItem(tree, TreeRelation::Next, nestedItem), "Workspace should contain two directories");
         for (int i = 0; i < 2; ++i) {
             expand(tree, nestedItem);
-            waitFor([&] { return expanded(tree, nestedItem) && nextItem(tree, TVGN_CHILD, nestedItem); },
+            waitFor([&] { return expanded(tree, nestedItem) && nextItem(tree, TreeRelation::Child, nestedItem); },
                     "Expanding a directory did not display its files");
             expand(tree, nestedItem, false);
-            check(!expanded(tree, nestedItem) && !nextItem(tree, TVGN_CHILD, nestedItem),
+            check(!expanded(tree, nestedItem) && !nextItem(tree, TreeRelation::Child, nestedItem),
                   "Collapsing a directory did not release its children");
         }
         expand(tree, emptyItem);
         // Both enumerations use the same worker. Waiting for the next one
         // ensures the empty-directory result was applied before adding a file.
         expand(tree, nestedItem);
-        waitFor([&] { return expanded(tree, nestedItem) && nextItem(tree, TVGN_CHILD, nestedItem); },
+        waitFor([&] { return expanded(tree, nestedItem) && nextItem(tree, TreeRelation::Child, nestedItem); },
                 "The directory worker did not finish enumerating the empty folder");
         writeFile(empty / L"new file.txt");
         check(PostMessageW(app.window, WM_KEYDOWN, VK_F5, 0) != FALSE, "Could not request a refresh");
-        waitFor([&] { return expanded(tree, emptyItem) && nextItem(tree, TVGN_CHILD, emptyItem); },
+        waitFor([&] { return expanded(tree, emptyItem) && nextItem(tree, TreeRelation::Child, emptyItem); },
                 "A file added to an empty directory did not appear");
     }
     {
         Fixture emptyRoot;
         Application app(executable, emptyRoot.root);
         const auto tree = app.tree();
-        HTREEITEM root = nullptr;
-        waitFor([&] { root = nextItem(tree, TVGN_ROOT); return root != nullptr; }, "Empty workspace has no root item");
+        TreeItem root = 0;
+        waitFor([&] { root = nextItem(tree, TreeRelation::Root); return root != 0; }, "Empty workspace has no root item");
         writeFile(emptyRoot.root / L"first file.txt");
         check(PostMessageW(app.window, WM_KEYDOWN, VK_F5, 0) != FALSE, "Could not refresh the empty workspace");
-        waitFor([&] { return expanded(tree, root) && nextItem(tree, TVGN_CHILD, root); },
+        waitFor([&] { return expanded(tree, root) && nextItem(tree, TreeRelation::Child, root); },
                 "A file added to an empty workspace did not appear");
     }
 }
@@ -289,6 +348,7 @@ int wmain(int argc, wchar_t** argv) {
         SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         folderTests(fs::absolute(argv[1]));
         sidebarTests(fs::absolute(argv[1]));
+        treeInteractionTests(fs::absolute(argv[1]));
         tabTests(fs::absolute(argv[1]));
         overflowingTabTests(fs::absolute(argv[1]));
         std::cout << "Folder, sidebar and tab tests passed.\n"; return 0;

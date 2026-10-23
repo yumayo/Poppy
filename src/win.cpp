@@ -59,10 +59,6 @@ std::wstring pathKey(const fs::path& path) {
     while (result.size() > 3 && (result.back() == L'\\' || result.back() == L'/')) result.pop_back();
     return result;
 }
-HFONT makeControlFont(int pixels) {
-    // Native tree-view controls still consume HFONT through WM_SETFONT.
-    return CreateFontW(-pixels, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
-}
 bool copyText(HWND owner, const std::wstring& text) {
     if (!OpenClipboard(owner)) return false;
     HGLOBAL data = GlobalAlloc(GMEM_MOVEABLE, (text.size() + 1) * sizeof(wchar_t));

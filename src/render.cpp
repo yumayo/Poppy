@@ -120,7 +120,7 @@ void Renderer::setDpi(UINT dpi) {
     // targets at 96 DPI avoids scaling it twice on per-monitor DPI changes.
 }
 void Renderer::discard() {
-    brush_.reset(); target_ = nullptr; windowTarget_.reset(); dcTarget_.reset();
+    brush_.reset(); target_ = nullptr; windowTarget_.reset(); bitmapTarget_.reset(); bitmap_ = nullptr;
 }
 bool Renderer::prepare(HRESULT result) {
     if (SUCCEEDED(result) && !brush_) result = target_->CreateSolidColorBrush(D2D1::ColorF(0.0f, 0.0f, 0.0f), brush_.put());
@@ -132,7 +132,7 @@ bool Renderer::prepare(HRESULT result) {
 }
 bool Renderer::begin(HWND window) {
     window_ = window;
-    if (dcTarget_) discard();
+    if (bitmapTarget_) discard();
     RECT bounds{}; GetClientRect(window, &bounds);
     if (empty(bounds)) return false;
     const auto size = D2D1::SizeU(static_cast<UINT32>(bounds.right), static_cast<UINT32>(bounds.bottom));
@@ -155,21 +155,18 @@ bool Renderer::begin(HWND window) {
     }
     target_ = windowTarget_.get(); return prepare(result);
 }
-bool Renderer::begin(HDC dc, const RECT& bounds, HWND window) {
-    window_ = window;
-    if (windowTarget_) discard();
-    if (empty(bounds)) return false;
+bool Renderer::begin(IWICBitmap* bitmap) {
+    window_ = nullptr;
+    if (!bitmap) return false;
+    if (windowTarget_ || (bitmap_ && bitmap_ != bitmap)) discard();
     HRESULT result = S_OK;
-    if (!dcTarget_) {
-        const auto properties = D2D1::RenderTargetProperties(D2D1_RENDER_TARGET_TYPE_DEFAULT,
+    if (!bitmapTarget_) {
+        const auto properties = D2D1::RenderTargetProperties(D2D1_RENDER_TARGET_TYPE_SOFTWARE,
             D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_IGNORE), 96.0f, 96.0f);
-        result = factories().drawing->CreateDCRenderTarget(&properties, dcTarget_.put());
+        result = factories().drawing->CreateWicBitmapRenderTarget(bitmap, properties, bitmapTarget_.put());
+        if (SUCCEEDED(result)) bitmap_ = bitmap;
     }
-    if (SUCCEEDED(result)) result = dcTarget_->BindDC(dc, &bounds);
-    target_ = dcTarget_.get();
-    if (!prepare(result)) return false;
-    target_->SetTransform(D2D1::Matrix3x2F::Translation(-static_cast<float>(bounds.left), -static_cast<float>(bounds.top)));
-    return true;
+    target_ = bitmapTarget_.get(); return prepare(result);
 }
 HRESULT Renderer::end() {
     const HRESULT result = target_->EndDraw();
@@ -185,6 +182,15 @@ void Renderer::color(COLORREF value) {
 void Renderer::fill(const RECT& rect, COLORREF value) {
     if (empty(rect)) return;
     color(value); target_->FillRectangle(rectangle(rect), brush_.get());
+}
+int Renderer::textWidth(const std::wstring& text) const {
+    auto* format = font_ == Font::Code ? codeFont_.get() : uiFont_.get();
+    if (!format || text.empty()) return 0;
+    ComPtr<IDWriteTextLayout> layout;
+    if (FAILED(factories().text->CreateTextLayout(text.data(), static_cast<UINT32>(text.size()), format, 1000000.0f, 1000000.0f, layout.put()))) return 0;
+    layout->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+    DWRITE_TEXT_METRICS metrics{};
+    return SUCCEEDED(layout->GetMetrics(&metrics)) ? static_cast<int>(std::ceil(metrics.widthIncludingTrailingWhitespace)) : 0;
 }
 void Renderer::label(const RECT& rect, const std::wstring& text, COLORREF value, UINT flags) {
     auto* format = font_ == Font::Code ? codeFont_.get() : uiFont_.get();

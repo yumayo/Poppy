@@ -8,42 +8,30 @@ namespace {
 void check(bool condition, const char* message) {
     if (!condition) throw std::runtime_error(message);
 }
-// A memory DC lets Direct2D tests inspect pixels without showing a window.
+// WIC provides inspectable Direct2D pixels without a DC or GDI bitmap.
 struct Bitmap {
     static constexpr int width = 512, height = 128;
-    HDC dc = CreateCompatibleDC(nullptr);
-    HBITMAP bitmap = nullptr;
-    HGDIOBJ previous = nullptr;
-    DWORD* pixels = nullptr;
+    ComPtr<IWICImagingFactory> factory;
+    ComPtr<IWICBitmap> bitmap;
+    std::vector<BYTE> pixels = std::vector<BYTE>(width * height * 4);
     Bitmap() {
-        check(dc != nullptr, "Could not create a test DC");
-        BITMAPINFO info{};
-        info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-        info.bmiHeader.biWidth = width; info.bmiHeader.biHeight = -height;
-        info.bmiHeader.biPlanes = 1; info.bmiHeader.biBitCount = 32;
-        info.bmiHeader.biCompression = BI_RGB;
-        bitmap = CreateDIBSection(dc, &info, DIB_RGB_COLORS, reinterpret_cast<void**>(&pixels), nullptr, 0);
-        if (!bitmap) { DeleteDC(dc); throw std::runtime_error("Could not create a test bitmap"); }
-        previous = SelectObject(dc, bitmap);
+        check(SUCCEEDED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER,
+            __uuidof(IWICImagingFactory), reinterpret_cast<void**>(factory.put()))), "Could not create the WIC factory");
+        check(SUCCEEDED(factory->CreateBitmap(width, height, GUID_WICPixelFormat32bppBGR, WICBitmapCacheOnLoad, bitmap.put())), "Could not create the WIC bitmap");
     }
-    ~Bitmap() { SelectObject(dc, previous); DeleteObject(bitmap); DeleteDC(dc); }
-    Bitmap(const Bitmap&) = delete;
-    Bitmap& operator=(const Bitmap&) = delete;
+    void read() { check(SUCCEEDED(bitmap->CopyPixels(nullptr, width * 4, static_cast<UINT>(pixels.size()), pixels.data())), "Could not read WIC pixels"); }
     RECT bounds() const { return {0, 0, width, height}; }
     COLORREF pixel(int x, int y) const {
-        const DWORD value = pixels[y * width + x];
-        return RGB((value >> 16) & 255, (value >> 8) & 255, value & 255);
+        const auto offset = static_cast<size_t>((y * width + x) * 4);
+        return RGB(pixels[offset + 2], pixels[offset + 1], pixels[offset]);
     }
 };
-void finish(Renderer& renderer) {
-    check(SUCCEEDED(renderer.end()), "Direct2D drawing failed");
-    GdiFlush();
-}
+void finish(Renderer& renderer) { check(SUCCEEDED(renderer.end()), "Direct2D drawing failed"); }
 void drawCells(Renderer& renderer, Bitmap& bitmap, const std::vector<Cell>& cells, int cw, int ch) {
-    check(renderer.begin(bitmap.dc, bitmap.bounds(), nullptr), "Could not bind Direct2D to the test bitmap");
+    check(renderer.begin(bitmap.bitmap.get()), "Could not bind Direct2D to the WIC bitmap");
     renderer.fill(bitmap.bounds(), background);
     renderer.cells(8, 8, cw, ch, cells, static_cast<int>(cells.size()), bitmap.bounds());
-    finish(renderer);
+    finish(renderer); bitmap.read();
 }
 void cellPositions() {
     Renderer renderer, reference;
@@ -80,7 +68,7 @@ void cellPositions() {
 void colorsAndClipping() {
     Renderer renderer; renderer.setDpi(96);
     Bitmap bitmap;
-    check(renderer.begin(bitmap.dc, bitmap.bounds(), nullptr), "Could not create the color test target");
+    check(renderer.begin(bitmap.bitmap.get()), "Could not create the color test target");
     const COLORREF untouched = RGB(201, 12, 193);
     renderer.fill(bitmap.bounds(), untouched);
     std::vector<Cell> cells(4);
@@ -88,7 +76,7 @@ void colorsAndClipping() {
     cells[0].ch = U'日'; cells[1].continuation = true;
     const RECT clip{12, 12, 62, 38};
     renderer.cells(4, 4, 20, 40, cells, 4, clip);
-    finish(renderer);
+    finish(renderer); bitmap.read();
     for (int y = 0; y < Bitmap::height; ++y) for (int x = 0; x < Bitmap::width; ++x) {
         if (x < clip.left || x >= clip.right || y < clip.top || y >= clip.bottom)
             check(bitmap.pixel(x, y) == untouched, "Cell drawing escaped its clip");
@@ -97,12 +85,13 @@ void colorsAndClipping() {
     // background differs from the leading cell (partial terminal selection).
     for (int x = clip.left; x < clip.right; ++x)
         check(bitmap.pixel(x, 36) == cells[(x - 4) / 20].bg, "A cell background or continuation color was lost");
-    check(!renderer.begin(bitmap.dc, {0, 0, 0, 0}, nullptr), "An empty target should not begin drawing");
-    check(renderer.begin(bitmap.dc, {10, 10, 110, 74}, nullptr), "Could not rebind an offset DC rectangle");
-    renderer.fill({10, 10, 110, 74}, accent);
-    finish(renderer);
-    check(bitmap.pixel(10, 10) == accent && bitmap.pixel(109, 73) == accent, "Offset DC coordinates were not preserved");
-    check(bitmap.pixel(110, 74) == untouched, "DC binding painted outside its bounds");
+    check(!renderer.begin(static_cast<IWICBitmap*>(nullptr)), "A null bitmap should not begin drawing");
+    Bitmap other;
+    check(renderer.begin(other.bitmap.get()), "Could not switch to another WIC bitmap");
+    renderer.fill(other.bounds(), accent);
+    finish(renderer); other.read(); bitmap.read();
+    check(other.pixel(0, 0) == accent && other.pixel(511, 127) == accent, "A replacement WIC bitmap was not rendered");
+    check(bitmap.pixel(0, 0) == untouched, "Switching WIC targets changed the old bitmap");
 }
 void windowTargets() {
     HWND window = CreateWindowExW(0, L"STATIC", L"Poppy render test", WS_POPUP, 0, 0, 320, 200, nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
@@ -124,7 +113,7 @@ void windowTargets() {
     }
     Bitmap bitmap;
     drawCells(renderer, bitmap, {Cell{U'M', foreground, background, false}}, 24, renderer.textHeight() + 4);
-    check(renderer.begin(window), "Could not switch from a DC target back to an HWND target");
+    check(renderer.begin(window), "Could not switch from a WIC target back to an HWND target");
     renderer.fill({0, 0, 320, 200}, accent);
     finish(renderer);
     renderer.discard();
