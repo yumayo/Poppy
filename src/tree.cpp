@@ -54,12 +54,12 @@ int Tree::row(TreeItem id) const {
     return found == rows.end() ? -1 : static_cast<int>(found - rows.begin());
 }
 TreeItem Tree::hit(int y) const {
-    RECT client{}; GetClientRect(window_, &client);
+    const auto client = Scrollbars::contentRect(window_);
     const auto& rows = model_.visible();
     const int index = top_ + y / rowHeight_;
     return y >= 0 && y < client.bottom && index >= 0 && index < static_cast<int>(rows.size()) ? rows[index].item : 0;
 }
-int Tree::page() const { RECT r{}; GetClientRect(window_, &r); return std::max(1, static_cast<int>(r.bottom) / rowHeight_); }
+int Tree::page() const { const auto r = Scrollbars::contentRect(window_); return std::max(1, static_cast<int>(r.bottom) / rowHeight_); }
 void Tree::ensureVisible() {
     const int index = row(selection());
     if (index < 0) return;
@@ -77,22 +77,22 @@ void Tree::layout() {
         if (found == widths_.end()) found = widths_.emplace(row.item, renderer_.textWidth(item(row.item)->text)).first;
         extent = std::max(extent, static_cast<int>(row.depth + 1) * indent_ + found->second + MulDiv(12, dpi_, 96));
     }
-    // A scrollbar may resize the client area. Re-read it after updating both.
-    for (int pass = 0; pass < 2; ++pass) {
-        RECT r{}; GetClientRect(window_, &r);
+    // Each bar can change the space available to the other.
+    for (int pass = 0; pass < 3; ++pass) {
+        const auto r = Scrollbars::contentRect(window_);
         const int count = static_cast<int>(rows.size()), height = page(), width = std::max(1L, r.right);
         top_ = std::clamp(top_, 0, std::max(0, count - height));
         left_ = std::clamp(left_, 0, std::max(0, extent - width));
         SCROLLINFO vertical{sizeof(vertical), SIF_RANGE | SIF_PAGE | SIF_POS, 0, std::max(0, count - 1), static_cast<UINT>(height), top_, 0};
         SCROLLINFO horizontal{sizeof(horizontal), SIF_RANGE | SIF_PAGE | SIF_POS, 0, std::max(0, extent - 1), static_cast<UINT>(width), left_, 0};
-        SetScrollInfo(window_, SB_VERT, &vertical, TRUE); SetScrollInfo(window_, SB_HORZ, &horizontal, TRUE);
+        SetScrollInfo(window_, SB_VERT, &vertical, FALSE); SetScrollInfo(window_, SB_HORZ, &horizontal, FALSE);
     }
     layingOut_ = false; InvalidateRect(window_, nullptr, FALSE);
 }
 void Tree::scroll(int vertical, int horizontal) { top_ += vertical; left_ += horizontal; changed(); }
 void Tree::paint() {
     Renderer::Paint paint(renderer_, window_); if (!paint) return;
-    RECT r{}; GetClientRect(window_, &r);
+    const auto r = Scrollbars::contentRect(window_);
     renderer_.fill(r, panel);
     const auto& rows = model_.visible();
     const bool focus = GetFocus() == window_;
@@ -119,6 +119,7 @@ void Tree::paint() {
         renderer_.label({x + indent_ + padding, y, std::max<LONG>(r.right, x + indent_ + widths_[row.item] + padding), y + rowHeight_},
             node->text, selected ? foreground : node->color, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
     }
+    scrollbars_.paint(window_, renderer_, panel);
 }
 LRESULT CALLBACK Tree::procedure(HWND w, UINT m, WPARAM a, LPARAM b) {
     auto* self = reinterpret_cast<Tree*>(GetWindowLongPtrW(w, GWLP_USERDATA));
@@ -126,6 +127,8 @@ LRESULT CALLBACK Tree::procedure(HWND w, UINT m, WPARAM a, LPARAM b) {
     return self ? self->handle(m, a, b) : DefWindowProcW(w, m, a, b);
 }
 LRESULT Tree::handle(UINT m, WPARAM a, LPARAM b) {
+    LRESULT result = 0;
+    if (scrollbars_.handle(window_, m, a, b, result)) return result;
     switch (m) {
     case WM_PAINT: paint(); return 0;
     case WM_ERASEBKGND: return 1;
@@ -164,7 +167,8 @@ LRESULT Tree::handle(UINT m, WPARAM a, LPARAM b) {
         switch (LOWORD(a)) {
         case SB_LINEUP: position -= step; break; case SB_LINEDOWN: position += step; break;
         case SB_PAGEUP: position -= static_cast<int>(info.nPage); break; case SB_PAGEDOWN: position += static_cast<int>(info.nPage); break;
-        case SB_THUMBTRACK: position = info.nTrackPos; break; case SB_TOP: position = 0; break; case SB_BOTTOM: position = info.nMax; break;
+        case SB_THUMBTRACK: case SB_THUMBPOSITION: position = scrollbars_.trackPosition(vertical ? SB_VERT : SB_HORZ, info.nTrackPos); break;
+        case SB_TOP: position = 0; break; case SB_BOTTOM: position = info.nMax; break;
         default: return 0;
         }
         if (vertical) top_ = position; else left_ = position;

@@ -1,5 +1,5 @@
 #pragma once
-#include "render.h"
+#include "scrollbars.h"
 #include "tree_messages.h"
 
 namespace poppy {
@@ -47,6 +47,7 @@ private:
     int page() const;
     HWND window_ = nullptr;
     Renderer renderer_;
+    Scrollbars scrollbars_;
     TreeModel model_;
     std::unordered_map<TreeItem, int> widths_;
     UINT dpi_ = 96;

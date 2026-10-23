@@ -1,4 +1,4 @@
-#include "render.h"
+#include "scrollbars.h"
 #include <algorithm>
 #include <iostream>
 #include <stdexcept>
@@ -120,13 +120,113 @@ void windowTargets() {
     check(renderer.begin(window), "Could not recreate the HWND render target");
     finish(renderer);
 }
+struct ScrollbarWindow {
+    Scrollbars bars;
+    HWND window = nullptr;
+    static LRESULT CALLBACK procedure(HWND window, UINT message, WPARAM a, LPARAM b) {
+        auto* self = reinterpret_cast<ScrollbarWindow*>(GetWindowLongPtrW(window, GWLP_USERDATA));
+        if (message == WM_NCCREATE) {
+            self = static_cast<ScrollbarWindow*>(reinterpret_cast<CREATESTRUCTW*>(b)->lpCreateParams);
+            SetWindowLongPtrW(window, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(self));
+        }
+        LRESULT result = 0;
+        if (self && self->bars.handle(window, message, a, b, result)) return result;
+        if (self && (message == WM_VSCROLL || message == WM_HSCROLL)) {
+            const int bar = message == WM_VSCROLL ? SB_VERT : SB_HORZ;
+            auto info = self->info(window, bar);
+            switch (LOWORD(a)) {
+            case SB_THUMBTRACK: case SB_THUMBPOSITION: info.nPos = self->bars.trackPosition(bar, info.nTrackPos); break;
+            case SB_LINEUP: --info.nPos; break; case SB_LINEDOWN: ++info.nPos; break;
+            case SB_PAGEUP: info.nPos -= static_cast<int>(info.nPage); break;
+            case SB_PAGEDOWN: info.nPos += static_cast<int>(info.nPage); break;
+            }
+            info.fMask = SIF_POS; SetScrollInfo(window, bar, &info, FALSE); return 0;
+        }
+        return DefWindowProcW(window, message, a, b);
+    }
+    static SCROLLINFO info(HWND window, int bar) {
+        SCROLLINFO value{sizeof(value), SIF_ALL, 0, 0, 0, 0, 0};
+        check(GetScrollInfo(window, bar, &value) != FALSE, "The themed scrollbar lost its Win32 scroll information");
+        return value;
+    }
+    ScrollbarWindow() {
+        WNDCLASSW cls{}; cls.lpfnWndProc = procedure; cls.hInstance = GetModuleHandleW(nullptr); cls.lpszClassName = L"PoppyScrollbarTest";
+        RegisterClassW(&cls);
+        window = CreateWindowExW(0, cls.lpszClassName, L"", WS_POPUP | WS_VSCROLL | WS_HSCROLL,
+            0, 0, 320, 128, nullptr, nullptr, cls.hInstance, this);
+        check(window != nullptr, "Could not create the scrollbar test window");
+        for (const int bar : {SB_VERT, SB_HORZ}) {
+            SCROLLINFO value{sizeof(value), SIF_RANGE | SIF_PAGE | SIF_POS, 0, 999999, 100, 0, 0};
+            SetScrollInfo(window, bar, &value, FALSE);
+        }
+    }
+    ~ScrollbarWindow() { DestroyWindow(window); }
+};
+void themedScrollbars() {
+    ScrollbarWindow pane;
+    Renderer renderer; renderer.setDpi(96);
+    Bitmap bitmap;
+    const auto draw = [&] {
+        check(renderer.begin(bitmap.bitmap.get()), "Could not render the themed scrollbars");
+        renderer.fill(bitmap.bounds(), accent);
+        pane.bars.paint(pane.window, renderer, panel);
+        finish(renderer); bitmap.read();
+    };
+    RECT client{}; GetClientRect(pane.window, &client);
+    check(client.right == 320 && client.bottom == 128, "Native nonclient scrollbars still consume the custom bars' client area");
+    const auto content = Scrollbars::contentRect(pane.window);
+    check(content.right < client.right && content.bottom < client.bottom, "The bars overlap the content area");
+    draw();
+    check(bitmap.pixel(0, 0) == accent, "Scrollbar painting changed the document area");
+    check(bitmap.pixel(client.right - 1, client.bottom - 1) == panel, "The scrollbar corner does not match its pane");
+    check(bitmap.pixel(content.right, content.bottom / 2) == panel && bitmap.pixel(content.right / 2, content.bottom) == panel,
+        "A scrollbar track does not match its pane");
+    for (const int bar : {SB_VERT, SB_HORZ}) {
+        draw();
+        const int cross = bar == SB_VERT ? (content.right + client.right) / 2 : (content.bottom + client.bottom) / 2;
+        const int length = bar == SB_VERT ? content.bottom : content.right;
+        int first = -1, last = -1;
+        for (int along = 0; along < length; ++along) {
+            if ((bar == SB_VERT ? bitmap.pixel(cross, along) : bitmap.pixel(along, cross)) == scrollbarThumb) {
+                if (first < 0) first = along;
+                last = along;
+            }
+        }
+        check(first >= 0 && last > first, "A scrollbar thumb is missing its theme color");
+        const int along = (first + last) / 2;
+        const POINT point = bar == SB_VERT ? POINT{cross, along} : POINT{along, cross};
+        const LPARAM location = MAKELPARAM(point.x, point.y);
+        SendMessageW(pane.window, WM_MOUSEMOVE, 0, location); draw();
+        check(bitmap.pixel(point.x, point.y) == scrollbarHover, "Hovering a thumb did not update its theme color");
+        SendMessageW(pane.window, WM_LBUTTONDOWN, MK_LBUTTON, location); draw();
+        check(GetCapture() == pane.window && bitmap.pixel(point.x, point.y) == muted, "Dragging a thumb did not capture the pointer or update its color");
+        const POINT end = bar == SB_VERT ? POINT{cross, client.bottom + 100} : POINT{client.right + 100, cross};
+        SendMessageW(pane.window, WM_MOUSEMOVE, MK_LBUTTON, MAKELPARAM(end.x, end.y));
+        check(ScrollbarWindow::info(pane.window, bar).nPos == 999900, "Dragging truncated a scroll position above 65535 or did not reach the end");
+        SendMessageW(pane.window, WM_LBUTTONUP, 0, MAKELPARAM(end.x, end.y));
+        check(GetCapture() != pane.window, "Releasing the thumb left the pointer captured");
+        SendMessageW(pane.window, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(bar == SB_VERT ? cross : 2, bar == SB_VERT ? 2 : cross));
+        check(ScrollbarWindow::info(pane.window, bar).nPos == 999899, "The scrollbar arrow did not scroll one line");
+        SendMessageW(pane.window, WM_CANCELMODE, 0, 0);
+        check(GetCapture() != pane.window, "Cancelling a scrollbar press left the pointer captured");
+        SendMessageW(pane.window, WM_LBUTTONDOWN, MK_LBUTTON, location);
+        check(ScrollbarWindow::info(pane.window, bar).nPos == 999799, "Clicking the scrollbar track did not scroll one page");
+        SendMessageW(pane.window, WM_LBUTTONUP, 0, location);
+    }
+    for (const int bar : {SB_VERT, SB_HORZ}) {
+        SCROLLINFO value{sizeof(value), SIF_RANGE | SIF_PAGE, 0, 0, 1, 0, 0};
+        SetScrollInfo(pane.window, bar, &value, FALSE);
+    }
+    const auto empty = Scrollbars::contentRect(pane.window);
+    check(empty.right == client.right && empty.bottom == client.bottom, "Hidden bars did not return their space to the content");
+}
 }
 int main() {
     const HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     int result = 0;
     try {
         initializeRendering();
-        cellPositions(); colorsAndClipping(); windowTargets();
+        cellPositions(); colorsAndClipping(); windowTargets(); themedScrollbars();
         std::cout << "Direct2D rendering tests passed\n";
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; result = 1; }
     if (SUCCEEDED(com)) CoUninitialize();
