@@ -3,7 +3,7 @@
 #include <algorithm>
 
 namespace poppy {
-Terminal::~Terminal() { stop(); if (font_) DeleteObject(font_); if (uiFont_) DeleteObject(uiFont_); }
+Terminal::~Terminal() { stop(); }
 void Terminal::create(HWND parent, HINSTANCE instance) {
     WNDCLASSW cls{}; cls.lpfnWndProc = procedure; cls.hInstance = instance; cls.lpszClassName = L"PoppyTerminal"; cls.hCursor = LoadCursorW(nullptr, IDC_IBEAM); RegisterClassW(&cls);
     window_ = CreateWindowExW(0, cls.lpszClassName, L"AI terminal", WS_CHILD | WS_VISIBLE | WS_TABSTOP, 0, 0, 0, 0, parent, nullptr, instance, this);
@@ -11,11 +11,8 @@ void Terminal::create(HWND parent, HINSTANCE instance) {
     setDpi(GetDpiForWindow(parent));
 }
 void Terminal::setDpi(UINT dpi) {
-    if (font_) DeleteObject(font_);
-    if (uiFont_) DeleteObject(uiFont_);
-    font_ = makeFont(MulDiv(15, dpi, 96)); uiFont_ = makeFont(MulDiv(13, dpi, 96), false);
-    HDC dc = GetDC(window_); const auto old = SelectObject(dc, font_); TEXTMETRICW metrics{}; GetTextMetricsW(dc, &metrics); SelectObject(dc, old); ReleaseDC(window_, dc);
-    cellWidth_ = metrics.tmAveCharWidth; cellHeight_ = metrics.tmHeight + MulDiv(2, dpi, 96); header_ = MulDiv(30, dpi, 96);
+    renderer_.setDpi(dpi);
+    cellWidth_ = renderer_.cellWidth(); cellHeight_ = renderer_.textHeight() + MulDiv(2, dpi, 96); header_ = MulDiv(30, dpi, 96);
     resize(); InvalidateRect(window_, nullptr, FALSE);
 }
 void Terminal::setDirectory(const fs::path& directory) {
@@ -166,34 +163,35 @@ void Terminal::copy() {
     copyText(window_, wide(result));
 }
 void Terminal::paint() {
-    PAINTSTRUCT ps{}; HDC dc = BeginPaint(window_, &ps); RECT rect{}; GetClientRect(window_, &rect); const auto old = SelectObject(dc, uiFont_);
-    fill(dc, {0, 0, rect.right, header_}, panel);
-    label(dc, {12, 0, rect.right - 12, header_}, L"TERMINAL  ·  " + (directory_.empty() ? std::wstring(L"PowerShell") : directory_.native()), muted);
-    fill(dc, {0, header_ - 1, rect.right, header_}, border);
+    Renderer::Paint paint(renderer_, window_); if (!paint) return;
+    auto& dc = renderer_; dc.font(Renderer::Font::Ui);
+    RECT rect{}; GetClientRect(window_, &rect);
+    dc.fill({0, 0, rect.right, header_}, panel);
+    dc.label({12, 0, rect.right - 12, header_}, L"TERMINAL  ·  " + (directory_.empty() ? std::wstring(L"PowerShell") : directory_.native()), muted);
+    dc.fill({0, header_ - 1, rect.right, header_}, border);
     if (!started_) {
-        fill(dc, {0, header_, rect.right, rect.bottom}, background);
+        dc.fill({0, header_, rect.right, rect.bottom}, background);
         RECT text{20, header_ + 18, std::max<LONG>(20, rect.right - 20), rect.bottom};
-        label(dc, text, error_.empty() ? L"Click to start PowerShell, then run your AI CLI.\nThe shell starts only when needed." : error_ + L"\nClick to retry.", muted, DT_LEFT | DT_TOP | DT_WORDBREAK);
+        dc.label(text, error_.empty() ? L"Click to start PowerShell, then run your AI CLI.\nThe shell starts only when needed." : error_ + L"\nClick to retry.", muted, DT_LEFT | DT_TOP | DT_WORDBREAK);
     } else {
-        SelectObject(dc, font_); RECT clip{6, header_ + 4, rect.right - 6, rect.bottom};
-        fill(dc, {0, header_, 6, rect.bottom}, background); fill(dc, {6, header_, rect.right, header_ + 4}, background);
+        RECT clip{6, header_ + 4, rect.right - 6, rect.bottom};
+        dc.fill({0, header_, 6, rect.bottom}, background); dc.fill({6, header_, rect.right, header_ + 4}, background);
         const int begin = std::min(anchor_, caret_), end = std::max(anchor_, caret_);
         std::vector<Cell> visible;
         for (int y = 0; y < model_.rows(); ++y) {
             visible = model_.row(y, scroll_); visible.resize(model_.columns());
             if (begin >= 0) for (int x = 0; x < model_.columns(); ++x) { const int index = y * model_.columns() + x; if (index >= begin && index <= end) visible[x].bg = rgb(50,70,94); }
             const int sy = header_ + 4 + y * cellHeight_;
-            paintCells(dc, 6, sy, cellWidth_, cellHeight_, visible, model_.columns(), clip);
-            fill(dc, {6 + model_.columns() * cellWidth_, sy, rect.right, sy + cellHeight_}, background);
+            dc.cells(6, sy, cellWidth_, cellHeight_, visible, model_.columns(), clip);
+            dc.fill({6 + model_.columns() * cellWidth_, sy, rect.right, sy + cellHeight_}, background);
         }
-        fill(dc, {0, header_ + 4 + model_.rows() * cellHeight_, rect.right, rect.bottom}, background);
+        dc.fill({0, header_ + 4 + model_.rows() * cellHeight_, rect.right, rect.bottom}, background);
         if (!scroll_ && running() && model_.cursorVisible() && GetFocus() == window_) {
             const int x = 6 + model_.cursorX() * cellWidth_, y = header_ + 4 + model_.cursorY() * cellHeight_;
-            fill(dc, {x, y + cellHeight_ - 2, x + cellWidth_, y + cellHeight_}, accent);
+            dc.fill({x, y + cellHeight_ - 2, x + cellWidth_, y + cellHeight_}, accent);
         }
-        if (!running()) label(dc, {12, 0, rect.right - 12, header_}, L"SESSION ENDED  ·  Click header to restart", accent, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+        if (!running()) dc.label({12, 0, rect.right - 12, header_}, L"SESSION ENDED  ·  Click header to restart", accent, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
     }
-    SelectObject(dc, old); EndPaint(window_, &ps);
 }
 LRESULT CALLBACK Terminal::procedure(HWND w, UINT m, WPARAM a, LPARAM b) {
     auto* self = reinterpret_cast<Terminal*>(GetWindowLongPtrW(w, GWLP_USERDATA));

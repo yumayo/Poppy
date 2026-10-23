@@ -55,10 +55,7 @@ std::string utf8(std::wstring_view text);
 std::wstring winError(DWORD error = GetLastError());
 std::wstring quoteArg(std::wstring_view arg);
 std::wstring pathKey(const fs::path& path);
-HFONT makeFont(int pixels, bool code = true);
-void fill(HDC dc, const RECT& r, COLORREF color);
-void label(HDC dc, const RECT& r, const std::wstring& text, COLORREF color, UINT format = DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-void paintCells(HDC dc, int x, int y, int cellWidth, int cellHeight, const std::vector<Cell>& cells, int columns, const RECT& clip);
+HFONT makeControlFont(int pixels);
 bool copyText(HWND owner, const std::wstring& text);
 std::wstring clipboardText(HWND owner);
 

@@ -59,34 +59,9 @@ std::wstring pathKey(const fs::path& path) {
     while (result.size() > 3 && (result.back() == L'\\' || result.back() == L'/')) result.pop_back();
     return result;
 }
-HFONT makeFont(int pixels, bool code) {
-    return CreateFontW(-pixels, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, code ? FIXED_PITCH : DEFAULT_PITCH, code ? L"Consolas" : L"Segoe UI");
-}
-void fill(HDC dc, const RECT& r, COLORREF color) { SetDCBrushColor(dc, color); FillRect(dc, &r, static_cast<HBRUSH>(GetStockObject(DC_BRUSH))); }
-void label(HDC dc, const RECT& r, const std::wstring& text, COLORREF color, UINT format) {
-    SetTextColor(dc, color); SetBkMode(dc, TRANSPARENT); RECT rect = r;
-    DrawTextW(dc, text.c_str(), static_cast<int>(text.size()), &rect, format | DT_NOPREFIX);
-}
-void paintCells(HDC dc, int x, int y, int cw, int ch, const std::vector<Cell>& cells, int columns, const RECT& clip) {
-    const int count = std::min(columns, static_cast<int>(cells.size()));
-    int col = 0;
-    while (col < count) {
-        if (cells[col].continuation) { ++col; continue; }
-        const int begin = col; const auto fg = cells[col].fg, bg = cells[col].bg;
-        std::wstring text; std::vector<int> spacing;
-        while (col < count && cells[col].fg == fg && cells[col].bg == bg) {
-            if (cells[col].continuation) { ++col; continue; }
-            char32_t scalar = cells[col].ch; const int width = cellWidth(scalar) == 2 ? 2 : 1;
-            if (scalar < 32 || scalar > 0x10ffff) scalar = U' ';
-            if (scalar > 0xffff) { scalar -= 0x10000; text += static_cast<wchar_t>(0xd800 + (scalar >> 10)); text += static_cast<wchar_t>(0xdc00 + (scalar & 1023)); spacing.push_back(cw * width); spacing.push_back(0); }
-            else { text += static_cast<wchar_t>(scalar); spacing.push_back(cw * width); }
-            col += width;
-        }
-        RECT r{x + begin * cw, y, x + std::min(col, columns) * cw, y + ch};
-        RECT visible{}; if (!IntersectRect(&visible, &r, &clip)) continue;
-        SetTextColor(dc, fg); SetBkColor(dc, bg);
-        ExtTextOutW(dc, x + begin * cw, y, ETO_CLIPPED | ETO_OPAQUE, &visible, text.data(), static_cast<UINT>(text.size()), spacing.data());
-    }
+HFONT makeControlFont(int pixels) {
+    // Native tree-view controls still consume HFONT through WM_SETFONT.
+    return CreateFontW(-pixels, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
 }
 bool copyText(HWND owner, const std::wstring& text) {
     if (!OpenClipboard(owner)) return false;

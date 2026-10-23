@@ -1,5 +1,5 @@
 #pragma once
-#include "win.h"
+#include "render.h"
 
 namespace poppy {
 class Terminal {
@@ -24,7 +24,7 @@ private:
     void imePosition();
     int point(int x, int y) const;
     HWND window_ = nullptr;
-    HFONT font_ = nullptr, uiFont_ = nullptr;
+    Renderer renderer_;
     int cellWidth_ = 8, cellHeight_ = 20, header_ = 30;
     fs::path directory_;
     TerminalModel model_;

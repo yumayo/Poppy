@@ -31,22 +31,21 @@ COLORREF stateColor(wchar_t state) {
     return state == L'U' || state == L'D' ? RGB(231,112,118) : state == L'?' || state == L'A' ? accent : RGB(224,192,128);
 }
 
-void activityIcon(HDC dc, const RECT& rect, bool git, COLORREF color, UINT dpi) {
-    const int saved = SaveDC(dc);
+void activityIcon(Renderer& dc, const RECT& rect, bool git, COLORREF color, UINT dpi) {
     const int size = MulDiv(24, dpi, 96), x = (rect.left + rect.right - size) / 2, y = (rect.top + rect.bottom - size) / 2;
     auto px = [&](int value) { return x + MulDiv(value, dpi, 96); };
     auto py = [&](int value) { return y + MulDiv(value, dpi, 96); };
-    HPEN pen = CreatePen(PS_SOLID, std::max(1, MulDiv(2, dpi, 96)), color);
-    SelectObject(dc, pen); SelectObject(dc, GetStockObject(HOLLOW_BRUSH));
+    const float stroke = static_cast<float>(std::max(1, MulDiv(2, dpi, 96)));
+    auto line = [&](int x1, int y1, int x2, int y2) { dc.line(static_cast<float>(px(x1)), static_cast<float>(py(y1)), static_cast<float>(px(x2)), static_cast<float>(py(y2)), color, stroke); };
     if (git) {
-        MoveToEx(dc, px(6), py(6), nullptr); LineTo(dc, px(6), py(18));
-        MoveToEx(dc, px(18), py(6), nullptr); LineTo(dc, px(18), py(9)); LineTo(dc, px(6), py(15));
-        Ellipse(dc, px(3), py(1), px(9), py(7)); Ellipse(dc, px(15), py(1), px(21), py(7)); Ellipse(dc, px(3), py(17), px(9), py(23));
+        line(6, 6, 6, 18); line(18, 6, 18, 9); line(18, 9, 6, 15);
+        dc.ellipse({px(3), py(1), px(9), py(7)}, color, stroke);
+        dc.ellipse({px(15), py(1), px(21), py(7)}, color, stroke);
+        dc.ellipse({px(3), py(17), px(9), py(23)}, color, stroke);
     } else {
-        MoveToEx(dc, px(6), py(17), nullptr); LineTo(dc, px(2), py(17)); LineTo(dc, px(2), py(2)); LineTo(dc, px(15), py(2)); LineTo(dc, px(15), py(5));
-        Rectangle(dc, px(7), py(7), px(21), py(23));
+        line(6, 17, 2, 17); line(2, 17, 2, 2); line(2, 2, 15, 2); line(15, 2, 15, 5);
+        dc.outline({px(7), py(7), px(21), py(23)}, color, stroke);
     }
-    RestoreDC(dc, saved); DeleteObject(pen);
 }
 
 std::shared_ptr<DirectoryResult> listDirectory(const fs::path& path) {
@@ -178,6 +177,7 @@ private:
     HWND window_ = nullptr, tree_ = nullptr, gitTree_ = nullptr, explorerButton_ = nullptr, gitButton_ = nullptr, tooltips_ = nullptr;
     HINSTANCE instance_ = nullptr;
     HFONT uiFont_ = nullptr;
+    Renderer renderer_, explorerRenderer_, gitRenderer_;
     UINT dpi_ = 96;
     int sidebar_ = 245, terminalHeight_ = 260, toolbar_ = 44, footer_ = 26, splitter_ = 5;
     int activityWidth_ = 48, sidebarHeader_ = 34, gitHeader_ = 56;
@@ -204,6 +204,7 @@ private:
     ULONGLONG dirtySince_ = 0, lastEvent_ = 0;
 };
 int App::run(HINSTANCE instance, int show, fs::path initial) {
+    initializeRendering();
     instance_ = instance;
     INITCOMMONCONTROLSEX common{sizeof(common), ICC_TREEVIEW_CLASSES | ICC_WIN95_CLASSES}; InitCommonControlsEx(&common);
     WNDCLASSW cls{}; cls.lpfnWndProc = procedure; cls.hInstance = instance; cls.lpszClassName = L"PoppyMain"; cls.hCursor = LoadCursorW(nullptr, IDC_ARROW); cls.hIcon = LoadIconW(nullptr, IDI_APPLICATION); RegisterClassW(&cls);
@@ -258,7 +259,9 @@ void App::create() {
     dpi(GetDpiForWindow(window_));
 }
 void App::dpi(UINT value) {
-    dpi_ = value; if (uiFont_) DeleteObject(uiFont_); uiFont_ = makeFont(MulDiv(13, dpi_, 96), false);
+    dpi_ = value; renderer_.setDpi(dpi_);
+    if (uiFont_) DeleteObject(uiFont_);
+    uiFont_ = makeControlFont(MulDiv(13, dpi_, 96));
     SendMessageW(tree_, WM_SETFONT, reinterpret_cast<WPARAM>(uiFont_), TRUE);
     SendMessageW(gitTree_, WM_SETFONT, reinterpret_cast<WPARAM>(uiFont_), TRUE);
     TreeView_SetItemHeight(tree_, MulDiv(26, dpi_, 96));
@@ -295,65 +298,69 @@ void App::layout(bool revealTab) {
     InvalidateRect(window_, nullptr, FALSE);
 }
 void App::paint() {
-    PAINTSTRUCT ps{}; HDC dc = BeginPaint(window_, &ps); RECT r{}; GetClientRect(window_, &r); const auto old = SelectObject(dc, uiFont_);
-    fill(dc, r, border); fill(dc, {0, 0, r.right, toolbar_}, panel); fill(dc, {0, r.bottom - footer_, r.right, r.bottom}, panel);
+    Renderer::Paint paint(renderer_, window_); if (!paint) return;
+    auto& dc = renderer_;
+    RECT r{}; GetClientRect(window_, &r);
+    dc.fill(r, border); dc.fill({0, 0, r.right, toolbar_}, panel); dc.fill({0, r.bottom - footer_, r.right, r.bottom}, panel);
     auto scaled = [&](int v) { return MulDiv(v, dpi_, 96); };
-    label(dc, {scaled(16), 0, scaled(85), toolbar_}, L"POPPY", accent);
-    label(dc, {scaled(98), 0, scaled(210), toolbar_}, L"Open folder", foreground);
-    label(dc, {scaled(220), 0, scaled(292), toolbar_}, L"Refresh", foreground);
-    label(dc, {scaled(305), 0, scaled(360), toolbar_}, L"Diff", foreground);
-    label(dc, {scaled(374), 0, scaled(460), toolbar_}, L"Terminal", terminalVisible_ ? accent : muted);
-    label(dc, {scaled(480), 0, r.right - scaled(16), toolbar_}, root_.empty() ? L"" : root_.native(), muted, DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_PATH_ELLIPSIS);
+    dc.label({scaled(16), 0, scaled(85), toolbar_}, L"POPPY", accent);
+    dc.label({scaled(98), 0, scaled(210), toolbar_}, L"Open folder", foreground);
+    dc.label({scaled(220), 0, scaled(292), toolbar_}, L"Refresh", foreground);
+    dc.label({scaled(305), 0, scaled(360), toolbar_}, L"Diff", foreground);
+    dc.label({scaled(374), 0, scaled(460), toolbar_}, L"Terminal", terminalVisible_ ? accent : muted);
+    dc.label({scaled(480), 0, r.right - scaled(16), toolbar_}, root_.empty() ? L"" : root_.native(), muted, DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_PATH_ELLIPSIS);
     const std::wstring gitLabel = !git_ ? L"Git" : !git_->error.empty() ? L"Git unavailable" : git_->root.empty() ? L"No Git repository" : git_->branch + L"  ·  " + std::to_wstring(git_->changed) + L" changed  ·  " + std::to_wstring(git_->untracked) + L" untracked";
-    label(dc, {scaled(12), r.bottom - footer_, scaled(390), r.bottom}, gitLabel, muted);
-    label(dc, {scaled(400), r.bottom - footer_, r.right - scaled(12), r.bottom}, status_, muted, DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-    fill(dc, {0, toolbar_, activityWidth_, r.bottom - footer_}, background);
-    fill(dc, {activityWidth_ - 1, toolbar_, activityWidth_, r.bottom - footer_}, border);
-    fill(dc, sidebarRect_, panel);
+    dc.label({scaled(12), r.bottom - footer_, scaled(390), r.bottom}, gitLabel, muted);
+    dc.label({scaled(400), r.bottom - footer_, r.right - scaled(12), r.bottom}, status_, muted, DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    dc.fill({0, toolbar_, activityWidth_, r.bottom - footer_}, background);
+    dc.fill({activityWidth_ - 1, toolbar_, activityWidth_, r.bottom - footer_}, border);
+    dc.fill(sidebarRect_, panel);
     const int left = sidebarRect_.left + scaled(14), edge = sidebarRect_.right - scaled(12), top = toolbar_ + sidebarHeader_;
-    label(dc, {left, toolbar_, edge, top}, activeSidebar_ == Sidebar::Explorer ? L"EXPLORER" : L"SOURCE CONTROL", foreground);
-    fill(dc, {sidebarRect_.left, top - 1, sidebarRect_.right, top}, border);
+    dc.label({left, toolbar_, edge, top}, activeSidebar_ == Sidebar::Explorer ? L"EXPLORER" : L"SOURCE CONTROL", foreground);
+    dc.fill({sidebarRect_.left, top - 1, sidebarRect_.right, top}, border);
     if (activeSidebar_ == Sidebar::Git) {
         const bool repository = git_ && !git_->root.empty() && git_->error.empty();
-        label(dc, {left, top, edge, top + scaled(28)}, repository ? git_->branch : L"Git", repository ? accent : muted);
+        dc.label({left, top, edge, top + scaled(28)}, repository ? git_->branch : L"Git", repository ? accent : muted);
         const auto summary = repository ? std::to_wstring(git_->changed + git_->untracked) + L" pending changes" : L"";
-        label(dc, {left, top + scaled(28), edge, top + gitHeader_}, summary, muted);
-        fill(dc, {sidebarRect_.left, top + gitHeader_ - 1, sidebarRect_.right, top + gitHeader_}, border);
+        dc.label({left, top + scaled(28), edge, top + gitHeader_}, summary, muted);
+        dc.fill({sidebarRect_.left, top + gitHeader_ - 1, sidebarRect_.right, top + gitHeader_}, border);
         if (!repository || git_->entries.empty()) {
             const std::wstring message = root_.empty() ? L"Open a folder to view Git changes." : !git_ ? L"Loading Git changes…" : !git_->error.empty() ? L"Git unavailable.\nCheck Git for Windows and press F5 to retry." : git_->root.empty() ? L"This folder is not in a Git repository." : L"No pending changes.";
-            label(dc, {left, top + gitHeader_ + scaled(16), edge, sidebarRect_.bottom - scaled(12)}, message, muted, DT_LEFT | DT_TOP | DT_WORDBREAK);
+            dc.label({left, top + gitHeader_ + scaled(16), edge, sidebarRect_.bottom - scaled(12)}, message, muted, DT_LEFT | DT_TOP | DT_WORDBREAK);
         }
     } else if (root_.empty()) {
-        label(dc, {left, top + scaled(16), edge, sidebarRect_.bottom - scaled(12)}, L"Open a folder with Ctrl+O to browse files.", muted, DT_LEFT | DT_TOP | DT_WORDBREAK);
+        dc.label({left, top + scaled(16), edge, sidebarRect_.bottom - scaled(12)}, L"Open a folder with Ctrl+O to browse files.", muted, DT_LEFT | DT_TOP | DT_WORDBREAK);
     }
     if (!tabs_.empty()) {
-        fill(dc, tabsRect_, background);
+        dc.fill(tabsRect_, background);
         for (size_t i = firstTab_; i < std::min(tabs_.size(), firstTab_ + tabCapacity()); ++i) {
             const auto rect = tabBounds(i);
             const bool active = i == activeTab_;
-            fill(dc, rect, active ? panel : background);
-            if (active) fill(dc, {rect.left, rect.top, rect.right, rect.top + scaled(2)}, accent);
+            dc.fill(rect, active ? panel : background);
+            if (active) dc.fill({rect.left, rect.top, rect.right, rect.top + scaled(2)}, accent);
             const auto title = tabs_[i].path.filename().native() + (tabs_[i].diff ? L" (diff)" : L"");
-            label(dc, {rect.left + scaled(12), rect.top, rect.right - scaled(28), rect.bottom}, title, active ? foreground : muted);
-            label(dc, {rect.right - scaled(28), rect.top, rect.right - scaled(4), rect.bottom}, L"×", muted, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-            fill(dc, {rect.right - 1, rect.top, rect.right, rect.bottom}, border);
+            dc.label({rect.left + scaled(12), rect.top, rect.right - scaled(28), rect.bottom}, title, active ? foreground : muted);
+            dc.label({rect.right - scaled(28), rect.top, rect.right - scaled(4), rect.bottom}, L"×", muted, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            dc.fill({rect.right - 1, rect.top, rect.right, rect.bottom}, border);
         }
         if (tabs_.size() > tabCapacity()) {
             const int edge = tabsRect_.right, button = scaled(28);
-            label(dc, {edge - 2 * button, tabsRect_.top, edge - button, tabsRect_.bottom}, L"‹", firstTab_ ? foreground : muted, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-            label(dc, {edge - button, tabsRect_.top, edge, tabsRect_.bottom}, L"›", firstTab_ + tabCapacity() < tabs_.size() ? foreground : muted, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            dc.label({edge - 2 * button, tabsRect_.top, edge - button, tabsRect_.bottom}, L"‹", firstTab_ ? foreground : muted, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            dc.label({edge - button, tabsRect_.top, edge, tabsRect_.bottom}, L"›", firstTab_ + tabCapacity() < tabs_.size() ? foreground : muted, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
         }
-        fill(dc, {tabsRect_.left, tabsRect_.bottom - 1, tabsRect_.right, tabsRect_.bottom}, border);
+        dc.fill({tabsRect_.left, tabsRect_.bottom - 1, tabsRect_.right, tabsRect_.bottom}, border);
     }
-    SelectObject(dc, old); EndPaint(window_, &ps);
 }
 void App::drawActivity(const DRAWITEMSTRUCT& item) {
     const bool git = item.CtlID == gitCommand;
     const bool selected = activeSidebar_ == (git ? Sidebar::Git : Sidebar::Explorer);
-    fill(item.hDC, item.rcItem, selected || (item.itemState & ODS_SELECTED) ? panel : background);
-    activityIcon(item.hDC, item.rcItem, git, selected ? foreground : muted, dpi_);
-    if (selected) fill(item.hDC, {item.rcItem.left, item.rcItem.top + MulDiv(8, dpi_, 96), item.rcItem.left + MulDiv(3, dpi_, 96), item.rcItem.bottom - MulDiv(8, dpi_, 96)}, accent);
-    if ((item.itemState & ODS_FOCUS) && !(item.itemState & ODS_NOFOCUSRECT)) { RECT focus = item.rcItem; InflateRect(&focus, -4, -4); DrawFocusRect(item.hDC, &focus); }
+    auto& dc = git ? gitRenderer_ : explorerRenderer_;
+    if (!dc.begin(item.hDC, item.rcItem, item.hwndItem)) return;
+    dc.fill(item.rcItem, selected || (item.itemState & ODS_SELECTED) ? panel : background);
+    activityIcon(dc, item.rcItem, git, selected ? foreground : muted, dpi_);
+    if (selected) dc.fill({item.rcItem.left, item.rcItem.top + MulDiv(8, dpi_, 96), item.rcItem.left + MulDiv(3, dpi_, 96), item.rcItem.bottom - MulDiv(8, dpi_, 96)}, accent);
+    if ((item.itemState & ODS_FOCUS) && !(item.itemState & ODS_NOFOCUSRECT)) { RECT focus = item.rcItem; InflateRect(&focus, -4, -4); dc.outline(focus, muted); }
+    dc.end();
 }
 void App::selectSidebar(Sidebar sidebar) {
     activeSidebar_ = sidebar; layout();
