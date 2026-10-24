@@ -2,6 +2,7 @@
 #include "terminal.h"
 #include "tree.h"
 #include "activity_button.h"
+#include "quick_open.h"
 #include "storage.h"
 #include <commctrl.h>
 #include <dwmapi.h>
@@ -197,6 +198,7 @@ private:
     Sidebar activeSidebar_ = Sidebar::Explorer;
     Viewer viewer_;
     Terminal terminal_;
+    QuickOpen quickOpen_;
     std::unique_ptr<Worker> worker_, gitWorker_;
     std::unique_ptr<Storage> storage_;
     AppSession appSession_;
@@ -260,9 +262,11 @@ int App::run(HINSTANCE instance, int show, fs::path initial) {
         const bool key = msg.message == WM_KEYDOWN;
         const bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
         const bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+        if (key && ctrl && !shift && !(GetKeyState(VK_MENU) & 0x8000) && msg.wParam == 'P') { quickOpen_.show(root_); continue; }
+        if (key && ctrl && msg.wParam == 'O') { quickOpen_.close(); chooseFolder(); continue; }
+        if (quickOpen_.visible() && key) { TranslateMessage(&msg); DispatchMessageW(&msg); continue; }
         if (key && ctrl && shift && msg.wParam == 'E') { selectSidebar(Sidebar::Explorer); continue; }
         if (key && ctrl && shift && msg.wParam == 'G') { selectSidebar(Sidebar::Git); continue; }
-        if (key && ctrl && msg.wParam == 'O') { chooseFolder(); continue; }
         if (key && ctrl && msg.wParam == VK_OEM_3) { toggleTerminal(); continue; }
         if (key && ctrl && msg.wParam == VK_TAB && !tabs_.empty()) { selectTab((activeTab_ + (shift ? tabs_.size() - 1 : 1)) % tabs_.size()); SetFocus(viewer_.window()); continue; }
         if (key && ctrl && msg.wParam == 'W' && GetFocus() != terminal_.window()) { closeTab(activeTab_); continue; }
@@ -305,6 +309,11 @@ void App::create() {
         SendMessageW(tooltips_, TTM_ADDTOOLW, 0, reinterpret_cast<LPARAM>(&tip));
     }
     viewer_.create(window_, instance_); terminal_.create(window_, instance_);
+    quickOpen_.create(window_, instance_);
+    quickOpen_.opened = [this](const fs::path& path) { openFile(path); SetFocus(viewer_.window()); };
+    // Each underlying pane must clip the palette when repainting beneath it.
+    for (const auto pane : {tree_, gitTree_, viewer_.window(), terminal_.window(), explorerButton_, gitButton_})
+        SetWindowLongPtrW(pane, GWL_STYLE, GetWindowLongPtrW(pane, GWL_STYLE) | WS_CLIPSIBLINGS);
     const BOOL dark = TRUE; DwmSetWindowAttribute(window_, 20, &dark, sizeof(dark));
     dpi(GetDpiForWindow(window_));
 }
@@ -314,7 +323,7 @@ void App::dpi(UINT value) {
     explorerActivity_.setDpi(dpi_); gitActivity_.setDpi(dpi_);
     toolbar_ = MulDiv(44, dpi_, 96); footer_ = MulDiv(26, dpi_, 96); splitter_ = MulDiv(5, dpi_, 96);
     activityWidth_ = MulDiv(48, dpi_, 96); sidebarHeader_ = MulDiv(34, dpi_, 96); gitHeader_ = MulDiv(56, dpi_, 96);
-    viewer_.setDpi(dpi_); terminal_.setDpi(dpi_); layout();
+    viewer_.setDpi(dpi_); terminal_.setDpi(dpi_); quickOpen_.setDpi(dpi_); layout();
 }
 void App::layout(bool revealTab) {
     if (!tree_) return;
@@ -358,6 +367,7 @@ void App::layout(bool revealTab) {
     }
     // WM_PAINT can be delayed by a stream of mouse moves. Present the parent
     // and all visible panes now, including the area the old splitters occupied.
+    quickOpen_.layout();
     RedrawWindow(window_, nullptr, nullptr, RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_UPDATENOW);
 }
 void App::paint() {
@@ -371,7 +381,8 @@ void App::paint() {
     dc.label({scaled(220), 0, scaled(292), toolbar_}, L"Refresh", foreground);
     dc.label({scaled(305), 0, scaled(360), toolbar_}, L"Diff", foreground);
     dc.label({scaled(374), 0, scaled(460), toolbar_}, L"Terminal", terminalVisible_ ? accent : muted);
-    dc.label({scaled(480), 0, r.right - scaled(16), toolbar_}, root_.empty() ? L"" : root_.native(), muted, DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_PATH_ELLIPSIS);
+    dc.label({scaled(480), 0, scaled(566), toolbar_}, L"Find file", foreground);
+    dc.label({scaled(582), 0, r.right - scaled(16), toolbar_}, root_.empty() ? L"" : root_.native(), muted, DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_PATH_ELLIPSIS);
     const std::wstring gitLabel = !git_ ? L"Git" : !git_->error.empty() ? L"Git unavailable" : git_->root.empty() ? L"No Git repository" : git_->branch + L"  ·  " + std::to_wstring(git_->changed) + L" changed  ·  " + std::to_wstring(git_->untracked) + L" untracked";
     dc.label({scaled(12), r.bottom - footer_, scaled(390), r.bottom}, gitLabel, muted);
     dc.label({scaled(400), r.bottom - footer_, r.right - scaled(12), r.bottom}, status_, muted, DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
@@ -484,6 +495,7 @@ TreeItem App::insert(TreeItem parent, const Entry& entry) {
 void App::openFolder(fs::path path) {
     std::error_code error; path = fs::absolute(path, error).lexically_normal().make_preferred();
     if (error || !fs::is_directory(path, error)) { status(L"Cannot open folder: " + path.native()); return; }
+    quickOpen_.close();
     saveSession();
     stopWatch(); ++generation_; ++serial_; worker_->cancelPending(); gitWorker_->cancelPending(); tabs_.clear(); activeTab_ = firstTab_ = 0; git_.reset();
     root_ = std::move(path); explorer_.clear(); expandedPaths_.clear(); pendingTreeSelection_.clear(); waitingForGit_ = false;
@@ -768,6 +780,7 @@ void App::refreshGit() {
 }
 void App::refresh(bool force) {
     if (root_.empty()) return;
+    quickOpen_.refresh();
     for (const auto& pair : nodes_) { const auto n = node(pair.second); if (n && n->expandRequested) requestDirectory(pair.second); }
     refreshGit();
     if (!tabs_.empty() && (force || fileDirty_)) { saveTab(); loadTab(true); }
@@ -832,9 +845,11 @@ LRESULT App::handle(UINT m, WPARAM a, LPARAM b) {
     case WM_TIMER: if (a == timerId) pollWatch(); return 0;
     case WM_ACTIVATE: if (LOWORD(a) != WA_INACTIVE && worker_ && !root_.empty()) refresh(false); return 0;
     case WM_LBUTTONDOWN: {
+        quickOpen_.close();
         const int x = MulDiv(GET_X_LPARAM(b), 96, dpi_), y = GET_Y_LPARAM(b);
         if (y < toolbar_) {
             if (x >= 98 && x < 210) chooseFolder(); else if (x >= 220 && x < 292) refresh(); else if (x >= 305 && x < 360) showDiff(); else if (x >= 374 && x < 460) toggleTerminal();
+            else if (x >= 480 && x < 566) quickOpen_.show(root_);
             return 0;
         }
         const POINT point{GET_X_LPARAM(b), y};
@@ -886,7 +901,7 @@ LRESULT App::handle(UINT m, WPARAM a, LPARAM b) {
     case WM_QUERYENDSESSION: saveSession(); return TRUE;
     case WM_CLOSE: saveSession(); DestroyWindow(window_); return 0;
     case WM_DESTROY:
-        KillTimer(window_, timerId); stopWatch(); if (gitWorker_) gitWorker_->stop(); if (worker_) worker_->stop(); terminal_.stop(); explorer_.clear(); changes_.clear();
+        KillTimer(window_, timerId); stopWatch(); quickOpen_.stop(); if (gitWorker_) gitWorker_->stop(); if (worker_) worker_->stop(); terminal_.stop(); explorer_.clear(); changes_.clear();
         PostQuitMessage(0); return 0;
     default: break;
     }

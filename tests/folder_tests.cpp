@@ -375,6 +375,49 @@ void folderTests(const fs::path& executable) {
                 "A file added to an empty workspace did not appear");
     }
 }
+void quickOpenTests(const fs::path& executable) {
+    Fixture fixture;
+    fs::create_directories(fixture.root / L"a nested"); fs::create_directories(fixture.root / L"z nested");
+    writeLines(fixture.root / L"a nested" / L"duplicate.txt", 201);
+    writeLines(fixture.root / L"z nested" / L"duplicate.txt", 301);
+    writeLines(fixture.root / L"a nested" / L"日本語.txt", 101);
+    Application app(executable, fixture.root);
+    app.tree();
+    const auto viewer = FindWindowExW(app.window, nullptr, L"PoppyViewer", nullptr);
+    const auto palette = FindWindowExW(app.window, nullptr, L"PoppyQuickOpen", nullptr);
+    check(viewer && palette && !IsWindowVisible(palette), "Quick open should start hidden");
+    const auto px = [dpi = GetDpiForWindow(app.window)](int value) { return MulDiv(value, dpi, 96); };
+    const auto open = [&] {
+        click(app.window, px(520), px(22));
+        check(IsWindowVisible(palette), "Find file did not open quick open");
+        const auto pane = bounds(app.window, palette); RECT client{}; GetClientRect(app.window, &client);
+        check(pane.top == px(8) && std::abs((pane.left + pane.right) - client.right) <= 1, "Quick open is not centered at the top");
+    };
+    const auto type = [&](const std::wstring& query) { for (const auto ch : query) send(palette, WM_CHAR, ch); };
+    const auto accept = [&](int lines) {
+        waitFor([&] { send(palette, WM_KEYDOWN, VK_RETURN); return !IsWindowVisible(palette); }, "Quick open did not open a matching file");
+        waitLines(viewer, lines);
+    };
+    open(); type(L"duplicate");
+    waitFor([&] { const auto pane = bounds(app.window, palette); return pane.bottom - pane.top >= px(204); }, "Quick open did not find files in collapsed directories");
+    send(palette, WM_KEYDOWN, VK_DOWN); accept(301);
+    open(); type(L"missing-file"); send(palette, WM_KEYDOWN, VK_RETURN);
+    check(IsWindowVisible(palette), "Enter opened a stale result while a new query was pending");
+    send(palette, WM_KEYDOWN, VK_ESCAPE);
+    check(!IsWindowVisible(palette) && scrollInfo(viewer).nMax == 301, "Escape changed the current document");
+    open(); type(L"日本語"); accept(101);
+    // Opening the same path again should switch to its tab instead of duplicating it.
+    open(); type(L"日本語"); accept(101);
+    auto pane = bounds(app.window, viewer);
+    click(app.window, pane.left + px(210), pane.top - px(17), true);
+    waitLines(viewer, 301);
+    pane = bounds(app.window, viewer);
+    click(app.window, pane.left + px(30), pane.top - px(17), true);
+    check(scrollInfo(viewer).nMax == 0, "Quick open created duplicate tabs");
+    open();
+    click(app.window, px(12), px(22));
+    check(!IsWindowVisible(palette), "Clicking outside quick open did not close it");
+}
 void sessionTests(const fs::path& executable) {
     Fixture fixture;
     const auto directory = fixture.root / L"nested 日本語";
@@ -454,8 +497,9 @@ int wmain(int argc, wchar_t** argv) {
         treeInteractionTests(fs::absolute(argv[1]));
         tabTests(fs::absolute(argv[1]));
         overflowingTabTests(fs::absolute(argv[1]));
+        quickOpenTests(fs::absolute(argv[1]));
         sessionTests(fs::absolute(argv[1]));
-        std::cout << "Folder, sidebar, tab and session tests passed.\n"; return 0;
+        std::cout << "Folder, sidebar, tab, quick open and session tests passed.\n"; return 0;
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n'; return 1;
     }
