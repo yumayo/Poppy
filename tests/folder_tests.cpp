@@ -176,7 +176,7 @@ void tabTests(const fs::path& executable) {
     click(app.window, pane.left + px(30), tabY, true);
     check(bounds(app.window, viewer).top == empty.top && scrollInfo(viewer).nMax == 0, "A stale load restored a closed tab");
 }
-void overflowingTabTests(const fs::path& executable) {
+void wrappingTabTests(const fs::path& executable) {
     Fixture fixture;
     for (int i = 0; i < 8; ++i) writeLines(fixture.root / (L"tab-" + std::to_wstring(i) + L".txt"), 100 + i);
     Application app(executable, fixture.root);
@@ -186,20 +186,61 @@ void overflowingTabTests(const fs::path& executable) {
     const auto px = [dpi](int value) { return MulDiv(value, dpi, 96); };
     check(SetWindowPos(app.window, nullptr, 0, 0, px(820), px(820), SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE) != FALSE,
           "Could not resize the tab test window");
-    waitFor([&] { return send(tree, treeGetCount) == 9; }, "The overflow test files did not appear");
+    const auto empty = bounds(app.window, viewer);
+    const int rowHeight = px(34), tabWidth = px(180);
+    const auto columns = [&] { const auto pane = bounds(app.window, viewer); return (pane.right - pane.left) / tabWidth; };
+    const auto rows = [&](int count) { return (count + columns() - 1) / columns(); };
+    const auto tabPoint = [&](int index, int offset = 30) -> POINT {
+        const auto pane = bounds(app.window, viewer);
+        return {pane.left + index % columns() * tabWidth + px(offset), empty.top + index / columns() * rowHeight + px(17)};
+    };
+    const auto clickTab = [&](int index, bool middle = false) {
+        const auto point = tabPoint(index); click(app.window, point.x, point.y, middle);
+    };
+    check(columns() == 2, "The wrapping fixture needs two tabs per row");
+    waitFor([&] { return send(tree, treeGetCount) == 9; }, "The wrapping test files did not appear");
     auto item = nextItem(tree, TreeRelation::Child, nextItem(tree, TreeRelation::Root));
+    TreeItem lastRemaining = 0;
     for (int i = 0; i < 8; ++i) {
         check(item != 0, "A tab test tree item is missing");
         send(tree, treeSelect, static_cast<WPARAM>(item)); waitLines(viewer, 100 + i);
+        check(bounds(app.window, viewer).top == empty.top + rows(i + 1) * rowHeight, "Opening tabs did not wrap at the viewer width");
+        if (i == 6) lastRemaining = item;
         item = nextItem(tree, TreeRelation::Next, item);
     }
+    check(bounds(app.window, viewer).bottom == empty.bottom, "Wrapping tabs moved the terminal boundary");
+    for (int i = 0; i < 8; ++i) { clickTab(i); waitLines(viewer, 100 + i); }
+    const auto wrapped = bounds(app.window, viewer);
+    click(app.window, wrapped.right - px(3), empty.top + px(17));
+    check(scrollInfo(viewer).nMax == 107, "Clicking the empty part of a tab row changed the active file");
+    // Close an inactive tab in the third row, then the active last-row tab.
+    clickTab(5, true);
+    check(scrollInfo(viewer).nMax == 107, "Closing a wrapped inactive tab changed the document");
+    clickTab(6); waitLines(viewer, 107);
+    const auto close = tabPoint(6, 166); click(app.window, close.x, close.y); waitLines(viewer, 106);
+    check(bounds(app.window, viewer).top == empty.top + rows(6) * rowHeight, "Closing a wrapped tab did not remove the empty row");
+    check(SetWindowPos(app.window, nullptr, 0, 0, px(1280), px(820), SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE) != FALSE,
+          "Could not widen the tab test window");
+    check(bounds(app.window, viewer).top == empty.top + rows(6) * rowHeight && rows(6) < 3, "Widening the viewer did not reduce the tab rows");
+    clickTab(0); waitLines(viewer, 100); clickTab(5); waitLines(viewer, 106);
+    // A short window must keep the document visible and allow row navigation.
+    check(SetWindowPos(app.window, nullptr, 0, 0, px(820), px(480), SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE) != FALSE,
+          "Could not shorten the tab test window");
     const auto pane = bounds(app.window, viewer); const int tabY = pane.top - px(17);
-    click(app.window, pane.right - px(42), tabY);
-    check(scrollInfo(viewer).nMax == 107, "Scrolling the tab strip changed the active file");
-    click(app.window, pane.left + px(30), tabY);
-    waitFor([&] { const int lines = scrollInfo(viewer).nMax; return lines >= 100 && lines < 107; }, "The previous tab button did not reveal older tabs");
+    check(pane.top == empty.top + rowHeight && pane.bottom > pane.top, "Many tabs hid the document in a short window");
+    for (int i = 0; i < 8; ++i) click(app.window, pane.right - px(42), tabY);
+    check(scrollInfo(viewer).nMax == 106, "Scrolling the tab rows changed the active file");
+    click(app.window, pane.left + px(30), tabY); waitLines(viewer, 100);
     for (int i = 0; i < 8; ++i) click(app.window, pane.right - px(14), tabY);
-    click(app.window, pane.left + px(180 + 30), tabY); waitLines(viewer, 107);
+    click(app.window, pane.left + px(180 + 30), tabY); waitLines(viewer, 106);
+    click(app.window, pane.right - px(42), tabY);
+    // Reactivating an existing file must reveal its row without adding a tab.
+    send(tree, treeSelect, static_cast<WPARAM>(lastRemaining)); waitLines(viewer, 106);
+    click(app.window, pane.left + px(180 + 30), tabY, true); waitLines(viewer, 104);
+    check(SetWindowPos(app.window, nullptr, 0, 0, px(820), px(820), SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE) != FALSE,
+          "Could not restore the tab test window");
+    check(bounds(app.window, viewer).top == empty.top + rows(5) * rowHeight, "Growing the window did not restore the wrapped tabs");
+    clickTab(0); waitLines(viewer, 100); clickTab(4); waitLines(viewer, 104);
 }
 void sidebarTests(const fs::path& executable) {
     Fixture fixture;
@@ -581,7 +622,7 @@ int wmain(int argc, wchar_t** argv) {
         sidebarTests(fs::absolute(argv[1]));
         treeInteractionTests(fs::absolute(argv[1]));
         tabTests(fs::absolute(argv[1]));
-        overflowingTabTests(fs::absolute(argv[1]));
+        wrappingTabTests(fs::absolute(argv[1]));
         quickOpenTests(fs::absolute(argv[1]));
         gitSidebarTests(fs::absolute(argv[1]));
         sessionTests(fs::absolute(argv[1]));
