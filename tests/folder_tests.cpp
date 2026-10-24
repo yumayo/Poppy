@@ -4,6 +4,7 @@
 #include "activity_button.h"
 #include <filesystem>
 #include <fstream>
+#include <initializer_list>
 #include <iostream>
 #include <stdexcept>
 #include <string>
@@ -162,6 +163,17 @@ void clickTab(const Application& app, int visibleIndex, bool middle = false, boo
     const int inset = MulDiv(close ? 14 : 16, GetDpiForWindow(app.window), 96);
     click(app.window, close ? rect.right - inset : rect.left + inset, (rect.top + rect.bottom) / 2, middle);
 }
+void beginTabDrag(const Application& app, int visibleIndex, POINT target) {
+    const auto rect = tabBounds(app, visibleIndex);
+    const POINT origin{rect.left + MulDiv(12, GetDpiForWindow(app.window), 96), (rect.top + rect.bottom) / 2};
+    send(app.window, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(origin.x, origin.y));
+    send(app.window, WM_MOUSEMOVE, MK_LBUTTON, MAKELPARAM(target.x, target.y));
+}
+void dragTab(const Application& app, int visibleIndex, POINT target, UINT cancel = 0) {
+    beginTabDrag(app, visibleIndex, target);
+    if (cancel) send(app.window, cancel);
+    send(app.window, WM_LBUTTONUP, 0, MAKELPARAM(target.x, target.y));
+}
 void toggleTabPin(const Application& app, int visibleIndex) {
     const auto rect = tabBounds(app, visibleIndex);
     POINT point{rect.left + 1, (rect.top + rect.bottom) / 2}; ClientToScreen(app.window, &point);
@@ -294,6 +306,123 @@ void pinnedTabTests(const fs::path& executable) {
         toggleTabPin(app, 0); clickTab(app, 0, true);
         check(visibleTabCount(app) == 0 && scrollInfo(viewer).nMax == 0, "The final unpinned tab could not be closed");
     }
+}
+void tabDragTests(const fs::path& executable) {
+    Fixture fixture;
+    writeLines(fixture.root / L"a 日本語の長い名前.txt", 200); writeLines(fixture.root / L"b.txt", 300);
+    writeLines(fixture.root / L"c-longer-name.txt", 400); writeLines(fixture.root / L"d.txt", 500);
+    int firstTop = 0, firstLeft = 0;
+    {
+        Application app(executable, fixture.root);
+        const auto tree = app.tree(), viewer = FindWindowExW(app.window, nullptr, L"PoppyViewer", nullptr);
+        const auto px = [dpi = GetDpiForWindow(app.window)](int value) { return MulDiv(value, dpi, 96); };
+        check(SetWindowPos(app.window, nullptr, 0, 0, px(1280), px(820), SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE) != FALSE,
+              "Could not resize the drag test window");
+        waitFor([&] { return send(tree, treeGetCount) == 5; }, "The drag test files did not appear");
+        auto item = nextItem(tree, TreeRelation::Child, nextItem(tree, TreeRelation::Root));
+        for (int lines : {200, 300, 400, 500}) {
+            send(tree, treeSelect, item); waitLines(viewer, lines);
+            item = nextItem(tree, TreeRelation::Next, item);
+        }
+        const auto before = [&](int index) { const auto r = tabBounds(app, index); return POINT{r.left + 1, (r.top + r.bottom) / 2}; };
+        const auto after = [&](int index) { const auto r = tabBounds(app, index); return POINT{r.right - 1, (r.top + r.bottom) / 2}; };
+        const auto checkOrder = [&](std::initializer_list<int> lines) {
+            int index = 0;
+            for (int count : lines) { clickTab(app, index++); waitLines(viewer, count); }
+        };
+        clickTab(app, 0); waitLines(viewer, 200);
+        for (int i = 0; i < 5; ++i) { send(viewer, WM_VSCROLL, SB_LINEDOWN); send(viewer, WM_HSCROLL, SB_LINEDOWN); }
+        firstTop = scrollInfo(viewer).nPos; firstLeft = scrollInfo(viewer, SB_HORZ).nPos;
+        check(firstTop > 0 && firstLeft > 0, "The dragged document did not scroll");
+        clickTab(app, 1); waitLines(viewer, 300);
+        send(viewer, WM_VSCROLL, SB_PAGEDOWN); const auto secondTop = scrollInfo(viewer).nPos;
+        dragTab(app, 0, after(2)); waitLines(viewer, 200);
+        check(scrollInfo(viewer).nPos == firstTop && scrollInfo(viewer, SB_HORZ).nPos == firstLeft,
+              "Dragging changed the active document's view state");
+        checkOrder({300, 400, 200, 500});
+        dragTab(app, 2, before(0)); waitLines(viewer, 200);
+        clickTab(app, 1); waitLines(viewer, 300);
+        check(scrollInfo(viewer).nPos == secondTop, "Dragging lost an inactive tab's view state");
+        // Cancellation, loss of capture, and releasing outside the strip must
+        // leave the original ordering intact and end the mouse interaction.
+        for (UINT cancel : {WM_CANCELMODE, WM_CAPTURECHANGED}) {
+            dragTab(app, 0, after(3), cancel); checkOrder({200, 300, 400, 500});
+        }
+        const auto first = tabBounds(app, 0);
+        dragTab(app, 0, {first.left - px(10), (first.top + first.bottom) / 2});
+        checkOrder({200, 300, 400, 500});
+        beginTabDrag(app, 0, after(3));
+        check(PostMessageW(viewer, WM_KEYDOWN, VK_ESCAPE, 0) != FALSE, "Could not cancel a tab drag with Escape");
+        waitFor([&] {
+            GUITHREADINFO info{}; info.cbSize = sizeof(info);
+            check(GetGUIThreadInfo(app.process.dwThreadId, &info) != FALSE, "Could not read drag capture");
+            return info.hwndCapture == nullptr;
+        }, "Escape did not release tab drag capture");
+        send(app.window, WM_LBUTTONUP); checkOrder({200, 300, 400, 500});
+        auto empty = after(3); empty.x += px(20);
+        dragTab(app, 0, empty); checkOrder({300, 400, 500, 200});
+        toggleTabPin(app, 0); toggleTabPin(app, 1);
+        dragTab(app, 0, after(1)); checkOrder({400, 300, 500, 200});
+        dragTab(app, 3, before(2)); checkOrder({400, 300, 200, 500});
+        // The two groups remain separate, including when a drag crosses rows.
+        dragTab(app, 0, after(3)); checkOrder({400, 300, 200, 500});
+        dragTab(app, 2, before(0)); waitLines(viewer, 200);
+        check(tabBounds(app, 0).top == tabBounds(app, 1).top && tabBounds(app, 1).bottom == tabBounds(app, 2).top,
+              "Dragging mixed pinned and regular tab rows");
+    }
+    {
+        Application app(executable, fixture.root); app.tree();
+        const auto viewer = FindWindowExW(app.window, nullptr, L"PoppyViewer", nullptr);
+        waitLines(viewer, 200);
+        check(scrollInfo(viewer).nPos == firstTop && scrollInfo(viewer, SB_HORZ).nPos == firstLeft,
+              "Restart lost the dragged tab's selection or view state");
+        int index = 0;
+        for (int lines : {400, 300, 200, 500}) { clickTab(app, index++); waitLines(viewer, lines); }
+        clickTab(app, 0, true); clickTab(app, 1, true);
+        check(visibleTabCount(app) == 4, "Dragging lost the saved pin state");
+    }
+}
+void wrappingTabDragTests(const fs::path& executable) {
+    Fixture fixture;
+    for (int i = 0; i < 8; ++i)
+        writeLines(fixture.root / (L"tab-" + std::to_wstring(i) + L"-" + std::wstring(12 + i % 3 * 3, L'x') + L".txt"), 100 + i);
+    Application app(executable, fixture.root);
+    const auto tree = app.tree(), viewer = FindWindowExW(app.window, nullptr, L"PoppyViewer", nullptr);
+    const auto px = [dpi = GetDpiForWindow(app.window)](int value) { return MulDiv(value, dpi, 96); };
+    check(SetWindowPos(app.window, nullptr, 0, 0, px(820), px(820), SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE) != FALSE,
+          "Could not resize the wrapped drag test window");
+    waitFor([&] { return send(tree, treeGetCount) == 9; }, "The wrapped drag test files did not appear");
+    auto item = nextItem(tree, TreeRelation::Child, nextItem(tree, TreeRelation::Root));
+    for (int i = 0; i < 8; ++i) {
+        send(tree, treeSelect, item); waitLines(viewer, 100 + i);
+        item = nextItem(tree, TreeRelation::Next, item);
+    }
+    const auto first = tabBounds(app, 0), last = tabBounds(app, 7);
+    check(first.top < last.top, "The drag test tabs did not wrap");
+    dragTab(app, 7, {first.left + 1, (first.top + first.bottom) / 2}); waitLines(viewer, 107);
+    clickTab(app, 0); waitLines(viewer, 107);
+    for (int i = 1; i < 8; ++i) { clickTab(app, i); waitLines(viewer, 99 + i); }
+    check(SetWindowPos(app.window, nullptr, 0, 0, px(820), px(480), SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE) != FALSE,
+          "Could not shorten the wrapped drag test window");
+    const auto pane = bounds(app.window, viewer);
+    const int y = pane.top - px(17);
+    for (int i = 0; i < 8; ++i) click(app.window, pane.right - px(42), y);
+    clickTab(app, 0); waitLines(viewer, 107);
+    const POINT next{pane.right - px(14), y};
+    beginTabDrag(app, 0, next);
+    // Fire the repeat timer while hovering over the next-row button. The
+    // source tab must stay captured even after its row is no longer visible.
+    for (int i = 0; i < 8; ++i) send(app.window, WM_TIMER, 2);
+    const auto target = tabBounds(app, visibleTabCount(app) - 1);
+    const POINT drop{target.right - 1, (target.top + target.bottom) / 2};
+    send(app.window, WM_MOUSEMOVE, MK_LBUTTON, MAKELPARAM(drop.x, drop.y));
+    send(app.window, WM_LBUTTONUP, 0, MAKELPARAM(drop.x, drop.y));
+    clickTab(app, visibleTabCount(app) - 1); waitLines(viewer, 107);
+    for (int i = 0; i < 8; ++i) click(app.window, pane.right - px(42), y);
+    clickTab(app, 0); waitLines(viewer, 100);
+    check(SetWindowPos(app.window, nullptr, 0, 0, px(820), px(820), SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE) != FALSE,
+          "Could not restore the wrapped drag test window");
+    for (int i = 0; i < 8; ++i) { clickTab(app, i); waitLines(viewer, 100 + i); }
 }
 void wrappingTabTests(const fs::path& executable) {
     Fixture fixture;
@@ -756,6 +885,8 @@ int wmain(int argc, wchar_t** argv) {
         treeInteractionTests(fs::absolute(argv[1]));
         tabTests(fs::absolute(argv[1]));
         pinnedTabTests(fs::absolute(argv[1]));
+        tabDragTests(fs::absolute(argv[1]));
+        wrappingTabDragTests(fs::absolute(argv[1]));
         wrappingTabTests(fs::absolute(argv[1]));
         quickOpenTests(fs::absolute(argv[1]));
         gitSidebarTests(fs::absolute(argv[1]));

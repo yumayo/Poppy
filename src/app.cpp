@@ -12,14 +12,17 @@
 #include <shellapi.h>
 #include <algorithm>
 #include <array>
+#include <cstdlib>
 #include <map>
 #include <memory>
+#include <optional>
 #include <set>
 #include <stdexcept>
 
 namespace poppy {
 namespace {
 constexpr UINT_PTR timerId = 1;
+constexpr UINT_PTR tabDragTimerId = 2;
 constexpr size_t maxEntries = 10000, maxTreeNodes = 50000, maxLines = 1000000;
 constexpr int explorerCommand = 2, gitCommand = 3;
 enum class Sidebar { Explorer, Git };
@@ -33,6 +36,13 @@ struct Node {
 struct DirectoryResult { std::vector<Entry> entries; std::wstring error; bool truncated = false; };
 struct FileResult { std::shared_ptr<Document> document; std::wstring error; };
 struct Tab { fs::path path; bool diff = false; Viewer::State fileView, diffView; bool pinned = false; };
+struct TabDrop { size_t position; RECT marker; };
+struct TabDrag {
+    size_t index;
+    POINT origin, point;
+    bool active = false;
+    std::optional<TabDrop> target;
+};
 struct GitEntry { fs::path path; wchar_t state; };
 struct GitResult { fs::path root; std::wstring branch, error; std::map<std::wstring, wchar_t> states; std::vector<GitEntry> entries; size_t changed = 0, untracked = 0; bool truncated = false; };
 
@@ -180,6 +190,10 @@ private:
     bool tabOverflow() const { return tabRowStarts_.size() > tabRows_; }
     RECT tabBounds(size_t index) const;
     size_t tabAt(POINT point) const;
+    std::optional<TabDrop> tabDropAt(POINT point) const;
+    void updateTabDrag(POINT point);
+    void scrollTabDrag();
+    void endTabDrag(bool drop = false);
     fs::path selectedPath() const { return tabs_.empty() ? fs::path{} : tabs_[activeTab_].path; }
     void showDiff();
     void refresh(bool force = true);
@@ -223,6 +237,7 @@ private:
     std::vector<size_t> tabRowStarts_;
     size_t activeTab_ = 0, firstTab_ = 0, tabTools_ = 0;
     size_t firstTabRow_ = 0, tabRows_ = 0;
+    std::optional<TabDrag> tabDrag_;
     TreeItem rootItem_ = 0;
     uint64_t generation_ = 0, serial_ = 0, nextId_ = 1;
     std::map<uint64_t, TreeItem> nodes_;
@@ -275,6 +290,7 @@ int App::run(HINSTANCE instance, int show, fs::path initial) {
         const bool key = msg.message == WM_KEYDOWN;
         const bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
         const bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+        if (key && msg.wParam == VK_ESCAPE && tabDrag_) { endTabDrag(); continue; }
         if (key && ctrl && !shift && !(GetKeyState(VK_MENU) & 0x8000) && msg.wParam == 'P') { quickOpen_.show(); continue; }
         if (key && ctrl && msg.wParam == 'O') { quickOpen_.close(); chooseFolder(); continue; }
         if (quickOpen_.visible() && key) { TranslateMessage(&msg); DispatchMessageW(&msg); continue; }
@@ -391,6 +407,7 @@ void App::layout(bool revealTab) {
     const int tabHeight = static_cast<int>(tabRows_) * rowHeight;
     tabsRect_ = {right, toolbar_, width, toolbar_ + tabHeight};
     updateTabs(revealTab);
+    if (tabDrag_ && tabDrag_->active) tabDrag_->target = tabDropAt(tabDrag_->point);
 
     struct Placement { HWND window; int x, y, width, height, flags; };
     const std::array<Placement, 6> panes{{
@@ -488,6 +505,7 @@ void App::paint() {
             const int bottom = tabsRect_.top + static_cast<int>(row) * scaled(34);
             dc.fill({tabsRect_.left, bottom - 1, tabsRect_.right, bottom}, border);
         }
+        if (tabDrag_ && tabDrag_->active && tabDrag_->target) dc.fill(tabDrag_->target->marker, accent);
     }
 }
 void App::selectSidebar(Sidebar sidebar) {
@@ -601,6 +619,7 @@ void App::openFolder(fs::path path) {
     std::error_code error; path = fs::absolute(path, error).lexically_normal().make_preferred();
     if (error || !fs::is_directory(path, error)) { status(L"Cannot open folder: " + path.native()); return; }
     quickOpen_.close();
+    endTabDrag();
     saveSession();
     stopWatch(); ++generation_; ++serial_; worker_->cancelPending(); gitWorker_->cancelPending(); tabs_.clear(); activeTab_ = firstTab_ = firstTabRow_ = 0; git_.reset();
     root_ = std::move(path); explorer_.clear(); expandedPaths_.clear(); pendingTreeSelection_.clear(); waitingForGit_ = false;
@@ -757,6 +776,74 @@ size_t App::tabAt(POINT point) const {
     }
     return tabs_.size();
 }
+std::optional<TabDrop> App::tabDropAt(POINT point) const {
+    if (!tabDrag_ || tabDrag_->index >= tabs_.size() || !PtInRect(&tabsRect_, point)) return std::nullopt;
+    if (tabOverflow() && point.x >= tabsRect_.right - MulDiv(56, dpi_, 96) &&
+        point.y >= tabsRect_.bottom - MulDiv(34, dpi_, 96)) return std::nullopt;
+    const int stroke = std::max(2, MulDiv(3, dpi_, 96)), inset = MulDiv(3, dpi_, 96);
+    const auto target = [&](size_t position, const RECT& rect, LONG x) {
+        const LONG left = std::clamp<LONG>(x - stroke / 2, tabsRect_.left, std::max(tabsRect_.left, tabsRect_.right - stroke));
+        return TabDrop{position, {left, rect.top + inset, left + stroke, rect.bottom - inset}};
+    };
+    std::optional<TabDrop> result;
+    for (size_t i = firstTab_; i < tabEnd(); ++i) {
+        const auto rect = tabBounds(i);
+        if (point.y < rect.top || point.y >= rect.bottom || tabs_[i].pinned != tabs_[tabDrag_->index].pinned) continue;
+        if (point.x < rect.left + (rect.right - rect.left) / 2) return target(i, rect, rect.left);
+        result = target(i + 1, rect, rect.right);
+    }
+    return result;
+}
+void App::updateTabDrag(POINT point) {
+    if (!tabDrag_) return;
+    auto& drag = *tabDrag_;
+    drag.point = point;
+    if (!drag.active) {
+        if (std::abs(point.x - drag.origin.x) < GetSystemMetricsForDpi(SM_CXDRAG, dpi_) &&
+            std::abs(point.y - drag.origin.y) < GetSystemMetricsForDpi(SM_CYDRAG, dpi_)) return;
+        drag.active = true;
+        SendMessageW(tooltips_, TTM_ACTIVATE, FALSE, 0);
+        SetTimer(window_, tabDragTimerId, 300, nullptr);
+    }
+    drag.target = tabDropAt(point);
+    InvalidateRect(window_, &tabsRect_, FALSE);
+}
+void App::scrollTabDrag() {
+    if (!tabDrag_ || !tabDrag_->active || !tabOverflow()) return;
+    const auto point = tabDrag_->point;
+    if (!PtInRect(&tabsRect_, point) || point.y < tabsRect_.bottom - MulDiv(34, dpi_, 96)) return;
+    const int button = MulDiv(28, dpi_, 96);
+    if (point.x >= tabsRect_.right - button && tabEnd() < tabs_.size()) ++firstTabRow_;
+    else if (point.x >= tabsRect_.right - 2 * button && point.x < tabsRect_.right - button && firstTabRow_) --firstTabRow_;
+    else return;
+    updateTabs(false);
+    tabDrag_->target = tabDropAt(point);
+}
+void App::endTabDrag(bool drop) {
+    if (!tabDrag_) return;
+    const auto drag = *tabDrag_;
+    tabDrag_.reset();
+    KillTimer(window_, tabDragTimerId);
+    if (GetCapture() == window_) ReleaseCapture();
+    if (!drag.active) return;
+    SendMessageW(tooltips_, TTM_ACTIVATE, TRUE, 0);
+    if (drop && drag.target) {
+        const size_t from = drag.index, position = drag.target->position;
+        const size_t to = position > from ? position - 1 : position;
+        if (from != to) {
+            auto tab = std::move(tabs_[from]);
+            tabs_.erase(tabs_.begin() + static_cast<std::ptrdiff_t>(from));
+            tabs_.insert(tabs_.begin() + static_cast<std::ptrdiff_t>(to), std::move(tab));
+            if (activeTab_ == from) activeTab_ = to;
+            else if (from < activeTab_ && activeTab_ <= to) --activeTab_;
+            else if (to <= activeTab_ && activeTab_ < from) ++activeTab_;
+            layout();
+            return;
+        }
+    }
+    // Reveal the selected tab again after scrolling or cancelling a drag.
+    updateTabs();
+}
 void App::updateTabs(bool reveal) {
     const size_t lastFirst = tabRowStarts_.size() - tabRows_;
     firstTabRow_ = std::min(firstTabRow_, lastFirst);
@@ -786,6 +873,7 @@ void App::saveTab() {
     }
 }
 void App::openFile(const fs::path& path, bool diff) {
+    endTabDrag();
     const auto key = pathKey(path);
     const auto found = std::find_if(tabs_.begin(), tabs_.end(), [&](const Tab& tab) { return pathKey(tab.path) == key; });
     const size_t index = static_cast<size_t>(found - tabs_.begin());
@@ -796,10 +884,12 @@ void App::openFile(const fs::path& path, bool diff) {
     activeTab_ = index; layout(); loadTab();
 }
 void App::selectTab(size_t index) {
+    endTabDrag();
     if (index >= tabs_.size() || index == activeTab_) return;
     saveTab(); activeTab_ = index; updateTabs(); loadTab();
 }
 void App::closeTab(size_t index) {
+    endTabDrag();
     if (index >= tabs_.size() || tabs_[index].pinned) return;
     saveTab(); const bool active = index == activeTab_;
     tabs_.erase(tabs_.begin() + static_cast<std::ptrdiff_t>(index));
@@ -814,6 +904,7 @@ void App::closeTab(size_t index) {
     SetFocus(viewer_.window());
 }
 void App::toggleTabPin(size_t index) {
+    endTabDrag();
     if (index >= tabs_.size()) return;
     saveTab();
     const auto activePath = selectedPath();
@@ -826,6 +917,7 @@ void App::toggleTabPin(size_t index) {
     layout();
 }
 void App::tabMenu(POINT screen) {
+    endTabDrag();
     if (tabs_.empty()) return;
     size_t index;
     if (screen.x == -1 && screen.y == -1) {
@@ -994,8 +1086,11 @@ LRESULT App::handle(UINT m, WPARAM a, LPARAM b) {
     case WM_GETMINMAXINFO: { auto info = reinterpret_cast<MINMAXINFO*>(b); info->ptMinTrackSize = {MulDiv(720, dpi_, 96), MulDiv(480, dpi_, 96)}; return 0; }
     case WM_DPICHANGED: { dpi(HIWORD(a)); const auto r = reinterpret_cast<RECT*>(b); SetWindowPos(window_, nullptr, r->left, r->top, r->right - r->left, r->bottom - r->top, SWP_NOZORDER | SWP_NOACTIVATE); return 0; }
     case wmWork: worker_->dispatch(); gitWorker_->dispatch(); return 0;
-    case WM_TIMER: if (a == timerId) pollWatch(); return 0;
-    case WM_ACTIVATE: if (LOWORD(a) != WA_INACTIVE && worker_ && !root_.empty()) refresh(false); return 0;
+    case WM_TIMER: if (a == timerId) pollWatch(); else if (a == tabDragTimerId) scrollTabDrag(); return 0;
+    case WM_ACTIVATE:
+        if (LOWORD(a) == WA_INACTIVE) endTabDrag();
+        else if (worker_ && !root_.empty()) refresh(false);
+        return 0;
     case WM_LBUTTONDOWN: {
         quickOpen_.close();
         const int x = MulDiv(GET_X_LPARAM(b), 96, dpi_), y = GET_Y_LPARAM(b);
@@ -1014,7 +1109,11 @@ LRESULT App::handle(UINT m, WPARAM a, LPARAM b) {
             if (index < tabs_.size()) {
                 const auto rect = tabBounds(index);
                 if (!tabs_[index].pinned && point.x >= rect.right - MulDiv(28, dpi_, 96)) closeTab(index);
-                else { selectTab(index); SetFocus(viewer_.window()); }
+                else {
+                    selectTab(index); SetFocus(viewer_.window());
+                    tabDrag_ = TabDrag{index, point, point, false, std::nullopt};
+                    SetCapture(window_);
+                }
             } else if (tabOverflow() && point.y >= tabsRect_.bottom - MulDiv(34, dpi_, 96)) {
                 const int button = MulDiv(28, dpi_, 96);
                 if (point.x >= tabsRect_.right - button && tabEnd() < tabs_.size()) ++firstTabRow_;
@@ -1033,16 +1132,23 @@ LRESULT App::handle(UINT m, WPARAM a, LPARAM b) {
         if (reinterpret_cast<HWND>(a) == window_) { tabMenu({GET_X_LPARAM(b), GET_Y_LPARAM(b)}); return 0; }
         break;
     case WM_MOUSEMOVE:
+        if (tabDrag_) { updateTabDrag({GET_X_LPARAM(b), GET_Y_LPARAM(b)}); return 0; }
         if (dragging_) {
             RECT r{}; GetClientRect(window_, &r);
             if (dragging_ == 1) sidebar_ = std::clamp(MulDiv(GET_X_LPARAM(b) - activityWidth_ - dragOffset_, 96, dpi_), 130, std::max(130, MulDiv(r.right - activityWidth_ - splitter_, 96, dpi_) - 250));
             else terminalHeight_ = std::clamp(MulDiv(r.bottom - footer_ - GET_Y_LPARAM(b), 96, dpi_), 100, std::max(100, MulDiv(r.bottom - toolbar_ - footer_, 96, dpi_) - 120));
             layout();
         } return 0;
-    case WM_LBUTTONUP: dragging_ = 0; if (GetCapture() == window_) ReleaseCapture(); return 0;
-    case WM_CAPTURECHANGED: dragging_ = 0; return 0;
+    case WM_LBUTTONUP:
+        if (tabDrag_ && tabDrag_->active) updateTabDrag({GET_X_LPARAM(b), GET_Y_LPARAM(b)});
+        endTabDrag(true);
+        dragging_ = 0; if (GetCapture() == window_) ReleaseCapture(); return 0;
+    case WM_CANCELMODE:
+        endTabDrag(); dragging_ = 0; if (GetCapture() == window_) ReleaseCapture(); return 0;
+    case WM_CAPTURECHANGED: endTabDrag(); dragging_ = 0; return 0;
     case WM_SETCURSOR:
         if (reinterpret_cast<HWND>(a) == window_ && LOWORD(b) == HTCLIENT) {
+            if (tabDrag_) return TRUE;
             POINT p{}; GetCursorPos(&p); ScreenToClient(window_, &p);
             if (PtInRect(&sidebarSplitter_, p)) { SetCursor(LoadCursorW(nullptr, IDC_SIZEWE)); return TRUE; }
             if (terminalVisible_ && PtInRect(&terminalSplitter_, p)) { SetCursor(LoadCursorW(nullptr, IDC_SIZENS)); return TRUE; }
@@ -1058,7 +1164,7 @@ LRESULT App::handle(UINT m, WPARAM a, LPARAM b) {
         return 0;
     }
     case WM_QUERYENDSESSION: saveSession(); return TRUE;
-    case WM_CLOSE: saveSession(); DestroyWindow(window_); return 0;
+    case WM_CLOSE: endTabDrag(); saveSession(); DestroyWindow(window_); return 0;
     case WM_DESTROY:
         KillTimer(window_, timerId); stopWatch(); quickOpen_.stop(); if (gitWorker_) gitWorker_->stop(); if (worker_) worker_->stop(); terminal_.stop(); explorer_.clear(); changes_.clear();
         PostQuitMessage(0); return 0;
