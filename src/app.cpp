@@ -7,6 +7,7 @@
 #include <shobjidl.h>
 #include <shellapi.h>
 #include <algorithm>
+#include <array>
 #include <map>
 #include <memory>
 
@@ -271,21 +272,38 @@ void App::layout(bool revealTab) {
     sidebarRect_ = {activityWidth_, toolbar_, activityWidth_ + side, toolbar_ + content};
     sidebarSplitter_ = {sidebarRect_.right, toolbar_, right, toolbar_ + content};
     terminalSplitter_ = {right, toolbar_ + viewerSize, width, toolbar_ + viewerSize + (terminalVisible_ ? splitter_ : 0)};
-    MoveWindow(explorerButton_, 0, toolbar_, activityWidth_ - 1, activityWidth_, TRUE);
-    MoveWindow(gitButton_, 0, toolbar_ + activityWidth_, activityWidth_ - 1, activityWidth_, TRUE);
-    ShowWindow(tree_, activeSidebar_ == Sidebar::Explorer && !root_.empty() ? SW_SHOWNA : SW_HIDE);
-    MoveWindow(tree_, activityWidth_, toolbar_ + sidebarHeader_, side, std::max(0, content - sidebarHeader_), TRUE);
     const int gitTop = toolbar_ + sidebarHeader_ + gitHeader_;
+    const bool showExplorer = activeSidebar_ == Sidebar::Explorer && !root_.empty();
     const bool showGitFiles = activeSidebar_ == Sidebar::Git && git_ && git_->error.empty() && !git_->root.empty() && !git_->entries.empty();
-    ShowWindow(gitTree_, showGitFiles ? SW_SHOWNA : SW_HIDE);
-    MoveWindow(gitTree_, activityWidth_, gitTop, side, std::max(0, toolbar_ + content - gitTop), TRUE);
     const int tabHeight = tabs_.empty() ? 0 : MulDiv(34, dpi_, 96);
     tabsRect_ = {right, toolbar_, width, toolbar_ + tabHeight};
     updateTabs(revealTab);
-    MoveWindow(viewer_.window(), right, toolbar_ + tabHeight, std::max(0, width - right), std::max(0, viewerSize - tabHeight), TRUE);
-    ShowWindow(terminal_.window(), terminalVisible_ ? SW_SHOWNA : SW_HIDE);
-    if (terminalVisible_) MoveWindow(terminal_.window(), right, toolbar_ + viewerSize + splitter_, std::max(0, width - right), terminalSize, TRUE);
-    InvalidateRect(window_, nullptr, FALSE);
+
+    struct Placement { HWND window; int x, y, width, height, flags; };
+    const std::array<Placement, 6> panes{{
+        {explorerButton_, 0, toolbar_, activityWidth_ - 1, activityWidth_, SWP_SHOWWINDOW},
+        {gitButton_, 0, toolbar_ + activityWidth_, activityWidth_ - 1, activityWidth_, SWP_SHOWWINDOW},
+        {tree_, activityWidth_, toolbar_ + sidebarHeader_, side, std::max(0, content - sidebarHeader_), showExplorer ? SWP_SHOWWINDOW : SWP_HIDEWINDOW},
+        {gitTree_, activityWidth_, gitTop, side, std::max(0, toolbar_ + content - gitTop), showGitFiles ? SWP_SHOWWINDOW : SWP_HIDEWINDOW},
+        {viewer_.window(), right, toolbar_ + tabHeight, std::max(0, width - right), std::max(0, viewerSize - tabHeight), SWP_SHOWWINDOW},
+        {terminal_.window(), right, toolbar_ + viewerSize + splitter_, std::max(0, width - right), terminalSize,
+            terminalVisible_ ? SWP_SHOWWINDOW : SWP_HIDEWINDOW | SWP_NOMOVE | SWP_NOSIZE}
+    }};
+    // Move every pane before painting. Copying old window pixels during a
+    // Direct2D resize can carry the previous splitter into the new layout.
+    constexpr UINT flags = SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOREDRAW | SWP_NOCOPYBITS;
+    HDWP positions = BeginDeferWindowPos(static_cast<int>(panes.size()));
+    for (const auto& pane : panes) {
+        if (!positions) break;
+        positions = DeferWindowPos(positions, pane.window, nullptr, pane.x, pane.y, pane.width, pane.height, flags | pane.flags);
+    }
+    if (!positions || !EndDeferWindowPos(positions)) {
+        for (const auto& pane : panes)
+            SetWindowPos(pane.window, nullptr, pane.x, pane.y, pane.width, pane.height, flags | pane.flags);
+    }
+    // WM_PAINT can be delayed by a stream of mouse moves. Present the parent
+    // and all visible panes now, including the area the old splitters occupied.
+    RedrawWindow(window_, nullptr, nullptr, RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_UPDATENOW);
 }
 void App::paint() {
     Renderer::Paint paint(renderer_, window_); if (!paint) return;
