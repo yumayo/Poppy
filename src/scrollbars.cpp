@@ -103,6 +103,15 @@ bool Scrollbars::handle(HWND window, UINT message, WPARAM a, LPARAM b, LRESULT& 
     // nonclient bars while retaining SetScrollInfo/GetScrollInfo and WS_*SCROLL.
     case WM_NCCALCSIZE: case WM_NCPAINT: return true;
     case WM_NCACTIVATE: result = TRUE; return true;
+    case WM_NCHITTEST: {
+        // WS_*SCROLL is retained for the native scroll information, but input
+        // must reach our client-area handlers rather than native bar tracking.
+        POINT point{GET_X_LPARAM(b), GET_Y_LPARAM(b)};
+        ScreenToClient(window, &point);
+        RECT client{}; GetClientRect(window, &client);
+        if (!PtInRect(&client, point)) break;
+        result = HTCLIENT; return true;
+    }
     case WM_SETCURSOR: {
         if (LOWORD(b) != HTCLIENT) break;
         POINT point{}; GetCursorPos(&point); ScreenToClient(window, &point);
