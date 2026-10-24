@@ -244,19 +244,29 @@ void pinnedTabTests(const fs::path& executable) {
             send(tree, treeSelect, item); waitLines(viewer, lines);
             item = nextItem(tree, TreeRelation::Next, item);
         }
+        const auto singleRow = bounds(app.window, viewer);
         toggleTabPin(app, 1);
         check(scrollInfo(viewer).nMax == 400, "Pinning an inactive tab changed the active file");
+        const auto pinned = tabBounds(app, 0), regular = tabBounds(app, 1);
+        check(pinned.bottom == regular.top && pinned.left == regular.left,
+              "Pinned and regular tabs did not start on separate rows");
+        check(bounds(app.window, viewer).top == singleRow.top + pinned.bottom - pinned.top,
+              "The viewer did not reserve a dedicated pinned tab row");
         clickTab(app, 0); waitLines(viewer, 300);
         clickTab(app, 0, true);
         check(visibleTabCount(app) == 3 && scrollInfo(viewer).nMax == 300, "Middle-click closed a pinned tab");
         clickTab(app, 0, false, true);
         check(visibleTabCount(app) == 3 && scrollInfo(viewer).nMax == 300, "A pinned tab retained a close button");
         toggleTabPin(app, 0);
+        check(bounds(app.window, viewer).top == singleRow.top && tabBounds(app, 0).top == tabBounds(app, 1).top,
+              "Unpinning the last pinned tab left an empty row");
         clickTab(app, 0, false, true); waitLines(viewer, 200);
         check(visibleTabCount(app) == 2, "An unpinned tab could not be closed");
         toggleTabPin(app, 1);
         check(scrollInfo(viewer).nMax == 200, "Moving a pinned tab lost the active file");
         toggleTabPin(app, 1);
+        check(tabBounds(app, 0).top == tabBounds(app, 1).top && bounds(app.window, viewer).top == singleRow.top,
+              "Pinning the final regular tab left an empty regular row");
         clickTab(app, 0); waitLines(viewer, 400);
         clickTab(app, 1); waitLines(viewer, 200);
         send(viewer, WM_VSCROLL, SB_LINEDOWN);
@@ -268,14 +278,19 @@ void pinnedTabTests(const fs::path& executable) {
         const auto viewer = FindWindowExW(app.window, nullptr, L"PoppyViewer", nullptr);
         waitLines(viewer, 200);
         check(scrollInfo(viewer).nPos > 0, "Restart lost a pinned tab's scroll position");
+        check(tabBounds(app, 0).top == tabBounds(app, 1).top, "Restart split pinned tabs into separate rows");
         clickTab(app, 0, true); clickTab(app, 1, true);
         check(visibleTabCount(app) == 2, "Restart lost pinned tab protection");
         clickTab(app, 0); waitLines(viewer, 400);
         clickTab(app, 1); waitLines(viewer, 200);
         toggleTabPin(app, 0);
         check(scrollInfo(viewer).nMax == 200, "Unpinning an inactive tab changed the active file");
+        check(tabBounds(app, 0).bottom == tabBounds(app, 1).top,
+              "Unpinning a tab did not move it below the pinned row");
         clickTab(app, 1, true);
         check(visibleTabCount(app) == 1 && scrollInfo(viewer).nMax == 200, "Closing an unpinned neighbor changed the pinned file");
+        check(bounds(app.window, viewer).top == tabBounds(app, 0).bottom,
+              "Closing the final regular tab left an empty row");
         toggleTabPin(app, 0); clickTab(app, 0, true);
         check(visibleTabCount(app) == 0 && scrollInfo(viewer).nMax == 0, "The final unpinned tab could not be closed");
     }

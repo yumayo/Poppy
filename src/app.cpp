@@ -373,7 +373,9 @@ void App::layout(bool revealTab) {
         int x = 0, y = 0;
         for (size_t i = 0; i < tabs_.size(); ++i) {
             const int tabWidth = std::min(tabWidths[i], available);
-            if (!i || (x > 0 && tabWidth > available - x)) {
+            // Pinned and regular tabs each start on their own row.
+            const bool newGroup = i > 0 && tabs_[i].pinned != tabs_[i - 1].pinned;
+            if (!i || newGroup || (x > 0 && tabWidth > available - x)) {
                 tabRowStarts_.push_back(i);
                 x = 0; y = static_cast<int>(tabRowStarts_.size() - 1) * rowHeight;
             }
