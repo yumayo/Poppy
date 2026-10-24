@@ -1,4 +1,5 @@
 #include "tree_model.h"
+#include "git_changes.h"
 #include <algorithm>
 #include <iostream>
 #include <stdexcept>
@@ -77,8 +78,49 @@ void largeAndDeepTrees() {
     check(tree.selection() == top && tree.visible().size() == 1, "Deep-tree collapse failed");
     check(tree.erase(top).size() == 10000 && tree.size() == 0, "Deep-tree removal failed");
 }
+void gitChangeLayouts() {
+    const std::vector<std::wstring> paths{L"z.txt", L"src/z.cpp", L"src/nested/same.cpp", L"src/A.cpp",
+        L"docs/same.cpp", L"docs/日本語 file.txt", L"a.txt"};
+    const auto list = buildGitChanges(paths, false);
+    check(list.size() == paths.size(), "List layout added folders or dropped files");
+    for (size_t i = 0; i < list.size(); ++i)
+        check(!list[i].directory() && list[i].path == paths[i] && list[i].entry == i && list[i].parent == noGitChange,
+            "List layout lost a relative path, order or file mapping");
+    const auto nodes = buildGitChanges(paths, true);
+    // Only compare the ASCII names' order: Unicode collation depends on locale.
+    check(nodes.size() == paths.size() + 3 && nodes[0].path == L"docs" && nodes[3].path == L"src" &&
+        nodes[4].path == L"src/nested" && nodes[6].path == L"src/A.cpp" && nodes[7].path == L"src/z.cpp" &&
+        nodes[8].path == L"a.txt" && nodes[9].path == L"z.txt", "Tree folders and files are not grouped and sorted");
+    TreeModel tree;
+    std::vector<TreeItem> items;
+    size_t files = 0;
+    for (size_t i = 0; i < nodes.size(); ++i) {
+        const auto& node = nodes[i];
+        check(node.parent == noGitChange || node.parent < i, "A child precedes its parent");
+        if (!node.directory()) { ++files; check(node.entry < paths.size() && paths[node.entry] == node.path, "Tree layout opened a different file"); }
+        if (node.parent != noGitChange)
+            check(nodes[node.parent].directory() && node.path.rfind(nodes[node.parent].path + L"/", 0) == 0, "A file has the wrong parent");
+        items.push_back(tree.insert(node.parent == noGitChange ? 0 : items[node.parent], node.path, node.directory(), node.entry, 0));
+        if (node.directory()) tree.expand(items.back(), true);
+    }
+    check(files == paths.size() && tree.visible().size() == nodes.size(), "Tree layout lost changed files");
+    tree.select(items[5]); tree.expand(items[3], false);
+    check(tree.selection() == items[3] && tree.visible().size() == nodes.size() - 4, "A Git folder did not collapse its descendants");
+    tree.expand(items[3], true);
+    check(tree.visible().size() == nodes.size(), "Reopening a Git folder lost changes");
+    check(buildGitChanges({}, true).empty() && buildGitChanges({}, false).empty(), "An empty change list has rows");
+    const auto limited = buildGitChanges({L"a/b/c.txt", L"a/b/d.txt", L"other/file.txt"}, true, 1);
+    check(limited.size() == 4 && limited[0].directory(), "The directory limit was ignored");
+    files = 0;
+    for (const auto& node : limited) if (!node.directory()) ++files;
+    check(files == 3, "The directory limit hid changed files");
+    std::vector<std::wstring> many;
+    for (int i = 0; i < 50000; ++i) many.push_back(L"src/file-" + std::to_wstring(i) + L".cpp");
+    check(buildGitChanges(many, true).size() == 50001 && buildGitChanges(many, false).size() == 50000,
+        "A large Git change list lost files");
+}
 }
 int main() {
-    try { hierarchy(); orderingAndRemoval(); largeAndDeepTrees(); std::cout << "Tree model tests passed.\n"; return 0; }
+    try { hierarchy(); orderingAndRemoval(); largeAndDeepTrees(); gitChangeLayouts(); std::cout << "Tree model tests passed.\n"; return 0; }
     catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
 }

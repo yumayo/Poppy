@@ -5,7 +5,7 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-add_library(poppy_core src/text.cpp src/diff.cpp src/terminal_model.cpp src/tree_model.cpp src/session.cpp src/file_search.cpp)
+add_library(poppy_core src/text.cpp src/diff.cpp src/terminal_model.cpp src/tree_model.cpp src/git_changes.cpp src/session.cpp src/file_search.cpp)
 target_include_directories(poppy_core PUBLIC src)
 if(MSVC)
   target_compile_options(poppy_core PRIVATE /W4 /utf-8 /permissive-)

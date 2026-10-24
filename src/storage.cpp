@@ -2,6 +2,7 @@
 #include <sqlite3.h>
 #include <algorithm>
 #include <cstdint>
+#include <initializer_list>
 #include <stdexcept>
 #include <utility>
 
@@ -73,7 +74,8 @@ private:
     Database& db_;
     bool committed_ = false;
 };
-void schema(Database& db, const char* sql, int currentVersion = 1, const char* upgrade = nullptr) {
+void schema(Database& db, const char* sql, std::initializer_list<const char*> upgrades = {}) {
+    const auto currentVersion = static_cast<sqlite3_int64>(upgrades.size() + 1);
     // Refuse newer schemas rather than changing a database from a newer app.
     sqlite3_int64 savedVersion = 0;
     {
@@ -83,7 +85,8 @@ void schema(Database& db, const char* sql, int currentVersion = 1, const char* u
     if (savedVersion > currentVersion) throw std::runtime_error("This state database requires a newer version of Poppy");
     if (savedVersion == currentVersion) return;
     Transaction transaction(db);
-    db.exec(savedVersion > 0 ? upgrade : sql);
+    if (savedVersion == 0) db.exec(sql);
+    else for (auto version = savedVersion; version < currentVersion; ++version) db.exec(upgrades.begin()[version - 1]);
     db.exec(("PRAGMA user_version=" + std::to_string(currentVersion)).c_str()); transaction.commit();
 }
 int bounded(sqlite3_int64 value, int low, int high) { return static_cast<int>(std::clamp(value, static_cast<sqlite3_int64>(low), static_cast<sqlite3_int64>(high))); }
@@ -103,18 +106,19 @@ ViewState readView(const Statement& statement, int start) {
 void projectSchema(Database& db) {
     schema(db,
         "CREATE TABLE IF NOT EXISTS session (id INTEGER PRIMARY KEY CHECK(id=1), sidebar INTEGER NOT NULL, terminal_height INTEGER NOT NULL,"
-        " terminal_visible INTEGER NOT NULL, git_sidebar INTEGER NOT NULL, active_tab INTEGER NOT NULL, selected_path TEXT NOT NULL, diff_inline INTEGER NOT NULL);"
+        " terminal_visible INTEGER NOT NULL, git_sidebar INTEGER NOT NULL, active_tab INTEGER NOT NULL, selected_path TEXT NOT NULL, diff_inline INTEGER NOT NULL, git_tree INTEGER NOT NULL);"
         "CREATE TABLE IF NOT EXISTS tabs (position INTEGER PRIMARY KEY, path TEXT NOT NULL, diff INTEGER NOT NULL,"
         " file_top INTEGER NOT NULL, file_left INTEGER NOT NULL, file_anchor INTEGER NOT NULL, file_caret INTEGER NOT NULL, file_after INTEGER NOT NULL,"
         " diff_top INTEGER NOT NULL, diff_left INTEGER NOT NULL, diff_anchor INTEGER NOT NULL, diff_caret INTEGER NOT NULL, diff_after INTEGER NOT NULL);"
-        "CREATE TABLE IF NOT EXISTS expanded (path TEXT PRIMARY KEY);", 2,
+        "CREATE TABLE IF NOT EXISTS expanded (path TEXT PRIMARY KEY);", {
         "ALTER TABLE session ADD COLUMN diff_inline INTEGER NOT NULL DEFAULT 0;"
         "UPDATE session SET diff_inline=COALESCE((SELECT diff_inline FROM tabs WHERE diff<>0"
         " ORDER BY (position=(SELECT active_tab FROM session WHERE id=1)) DESC,position LIMIT 1),0);"
         // Old split row indices cannot be converted without the original patch.
         "UPDATE tabs SET diff_top=0 WHERE diff_inline=0;"
         "ALTER TABLE tabs DROP COLUMN file_inline;"
-        "ALTER TABLE tabs DROP COLUMN diff_inline;");
+        "ALTER TABLE tabs DROP COLUMN diff_inline;",
+        "ALTER TABLE session ADD COLUMN git_tree INTEGER NOT NULL DEFAULT 0;"});
 }
 }
 struct Storage::Impl {
@@ -181,12 +185,13 @@ std::optional<ProjectSession> Storage::loadProject(const std::string& key, const
     Transaction snapshot(db, false);
     ProjectSession state;
     {
-        Statement row(db, "SELECT sidebar,terminal_height,terminal_visible,git_sidebar,active_tab,selected_path,diff_inline FROM session WHERE id=1");
+        Statement row(db, "SELECT sidebar,terminal_height,terminal_visible,git_sidebar,active_tab,selected_path,diff_inline,git_tree FROM session WHERE id=1");
         if (!row.row()) return std::nullopt;
         state.sidebar = bounded(row.number(0), 130, 10000); state.terminalHeight = bounded(row.number(1), 100, 10000);
         state.terminalVisible = row.number(2) != 0; state.gitSidebar = row.number(3) != 0;
         state.activeTab = static_cast<size_t>(bounded(row.number(4), 0, static_cast<int>(maxSavedTabs - 1))); state.selected = row.text(5);
         state.diffInline = row.number(6) != 0;
+        state.gitTree = row.number(7) != 0;
     }
     Statement tabs(db, "SELECT path,diff,file_top,file_left,file_anchor,file_caret,file_after,diff_top,diff_left,diff_anchor,diff_caret,diff_after FROM tabs ORDER BY position LIMIT 10000");
     while (tabs.row()) state.tabs.push_back({tabs.text(0), tabs.number(1) != 0, readView(tabs, 2), readView(tabs, 7)});
@@ -199,10 +204,10 @@ void Storage::saveProject(const std::string& key, const std::string& path, const
     Database db(projectDirectory(key, path) / "storage.sql"); projectSchema(db);
     Transaction transaction(db);
     db.exec("DELETE FROM tabs; DELETE FROM expanded;");
-    Statement session(db, "INSERT OR REPLACE INTO session VALUES(1,?,?,?,?,?,?,?)");
+    Statement session(db, "INSERT OR REPLACE INTO session VALUES(1,?,?,?,?,?,?,?,?)");
     session.number(1, state.sidebar); session.number(2, state.terminalHeight); session.number(3, state.terminalVisible);
     session.number(4, state.gitSidebar); session.number(5, static_cast<sqlite3_int64>(state.activeTab)); session.text(6, state.selected);
-    session.number(7, state.diffInline); session.run();
+    session.number(7, state.diffInline); session.number(8, state.gitTree); session.run();
     Statement tab(db, "INSERT INTO tabs VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)");
     for (size_t i = 0; i < state.tabs.size(); ++i) {
         const auto& value = state.tabs[i];
