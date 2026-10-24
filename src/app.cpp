@@ -575,18 +575,26 @@ void App::loadTab(bool preserve) {
     const auto root = git_->root;
     gitWorker_->submit(L"diff", [this, serial, generation, path, root, preserve, state] {
         const auto relative = path.lexically_relative(root).native();
-        auto result = runProcess({L"git.exe", L"--no-optional-locks", L"diff", L"--no-ext-diff", L"--no-textconv", L"--color=never", L"--", relative}, root, 5000, gitWorker_->cancellation());
+        auto readDiff = [&](bool staged) {
+            std::vector<std::wstring> args{L"git.exe", L"-c", L"diff.suppressBlankEmpty=false", L"--no-optional-locks", L"diff", L"--patch",
+                L"--no-ext-diff", L"--no-textconv", L"--color=never",
+                L"--output-indicator-old=-", L"--output-indicator-new=+", L"--output-indicator-context= ",
+                staged ? L"--cached" : L"--ours", L"--", relative};
+            return runProcess(args, root, 5000, gitWorker_->cancellation());
+        };
+        auto result = readDiff(false);
         bool staged = false;
-        if (result.code == 0 && result.output.empty()) { staged = true; result = runProcess({L"git.exe", L"--no-optional-locks", L"diff", L"--cached", L"--no-ext-diff", L"--no-textconv", L"--color=never", L"--", relative}, root, 5000, gitWorker_->cancellation()); }
-        auto doc = std::make_shared<Document>();
+        if (result.code == 0 && result.output.empty()) { staged = true; result = readDiff(true); }
+        auto doc = std::make_shared<DiffDocument>();
         if (result.code == 0 && static_cast<size_t>(std::count(result.output.begin(), result.output.end(), '\n')) >= maxLines) { result.code = 1; result.error = L"Diff exceeds the 1,000,000-line preview limit."; }
-        if (result.code == 0) { doc->text = std::move(result.output); doc->language = Language::Diff; indexDocument(*doc); }
+        if (result.code == 0) { doc->patch.text = std::move(result.output); indexDiff(*doc); }
         const auto error = result.error; const auto code = result.code;
         gitWorker_->complete([this, serial, generation, path, doc, code, error, staged, preserve, state] {
             if (generation != generation_ || serial != serial_) return;
             if (code) viewer_.message(error, path);
-            else if (doc->text.empty()) viewer_.message(L"No tracked changes for this file.\nUntracked files can be read in the normal preview.\n\nPress F6 to return to the file.", path);
-            else { viewer_.show(doc, path, preserve); if (!preserve) viewer_.restore(state); }
+            else if (doc->patch.text.empty()) viewer_.message(L"No tracked changes for this file.\nUntracked files can be read in the normal preview.\n\nPress F6 to return to the file.", path);
+            else if (doc->rows.empty()) viewer_.message(L"No text changes to display.\n\nPress F6 to return to the file.", path);
+            else { viewer_.showDiff(doc, path, preserve); if (!preserve) viewer_.restore(state); }
             status(staged ? L"Staged diff  ·  F6: return to file" : L"Working tree diff  ·  F6: return to file");
         });
     });

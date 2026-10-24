@@ -1,0 +1,79 @@
+#include "diff.h"
+#include <cstdlib>
+#include <iostream>
+#include <stdexcept>
+
+using namespace poppy;
+namespace {
+void check(bool condition, const char* message) { if (!condition) throw std::runtime_error(message); }
+DiffDocument parse(std::string patch) {
+    DiffDocument result; result.patch.text = std::move(patch); indexDiff(result); return result;
+}
+void alignment() {
+    const auto diff = parse(
+        "diff --git a/file.cpp b/file.cpp\nindex 1234567..7654321 100644\n"
+        "--- a/file.cpp\n+++ b/file.cpp\n@@ -10,5 +20,6 @@ function\n"
+        " context\n-old one\n-old two\n+new one\n unchanged\n+extra one\n+extra two\n last\n"
+        "@@ -40 +70 @@\n-before\n+after\n");
+    check(diff.rows.size() == 8, "Metadata must not produce display rows");
+    const auto& context = diff.rows[0];
+    check(!context.changed && context.before.number == 10 && context.after.number == 20 &&
+        diff.line(context.before) == "context" && diff.line(context.after) == "context", "Context must use each file's line numbers");
+    const auto& replacement = diff.rows[1];
+    check(replacement.changed && replacement.before.number == 11 && replacement.after.number == 21 &&
+        diff.line(replacement.before) == "old one" && diff.line(replacement.after) == "new one", "Replacement lines must align");
+    check(diff.rows[2].changed && diff.rows[2].before.number == 12 && !diff.rows[2].after.number,
+        "Unpaired removals need an empty cell on the right");
+    check(diff.rows[3].before.number == 13 && diff.rows[3].after.number == 22 && !diff.rows[3].changed,
+        "Context after uneven replacements must stay aligned");
+    check(!diff.rows[4].before.number && diff.rows[4].after.number == 23 && diff.rows[5].after.number == 24,
+        "Unpaired additions need empty cells on the left");
+    check(diff.rows[6].before.number == 14 && diff.rows[6].after.number == 25,
+        "Insertions must advance only the new file's line numbers");
+    check(diff.rows[7].before.number == 40 && diff.rows[7].after.number == 70,
+        "Each hunk must restore source line numbers, including omitted counts");
+    check(diff.maxColumns == 9, "Scrollbar width must exclude prefixes and metadata");
+    check(diff.selectedText(false, 0, diff.patch.text.size()) == "context\nold one\nold two\nunchanged\nlast\nbefore\n",
+        "Copying the original side must omit metadata, prefixes and additions");
+    check(diff.selectedText(true, 0, diff.patch.text.size()) == "context\nnew one\nunchanged\nextra one\nextra two\nlast\nafter\n",
+        "Copying the new side must omit metadata, prefixes and removals");
+    const size_t start = diff.offset(replacement.after);
+    check(diff.selectedText(true, start + 1, start + 5) == "ew o" && diff.selectedText(true, start + 5, start + 1) == "ew o",
+        "Partial and backward selections must copy the selected bytes");
+}
+void additionsAndDeletions() {
+    const auto added = parse("new file mode 100644\n--- /dev/null\n+++ b/new\n@@ -0,0 +1,3 @@\n+\n+--- literal\n+日本語\n");
+    check(added.rows.size() == 3 && !added.rows[0].before.number && added.rows[0].after.number == 1 && added.line(added.rows[0].after).empty(),
+        "A new file may begin with an empty line");
+    check(added.line(added.rows[1].after) == "--- literal" && added.maxColumns == 11,
+        "Source text resembling metadata must remain visible");
+    check(added.selectedText(true, 0, added.patch.text.size()) == "\n--- literal\n日本語\n", "Copy must preserve blank lines and UTF-8");
+    const auto removed = parse("deleted file mode 100644\n@@ -1,2 +0,0 @@\n-+++ literal\n-@@ source\n\\ No newline at end of file\n");
+    check(removed.rows.size() == 2 && !removed.rows[1].after.number && removed.rows[1].before.number == 2,
+        "Deleted files must leave the right side empty");
+    check(removed.selectedText(false, 0, removed.patch.text.size()) == "+++ literal\n@@ source",
+        "Copy must preserve a missing final newline and source text resembling metadata");
+    check(removed.selectedText(true, 0, removed.patch.text.size()).empty(), "An empty side must copy no text");
+}
+void edgeCases() {
+    const auto crlf = parse("@@ -2 +2 @@\r\n-\tあ\r\n+\tい\r\n\\ No newline at end of file\r\n");
+    check(crlf.rows.size() == 1 && crlf.line(crlf.rows[0].before) == "\tあ" && crlf.maxColumns == 6,
+        "CRLF, tabs and wide characters must use source display widths");
+    check(crlf.selectedText(true, 0, crlf.patch.text.size()) == "\tい", "No-newline markers must not be copied");
+    check(crlf.selectedText(false, 0, crlf.patch.text.size()) == "\tあ\n", "Each side must retain its own final newline");
+    const auto noNewlines = parse("@@ -1 +1 @@\n-old\n\\ No newline at end of file\n+new\n\\ No newline at end of file\n");
+    check(noNewlines.rows.size() == 1 && noNewlines.selectedText(false, 0, noNewlines.patch.text.size()) == "old" &&
+        noNewlines.selectedText(true, 0, noNewlines.patch.text.size()) == "new", "Newline markers must not split a replacement group");
+    for (const auto* patch : {"", "diff --git a/a b/b\nold mode 100644\nnew mode 100755\n",
+        "diff --git a/a b/b\nBinary files a/a and b/b differ\n", "@@@ -1,1 -1,1 +1,1 @@@\n--old\n++new\n",
+        "@@ -4294967296 +1 @@\n-old\n+new\n", "@@ -0 +1 @@\n-old\n+new\n"})
+        check(parse(patch).rows.empty(), "Metadata-only, binary and unsupported or invalid hunks must not become source text");
+    auto reused = parse("@@ -1 +1 @@\n-a\n+b\n");
+    reused.patch.text.clear(); indexDiff(reused);
+    check(reused.rows.empty() && reused.maxColumns == 0, "Reindexing must discard old rows and widths");
+}
+}
+int main() {
+    try { alignment(); additionsAndDeletions(); edgeCases(); std::cout << "Diff tests passed.\n"; return EXIT_SUCCESS; }
+    catch (const std::exception& error) { std::cerr << error.what() << '\n'; return EXIT_FAILURE; }
+}
