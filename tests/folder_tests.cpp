@@ -430,6 +430,79 @@ void quickOpenTests(const fs::path& executable) {
     click(app.window, px(12), px(22));
     check(!IsWindowVisible(palette), "Clicking outside quick open did not close it");
 }
+void gitSidebarTests(const fs::path& executable) {
+    wchar_t git[MAX_PATH]{};
+    const auto length = SearchPathW(nullptr, L"git.exe", nullptr, MAX_PATH, git, nullptr);
+    if (!length || length >= MAX_PATH) { std::cout << "Git sidebar tests skipped: Git for Windows is not on PATH.\n"; return; }
+    Fixture fixture;
+    fs::create_directories(fixture.root / L"src" / L"nested 日本語");
+    fs::create_directory(fixture.root / L"docs");
+    writeLines(fixture.root / L"docs" / L"same.txt", 200);
+    writeLines(fixture.root / L"src" / L"nested 日本語" / L"same.txt", 300);
+    writeLines(fixture.root / L"root.txt", 400);
+    std::wstring command = L"\"" + std::wstring(git) + L"\" init --quiet --template=\"\"";
+    STARTUPINFOW startup{}; startup.cb = sizeof(startup);
+    PROCESS_INFORMATION process{};
+    check(CreateProcessW(git, command.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, fixture.root.c_str(), &startup, &process) != FALSE,
+        "Could not initialize the Git fixture");
+    CloseHandle(process.hThread);
+    const auto wait = WaitForSingleObject(process.hProcess, 5000);
+    if (wait != WAIT_OBJECT_0) { TerminateProcess(process.hProcess, 1); WaitForSingleObject(process.hProcess, 1000); }
+    DWORD code = 1; GetExitCodeProcess(process.hProcess, &code); CloseHandle(process.hProcess);
+    check(wait == WAIT_OBJECT_0 && code == 0, "Git fixture initialization failed");
+    // Keep the fixture independent of the user's global ignore patterns.
+    {
+        std::ofstream config(fixture.root / L".git" / L"config", std::ios::app);
+        config << "\n[core]\n\texcludesFile =\n";
+        config.close(); check(!config.fail(), "Could not isolate the Git fixture's ignore rules");
+    }
+    {
+        Application app(executable, fixture.root); app.tree();
+        const auto changes = GetDlgItem(app.window, 4), viewer = FindWindowExW(app.window, nullptr, L"PoppyViewer", nullptr);
+        send(GetDlgItem(app.window, 3), BM_CLICK);
+        waitFor([&] { return IsWindowVisible(changes) && send(changes, treeGetCount) == 3; }, "Git List did not load all untracked files");
+        const auto px = [dpi = GetDpiForWindow(app.window)](int value) { return MulDiv(value, dpi, 96); };
+        const auto view = [&](bool tree) {
+            const auto rect = bounds(app.window, changes);
+            click(app.window, rect.left + (rect.right - rect.left) * (tree ? 1 : 3) / 4, rect.top - px(14));
+            check(send(changes, treeGetCount) == (tree ? 6 : 3), "Git layout toggle did not rebuild the hierarchy");
+        };
+        view(true);
+        auto docs = nextItem(changes, TreeRelation::Root), src = nextItem(changes, TreeRelation::Next, docs);
+        check(expanded(changes, docs) && expanded(changes, src), "Git folders did not start expanded");
+        send(changes, treeSelect, docs);
+        check(scrollInfo(viewer).nMax == 0, "Selecting a Git folder opened a file");
+        send(changes, treeSelect, nextItem(changes, TreeRelation::Child, docs)); waitLines(viewer, 200);
+        expand(changes, src, false);
+        check(!expanded(changes, src), "A Git folder did not collapse");
+        view(false); view(true);
+        docs = nextItem(changes, TreeRelation::Root); src = nextItem(changes, TreeRelation::Next, docs);
+        check(!expanded(changes, src), "Changing layouts forgot a collapsed Git folder");
+        check(PostMessageW(app.window, WM_KEYDOWN, VK_F5, 0) != FALSE, "Could not refresh Git changes");
+        waitFor([&] { return nextItem(changes, TreeRelation::Root) != docs; }, "Git changes did not refresh");
+        docs = nextItem(changes, TreeRelation::Root); src = nextItem(changes, TreeRelation::Next, docs);
+        check(!expanded(changes, src), "Refreshing forgot a collapsed Git folder");
+        expand(changes, src);
+        const auto nested = nextItem(changes, TreeRelation::Child, src), file = nextItem(changes, TreeRelation::Child, nested);
+        check(file != 0, "Git Tree lost a nested untracked file");
+        send(changes, treeSelect, file); waitLines(viewer, 300);
+        view(false);
+        send(changes, WM_KEYDOWN, VK_RETURN); waitLines(viewer, 300);
+        view(true);
+    }
+    {
+        Application app(executable, fixture.root); app.tree();
+        const auto changes = GetDlgItem(app.window, 4);
+        waitFor([&] { return IsWindowVisible(changes) && send(changes, treeGetCount) == 6; }, "Restart lost the Git Tree layout");
+        const auto rect = bounds(app.window, changes);
+        click(app.window, rect.left + (rect.right - rect.left) * 3 / 4, rect.top - MulDiv(14, GetDpiForWindow(app.window), 96));
+    }
+    {
+        Application app(executable, fixture.root); app.tree();
+        const auto changes = GetDlgItem(app.window, 4);
+        waitFor([&] { return IsWindowVisible(changes) && send(changes, treeGetCount) == 3; }, "Restart lost the Git List layout");
+    }
+}
 void sessionTests(const fs::path& executable) {
     Fixture fixture;
     const auto directory = fixture.root / L"nested 日本語";
@@ -510,8 +583,9 @@ int wmain(int argc, wchar_t** argv) {
         tabTests(fs::absolute(argv[1]));
         overflowingTabTests(fs::absolute(argv[1]));
         quickOpenTests(fs::absolute(argv[1]));
+        gitSidebarTests(fs::absolute(argv[1]));
         sessionTests(fs::absolute(argv[1]));
-        std::cout << "Folder, sidebar, tab, quick open and session tests passed.\n"; return 0;
+        std::cout << "Folder, sidebar, Git layouts, tab, quick open and session tests passed.\n"; return 0;
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n'; return 1;
     }

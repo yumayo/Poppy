@@ -17,7 +17,7 @@ struct SavedTab {
 };
 struct ProjectSession {
     int sidebar = 245, terminalHeight = 260;
-    bool terminalVisible = true, gitSidebar = false, diffInline = false;
+    bool terminalVisible = true, gitSidebar = false, diffInline = false, gitTree = false;
     size_t activeTab = 0;
     std::vector<SavedTab> tabs;
     std::vector<std::string> expanded;

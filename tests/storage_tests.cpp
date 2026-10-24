@@ -33,7 +33,7 @@ bool same(const poppy::ViewState& a, const poppy::ViewState& b) {
 }
 bool same(const poppy::ProjectSession& a, const poppy::ProjectSession& b) {
     if (a.sidebar != b.sidebar || a.terminalHeight != b.terminalHeight || a.terminalVisible != b.terminalVisible ||
-        a.gitSidebar != b.gitSidebar || a.diffInline != b.diffInline || a.activeTab != b.activeTab || a.expanded != b.expanded || a.selected != b.selected || a.tabs.size() != b.tabs.size()) return false;
+        a.gitSidebar != b.gitSidebar || a.diffInline != b.diffInline || a.gitTree != b.gitTree || a.activeTab != b.activeTab || a.expanded != b.expanded || a.selected != b.selected || a.tabs.size() != b.tabs.size()) return false;
     for (size_t i = 0; i < a.tabs.size(); ++i) {
         const auto& x = a.tabs[i]; const auto& y = b.tabs[i];
         if (x.path != y.path || x.diff != y.diff || !same(x.fileView, y.fileView) || !same(x.diffView, y.diffView)) return false;
@@ -46,7 +46,7 @@ void roundTripAndIsolation() {
     const std::string path = "D:\\repository\\yumayo\\PoppyWorktrees\\PoppyDirect2D";
     poppy::ProjectSession state;
     state.sidebar = 333; state.terminalHeight = 222; state.terminalVisible = false; state.gitSidebar = true; state.activeTab = 1;
-    state.diffInline = true;
+    state.diffInline = true; state.gitTree = true;
     state.tabs = {{path + "\\日本語's file.cpp", false, {42, 17, 30, 50, false}, {20, 3, 2, 11, true}},
                   {path + "\\deleted.cpp", true, {5, 2, 1, 7, false}, {50, 4, 6, 14, true}}};
     state.expanded = {path, path + "\\src", path + "\\src\\日本語"}; state.selected = state.tabs.front().path;
@@ -82,7 +82,7 @@ void roundTripAndIsolation() {
         check(same(*storage.loadProject(a, a), state) && same(*storage.loadProject(b, b), empty), "One project overwrote another");
         storage.saveProject(key, path, empty);
         check(same(*storage.loadProject(key, path), empty), "Closed tabs or collapsed directories were retained");
-        empty.diffInline = true;
+        empty.diffInline = true; empty.gitTree = true;
         storage.saveProject(key, path, empty);
         check(same(*storage.loadProject(key, path), empty), "A project's layout was lost when no files were open");
     }
@@ -95,7 +95,7 @@ void atomicSave() {
     storage.saveProject(key, key, original);
     execute(storage.projectDirectory(key, key) / "storage.sql",
         "CREATE TRIGGER reject_tab BEFORE INSERT ON tabs WHEN NEW.path='reject' BEGIN SELECT RAISE(ABORT,'test write failure'); END;");
-    auto changed = original; changed.sidebar = 500; changed.diffInline = true; changed.tabs[0].path = "reject"; changed.expanded.clear();
+    auto changed = original; changed.sidebar = 500; changed.diffInline = true; changed.gitTree = true; changed.tabs[0].path = "reject"; changed.expanded.clear();
     rejects([&] { storage.saveProject(key, key, changed); }, "A failed SQLite write reported success");
     check(same(*storage.loadProject(key, key), original), "A failed save partially overwrote the previous session");
     changed.tabs.resize(10001);
@@ -123,6 +123,7 @@ void migrateProjectLayout() {
             "PRAGMA user_version=1;");
         if (active == 2) execute(db, "UPDATE session SET active_tab=2;");
         const auto saved = storage.loadProject(key, key);
+        check(saved && !saved->gitTree, "Migration did not preserve the Git list layout");
         check(saved && saved->diffInline == (active == 2), "Migration did not prefer the active diff or first diff tab's layout");
         check(saved->activeTab == static_cast<size_t>(active) && saved->sidebar == 333 && saved->terminalHeight == 222 &&
               !saved->terminalVisible && saved->gitSidebar && saved->selected == "selected" && saved->expanded == std::vector<std::string>{"expanded"},
@@ -133,10 +134,27 @@ void migrateProjectLayout() {
         rejects([&] { execute(db, "SELECT file_inline FROM tabs;"); }, "Normal tabs still store a layout setting");
         rejects([&] { execute(db, "SELECT diff_inline FROM tabs;"); }, "Diff tabs still store a layout setting");
         check(same(*storage.loadProject(key, key), *saved), "Reopening repeated the migration");
-        auto changed = *saved; changed.diffInline = !saved->diffInline;
+        auto changed = *saved; changed.diffInline = !saved->diffInline; changed.gitTree = true;
         storage.saveProject(key, key, changed);
         check(same(*storage.loadProject(key, key), changed), "Migrated project layouts cannot be updated");
     }
+}
+void migrateGitLayout() {
+    Fixture fixture;
+    poppy::Storage storage(fixture.directory);
+    const std::string key = "c:\\git-layout";
+    poppy::ProjectSession original;
+    original.sidebar = 321; original.gitSidebar = true; original.diffInline = true;
+    original.tabs.push_back({key + "\\modified.cpp", true, {}, {12, 3, 4, 5, true}});
+    original.expanded = {key}; original.selected = key;
+    storage.saveProject(key, key, original);
+    execute(storage.projectDirectory(key, key) / "storage.sql",
+        "ALTER TABLE session DROP COLUMN git_tree; PRAGMA user_version=2;");
+    const auto saved = storage.loadProject(key, key);
+    check(saved && same(*saved, original), "Migrating version 2 changed existing project state");
+    auto changed = *saved; changed.gitTree = true;
+    storage.saveProject(key, key, changed);
+    check(same(*storage.loadProject(key, key), changed), "A migrated Git view cannot be saved");
 }
 void schemaAndRegistry() {
     Fixture fixture;
@@ -144,7 +162,7 @@ void schemaAndRegistry() {
     {
         poppy::Storage storage(fixture.directory);
         const auto projectDb = storage.projectDirectory("c:\\future", "c:\\future") / "storage.sql";
-        execute(projectDb, "PRAGMA user_version=3");
+        execute(projectDb, "PRAGMA user_version=4");
         rejects([&] { storage.loadProject("c:\\future", "c:\\future"); }, "A newer project schema was overwritten");
         storage.projectDirectory("c:\\invalid", "c:\\invalid");
         execute(appDb, R"(UPDATE projects SET directory='../../escape' WHERE path_key='c:\invalid')");
@@ -156,7 +174,7 @@ void schemaAndRegistry() {
 }
 int main() {
     try {
-        roundTripAndIsolation(); atomicSave(); migrateProjectLayout(); schemaAndRegistry();
+        roundTripAndIsolation(); atomicSave(); migrateProjectLayout(); migrateGitLayout(); schemaAndRegistry();
         std::cout << "Storage tests passed\n";
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
 }

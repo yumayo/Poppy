@@ -1,6 +1,7 @@
 #include "viewer.h"
 #include "terminal.h"
 #include "tree.h"
+#include "git_changes.h"
 #include "activity_button.h"
 #include "quick_open.h"
 #include "storage.h"
@@ -13,6 +14,7 @@
 #include <array>
 #include <map>
 #include <memory>
+#include <set>
 #include <stdexcept>
 
 namespace poppy {
@@ -149,6 +151,8 @@ private:
     void layout(bool revealTab = true);
     void paint();
     void selectSidebar(Sidebar sidebar);
+    RECT gitViewButton(bool tree) const;
+    void setGitView(bool tree);
     void updateGitFiles();
     void openGitFile(TreeItem item);
     void chooseFolder();
@@ -190,11 +194,14 @@ private:
     ActivityButton explorerActivity_, gitActivity_;
     UINT dpi_ = 96;
     int sidebar_ = 245, terminalHeight_ = 260, toolbar_ = 44, footer_ = 26, splitter_ = 5;
-    int activityWidth_ = 48, sidebarHeader_ = 34, gitHeader_ = 56;
+    int activityWidth_ = 48, sidebarHeader_ = 34, gitHeader_ = 84;
     RECT sidebarRect_{}, sidebarSplitter_{}, terminalSplitter_{}, tabsRect_{};
     int dragging_ = 0, dragOffset_ = 0;
     bool terminalVisible_ = true;
     bool updatingGitFiles_ = false;
+    bool gitTreeView_ = false;
+    std::vector<GitChangeNode> gitChangeNodes_;
+    std::set<std::wstring> collapsedGitPaths_;
     Sidebar activeSidebar_ = Sidebar::Explorer;
     Viewer viewer_;
     Terminal terminal_;
@@ -297,6 +304,14 @@ void App::create() {
     };
     explorer_.removed = [this](uintptr_t data) { const auto n = reinterpret_cast<Node*>(data); if (n) { nodes_.erase(n->id); delete n; } };
     changes_.activated = [this](TreeItem item) { openGitFile(item); };
+    changes_.expanded = [this](TreeItem item, bool value) {
+        if (updatingGitFiles_) return;
+        const auto node = changes_.item(item);
+        if (!node || node->data >= gitChangeNodes_.size()) return;
+        const auto& path = gitChangeNodes_[node->data].path;
+        if (value) collapsedGitPaths_.erase(path);
+        else if (collapsedGitPaths_.size() < maxTreeNodes) collapsedGitPaths_.insert(path);
+    };
     explorerActivity_.create(window_, instance_, L"Explorer", explorerCommand, false); explorerButton_ = explorerActivity_.window();
     gitActivity_.create(window_, instance_, L"Source Control", gitCommand, true); gitButton_ = gitActivity_.window();
     explorerActivity_.clicked = [this] { selectSidebar(Sidebar::Explorer); };
@@ -322,7 +337,7 @@ void App::dpi(UINT value) {
     explorer_.setDpi(dpi_); changes_.setDpi(dpi_, 28);
     explorerActivity_.setDpi(dpi_); gitActivity_.setDpi(dpi_);
     toolbar_ = MulDiv(44, dpi_, 96); footer_ = MulDiv(26, dpi_, 96); splitter_ = MulDiv(5, dpi_, 96);
-    activityWidth_ = MulDiv(48, dpi_, 96); sidebarHeader_ = MulDiv(34, dpi_, 96); gitHeader_ = MulDiv(56, dpi_, 96);
+    activityWidth_ = MulDiv(48, dpi_, 96); sidebarHeader_ = MulDiv(34, dpi_, 96); gitHeader_ = MulDiv(84, dpi_, 96);
     viewer_.setDpi(dpi_); terminal_.setDpi(dpi_); quickOpen_.setDpi(dpi_); layout();
 }
 void App::layout(bool revealTab) {
@@ -396,7 +411,12 @@ void App::paint() {
         const bool repository = git_ && !git_->root.empty() && git_->error.empty();
         dc.label({left, top, edge, top + scaled(28)}, repository ? git_->branch : L"Git", repository ? accent : muted);
         const auto summary = repository ? std::to_wstring(git_->changed + git_->untracked) + L" pending changes" : L"";
-        dc.label({left, top + scaled(28), edge, top + gitHeader_}, summary, muted);
+        dc.label({left, top + scaled(28), edge, top + scaled(56)}, summary, muted);
+        for (const bool tree : {true, false}) {
+            const auto button = gitViewButton(tree);
+            dc.fill(button, tree == gitTreeView_ ? rgb(50, 70, 94) : background);
+            dc.label(button, tree ? L"Tree" : L"List", tree == gitTreeView_ ? foreground : muted, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        }
         dc.fill({sidebarRect_.left, top + gitHeader_ - 1, sidebarRect_.right, top + gitHeader_}, border);
         if (!repository || git_->entries.empty()) {
             const std::wstring message = root_.empty() ? L"Open a folder to view Git changes." : !git_ ? L"Loading Git changes…" : !git_->error.empty() ? L"Git unavailable.\nCheck Git for Windows and press F5 to retry." : git_->root.empty() ? L"This folder is not in a Git repository." : L"No pending changes.";
@@ -430,19 +450,59 @@ void App::selectSidebar(Sidebar sidebar) {
     explorerActivity_.select(sidebar == Sidebar::Explorer); gitActivity_.select(sidebar == Sidebar::Git);
     SetFocus(sidebar == Sidebar::Explorer ? (IsWindowVisible(tree_) ? tree_ : explorerButton_) : (IsWindowVisible(gitTree_) ? gitTree_ : gitButton_));
 }
+RECT App::gitViewButton(bool tree) const {
+    const int padding = MulDiv(12, dpi_, 96), top = toolbar_ + sidebarHeader_;
+    const int middle = (sidebarRect_.left + sidebarRect_.right) / 2;
+    return {tree ? sidebarRect_.left + padding : middle, top + MulDiv(59, dpi_, 96),
+        tree ? middle : sidebarRect_.right - padding, top + gitHeader_ - MulDiv(3, dpi_, 96)};
+}
+void App::setGitView(bool tree) {
+    if (gitTreeView_ == tree) return;
+    gitTreeView_ = tree;
+    updateGitFiles();
+    if (IsWindowVisible(gitTree_)) SetFocus(gitTree_);
+}
 void App::updateGitFiles() {
+    std::wstring selected;
+    if (const auto node = changes_.item(changes_.selection()); node && node->data < gitChangeNodes_.size())
+        selected = gitChangeNodes_[node->data].path;
     updatingGitFiles_ = true;
     {
         Tree::Batch batch(changes_);
         changes_.clear();
+        gitChangeNodes_.clear();
         TreeItem selection = 0;
         if (git_ && git_->error.empty()) {
-            const auto selected = pathKey(selectedPath());
-            for (size_t i = 0; i < git_->entries.size(); ++i) {
-                const auto& entry = git_->entries[i];
-                auto text = std::wstring(1, entry.state) + L"  " + entry.path.lexically_relative(root_).native();
-                const auto item = changes_.insert(0, std::move(text), false, i, stateColor(entry.state));
-                if (pathKey(entry.path) == selected) selection = item;
+            std::vector<std::wstring> paths; paths.reserve(git_->entries.size());
+            for (const auto& entry : git_->entries) paths.push_back(entry.path.lexically_relative(git_->root).generic_wstring());
+            gitChangeNodes_ = buildGitChanges(paths, gitTreeView_);
+            std::vector<TreeItem> items; items.reserve(gitChangeNodes_.size());
+            TreeItem active = 0;
+            const auto activePath = pathKey(selectedPath());
+            for (size_t i = 0; i < gitChangeNodes_.size(); ++i) {
+                const auto& node = gitChangeNodes_[i];
+                const auto parent = node.parent == noGitChange ? 0 : items[node.parent];
+                const auto offset = node.parent == noGitChange ? 0 : gitChangeNodes_[node.parent].path.size() + 1;
+                auto text = node.path.substr(offset);
+                COLORREF color = foreground;
+                if (!node.directory()) {
+                    const auto& entry = git_->entries[node.entry];
+                    if (!gitTreeView_) text = entry.path.lexically_relative(root_).native();
+                    text = std::wstring(1, entry.state) + L"  " + text;
+                    color = stateColor(entry.state);
+                }
+                const auto item = changes_.insert(parent, std::move(text), node.directory(), i, color);
+                items.push_back(item);
+                if (node.directory()) changes_.expand(item, !collapsedGitPaths_.count(node.path));
+                if (node.path == selected) selection = item;
+                if (!node.directory() && pathKey(git_->entries[node.entry].path) == activePath) active = item;
+            }
+            if (!selection) selection = active;
+            // Restore a visible ancestor when the selected file is folded away.
+            for (auto item = selection; item;) {
+                const auto node = changes_.item(item);
+                item = node ? node->parent : 0;
+                if (const auto parent = changes_.item(item); parent && !parent->expanded) selection = item;
             }
         }
         changes_.select(selection, false);
@@ -453,8 +513,10 @@ void App::updateGitFiles() {
 void App::openGitFile(TreeItem item) {
     if (updatingGitFiles_ || !git_) return;
     const auto value = changes_.item(item);
-    if (!value || value->data >= git_->entries.size()) return;
-    const auto entry = git_->entries[value->data];
+    if (!value || value->data >= gitChangeNodes_.size()) return;
+    const auto& node = gitChangeNodes_[value->data];
+    if (node.directory() || node.entry >= git_->entries.size()) return;
+    const auto entry = git_->entries[node.entry];
     openFile(entry.path, entry.state != L'?');
 }
 void App::status(std::wstring message) { status_ = std::move(message); RECT r{}; GetClientRect(window_, &r); r.top = r.bottom - footer_; InvalidateRect(window_, &r, FALSE); }
@@ -499,6 +561,7 @@ void App::openFolder(fs::path path) {
     saveSession();
     stopWatch(); ++generation_; ++serial_; worker_->cancelPending(); gitWorker_->cancelPending(); tabs_.clear(); activeTab_ = firstTab_ = 0; git_.reset();
     root_ = std::move(path); explorer_.clear(); expandedPaths_.clear(); pendingTreeSelection_.clear(); waitingForGit_ = false;
+    changes_.clear(); gitChangeNodes_.clear(); collapsedGitPaths_.clear();
     projectStorageAvailable_ = true;
     std::optional<ProjectSession> saved;
     if (storage_) {
@@ -528,6 +591,7 @@ void App::saveSession() {
             state.sidebar = sidebar_; state.terminalHeight = terminalHeight_; state.terminalVisible = terminalVisible_;
             state.gitSidebar = activeSidebar_ == Sidebar::Git; state.activeTab = activeTab_;
             state.diffInline = viewer_.diffInline();
+            state.gitTree = gitTreeView_;
             for (const auto& tab : tabs_) state.tabs.push_back({tab.path.u8string(), tab.diff, tab.fileView, tab.diffView});
             for (const auto& entry : expandedPaths_) state.expanded.push_back(entry.second.u8string());
             if (!pendingTreeSelection_.empty()) state.selected = pendingTreeSelection_.u8string();
@@ -550,6 +614,7 @@ void App::saveSession() {
 }
 void App::restoreProject(const ProjectSession& state) {
     viewer_.setDiffLayout(state.diffInline);
+    gitTreeView_ = state.gitTree;
     sidebar_ = state.sidebar; terminalHeight_ = state.terminalHeight; terminalVisible_ = state.terminalVisible;
     activeSidebar_ = state.gitSidebar ? Sidebar::Git : Sidebar::Explorer;
     explorerActivity_.select(!state.gitSidebar); gitActivity_.select(state.gitSidebar);
@@ -856,6 +921,10 @@ LRESULT App::handle(UINT m, WPARAM a, LPARAM b) {
             return 0;
         }
         const POINT point{GET_X_LPARAM(b), y};
+        if (activeSidebar_ == Sidebar::Git) for (const bool tree : {true, false}) {
+            const auto button = gitViewButton(tree);
+            if (PtInRect(&button, point)) { setGitView(tree); return 0; }
+        }
         if (PtInRect(&tabsRect_, point)) {
             const auto index = tabAt(point);
             if (index < tabs_.size()) {
