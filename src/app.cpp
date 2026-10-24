@@ -1,10 +1,10 @@
 #include "viewer.h"
-#include "terminal.h"
+#include "terminal_pane.h"
+#include "project_runtime.h"
 #include "tree.h"
 #include "git_changes.h"
 #include "activity_button.h"
 #include "quick_open.h"
-#include "storage.h"
 #include <commctrl.h>
 #include <dwmapi.h>
 #include <shobjidl.h>
@@ -45,22 +45,6 @@ struct TabDrag {
 };
 struct GitEntry { fs::path path; wchar_t state; };
 struct GitResult { fs::path root; std::wstring branch, error; std::map<std::wstring, wchar_t> states; std::vector<GitEntry> entries; size_t changed = 0, untracked = 0; bool truncated = false; };
-
-fs::path applicationDirectory() {
-    const DWORD size = GetEnvironmentVariableW(L"APPDATA", nullptr, 0);
-    if (size) {
-        std::wstring value(size, L'\0');
-        const DWORD count = GetEnvironmentVariableW(L"APPDATA", value.data(), size);
-        if (!count || count >= size) throw std::runtime_error("Cannot read APPDATA");
-        value.resize(count);
-        return fs::path(value) / L"yumayo" / L"Poppy";
-    }
-    PWSTR roaming = nullptr;
-    if (FAILED(SHGetKnownFolderPath(FOLDERID_RoamingAppData, KF_FLAG_CREATE, nullptr, &roaming)))
-        throw std::runtime_error("Cannot locate the roaming application data directory");
-    const fs::path directory(roaming); CoTaskMemFree(roaming);
-    return directory / L"yumayo" / L"Poppy";
-}
 
 COLORREF stateColor(wchar_t state) {
     return state == L'U' || state == L'D' ? RGB(231,112,118) : state == L'?' || state == L'A' ? accent : RGB(224,192,128);
@@ -150,9 +134,10 @@ std::shared_ptr<GitResult> readGit(const fs::path& directory, const std::atomic<
 }
 }
 
-class App {
+class ProjectRuntime::Impl {
+    friend class ProjectRuntime;
 public:
-    int run(HINSTANCE instance, int show, fs::path initial);
+    bool key(const MSG& message);
 private:
     static LRESULT CALLBACK procedure(HWND, UINT, WPARAM, LPARAM);
     LRESULT handle(UINT, WPARAM, LPARAM);
@@ -167,10 +152,9 @@ private:
     void openGitFile(TreeItem item);
     void chooseFolder();
     void openFolder(fs::path path);
-    void saveSession();
+    ProjectSession saveSession();
     void restoreProject(const ProjectSession& state);
     void forgetExpanded(const fs::path& path);
-    void storageError(const std::exception& error);
     void requestDirectory(TreeItem item);
     void applyDirectory(TreeItem item, Node* node, const DirectoryResult& result);
     TreeItem insert(TreeItem parent, const Entry& entry);
@@ -221,17 +205,20 @@ private:
     std::set<std::wstring> collapsedGitPaths_;
     Sidebar activeSidebar_ = Sidebar::Explorer;
     Viewer viewer_;
-    Terminal terminal_;
+    TerminalPane terminal_;
     QuickOpen quickOpen_;
     std::unique_ptr<Worker> worker_, gitWorker_;
-    std::unique_ptr<Storage> storage_;
-    AppSession appSession_;
-    std::wstring startupStorageError_;
+    ProjectRuntime* owner_ = nullptr;
+    std::optional<ProjectSession> initialState_;
+    HWND lastFocus_ = nullptr;
+    std::string focusedPane_ = "viewer";
+    std::string pendingGitSelection_;
+    int restoreExplorerTop_ = 0, restoreExplorerLeft_ = 0, restoreGitTop_ = 0, restoreGitLeft_ = 0;
+    bool restoredScroll_ = false;
     fs::path root_;
     std::map<std::wstring, fs::path> expandedPaths_;
     fs::path pendingTreeSelection_;
     bool waitingForGit_ = false;
-    bool projectStorageAvailable_ = true;
     std::vector<Tab> tabs_;
     std::vector<RECT> tabRects_;
     std::vector<size_t> tabRowStarts_;
@@ -249,68 +236,7 @@ private:
     bool watchPending_ = false, dirty_ = false, fileDirty_ = false, filesDirty_ = false;
     ULONGLONG dirtySince_ = 0, lastEvent_ = 0;
 };
-int App::run(HINSTANCE instance, int show, fs::path initial) {
-    initializeRendering();
-    instance_ = instance;
-    try {
-        storage_ = std::make_unique<Storage>(applicationDirectory());
-        appSession_ = storage_->loadApp();
-    } catch (const std::exception& error) { storage_.reset(); startupStorageError_ = wide(error.what()); }
-    if (initial.empty() && !appSession_.lastProject.empty()) initial = fs::u8path(appSession_.lastProject);
-    INITCOMMONCONTROLSEX common{sizeof(common), ICC_WIN95_CLASSES}; InitCommonControlsEx(&common);
-    WNDCLASSW cls{}; cls.lpfnWndProc = procedure; cls.hInstance = instance; cls.lpszClassName = L"PoppyMain"; cls.hCursor = LoadCursorW(nullptr, IDC_ARROW); cls.hIcon = LoadIconW(nullptr, IDI_APPLICATION); RegisterClassW(&cls);
-    window_ = CreateWindowExW(0, cls.lpszClassName, L"Poppy", WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN, CW_USEDEFAULT, CW_USEDEFAULT, 1180, 820, nullptr, nullptr, instance, this);
-    if (!window_) return 1;
-    if (appSession_.positioned) {
-        RECT rect{appSession_.x, appSession_.y, appSession_.x + appSession_.width, appSession_.y + appSession_.height};
-        // Keep a restored window reachable after a monitor is disconnected.
-        MONITORINFO monitor{}; monitor.cbSize = sizeof(monitor);
-        if (GetMonitorInfoW(MonitorFromRect(&rect, MONITOR_DEFAULTTONEAREST), &monitor)) {
-            const auto& work = monitor.rcWork;
-            const LONG width = std::min(rect.right - rect.left, work.right - work.left);
-            const LONG height = std::min(rect.bottom - rect.top, work.bottom - work.top);
-            rect.left = std::clamp(rect.left, work.left, work.right - width);
-            rect.top = std::clamp(rect.top, work.top, work.bottom - height);
-            rect.right = rect.left + width; rect.bottom = rect.top + height;
-        }
-        SetWindowPos(window_, nullptr, rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top, SWP_NOZORDER | SWP_NOACTIVATE);
-        if (appSession_.maximized && (show == SW_SHOWNORMAL || show == SW_SHOWDEFAULT || show == SW_SHOW)) show = SW_SHOWMAXIMIZED;
-    }
-    ShowWindow(window_, show); UpdateWindow(window_);
-    if (!initial.empty()) openFolder(std::move(initial));
-    if (!startupStorageError_.empty()) MessageBoxW(window_, (L"State storage is unavailable.\n\n" + startupStorageError_).c_str(), L"Poppy", MB_OK | MB_ICONWARNING);
-    MSG msg{};
-    for (;;) {
-      HANDLE event = watchPending_ ? watchEvent_.value : nullptr;
-      const DWORD wait = MsgWaitForMultipleObjects(event ? 1 : 0, event ? &event : nullptr, FALSE, INFINITE, QS_ALLINPUT);
-      if (event && wait == WAIT_OBJECT_0) pollWatch();
-      if (wait == WAIT_FAILED) return 1;
-      while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
-        if (msg.message == WM_QUIT) return static_cast<int>(msg.wParam);
-        const bool key = msg.message == WM_KEYDOWN;
-        const bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
-        const bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
-        if (key && msg.wParam == VK_ESCAPE && tabDrag_) { endTabDrag(); continue; }
-        if (key && ctrl && !shift && !(GetKeyState(VK_MENU) & 0x8000) && msg.wParam == 'P') { quickOpen_.show(); continue; }
-        if (key && ctrl && msg.wParam == 'O') { quickOpen_.close(); chooseFolder(); continue; }
-        if (quickOpen_.visible() && key) { TranslateMessage(&msg); DispatchMessageW(&msg); continue; }
-        if (key && ctrl && shift && msg.wParam == 'E') { selectSidebar(Sidebar::Explorer); continue; }
-        if (key && ctrl && shift && msg.wParam == 'G') { selectSidebar(Sidebar::Git); continue; }
-        if (key && ctrl && msg.wParam == VK_OEM_3) { toggleTerminal(); continue; }
-        if (key && ctrl && msg.wParam == VK_TAB && !tabs_.empty()) { selectTab((activeTab_ + (shift ? tabs_.size() - 1 : 1)) % tabs_.size()); SetFocus(viewer_.window()); continue; }
-        if (key && ctrl && msg.wParam == 'W' && GetFocus() != terminal_.window()) { closeTab(activeTab_); continue; }
-        if (key && msg.wParam == VK_F5 && GetFocus() != terminal_.window()) { refresh(); continue; }
-        if (key && msg.wParam == VK_F6 && GetFocus() != terminal_.window()) { showDiff(); continue; }
-        if (key && msg.wParam == VK_F7 && GetFocus() != terminal_.window()) { viewer_.toggleDiffLayout(); continue; }
-        if (key && msg.wParam == VK_TAB && GetFocus() != terminal_.window()) {
-            const HWND files = activeSidebar_ == Sidebar::Explorer ? (IsWindowVisible(tree_) ? tree_ : explorerButton_) : (IsWindowVisible(gitTree_) ? gitTree_ : gitButton_);
-            SetFocus(GetFocus() == files ? viewer_.window() : terminalVisible_ ? terminal_.window() : files); continue;
-        }
-        TranslateMessage(&msg); DispatchMessageW(&msg);
-      }
-    }
-}
-void App::create() {
+void ProjectRuntime::Impl::create() {
     worker_ = std::make_unique<Worker>(window_);
     gitWorker_ = std::make_unique<Worker>(window_);
     explorer_.create(window_, instance_, L"Files", 1); tree_ = explorer_.window();
@@ -346,15 +272,16 @@ void App::create() {
         SendMessageW(tooltips_, TTM_ADDTOOLW, 0, reinterpret_cast<LPARAM>(&tip));
     }
     viewer_.create(window_, instance_); terminal_.create(window_, instance_);
+    terminal_.changed = [this] { if (owner_ && owner_->changed) owner_->changed(); };
     quickOpen_.create(window_, instance_);
     quickOpen_.opened = [this](const fs::path& path) { openFile(path); SetFocus(viewer_.window()); };
     // Each underlying pane must clip the palette when repainting beneath it.
-    for (const auto pane : {tree_, gitTree_, viewer_.window(), terminal_.window(), explorerButton_, gitButton_})
+    for (const auto pane : {tree_, gitTree_, viewer_.window(), terminal_.container(), explorerButton_, gitButton_})
         SetWindowLongPtrW(pane, GWL_STYLE, GetWindowLongPtrW(pane, GWL_STYLE) | WS_CLIPSIBLINGS);
     const BOOL dark = TRUE; DwmSetWindowAttribute(window_, 20, &dark, sizeof(dark));
     dpi(GetDpiForWindow(window_));
 }
-void App::dpi(UINT value) {
+void ProjectRuntime::Impl::dpi(UINT value) {
     dpi_ = value; renderer_.setDpi(dpi_);
     explorer_.setDpi(dpi_); changes_.setDpi(dpi_, 28);
     explorerActivity_.setDpi(dpi_); gitActivity_.setDpi(dpi_);
@@ -362,7 +289,7 @@ void App::dpi(UINT value) {
     activityWidth_ = MulDiv(48, dpi_, 96); sidebarHeader_ = MulDiv(34, dpi_, 96); gitHeader_ = MulDiv(84, dpi_, 96);
     viewer_.setDpi(dpi_); terminal_.setDpi(dpi_); quickOpen_.setDpi(dpi_); layout();
 }
-void App::layout(bool revealTab) {
+void ProjectRuntime::Impl::layout(bool revealTab) {
     if (!tree_) return;
     RECT r{}; GetClientRect(window_, &r);
     const int width = static_cast<int>(r.right), height = static_cast<int>(r.bottom);
@@ -416,7 +343,7 @@ void App::layout(bool revealTab) {
         {tree_, activityWidth_, toolbar_ + sidebarHeader_, side, std::max(0, content - sidebarHeader_), showExplorer ? SWP_SHOWWINDOW : SWP_HIDEWINDOW},
         {gitTree_, activityWidth_, gitTop, side, std::max(0, toolbar_ + content - gitTop), showGitFiles ? SWP_SHOWWINDOW : SWP_HIDEWINDOW},
         {viewer_.window(), right, toolbar_ + tabHeight, std::max(0, width - right), std::max(0, viewerSize - tabHeight), SWP_SHOWWINDOW},
-        {terminal_.window(), right, toolbar_ + viewerSize + splitter_, std::max(0, width - right), terminalSize,
+        {terminal_.container(), right, toolbar_ + viewerSize + splitter_, std::max(0, width - right), terminalSize,
             terminalVisible_ ? SWP_SHOWWINDOW : SWP_HIDEWINDOW | SWP_NOMOVE | SWP_NOSIZE}
     }};
     // Move every pane before painting. Copying old window pixels during a
@@ -433,10 +360,11 @@ void App::layout(bool revealTab) {
     }
     // WM_PAINT can be delayed by a stream of mouse moves. Present the parent
     // and all visible panes now, including the area the old splitters occupied.
+    terminal_.acknowledge();
     quickOpen_.layout();
     RedrawWindow(window_, nullptr, nullptr, RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_UPDATENOW);
 }
-void App::paint() {
+void ProjectRuntime::Impl::paint() {
     Renderer::Paint paint(renderer_, window_); if (!paint) return;
     auto& dc = renderer_;
     RECT r{}; GetClientRect(window_, &r);
@@ -508,25 +436,26 @@ void App::paint() {
         if (tabDrag_ && tabDrag_->active && tabDrag_->target) dc.fill(tabDrag_->target->marker, accent);
     }
 }
-void App::selectSidebar(Sidebar sidebar) {
+void ProjectRuntime::Impl::selectSidebar(Sidebar sidebar) {
     activeSidebar_ = sidebar; layout();
     explorerActivity_.select(sidebar == Sidebar::Explorer); gitActivity_.select(sidebar == Sidebar::Git);
     SetFocus(sidebar == Sidebar::Explorer ? (IsWindowVisible(tree_) ? tree_ : explorerButton_) : (IsWindowVisible(gitTree_) ? gitTree_ : gitButton_));
 }
-RECT App::gitViewButton(bool tree) const {
+RECT ProjectRuntime::Impl::gitViewButton(bool tree) const {
     const int padding = MulDiv(12, dpi_, 96), top = toolbar_ + sidebarHeader_;
     const int middle = (sidebarRect_.left + sidebarRect_.right) / 2;
     return {tree ? sidebarRect_.left + padding : middle, top + MulDiv(59, dpi_, 96),
         tree ? middle : sidebarRect_.right - padding, top + gitHeader_ - MulDiv(3, dpi_, 96)};
 }
-void App::setGitView(bool tree) {
+void ProjectRuntime::Impl::setGitView(bool tree) {
     if (gitTreeView_ == tree) return;
     gitTreeView_ = tree;
     updateGitFiles();
     if (IsWindowVisible(gitTree_)) SetFocus(gitTree_);
 }
-void App::updateGitFiles() {
-    std::wstring selected;
+void ProjectRuntime::Impl::updateGitFiles() {
+    std::wstring selected = wide(pendingGitSelection_);
+    const int oldTop = changes_.top(), oldLeft = changes_.left();
     if (const auto node = changes_.item(changes_.selection()); node && node->data < gitChangeNodes_.size())
         selected = gitChangeNodes_[node->data].path;
     updatingGitFiles_ = true;
@@ -570,9 +499,10 @@ void App::updateGitFiles() {
         changes_.select(selection, false);
     }
     updatingGitFiles_ = false;
+    if (git_) { changes_.restoreScroll(restoreGitTop_ ? restoreGitTop_ : oldTop, restoreGitLeft_ ? restoreGitLeft_ : oldLeft); restoreGitTop_ = restoreGitLeft_ = 0; pendingGitSelection_.clear(); }
     layout(false);
 }
-void App::openGitFile(TreeItem item) {
+void ProjectRuntime::Impl::openGitFile(TreeItem item) {
     if (updatingGitFiles_ || !git_) return;
     const auto value = changes_.item(item);
     if (!value || value->data >= gitChangeNodes_.size()) return;
@@ -581,55 +511,45 @@ void App::openGitFile(TreeItem item) {
     const auto entry = git_->entries[node.entry];
     openFile(entry.path, entry.state != L'?');
 }
-void App::status(std::wstring message) { status_ = std::move(message); RECT r{}; GetClientRect(window_, &r); r.top = r.bottom - footer_; InvalidateRect(window_, &r, FALSE); }
-void App::chooseFolder() {
+void ProjectRuntime::Impl::status(std::wstring message) { status_ = std::move(message); RECT r{}; GetClientRect(window_, &r); r.top = r.bottom - footer_; InvalidateRect(window_, &r, FALSE); }
+void ProjectRuntime::Impl::chooseFolder() {
     IFileOpenDialog* dialog = nullptr;
     if (FAILED(CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&dialog)))) return;
     DWORD options = 0; dialog->GetOptions(&options); dialog->SetOptions(options | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST); dialog->SetTitle(L"Open workspace folder");
     if (SUCCEEDED(dialog->Show(window_))) {
         IShellItem* item = nullptr;
         if (SUCCEEDED(dialog->GetResult(&item))) {
-            PWSTR path = nullptr; if (SUCCEEDED(item->GetDisplayName(SIGDN_FILESYSPATH, &path))) { openFolder(fs::path(path)); CoTaskMemFree(path); } item->Release();
+            PWSTR path = nullptr; if (SUCCEEDED(item->GetDisplayName(SIGDN_FILESYSPATH, &path))) { if (owner_ && owner_->openFolder) owner_->openFolder(fs::path(path)); CoTaskMemFree(path); } item->Release();
         }
     }
     dialog->Release();
 }
-Node* App::node(TreeItem item) const { const auto value = explorer_.item(item); return value ? reinterpret_cast<Node*>(value->data) : nullptr; }
-void App::clearChildren(TreeItem parent) { explorer_.clearChildren(parent); }
-wchar_t App::stateFor(const fs::path& path) const {
+Node* ProjectRuntime::Impl::node(TreeItem item) const { const auto value = explorer_.item(item); return value ? reinterpret_cast<Node*>(value->data) : nullptr; }
+void ProjectRuntime::Impl::clearChildren(TreeItem parent) { explorer_.clearChildren(parent); }
+wchar_t ProjectRuntime::Impl::stateFor(const fs::path& path) const {
     if (!git_) return 0;
     const auto direct = git_->states.find(pathKey(path));
     return direct != git_->states.end() ? direct->second : 0;
 }
-void App::updateLabel(TreeItem item) {
+void ProjectRuntime::Impl::updateLabel(TreeItem item) {
     const auto n = node(item); if (!n) return;
     std::wstring text = n->path.filename().empty() ? n->path.native() : n->path.filename().native();
     if (n->directory && n->reparse) text += L"  [link]";
     const auto state = stateFor(n->path);
     explorer_.label(item, std::move(text), state ? stateColor(state) : foreground);
 }
-TreeItem App::insert(TreeItem parent, const Entry& entry) {
+TreeItem ProjectRuntime::Impl::insert(TreeItem parent, const Entry& entry) {
     if (nodes_.size() >= maxTreeNodes) return 0;
     auto n = std::make_unique<Node>(); n->path = entry.path; n->id = nextId_++; n->directory = entry.directory; n->reparse = entry.reparse;
     const auto item = explorer_.insert(parent, L"", n->directory && !n->reparse, reinterpret_cast<uintptr_t>(n.get()));
     if (item) { nodes_[n->id] = item; n.release(); updateLabel(item); }
     return item;
 }
-void App::openFolder(fs::path path) {
-    std::error_code error; path = fs::absolute(path, error).lexically_normal().make_preferred();
-    if (error || !fs::is_directory(path, error)) { status(L"Cannot open folder: " + path.native()); return; }
+void ProjectRuntime::Impl::openFolder(fs::path path) {
     quickOpen_.close();
     endTabDrag();
-    saveSession();
-    stopWatch(); ++generation_; ++serial_; worker_->cancelPending(); gitWorker_->cancelPending(); tabs_.clear(); activeTab_ = firstTab_ = firstTabRow_ = 0; git_.reset();
-    root_ = std::move(path); explorer_.clear(); expandedPaths_.clear(); pendingTreeSelection_.clear(); waitingForGit_ = false;
-    changes_.clear(); gitChangeNodes_.clear(); collapsedGitPaths_.clear();
-    projectStorageAvailable_ = true;
-    std::optional<ProjectSession> saved;
-    if (storage_) {
-        try { saved = storage_->loadProject(utf8(pathKey(root_)), root_.u8string()); }
-        catch (const std::exception& failure) { projectStorageAvailable_ = false; storageError(failure); }
-    }
+    root_ = std::move(path);
+    auto saved = std::move(initialState_);
     restoreProject(saved.value_or(ProjectSession{}));
     if (!saved) expandedPaths_[pathKey(root_)] = root_;
     viewer_.message(L"Select a file on the left.\n\nFiles are read only. Your AI CLI can edit them from the terminal.");
@@ -641,40 +561,37 @@ void App::openFolder(fs::path path) {
     SetWindowTextW(window_, (L"Poppy — " + root_.native()).c_str()); status(L"F5: refresh  ·  F6: diff  ·  Ctrl+`: terminal"); InvalidateRect(window_, nullptr, FALSE);
     if (!tabs_.empty()) loadTab();
 }
-void App::storageError(const std::exception& error) {
-    MessageBoxW(window_, (L"Could not read or save the application state.\n\n" + wide(error.what())).c_str(), L"Poppy", MB_OK | MB_ICONWARNING);
+ProjectSession ProjectRuntime::Impl::saveSession() {
+    saveTab();
+    ProjectSession state;
+    state.sidebar = sidebar_; state.terminalHeight = terminalHeight_; state.terminalVisible = terminalVisible_;
+    state.gitSidebar = activeSidebar_ == Sidebar::Git; state.activeTab = activeTab_;
+    state.diffInline = viewer_.diffInline(); state.gitTree = gitTreeView_; state.firstTabRow = firstTabRow_;
+    for (const auto& tab : tabs_) state.tabs.push_back({tab.path.u8string(), tab.diff, tab.fileView, tab.diffView, tab.pinned});
+    for (const auto& entry : expandedPaths_) state.expanded.push_back(entry.second.u8string());
+    if (!pendingTreeSelection_.empty()) state.selected = pendingTreeSelection_.u8string();
+    else if (const auto selected = node(explorer_.selection())) state.selected = selected->path.u8string();
+    state.explorerTop = restoredScroll_ ? explorer_.top() : restoreExplorerTop_; state.explorerLeft = restoredScroll_ ? explorer_.left() : restoreExplorerLeft_;
+    state.gitTop = git_ ? changes_.top() : restoreGitTop_; state.gitLeft = git_ ? changes_.left() : restoreGitLeft_;
+    if (const auto selected = changes_.item(changes_.selection()); selected && selected->data < gitChangeNodes_.size()) state.gitSelected = utf8(gitChangeNodes_[selected->data].path);
+    else state.gitSelected = pendingGitSelection_;
+    for (const auto& path : collapsedGitPaths_) state.collapsedGit.push_back(utf8(path));
+    const auto focus = GetFocus();
+    if (focus == terminal_.window()) focusedPane_ = "terminal";
+    else if (focus == tree_) focusedPane_ = "explorer";
+    else if (focus == gitTree_) focusedPane_ = "git";
+    else if (focus == viewer_.window()) focusedPane_ = "viewer";
+    state.focusedPane = focusedPane_;
+    terminal_.snapshot(state);
+    return state;
 }
-void App::saveSession() {
-    if (!storage_) return;
-    try {
-        if (!root_.empty() && projectStorageAvailable_) {
-            saveTab();
-            ProjectSession state;
-            state.sidebar = sidebar_; state.terminalHeight = terminalHeight_; state.terminalVisible = terminalVisible_;
-            state.gitSidebar = activeSidebar_ == Sidebar::Git; state.activeTab = activeTab_;
-            state.diffInline = viewer_.diffInline();
-            state.gitTree = gitTreeView_;
-            for (const auto& tab : tabs_) state.tabs.push_back({tab.path.u8string(), tab.diff, tab.fileView, tab.diffView, tab.pinned});
-            for (const auto& entry : expandedPaths_) state.expanded.push_back(entry.second.u8string());
-            if (!pendingTreeSelection_.empty()) state.selected = pendingTreeSelection_.u8string();
-            else if (const auto selected = node(explorer_.selection())) state.selected = selected->path.u8string();
-            storage_->saveProject(utf8(pathKey(root_)), root_.u8string(), state);
-        }
-        if (!root_.empty()) appSession_.lastProject = root_.u8string();
-        WINDOWPLACEMENT placement{}; placement.length = sizeof(placement);
-        if (GetWindowPlacement(window_, &placement)) {
-            auto rect = placement.rcNormalPosition;
-            MONITORINFO monitor{}; monitor.cbSize = sizeof(monitor);
-            if (GetMonitorInfoW(MonitorFromWindow(window_, MONITOR_DEFAULTTONEAREST), &monitor))
-                OffsetRect(&rect, monitor.rcWork.left - monitor.rcMonitor.left, monitor.rcWork.top - monitor.rcMonitor.top);
-            appSession_.x = rect.left; appSession_.y = rect.top; appSession_.width = rect.right - rect.left; appSession_.height = rect.bottom - rect.top;
-            appSession_.positioned = true;
-            appSession_.maximized = placement.showCmd == SW_SHOWMAXIMIZED || (placement.flags & WPF_RESTORETOMAXIMIZED) != 0;
-        }
-        storage_->saveApp(appSession_);
-    } catch (const std::exception& error) { storageError(error); }
-}
-void App::restoreProject(const ProjectSession& state) {
+void ProjectRuntime::Impl::restoreProject(const ProjectSession& state) {
+    focusedPane_ = state.focusedPane;
+    firstTabRow_ = state.firstTabRow;
+    restoreExplorerTop_ = state.explorerTop; restoreExplorerLeft_ = state.explorerLeft;
+    restoreGitTop_ = state.gitTop; restoreGitLeft_ = state.gitLeft; pendingGitSelection_ = state.gitSelected;
+    for (const auto& path : state.collapsedGit) collapsedGitPaths_.insert(wide(path));
+    terminal_.setDirectory(root_); terminal_.restore(state);
     viewer_.setDiffLayout(state.diffInline);
     gitTreeView_ = state.gitTree;
     sidebar_ = state.sidebar; terminalHeight_ = state.terminalHeight; terminalVisible_ = state.terminalVisible;
@@ -691,16 +608,14 @@ void App::restoreProject(const ProjectSession& state) {
     for (size_t i = 0; i < state.tabs.size(); ++i) {
         const auto& saved = state.tabs[i];
         const auto path = fs::u8path(saved.path);
-        std::error_code error;
-        // A deleted tracked file may still have a useful Git diff.
-        if (!path.is_absolute() || (!saved.diff && !fs::is_regular_file(path, error))) continue;
+        if (!path.is_absolute()) continue;
         const auto duplicate = std::find_if(tabs_.begin(), tabs_.end(), [&](const Tab& tab) { return pathKey(tab.path) == pathKey(path); });
         if (duplicate != tabs_.end()) continue;
         if (i <= state.activeTab) activeTab_ = tabs_.size();
         tabs_.push_back({path, saved.diff, saved.fileView, saved.diffView, saved.pinned});
     }
 }
-void App::forgetExpanded(const fs::path& path) {
+void ProjectRuntime::Impl::forgetExpanded(const fs::path& path) {
     const auto key = pathKey(path);
     for (auto iterator = expandedPaths_.begin(); iterator != expandedPaths_.end();) {
         const auto& candidate = iterator->first;
@@ -709,7 +624,7 @@ void App::forgetExpanded(const fs::path& path) {
         else ++iterator;
     }
 }
-void App::requestDirectory(TreeItem item) {
+void ProjectRuntime::Impl::requestDirectory(TreeItem item) {
     const auto n = node(item); if (!n || !n->directory || n->reparse) return;
     n->expandRequested = true;
     expandedPaths_[pathKey(n->path)] = n->path;
@@ -725,10 +640,13 @@ void App::requestDirectory(TreeItem item) {
             n->loaded = result->error.empty();
             applyDirectory(found->second, n, *result);
             if (n->loaded) explorer_.expand(found->second, true);
+            if (!restoredScroll_ && std::none_of(nodes_.begin(), nodes_.end(), [this](const auto& pair) { const auto value = node(pair.second); return value && value->loading; })) {
+                explorer_.restoreScroll(restoreExplorerTop_, restoreExplorerLeft_); restoredScroll_ = true;
+            }
         });
     });
 }
-void App::applyDirectory(TreeItem item, Node*, const DirectoryResult& result) {
+void ProjectRuntime::Impl::applyDirectory(TreeItem item, Node*, const DirectoryResult& result) {
     if (!result.error.empty()) { status(L"Folder: " + result.error); return; }
     std::map<std::wstring, TreeItem> existing;
     for (auto child = explorer_.child(item); child; child = explorer_.next(child)) if (const auto n = node(child)) existing[pathKey(n->path)] = child;
@@ -758,16 +676,16 @@ void App::applyDirectory(TreeItem item, Node*, const DirectoryResult& result) {
     }
     if (result.truncated || nodes_.size() >= maxTreeNodes) status(L"Explorer limit: 10,000 items/folder, 50,000 visible nodes.");
 }
-size_t App::tabEnd() const {
+size_t ProjectRuntime::Impl::tabEnd() const {
     const size_t endRow = firstTabRow_ + tabRows_;
     return endRow < tabRowStarts_.size() ? tabRowStarts_[endRow] : tabs_.size();
 }
-RECT App::tabBounds(size_t index) const {
+RECT ProjectRuntime::Impl::tabBounds(size_t index) const {
     auto rect = tabRects_[index];
     OffsetRect(&rect, tabsRect_.left, tabsRect_.top - static_cast<int>(firstTabRow_) * MulDiv(34, dpi_, 96));
     return rect;
 }
-size_t App::tabAt(POINT point) const {
+size_t ProjectRuntime::Impl::tabAt(POINT point) const {
     if (PtInRect(&tabsRect_, point)) {
         for (size_t i = firstTab_; i < tabEnd(); ++i) {
             const auto rect = tabBounds(i);
@@ -776,7 +694,7 @@ size_t App::tabAt(POINT point) const {
     }
     return tabs_.size();
 }
-std::optional<TabDrop> App::tabDropAt(POINT point) const {
+std::optional<TabDrop> ProjectRuntime::Impl::tabDropAt(POINT point) const {
     if (!tabDrag_ || tabDrag_->index >= tabs_.size() || !PtInRect(&tabsRect_, point)) return std::nullopt;
     if (tabOverflow() && point.x >= tabsRect_.right - MulDiv(56, dpi_, 96) &&
         point.y >= tabsRect_.bottom - MulDiv(34, dpi_, 96)) return std::nullopt;
@@ -794,7 +712,7 @@ std::optional<TabDrop> App::tabDropAt(POINT point) const {
     }
     return result;
 }
-void App::updateTabDrag(POINT point) {
+void ProjectRuntime::Impl::updateTabDrag(POINT point) {
     if (!tabDrag_) return;
     auto& drag = *tabDrag_;
     drag.point = point;
@@ -808,7 +726,7 @@ void App::updateTabDrag(POINT point) {
     drag.target = tabDropAt(point);
     InvalidateRect(window_, &tabsRect_, FALSE);
 }
-void App::scrollTabDrag() {
+void ProjectRuntime::Impl::scrollTabDrag() {
     if (!tabDrag_ || !tabDrag_->active || !tabOverflow()) return;
     const auto point = tabDrag_->point;
     if (!PtInRect(&tabsRect_, point) || point.y < tabsRect_.bottom - MulDiv(34, dpi_, 96)) return;
@@ -819,7 +737,7 @@ void App::scrollTabDrag() {
     updateTabs(false);
     tabDrag_->target = tabDropAt(point);
 }
-void App::endTabDrag(bool drop) {
+void ProjectRuntime::Impl::endTabDrag(bool drop) {
     if (!tabDrag_) return;
     const auto drag = *tabDrag_;
     tabDrag_.reset();
@@ -844,7 +762,7 @@ void App::endTabDrag(bool drop) {
     // Reveal the selected tab again after scrolling or cancelling a drag.
     updateTabs();
 }
-void App::updateTabs(bool reveal) {
+void ProjectRuntime::Impl::updateTabs(bool reveal) {
     const size_t lastFirst = tabRowStarts_.size() - tabRows_;
     firstTabRow_ = std::min(firstTabRow_, lastFirst);
     if (reveal && !tabs_.empty()) {
@@ -866,13 +784,13 @@ void App::updateTabs(bool reveal) {
     }
     InvalidateRect(window_, &tabsRect_, FALSE);
 }
-void App::saveTab() {
+void ProjectRuntime::Impl::saveTab() {
     if (!tabs_.empty() && viewer_.hasDocument()) {
         auto& tab = tabs_[activeTab_];
         (tab.diff ? tab.diffView : tab.fileView) = viewer_.state();
     }
 }
-void App::openFile(const fs::path& path, bool diff) {
+void ProjectRuntime::Impl::openFile(const fs::path& path, bool diff) {
     endTabDrag();
     const auto key = pathKey(path);
     const auto found = std::find_if(tabs_.begin(), tabs_.end(), [&](const Tab& tab) { return pathKey(tab.path) == key; });
@@ -883,12 +801,12 @@ void App::openFile(const fs::path& path, bool diff) {
     else if (diff) found->diff = true;
     activeTab_ = index; layout(); loadTab();
 }
-void App::selectTab(size_t index) {
+void ProjectRuntime::Impl::selectTab(size_t index) {
     endTabDrag();
     if (index >= tabs_.size() || index == activeTab_) return;
     saveTab(); activeTab_ = index; updateTabs(); loadTab();
 }
-void App::closeTab(size_t index) {
+void ProjectRuntime::Impl::closeTab(size_t index) {
     endTabDrag();
     if (index >= tabs_.size() || tabs_[index].pinned) return;
     saveTab(); const bool active = index == activeTab_;
@@ -903,7 +821,7 @@ void App::closeTab(size_t index) {
     }
     SetFocus(viewer_.window());
 }
-void App::toggleTabPin(size_t index) {
+void ProjectRuntime::Impl::toggleTabPin(size_t index) {
     endTabDrag();
     if (index >= tabs_.size()) return;
     saveTab();
@@ -916,7 +834,7 @@ void App::toggleTabPin(size_t index) {
     activeTab_ = static_cast<size_t>(std::find_if(tabs_.begin(), tabs_.end(), [&](const Tab& value) { return value.path == activePath; }) - tabs_.begin());
     layout();
 }
-void App::tabMenu(POINT screen) {
+void ProjectRuntime::Impl::tabMenu(POINT screen) {
     endTabDrag();
     if (tabs_.empty()) return;
     size_t index;
@@ -944,7 +862,7 @@ void App::tabMenu(POINT screen) {
         else if (command == 2) closeTab(index);
     }
 }
-void App::loadTab(bool preserve) {
+void ProjectRuntime::Impl::loadTab(bool preserve) {
     waitingForGit_ = false;
     if (tabs_.empty()) return;
     preserve = preserve && viewer_.hasDocument();
@@ -996,13 +914,13 @@ void App::loadTab(bool preserve) {
         });
     });
 }
-void App::showDiff() {
+void ProjectRuntime::Impl::showDiff() {
     if (tabs_.empty()) { status(L"Select a file to view its Git diff."); return; }
     auto& tab = tabs_[activeTab_];
     if (!tab.diff && (!git_ || git_->root.empty() || !git_->error.empty())) { status(L"Git repository unavailable. Refresh after installing Git for Windows."); return; }
     saveTab(); tab.diff = !tab.diff; layout(); loadTab();
 }
-void App::refreshGit() {
+void ProjectRuntime::Impl::refreshGit() {
     if (root_.empty()) return;
     const auto generation = generation_; const auto root = root_;
     gitWorker_->submit(L"git", [this, root, generation] {
@@ -1019,28 +937,31 @@ void App::refreshGit() {
         });
     });
 }
-void App::refresh(bool force) {
+void ProjectRuntime::Impl::refresh(bool force) {
     if (root_.empty()) return;
     if (force || filesDirty_) quickOpen_.refresh();
     filesDirty_ = false;
     for (const auto& pair : nodes_) { const auto n = node(pair.second); if (n && n->expandRequested) requestDirectory(pair.second); }
     refreshGit();
-    if (!tabs_.empty() && (force || fileDirty_)) { saveTab(); loadTab(true); }
+    if (!tabs_.empty() && (force || fileDirty_)) {
+        if (!IsWindowVisible(window_) && !viewer_.hasDocument()) { fileDirty_ = true; return; }
+        saveTab(); loadTab(true);
+    }
     fileDirty_ = false;
 }
-void App::watch() {
+void ProjectRuntime::Impl::watch() {
     watchDirectory_.reset(CreateFileW(root_.c_str(), FILE_LIST_DIRECTORY, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OVERLAPPED, nullptr));
     watchEvent_.reset(CreateEventW(nullptr, TRUE, FALSE, nullptr));
     if (!watchDirectory_ || !watchEvent_) { status(L"Folder watching unavailable; use F5 to refresh."); stopWatch(); return; }
     watchOperation_ = {}; watchOperation_.hEvent = watchEvent_.value; armWatch();
 }
-void App::armWatch() {
+void ProjectRuntime::Impl::armWatch() {
     if (!watchDirectory_) return;
     ResetEvent(watchEvent_.value);
     watchPending_ = ReadDirectoryChangesW(watchDirectory_.value, watchBuffer_.data(), static_cast<DWORD>(watchBuffer_.size()), TRUE, FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_DIR_NAME | FILE_NOTIFY_CHANGE_SIZE | FILE_NOTIFY_CHANGE_LAST_WRITE, nullptr, &watchOperation_, nullptr) != FALSE;
     if (!watchPending_) status(L"Folder watching unavailable; use F5 to refresh.");
 }
-void App::pollWatch() {
+void ProjectRuntime::Impl::pollWatch() {
     const auto now = GetTickCount64();
     if (watchPending_ && WaitForSingleObject(watchEvent_.value, 0) == WAIT_OBJECT_0) {
         DWORD bytes = 0; const bool ok = GetOverlappedResult(watchDirectory_.value, &watchOperation_, &bytes, FALSE) != FALSE;
@@ -1059,25 +980,25 @@ void App::pollWatch() {
             if (!info->NextEntryOffset) break;
             offset += info->NextEntryOffset;
         }
-        if (relevant) { if (!dirty_) { dirtySince_ = now; SetTimer(window_, timerId, 200, nullptr); } dirty_ = true; lastEvent_ = now; }
+        if (relevant) { if (!dirty_) dirtySince_ = now; dirty_ = true; lastEvent_ = now; }
         watchPending_ = false; armWatch();
     }
-    if (dirty_ && (now - lastEvent_ >= 500 || now - dirtySince_ >= 2000)) { dirty_ = false; KillTimer(window_, timerId); refresh(false); }
+    if (dirty_ && (now - lastEvent_ >= 500 || now - dirtySince_ >= 2000)) { dirty_ = false; refresh(false); }
 }
-void App::stopWatch() {
+void ProjectRuntime::Impl::stopWatch() {
     KillTimer(window_, timerId);
     if (watchDirectory_ && watchPending_) { CancelIoEx(watchDirectory_.value, &watchOperation_); DWORD bytes = 0; GetOverlappedResult(watchDirectory_.value, &watchOperation_, &bytes, TRUE); }
     watchDirectory_.reset(); watchEvent_.reset(); watchPending_ = dirty_ = fileDirty_ = filesDirty_ = false;
 }
-void App::toggleTerminal() {
+void ProjectRuntime::Impl::toggleTerminal() {
     terminalVisible_ = !terminalVisible_; layout(); SetFocus(terminalVisible_ ? terminal_.window() : viewer_.window());
 }
-LRESULT CALLBACK App::procedure(HWND w, UINT m, WPARAM a, LPARAM b) {
-    auto* self = reinterpret_cast<App*>(GetWindowLongPtrW(w, GWLP_USERDATA));
-    if (m == WM_NCCREATE) { self = static_cast<App*>(reinterpret_cast<CREATESTRUCTW*>(b)->lpCreateParams); self->window_ = w; SetWindowLongPtrW(w, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(self)); }
+LRESULT CALLBACK ProjectRuntime::Impl::procedure(HWND w, UINT m, WPARAM a, LPARAM b) {
+    auto* self = reinterpret_cast<ProjectRuntime::Impl*>(GetWindowLongPtrW(w, GWLP_USERDATA));
+    if (m == WM_NCCREATE) { self = static_cast<ProjectRuntime::Impl*>(reinterpret_cast<CREATESTRUCTW*>(b)->lpCreateParams); self->window_ = w; SetWindowLongPtrW(w, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(self)); }
     return self ? self->handle(m, a, b) : DefWindowProcW(w, m, a, b);
 }
-LRESULT App::handle(UINT m, WPARAM a, LPARAM b) {
+LRESULT ProjectRuntime::Impl::handle(UINT m, WPARAM a, LPARAM b) {
     switch (m) {
     case WM_CREATE: create(); return 0;
     case WM_PAINT: paint(); return 0;
@@ -1087,10 +1008,8 @@ LRESULT App::handle(UINT m, WPARAM a, LPARAM b) {
     case WM_DPICHANGED: { dpi(HIWORD(a)); const auto r = reinterpret_cast<RECT*>(b); SetWindowPos(window_, nullptr, r->left, r->top, r->right - r->left, r->bottom - r->top, SWP_NOZORDER | SWP_NOACTIVATE); return 0; }
     case wmWork: worker_->dispatch(); gitWorker_->dispatch(); return 0;
     case WM_TIMER: if (a == timerId) pollWatch(); else if (a == tabDragTimerId) scrollTabDrag(); return 0;
-    case WM_ACTIVATE:
-        if (LOWORD(a) == WA_INACTIVE) endTabDrag();
-        else if (worker_ && !root_.empty()) refresh(false);
-        return 0;
+    case WM_APP + 13: if (!root_.empty()) { if (!watchDirectory_) watch(); refresh(); } return 0;
+    case WM_APP + 12: if (!root_.empty() && IsWindowVisible(window_)) { refreshGit(); if (!tabs_.empty()) { saveTab(); loadTab(true); } } return 0;
     case WM_LBUTTONDOWN: {
         quickOpen_.close();
         const int x = MulDiv(GET_X_LPARAM(b), 96, dpi_), y = GET_Y_LPARAM(b);
@@ -1163,23 +1082,85 @@ LRESULT App::handle(UINT m, WPARAM a, LPARAM b) {
         }
         return 0;
     }
-    case WM_QUERYENDSESSION: saveSession(); return TRUE;
-    case WM_CLOSE: endTabDrag(); saveSession(); DestroyWindow(window_); return 0;
+    case WM_CLOSE: return 0;
     case WM_DESTROY:
         KillTimer(window_, timerId); stopWatch(); quickOpen_.stop(); if (gitWorker_) gitWorker_->stop(); if (worker_) worker_->stop(); terminal_.stop(); explorer_.clear(); changes_.clear();
-        PostQuitMessage(0); return 0;
+        return 0;
     default: break;
     }
     return DefWindowProcW(window_, m, a, b);
 }
+bool ProjectRuntime::Impl::key(const MSG& message) {
+        const bool key = message.message == WM_KEYDOWN;
+        const bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+        const bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+        if (key && message.wParam == VK_ESCAPE && tabDrag_) { endTabDrag(); return true; }
+        if (key && ctrl && !shift && !(GetKeyState(VK_MENU) & 0x8000) && message.wParam == 'P') { quickOpen_.show(); return true; }
+        if (key && ctrl && message.wParam == 'O') { quickOpen_.close(); chooseFolder(); return true; }
+        if (quickOpen_.visible() && key) return false;
+        if (key && ctrl && shift && message.wParam == 'E') { selectSidebar(Sidebar::Explorer); return true; }
+        if (key && ctrl && shift && message.wParam == 'G') { selectSidebar(Sidebar::Git); return true; }
+        if (key && ctrl && message.wParam == VK_OEM_3) { toggleTerminal(); return true; }
+        if (key && ctrl && message.wParam == VK_TAB && !tabs_.empty()) { selectTab((activeTab_ + (shift ? tabs_.size() - 1 : 1)) % tabs_.size()); SetFocus(viewer_.window()); return true; }
+        if (key && ctrl && message.wParam == 'W' && GetFocus() != terminal_.window()) { closeTab(activeTab_); return true; }
+        if (key && message.wParam == VK_F5 && GetFocus() != terminal_.window()) { refresh(); return true; }
+        if (key && message.wParam == VK_F6 && GetFocus() != terminal_.window()) { showDiff(); return true; }
+        if (key && message.wParam == VK_F7 && GetFocus() != terminal_.window()) { viewer_.toggleDiffLayout(); return true; }
+        if (key && message.wParam == VK_TAB && GetFocus() != terminal_.window()) {
+            const HWND files = activeSidebar_ == Sidebar::Explorer ? (IsWindowVisible(tree_) ? tree_ : explorerButton_) : (IsWindowVisible(gitTree_) ? gitTree_ : gitButton_);
+            SetFocus(GetFocus() == files ? viewer_.window() : terminalVisible_ ? terminal_.window() : files); return true;
+        }
+
+    return false;
 }
-int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
-    const HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
-    int argc = 0; LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
-    poppy::fs::path initial; if (argv && argc > 1) initial = argv[1]; if (argv) LocalFree(argv);
-    int result = 1;
-    try { poppy::App app; result = app.run(instance, show, std::move(initial)); }
-    catch (const std::exception& error) { MessageBoxW(nullptr, poppy::wide(error.what()).c_str(), L"Poppy", MB_OK | MB_ICONERROR); }
-    if (SUCCEEDED(com)) CoUninitialize();
-    return result;
+ProjectRuntime::ProjectRuntime() : impl_(std::make_unique<Impl>()) { impl_->owner_ = this; }
+ProjectRuntime::~ProjectRuntime() {
+    shutdown();
+    if (impl_->window_ && IsWindow(impl_->window_)) DestroyWindow(impl_->window_);
+}
+void ProjectRuntime::create(HWND parent, HINSTANCE instance, HookServer* hooks) {
+    impl_->instance_ = instance;
+    WNDCLASSW cls{}; cls.lpfnWndProc = Impl::procedure; cls.hInstance = instance; cls.lpszClassName = L"PoppyProject"; cls.hCursor = LoadCursorW(nullptr, IDC_ARROW); RegisterClassW(&cls);
+    impl_->window_ = CreateWindowExW(0, cls.lpszClassName, L"Project", WS_CHILD | WS_CLIPCHILDREN | WS_CLIPSIBLINGS, 0, 0, 0, 0, parent, nullptr, instance, impl_.get());
+    impl_->terminal_.connect(hooks);
+}
+void ProjectRuntime::shutdown() {
+    impl_->stopWatch(); impl_->quickOpen_.stop();
+    if (impl_->gitWorker_) impl_->gitWorker_->stop();
+    if (impl_->worker_) impl_->worker_->stop();
+    impl_->terminal_.stop();
+}
+void ProjectRuntime::revalidate() { PostMessageW(window(), WM_APP+13, 0, 0); }
+void ProjectRuntime::initialize(const fs::path& path, const ProjectSession& state, bool saved) { if (saved) impl_->initialState_ = state; impl_->openFolder(path); }
+void ProjectRuntime::activate(bool active) {
+    if (!active) {
+        impl_->saveTab(); impl_->lastFocus_ = GetFocus();
+        if (impl_->lastFocus_ == impl_->terminal_.window()) impl_->focusedPane_ = "terminal";
+        else if (impl_->lastFocus_ == impl_->tree_) impl_->focusedPane_ = "explorer";
+        else if (impl_->lastFocus_ == impl_->gitTree_) impl_->focusedPane_ = "git";
+        else if (impl_->lastFocus_ == impl_->viewer_.window()) impl_->focusedPane_ = "viewer";
+        impl_->quickOpen_.close(false); impl_->endTabDrag(); ShowWindow(window(), SW_HIDE);
+    }
+    else {
+        ShowWindow(window(), SW_SHOWNA); impl_->layout(false);
+        HWND focus = impl_->lastFocus_;
+        if (!focus || !IsWindow(focus) || !IsWindowVisible(focus)) {
+            focus = impl_->focusedPane_ == "terminal" && impl_->terminalVisible_ ? impl_->terminal_.window() : impl_->focusedPane_ == "explorer" && IsWindowVisible(impl_->tree_) ? impl_->tree_ : impl_->focusedPane_ == "git" && IsWindowVisible(impl_->gitTree_) ? impl_->gitTree_ : impl_->viewer_.window();
+        }
+        SetFocus(focus); impl_->terminal_.acknowledge(); PostMessageW(window(), WM_APP+12, 0, 0);
+    }
+}
+void ProjectRuntime::setDpi(UINT dpi) { impl_->dpi(dpi); }
+void ProjectRuntime::poll() { if (ready()) impl_->pollWatch(); if (IsWindowVisible(impl_->terminal_.container())) { impl_->terminal_.acknowledge(); if (summary().counts[static_cast<size_t>(AiState::Running)]) InvalidateRect(impl_->terminal_.container(), nullptr, FALSE); } }
+bool ProjectRuntime::key(const MSG& message) { return impl_->key(message); }
+ProjectSession ProjectRuntime::snapshot() { return impl_->saveSession(); }
+AiSummary ProjectRuntime::summary() const { return impl_->terminal_.summary(); }
+std::wstring ProjectRuntime::description() const { return impl_->terminal_.description(); }
+bool ProjectRuntime::apply(const AiEvent& event) { return impl_->terminal_.apply(event); }
+void ProjectRuntime::focusAttention() { impl_->terminalVisible_ = true; impl_->layout(false); impl_->terminal_.focusAttention(); }
+size_t ProjectRuntime::documentBytes() const { return impl_->viewer_.documentBytes(); }
+void ProjectRuntime::releaseDocument() { impl_->saveTab(); ++impl_->serial_; impl_->waitingForGit_ = false; impl_->viewer_.message(L"Loading…"); }
+HWND ProjectRuntime::window() const { return impl_->window_; }
+bool ProjectRuntime::ready() const { return !impl_->root_.empty(); }
+
 }

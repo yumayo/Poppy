@@ -26,6 +26,13 @@ cmake -S "$source_dir" -B /build/windows -G Ninja \
 cmake --build /build/windows --parallel "$build_jobs"
 
 mkdir -p /output
+build_output=$(mktemp /output/Poppy.XXXXXX.exe)
 x86_64-w64-mingw32-strip --strip-all \
-    -o /output/Poppy.exe /build/windows/Poppy.exe
-printf '%s\n' 'Windows x64 build: /output/Poppy.exe (host: out/docker/Poppy.exe)'
+    -o "$build_output" /build/windows/Poppy.exe
+# Windows may still hold the previous executable open. Keep the completed
+# artifact available without touching that running process.
+if mv -f "$build_output" /output/Poppy.exe; then
+    build_output=/output/Poppy.exe
+fi
+cp -R "$source_dir/integration/ai" /output/
+printf 'Windows x64 build: %s (host: out/docker/)\n' "$build_output"

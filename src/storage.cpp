@@ -10,6 +10,11 @@ namespace poppy {
 namespace {
 namespace fs = std::filesystem;
 constexpr size_t maxSavedTabs = 10000, maxSavedDirectories = 50000;
+constexpr const char* projectViews =
+    "CREATE TABLE view_state (id INTEGER PRIMARY KEY CHECK(id=1), explorer_top INTEGER NOT NULL, explorer_left INTEGER NOT NULL,"
+    " git_top INTEGER NOT NULL, git_left INTEGER NOT NULL, first_tab_row INTEGER NOT NULL, git_selected TEXT NOT NULL, focused_pane TEXT NOT NULL, active_terminal TEXT NOT NULL);"
+    "CREATE TABLE terminals (position INTEGER PRIMARY KEY, terminal_id TEXT NOT NULL UNIQUE, name TEXT NOT NULL, directory TEXT NOT NULL);"
+    "CREATE TABLE git_collapsed (path TEXT PRIMARY KEY);";
 
 class Database {
 public:
@@ -105,12 +110,12 @@ ViewState readView(const Statement& statement, int start) {
 }
 void projectSchema(Database& db) {
     schema(db,
-        "CREATE TABLE IF NOT EXISTS session (id INTEGER PRIMARY KEY CHECK(id=1), sidebar INTEGER NOT NULL, terminal_height INTEGER NOT NULL,"
+        (std::string("CREATE TABLE IF NOT EXISTS session (id INTEGER PRIMARY KEY CHECK(id=1), sidebar INTEGER NOT NULL, terminal_height INTEGER NOT NULL,"
         " terminal_visible INTEGER NOT NULL, git_sidebar INTEGER NOT NULL, active_tab INTEGER NOT NULL, selected_path TEXT NOT NULL, diff_inline INTEGER NOT NULL, git_tree INTEGER NOT NULL);"
         "CREATE TABLE IF NOT EXISTS tabs (position INTEGER PRIMARY KEY, path TEXT NOT NULL, diff INTEGER NOT NULL,"
         " file_top INTEGER NOT NULL, file_left INTEGER NOT NULL, file_anchor INTEGER NOT NULL, file_caret INTEGER NOT NULL, file_after INTEGER NOT NULL,"
         " diff_top INTEGER NOT NULL, diff_left INTEGER NOT NULL, diff_anchor INTEGER NOT NULL, diff_caret INTEGER NOT NULL, diff_after INTEGER NOT NULL, pinned INTEGER NOT NULL);"
-        "CREATE TABLE IF NOT EXISTS expanded (path TEXT PRIMARY KEY);", {
+        "CREATE TABLE IF NOT EXISTS expanded (path TEXT PRIMARY KEY);") + projectViews).c_str(), {
         "ALTER TABLE session ADD COLUMN diff_inline INTEGER NOT NULL DEFAULT 0;"
         "UPDATE session SET diff_inline=COALESCE((SELECT diff_inline FROM tabs WHERE diff<>0"
         " ORDER BY (position=(SELECT active_tab FROM session WHERE id=1)) DESC,position LIMIT 1),0);"
@@ -119,7 +124,7 @@ void projectSchema(Database& db) {
         "ALTER TABLE tabs DROP COLUMN file_inline;"
         "ALTER TABLE tabs DROP COLUMN diff_inline;",
         "ALTER TABLE session ADD COLUMN git_tree INTEGER NOT NULL DEFAULT 0;",
-        "ALTER TABLE tabs ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0;"});
+        "ALTER TABLE tabs ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0;", projectViews});
 }
 }
 struct Storage::Impl {
@@ -133,23 +138,43 @@ Storage::Storage(fs::path directory) : impl_(std::make_unique<Impl>()) {
     schema(*impl_->app,
         "CREATE TABLE IF NOT EXISTS projects (path_key TEXT PRIMARY KEY, path TEXT NOT NULL, directory TEXT NOT NULL UNIQUE);"
         "CREATE TABLE IF NOT EXISTS app (id INTEGER PRIMARY KEY CHECK(id=1), last_project TEXT NOT NULL, x INTEGER NOT NULL, y INTEGER NOT NULL,"
-        " width INTEGER NOT NULL, height INTEGER NOT NULL, positioned INTEGER NOT NULL, maximized INTEGER NOT NULL);");
+        " width INTEGER NOT NULL, height INTEGER NOT NULL, positioned INTEGER NOT NULL, maximized INTEGER NOT NULL, project_list_width INTEGER NOT NULL DEFAULT 180);"
+        "CREATE TABLE open_projects (path_key TEXT PRIMARY KEY, path TEXT NOT NULL, position INTEGER NOT NULL UNIQUE);", {
+        "ALTER TABLE app ADD COLUMN project_list_width INTEGER NOT NULL DEFAULT 180;"
+        "CREATE TABLE open_projects (path_key TEXT PRIMARY KEY, path TEXT NOT NULL, position INTEGER NOT NULL UNIQUE);"
+        "INSERT INTO open_projects SELECT COALESCE((SELECT path_key FROM projects WHERE path=last_project),lower(last_project)),last_project,0 FROM app WHERE last_project<>'';"});
 }
 Storage::~Storage() = default;
 AppSession Storage::loadApp() {
     AppSession state;
-    Statement row(*impl_->app, "SELECT last_project,x,y,width,height,positioned,maximized FROM app WHERE id=1");
+    Transaction snapshot(*impl_->app, false);
+    Statement row(*impl_->app, "SELECT last_project,x,y,width,height,positioned,maximized,project_list_width FROM app WHERE id=1");
     if (row.row()) {
         state.lastProject = row.text(0); state.x = bounded(row.number(1), -1000000, 1000000); state.y = bounded(row.number(2), -1000000, 1000000);
         state.width = bounded(row.number(3), 720, 30000); state.height = bounded(row.number(4), 480, 30000);
         state.positioned = row.number(5) != 0; state.maximized = row.number(6) != 0;
+        state.projectListWidth = bounded(row.number(7), 100, 600);
     }
+    Statement projects(*impl_->app, "SELECT path_key,path FROM open_projects ORDER BY position LIMIT 1000");
+    while (projects.row()) { state.openProjectKeys.push_back(projects.text(0)); state.openProjects.push_back(projects.text(1)); }
+    snapshot.commit();
     return state;
 }
 void Storage::saveApp(const AppSession& state) {
-    Statement row(*impl_->app, "INSERT OR REPLACE INTO app VALUES(1,?,?,?,?,?,?,?)");
+    if (state.openProjects.size() > 1000 || (!state.openProjectKeys.empty() && state.openProjectKeys.size() != state.openProjects.size())) throw std::runtime_error("Invalid open project list");
+    Transaction transaction(*impl_->app);
+    Statement row(*impl_->app, "INSERT OR REPLACE INTO app VALUES(1,?,?,?,?,?,?,?,?)");
     row.text(1, state.lastProject); row.number(2, state.x); row.number(3, state.y);
-    row.number(4, state.width); row.number(5, state.height); row.number(6, state.positioned); row.number(7, state.maximized); row.run();
+    row.number(4, state.width); row.number(5, state.height); row.number(6, state.positioned); row.number(7, state.maximized); row.number(8, state.projectListWidth); row.run();
+    impl_->app->exec("DELETE FROM open_projects");
+    Statement project(*impl_->app, "INSERT INTO open_projects VALUES(?,?,?)");
+    for (size_t i = 0; i < state.openProjects.size(); ++i) {
+        auto key = state.openProjectKeys.empty() ? state.openProjects[i] : state.openProjectKeys[i];
+        if (state.openProjectKeys.empty()) std::transform(key.begin(), key.end(), key.begin(), [](unsigned char c) { return c >= 'A' && c <= 'Z' ? static_cast<char>(c + 32) : static_cast<char>(c); });
+        if (key.empty()) throw std::runtime_error("Cannot store an empty project key");
+        project.text(1, key); project.text(2, state.openProjects[i]); project.number(3, static_cast<sqlite3_int64>(i)); project.run(); project.reset();
+    }
+    transaction.commit();
 }
 fs::path Storage::projectDirectory(const std::string& key, const std::string& path) {
     if (key.empty()) throw std::runtime_error("Cannot store a project without a path");
@@ -198,10 +223,25 @@ std::optional<ProjectSession> Storage::loadProject(const std::string& key, const
     while (tabs.row()) state.tabs.push_back({tabs.text(0), tabs.number(1) != 0, readView(tabs, 2), readView(tabs, 7), tabs.number(12) != 0});
     Statement expanded(db, "SELECT path FROM expanded ORDER BY path LIMIT 50000");
     while (expanded.row()) state.expanded.push_back(expanded.text(0));
+    Statement views(db, "SELECT explorer_top,explorer_left,git_top,git_left,first_tab_row,git_selected,focused_pane,active_terminal FROM view_state WHERE id=1");
+    if (views.row()) {
+        state.explorerTop = bounded(views.number(0), 0, 50000); state.explorerLeft = bounded(views.number(1), 0, 1000000);
+        state.gitTop = bounded(views.number(2), 0, 50000); state.gitLeft = bounded(views.number(3), 0, 1000000);
+        state.firstTabRow = static_cast<size_t>(bounded(views.number(4), 0, 10000));
+        state.gitSelected = views.text(5); state.focusedPane = views.text(6); state.activeTerminal = views.text(7);
+    }
+    Statement terminals(db, "SELECT terminal_id,name,directory FROM terminals ORDER BY position LIMIT 100");
+    state.terminals.clear();
+    while (terminals.row()) state.terminals.push_back({terminals.text(0), terminals.text(1), terminals.text(2)});
+    if (state.terminals.empty()) state.terminals.push_back({"shell-1", "Shell", path});
+    if (std::none_of(state.terminals.begin(), state.terminals.end(), [&](const SavedTerminal& terminal) { return terminal.id == state.activeTerminal; })) state.activeTerminal = state.terminals.front().id;
+    Statement collapsed(db, "SELECT path FROM git_collapsed ORDER BY path LIMIT 50000");
+    while (collapsed.row()) state.collapsedGit.push_back(collapsed.text(0));
+    snapshot.commit();
     return state;
 }
 void Storage::saveProject(const std::string& key, const std::string& path, const ProjectSession& state) {
-    if (state.tabs.size() > maxSavedTabs || state.expanded.size() > maxSavedDirectories) throw std::runtime_error("Too many items to save the project session");
+    if (state.tabs.size() > maxSavedTabs || state.expanded.size() > maxSavedDirectories || state.collapsedGit.size() > maxSavedDirectories || state.terminals.size() > 100) throw std::runtime_error("Too many items to save the project session");
     Database db(projectDirectory(key, path) / "storage.sql"); projectSchema(db);
     Transaction transaction(db);
     db.exec("DELETE FROM tabs; DELETE FROM expanded;");
@@ -217,6 +257,18 @@ void Storage::saveProject(const std::string& key, const std::string& path, const
     }
     Statement expanded(db, "INSERT OR IGNORE INTO expanded VALUES(?)");
     for (const auto& value : state.expanded) { expanded.text(1, value); expanded.run(); expanded.reset(); }
+    db.exec("DELETE FROM terminals; DELETE FROM git_collapsed;");
+    Statement views(db, "INSERT OR REPLACE INTO view_state VALUES(1,?,?,?,?,?,?,?,?)");
+    views.number(1, state.explorerTop); views.number(2, state.explorerLeft); views.number(3, state.gitTop); views.number(4, state.gitLeft);
+    views.number(5, static_cast<sqlite3_int64>(state.firstTabRow)); views.text(6, state.gitSelected); views.text(7, state.focusedPane); views.text(8, state.activeTerminal); views.run();
+    Statement terminal(db, "INSERT INTO terminals VALUES(?,?,?,?)");
+    for (size_t i = 0; i < state.terminals.size(); ++i) {
+        const auto& value = state.terminals[i];
+        if (value.id.empty() || value.id.size() > 64 || value.name.size() > 512) throw std::runtime_error("Invalid terminal configuration");
+        terminal.number(1, static_cast<sqlite3_int64>(i)); terminal.text(2, value.id); terminal.text(3, value.name); terminal.text(4, value.directory); terminal.run(); terminal.reset();
+    }
+    Statement collapsed(db, "INSERT OR IGNORE INTO git_collapsed VALUES(?)");
+    for (const auto& value : state.collapsedGit) { collapsed.text(1, value); collapsed.run(); collapsed.reset(); }
     transaction.commit();
 }
 }

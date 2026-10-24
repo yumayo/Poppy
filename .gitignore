@@ -4,3 +4,7 @@
 /.vs/
 *.user
 *.pdb
+
+.poppy-runtime/
+__pycache__/
+*.pyc

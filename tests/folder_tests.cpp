@@ -1,5 +1,7 @@
 #include <windows.h>
 #include <commctrl.h>
+#include <tlhelp32.h>
+#include <set>
 #include "tree_messages.h"
 #include "activity_button.h"
 #include <filesystem>
@@ -42,8 +44,9 @@ void expand(HWND tree, TreeItem item, bool value = true) {
     send(tree, WM_KEYDOWN, value ? VK_RIGHT : VK_LEFT);
 }
 struct Fixture {
+    inline static size_t serial = 0;
     fs::path root;
-    Fixture() : root(fs::temp_directory_path() / (L"Poppy folder test 日本語 " + std::to_wstring(GetCurrentProcessId()) + L" " + std::to_wstring(GetTickCount64()))) {
+    Fixture() : root(fs::temp_directory_path() / (L"Poppy folder test 日本語 " + std::to_wstring(GetCurrentProcessId()) + L" " + std::to_wstring(GetTickCount64()) + L" " + std::to_wstring(++serial))) {
         check(fs::create_directory(root), "Could not create the test workspace");
     }
     ~Fixture() { std::error_code error; fs::remove_all(root, error); }
@@ -75,7 +78,7 @@ void writeLines(const fs::path& path, int lines) {
 }
 struct Application {
     PROCESS_INFORMATION process{};
-    HWND window = nullptr;
+    HWND window = nullptr, host = nullptr;
     Application(const fs::path& executable, const fs::path& folder = {}) {
         std::wstring command = L"\"" + executable.native() + L"\"";
         if (!folder.empty()) command += L" \"" + folder.native() + L"\"";
@@ -85,7 +88,7 @@ struct Application {
         CloseHandle(process.hThread); process.hThread = nullptr;
     }
     ~Application() {
-        if (window) PostMessageW(window, WM_CLOSE, 0, 0);
+        if (host) PostMessageW(host, WM_CLOSE, 0, 0);
         if (WaitForSingleObject(process.hProcess, 2000) != WAIT_OBJECT_0) {
             TerminateProcess(process.hProcess, 1);
             WaitForSingleObject(process.hProcess, 1000);
@@ -102,9 +105,16 @@ struct Application {
                 if (id != app.process.dwProcessId) return TRUE;
                 wchar_t name[32]{}; GetClassNameW(candidate, name, 32);
                 if (std::wstring(name) != L"PoppyMain") return TRUE;
-                app.window = candidate; return FALSE;
+                app.host = candidate; return FALSE;
             }, reinterpret_cast<LPARAM>(this));
-            if (window) result = FindWindowExW(window, nullptr, treeClassName, L"Files");
+            if (host) {
+                for (HWND project = nullptr; (project = FindWindowExW(host, project, L"PoppyProject", nullptr));) {
+                    if (!IsWindowVisible(project)) continue;
+                    window = project; result = FindWindowExW(window, nullptr, treeClassName, L"Files");
+                    if (result && nextItem(result, TreeRelation::Root)) break;
+                    result = nullptr;
+                }
+            }
             return result != nullptr;
         }, "Poppy did not create its file tree");
         return result;
@@ -513,7 +523,7 @@ void sidebarTests(const fs::path& executable) {
     const auto explorer = FindWindowExW(app.window, nullptr, activityButtonClassName, L"Explorer");
     const auto git = FindWindowExW(app.window, nullptr, activityButtonClassName, L"Source Control");
     const auto viewer = FindWindowExW(app.window, nullptr, L"PoppyViewer", nullptr);
-    const auto terminal = FindWindowExW(app.window, nullptr, L"PoppyTerminal", nullptr);
+    const auto terminal = FindWindowExW(app.window, nullptr, L"PoppyTerminalPane", nullptr);
     check(explorer && git && viewer && terminal, "Activity buttons or panes are missing");
     TreeItem nested = 0;
     waitFor([&] {
@@ -806,6 +816,71 @@ void gitSidebarTests(const fs::path& executable) {
         waitFor([&] { return IsWindowVisible(changes) && send(changes, treeGetCount) == 3; }, "Restart lost the Git List layout");
     }
 }
+std::set<DWORD> childProcesses(DWORD parent) {
+    std::set<DWORD> result; const auto snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    check(snapshot != INVALID_HANDLE_VALUE, "Cannot inspect shell processes");
+    PROCESSENTRY32W entry{}; entry.dwSize = sizeof(entry);
+    if (Process32FirstW(snapshot, &entry)) do { if (entry.th32ParentProcessID == parent && _wcsicmp(entry.szExeFile, L"powershell.exe") == 0) result.insert(entry.th32ProcessID); } while (Process32NextW(snapshot, &entry));
+    CloseHandle(snapshot); return result;
+}
+void multiProjectTests(const fs::path& executable) {
+    Fixture a, b, c;
+    writeLines(a.root / L"a.txt", 200); writeLines(b.root / L"b.txt", 300); writeLines(c.root / L"c.txt", 400);
+    {
+    Application app(executable, a.root);
+    const auto treeA = app.tree(); const auto surfaceA = app.window;
+    const auto viewerA = FindWindowExW(surfaceA, nullptr, L"PoppyViewer", nullptr);
+    waitFor([&] { return nextItem(treeA, TreeRelation::Child, nextItem(treeA, TreeRelation::Root)) != 0; }, "Project A did not load");
+    send(treeA, treeSelect, nextItem(treeA, TreeRelation::Child, nextItem(treeA, TreeRelation::Root))); waitLines(viewerA, 200);
+    send(viewerA, WM_VSCROLL, SB_PAGEDOWN); const int top = scrollInfo(viewerA).nPos;
+    const auto rootA = nextItem(treeA, TreeRelation::Root);
+    const auto open = [&](const fs::path& path) {
+        const auto text = path.native(); COPYDATASTRUCT data{0x50505901, static_cast<DWORD>((text.size()+1)*sizeof(wchar_t)), const_cast<wchar_t*>(text.c_str())};
+        check(send(app.host, WM_COPYDATA, 0, reinterpret_cast<LPARAM>(&data)), "Could not add a second project");
+        app.tree();
+    };
+    const auto select = [&](size_t index) { const UINT dpi=GetDpiForWindow(app.host);click(app.host,MulDiv(60,dpi,96),MulDiv(44+static_cast<int>(index)*48+24,dpi,96));app.tree(); };
+    open(b.root); const auto surfaceB = app.window; const auto treeB = app.tree();
+    const auto viewerB = FindWindowExW(surfaceB, nullptr, L"PoppyViewer", nullptr);
+    waitFor([&] { return nextItem(treeB, TreeRelation::Child, nextItem(treeB, TreeRelation::Root)) != 0; }, "Project B did not load");
+    send(treeB, treeSelect, nextItem(treeB, TreeRelation::Child, nextItem(treeB, TreeRelation::Root))); waitLines(viewerB, 300);
+    open(c.root); check(app.window!=surfaceA && app.window!=surfaceB,"Projects reused a surface");
+    select(0); check(app.window==surfaceA && nextItem(treeA,TreeRelation::Root)==rootA,"Switching rebuilt the explorer");
+    check(scrollInfo(viewerA).nMax==200 && scrollInfo(viewerA).nPos==top,"A-B-A lost the document or its view position");
+    const auto terminals = FindWindowExW(surfaceA,nullptr,L"PoppyTerminalPane",nullptr);check(terminals!=nullptr,"Project has no terminal pane");
+    HWND shell = FindWindowExW(terminals,nullptr,L"PoppyTerminal",nullptr);check(shell!=nullptr,"Project has no shell");
+    const auto before = childProcesses(app.process.dwProcessId);
+    click(shell,10,10); // Start only this project's shell.
+    DWORD shellPid = 0;
+    waitFor([&] { for (const auto child : childProcesses(app.process.dwProcessId)) if (!before.count(child)) shellPid = child; return shellPid != 0; }, "Shell process did not start");
+    const auto shellProcess = OpenProcess(SYNCHRONIZE, FALSE, shellPid); check(shellProcess != nullptr, "Cannot inspect the running shell");
+    const auto px=[dpi=GetDpiForWindow(terminals)](int v){return MulDiv(v,dpi,96);};
+    RECT client{};GetClientRect(terminals,&client);click(terminals,client.right-px(12),px(16));
+    check(FindWindowExW(terminals,shell,L"PoppyTerminal",nullptr)!=nullptr,"Adding a shell replaced the first session");
+    select(1);
+    writeFile(a.root / L"background.txt");
+    waitFor([&] { return send(treeA, treeGetCount) == 3; }, "An inactive project's directory changes were not applied");
+    check(scrollInfo(viewerB).nMax == 300 && app.window == surfaceB, "An inactive result changed the visible project");
+    select(0);check(IsWindow(shell) && WaitForSingleObject(shellProcess, 0) == WAIT_TIMEOUT,"Switching destroyed a running terminal");
+    LARGE_INTEGER frequency{}; QueryPerformanceFrequency(&frequency); double maximum = 0;
+    for (int i = 0; i < 6; ++i) { LARGE_INTEGER start{}, end{}; QueryPerformanceCounter(&start); select(i % 2); QueryPerformanceCounter(&end); maximum = std::max(maximum, (end.QuadPart-start.QuadPart)*1000.0/frequency.QuadPart); }
+    std::cout << "Retained project switch maximum: " << maximum << " ms\n";
+    open(a.root);check(app.window==surfaceA,"Reopening a registered path duplicated the project");
+    const auto oldB=surfaceB;const auto dpi=GetDpiForWindow(app.host);click(app.host,MulDiv(60,dpi,96),MulDiv(44+48+24,dpi,96),true);
+    check(!IsWindow(oldB)&&IsWindow(surfaceA)&&IsWindow(shell) && WaitForSingleObject(shellProcess, 0) == WAIT_TIMEOUT,"Closing an inactive project affected another session");
+    CloseHandle(shellProcess);
+    }
+    {
+        Application restored(executable); const auto tree = restored.tree();
+        waitLines(FindWindowExW(restored.window, nullptr, L"PoppyViewer", nullptr), 200);
+        size_t count = 0; for (HWND project = nullptr; (project = FindWindowExW(restored.host, project, L"PoppyProject", nullptr));) ++count;
+        check(count == 2 && nextItem(tree, TreeRelation::Root), "Restart lost the open list or reopened a closed project");
+        const auto pane = FindWindowExW(restored.window, nullptr, L"PoppyTerminalPane", nullptr);
+        count = 0; for (HWND terminal = nullptr; (terminal = FindWindowExW(pane, terminal, L"PoppyTerminal", nullptr));) ++count;
+        check(count == 2, "Restart lost terminal configuration");
+        check(childProcesses(restored.process.dwProcessId).empty(), "Restoring terminal configuration automatically started a process");
+    }
+}
 void sessionTests(const fs::path& executable) {
     Fixture fixture;
     const auto directory = fixture.root / L"nested 日本語";
@@ -848,7 +923,7 @@ void sessionTests(const fs::path& executable) {
         const auto tree = app.tree(), viewer = FindWindowExW(app.window, nullptr, L"PoppyViewer", nullptr);
         waitLines(viewer, 300);
         check(scrollInfo(viewer).nPos == secondTop, "Restart lost the active tab or its scroll position");
-        check(!IsWindowVisible(FindWindowExW(app.window, nullptr, L"PoppyTerminal", nullptr)), "Restart lost terminal visibility");
+        check(!IsWindowVisible(FindWindowExW(app.window, nullptr, L"PoppyTerminalPane", nullptr)), "Restart lost terminal visibility");
         check(!IsWindowVisible(tree), "Restart lost the active sidebar");
         const auto pane = bounds(app.window, viewer);
         check(pane.left == sidebarEdge, "Restart lost sidebar width");
@@ -877,20 +952,12 @@ void sessionTests(const fs::path& executable) {
 int wmain(int argc, wchar_t** argv) {
     try {
         check(argc == 2, "Pass the path to Poppy.exe");
-        Fixture appData;
-        AppDataEnvironment environment(appData.root);
         SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
-        folderTests(fs::absolute(argv[1]));
-        sidebarTests(fs::absolute(argv[1]));
-        treeInteractionTests(fs::absolute(argv[1]));
-        tabTests(fs::absolute(argv[1]));
-        pinnedTabTests(fs::absolute(argv[1]));
-        tabDragTests(fs::absolute(argv[1]));
-        wrappingTabDragTests(fs::absolute(argv[1]));
-        wrappingTabTests(fs::absolute(argv[1]));
-        quickOpenTests(fs::absolute(argv[1]));
-        gitSidebarTests(fs::absolute(argv[1]));
-        sessionTests(fs::absolute(argv[1]));
+        for (const auto test : {folderTests, sidebarTests, treeInteractionTests, tabTests, pinnedTabTests,
+                tabDragTests, wrappingTabDragTests, wrappingTabTests, quickOpenTests, gitSidebarTests, sessionTests, multiProjectTests}) {
+            Fixture appData; AppDataEnvironment environment(appData.root);
+            test(fs::absolute(argv[1]));
+        }
         std::cout << "Folder, sidebar, Git layouts, tab, quick open and session tests passed.\n"; return 0;
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n'; return 1;

@@ -289,3 +289,9 @@ LRESULT Viewer::handle(UINT m, WPARAM a, LPARAM b) {
     }
 }
 }
+
+size_t poppy::Viewer::documentBytes() const {
+    size_t bytes = document_ ? document_->text.capacity() + document_->lines.capacity() * sizeof(uint32_t) + document_->states.capacity() * sizeof(LexState) : 0;
+    if (diff_) bytes += diff_->rows.capacity() * sizeof(DiffRow) + diff_->inlineOrder.capacity() * sizeof(uint32_t);
+    return bytes;
+}

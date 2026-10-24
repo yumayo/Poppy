@@ -1,0 +1,61 @@
+#pragma once
+#include "terminal.h"
+#include "hook_server.h"
+#include "session.h"
+#include <memory>
+
+namespace poppy {
+// Each session retains its ConPTY, VT model and view while other tabs are shown.
+struct TerminalSession {
+    ~TerminalSession() { if (terminal) { terminal->stop(); terminal->starting = {}; terminal->ended = {}; } }
+    SavedTerminal configuration;
+    std::unique_ptr<Terminal> terminal;
+    std::string notificationId;
+    AiStatus ai;
+};
+class TerminalPane {
+public:
+    ~TerminalPane();
+    void create(HWND parent, HINSTANCE instance);
+    void setDpi(UINT dpi);
+    void setDirectory(const fs::path& directory);
+    void restore(const ProjectSession& state);
+    void snapshot(ProjectSession& state) const;
+    void connect(HookServer* hooks) { hooks_ = hooks; }
+    bool apply(const AiEvent& event);
+    void acknowledge();
+    void focusAttention();
+    AiSummary summary() const;
+    std::wstring description() const;
+    void stop();
+    HWND window() const { return active().terminal->window(); }
+    HWND container() const { return window_; }
+    std::function<void()> changed;
+private:
+    static LRESULT CALLBACK procedure(HWND, UINT, WPARAM, LPARAM);
+    static LRESULT CALLBACK renameProcedure(HWND, UINT, WPARAM, LPARAM, UINT_PTR, DWORD_PTR);
+    LRESULT handle(UINT, WPARAM, LPARAM);
+    TerminalSession& active() { return *sessions_[active_]; }
+    const TerminalSession& active() const { return *sessions_[active_]; }
+    void add(SavedTerminal configuration = {});
+    void select(size_t index);
+    void close(size_t index);
+    void menu(size_t index, POINT point);
+    void addAi(const std::wstring& tool);
+    void addMenu(POINT point);
+    void layout();
+    void paint();
+    std::vector<RECT> bounds() const;
+    HWND window_ = nullptr, rename_ = nullptr, tooltips_ = nullptr;
+    size_t renaming_ = 0, tools_ = 0;
+    HINSTANCE instance_ = nullptr;
+    Renderer renderer_;
+    UINT dpi_ = 96;
+    int header_ = 32, offset_ = 0;
+    fs::path directory_;
+    std::vector<std::unique_ptr<TerminalSession>> sessions_;
+    size_t active_ = 0;
+    HookServer* hooks_ = nullptr;
+    std::wstring tooltipText_;
+};
+}

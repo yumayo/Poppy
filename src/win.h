@@ -71,6 +71,7 @@ public:
     void complete(std::function<void()> task);
     void dispatch();
     void cancelPending();
+    void drain();
     void stop();
     const std::atomic<bool>* cancellation() const { return &stopping_; }
 private:

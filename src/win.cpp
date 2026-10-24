@@ -165,6 +165,11 @@ void Worker::dispatch() {
     for (auto& task : tasks) task();
 }
 void Worker::cancelPending() { std::lock_guard<std::mutex> lock(mutex_); jobs_.clear(); completions_.clear(); }
+void Worker::drain() {
+    Handle done(CreateEventW(nullptr, TRUE, FALSE, nullptr));
+    submit(L"drain", [event = done.value] { SetEvent(event); });
+    WaitForSingleObject(done.value, INFINITE);
+}
 void Worker::stop() {
     { std::lock_guard<std::mutex> lock(mutex_); stopping_ = true; jobs_.clear(); completions_.clear(); }
     condition_.notify_one();
