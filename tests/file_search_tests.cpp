@@ -33,36 +33,73 @@ void traversal() {
     Fixture fixture;
     fixture.file("src/app.cpp"); fixture.file("app/other.cpp"); fixture.file("untracked.txt");
     fixture.file(u8"資料/日本語.txt"); fixture.file(".git/objects/hidden.txt"); fixture.file("nested/.git/hidden.txt");
-    auto result = searchFiles(fixture.root, "");
+    const auto index = indexFiles(fixture.root);
+    check(index.error.empty() && index.files.size() == 4, "Startup file list did not collect every file");
+    auto result = searchFiles(index, "");
     check(result.error.empty() && result.matches.size() == 4, "Traversal omitted files, included directories, or entered .git");
-    result = searchFiles(fixture.root, "app");
+    result = searchFiles(index, "app");
     check(result.matches.size() == 2 && result.matches.front().relative.generic_u8string() == "src/app.cpp", "Search did not rank filename matches first");
-    result = searchFiles(fixture.root, u8"日本");
+    result = searchFiles(index, u8"日本");
     check(result.matches.size() == 1 && result.matches[0].relative.generic_u8string() == u8"資料/日本語.txt", "Traversal lost Unicode paths");
-    fixture.file("new-file.txt");
-    check(searchFiles(fixture.root, "new-file").matches.size() == 1, "A later search did not discover newly added files");
-    fs::remove(fixture.root / "new-file.txt");
-    check(searchFiles(fixture.root, "new-file").matches.empty(), "A later search retained deleted files");
     std::error_code error;
     fs::create_directory_symlink(fixture.root, fixture.root / "loop", error);
-    if (!error) check(searchFiles(fixture.root, "").matches.size() == 4, "Traversal followed a directory symlink");
-    check(!searchFiles(fixture.root / "missing", "").error.empty(), "An inaccessible root did not report an error");
+    if (!error) check(indexFiles(fixture.root).files.size() == 4, "Traversal followed a directory symlink");
+    check(!indexFiles(fixture.root / "missing").error.empty(), "An inaccessible root did not report an error");
+}
+void cachedFilteringAndRefresh() {
+    Fixture fixture;
+    fixture.file("old-file.txt"); fixture.file(u8"資料/日本語.txt");
+    const auto initial = indexFiles(fixture.root);
+    fixture.file("new-file.txt"); fs::remove(fixture.root / "old-file.txt");
+    check(searchFiles(initial, "new-file").matches.empty(), "Typing performed an unexpected directory scan");
+    check(searchFiles(initial, "old-file").matches.size() == 1, "Typing did not use the cached snapshot");
+    const auto updated = indexFiles(fixture.root);
+    check(searchFiles(updated, "new-file").matches.size() == 1 && searchFiles(updated, "old-file").matches.empty(), "Reindexing did not apply additions and deletions");
+    fs::remove_all(fixture.root);
+    check(searchFiles(initial, u8"日本").matches.size() == 1 && searchFiles(updated, "new-file").matches.size() == 1,
+        "Filtering accessed the filesystem after the file list was collected");
 }
 void limitsAndCancellation() {
     Fixture fixture;
     for (const auto* name : {"z.txt", "a.txt", "m.txt", "b.txt"}) fixture.file(name);
-    const auto limited = searchFiles(fixture.root, "txt", {}, 2);
-    check(limited.matches.size() == 2 && limited.resultsLimited && !limited.scanLimited, "Result limit was not reported");
+    const auto index = indexFiles(fixture.root);
+    const auto limited = searchFiles(index, "txt", {}, 2);
+    check(limited.matches.size() == 2 && limited.resultsLimited, "Result limit was not reported");
     check(limited.matches[0].relative == "a.txt" && limited.matches[1].relative == "b.txt", "The bounded result list did not retain the best matches");
-    const auto scanned = searchFiles(fixture.root, "", {}, 100, 2);
-    check(scanned.scanLimited && scanned.matches.size() == 2, "Traversal exceeded its scan limit");
     size_t visited = 0;
-    const auto cancelled = searchFiles(fixture.root, "", [&] { return ++visited == 3; });
+    const auto cancelled = searchFiles(index, "txt", [&] { return ++visited == 3; });
     check(visited == 3 && cancelled.matches.empty(), "Cancelled searches retained stale results or continued scanning");
-    check(searchFiles(fixture.root, "", {}, 0).matches.empty(), "Zero result limit was ignored");
+    visited = 0;
+    check(indexFiles(fixture.root, [&] { return ++visited == 3; }).files.empty() && visited == 3,
+        "Cancelled indexing retained a partial list or continued scanning");
+    check(searchFiles(index, "", {}, 0).matches.empty(), "Zero result limit was ignored");
+    const auto empty = searchFiles(index, "", {}, 2);
+    check(empty.matches.size() == 2 && empty.resultsLimited && empty.matches[0].relative == "a.txt", "Empty query did not return the first cached files");
+    FileIndex ranked;
+    ranked.files = {{"a/needle-other.txt", U"a/needle-other.txt"}, {"z/needle.txt", U"z/needle.txt"}};
+    const auto best = searchFiles(ranked, "needle.txt", {}, 1);
+    check(best.matches.size() == 1 && best.matches[0].relative.generic_u8string() == "z/needle.txt" && best.resultsLimited,
+        "A later exact match did not replace a weaker match in the bounded heap");
+}
+void completeFileList() {
+    Fixture fixture;
+    // Collect more than the displayed candidate limit, including deep folders.
+    for (int i = 0; i < 125; ++i) fixture.file("file-" + std::to_string(i) + ".txt");
+    std::string deep;
+    for (int i = 0; i < 65; ++i) deep += "a/";
+    fixture.file(deep + "deep.txt");
+    auto index = indexFiles(fixture.root);
+    check(index.files.size() == 126 && searchFiles(index, "deep.txt").matches.size() == 1,
+        "Indexing stopped at the result limit or the old directory depth limit");
+    // In-memory filtering must include files beyond the old 50,000-entry cap.
+    index.files.assign(60000, {"a.txt", U"a.txt"});
+    index.files.push_back({"z-last.txt", U"z-last.txt"});
+    const auto last = searchFiles(index, "z-last");
+    check(last.matches.size() == 1 && last.matches[0].relative == "z-last.txt", "Filtering stopped at 50,000 entries");
+    check(searchFiles(index, "").matches.size() == 100, "The display limit should not limit the cached file list");
 }
 }
 int main() {
-    try { matching(); traversal(); limitsAndCancellation(); std::cout << "File search tests passed.\n"; return 0; }
+    try { matching(); traversal(); cachedFilteringAndRefresh(); limitsAndCancellation(); completeFileList(); std::cout << "File search tests passed.\n"; return 0; }
     catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
 }

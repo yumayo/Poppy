@@ -218,7 +218,7 @@ private:
     Handle watchDirectory_, watchEvent_;
     OVERLAPPED watchOperation_{};
     alignas(DWORD) std::array<BYTE, 64 * 1024> watchBuffer_{};
-    bool watchPending_ = false, dirty_ = false, fileDirty_ = false;
+    bool watchPending_ = false, dirty_ = false, fileDirty_ = false, filesDirty_ = false;
     ULONGLONG dirtySince_ = 0, lastEvent_ = 0;
 };
 int App::run(HINSTANCE instance, int show, fs::path initial) {
@@ -262,7 +262,7 @@ int App::run(HINSTANCE instance, int show, fs::path initial) {
         const bool key = msg.message == WM_KEYDOWN;
         const bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
         const bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
-        if (key && ctrl && !shift && !(GetKeyState(VK_MENU) & 0x8000) && msg.wParam == 'P') { quickOpen_.show(root_); continue; }
+        if (key && ctrl && !shift && !(GetKeyState(VK_MENU) & 0x8000) && msg.wParam == 'P') { quickOpen_.show(); continue; }
         if (key && ctrl && msg.wParam == 'O') { quickOpen_.close(); chooseFolder(); continue; }
         if (quickOpen_.visible() && key) { TranslateMessage(&msg); DispatchMessageW(&msg); continue; }
         if (key && ctrl && shift && msg.wParam == 'E') { selectSidebar(Sidebar::Explorer); continue; }
@@ -512,7 +512,7 @@ void App::openFolder(fs::path path) {
     rootItem_ = insert(0, {root_, true, false});
     if (expandedPaths_.count(pathKey(root_))) requestDirectory(rootItem_);
     if (pathKey(pendingTreeSelection_) == pathKey(root_)) { explorer_.select(rootItem_, false); pendingTreeSelection_.clear(); }
-    terminal_.setDirectory(root_); watch(); refreshGit();
+    terminal_.setDirectory(root_); watch(); quickOpen_.setRoot(root_); refreshGit();
     SetWindowTextW(window_, (L"Poppy — " + root_.native()).c_str()); status(L"F5: refresh  ·  F6: diff  ·  Ctrl+`: terminal"); InvalidateRect(window_, nullptr, FALSE);
     if (!tabs_.empty()) loadTab();
 }
@@ -780,7 +780,8 @@ void App::refreshGit() {
 }
 void App::refresh(bool force) {
     if (root_.empty()) return;
-    quickOpen_.refresh();
+    if (force || filesDirty_) quickOpen_.refresh();
+    filesDirty_ = false;
     for (const auto& pair : nodes_) { const auto n = node(pair.second); if (n && n->expandRequested) requestDirectory(pair.second); }
     refreshGit();
     if (!tabs_.empty() && (force || fileDirty_)) { saveTab(); loadTab(true); }
@@ -802,12 +803,14 @@ void App::pollWatch() {
     const auto now = GetTickCount64();
     if (watchPending_ && WaitForSingleObject(watchEvent_.value, 0) == WAIT_OBJECT_0) {
         DWORD bytes = 0; const bool ok = GetOverlappedResult(watchDirectory_.value, &watchOperation_, &bytes, FALSE) != FALSE;
-        bool relevant = !ok || !bytes; if (!bytes) fileDirty_ = true;
+        bool relevant = !ok || !bytes;
+        if (relevant) fileDirty_ = filesDirty_ = true;
         for (size_t offset = 0; ok && offset + sizeof(FILE_NOTIFY_INFORMATION) <= bytes;) {
             const auto info = reinterpret_cast<const FILE_NOTIFY_INFORMATION*>(watchBuffer_.data() + offset);
             const std::wstring name(info->FileName, info->FileNameLength / sizeof(wchar_t));
             const bool gitNoise = name.rfind(L".git\\", 0) == 0 && name != L".git\\HEAD" && name != L".git\\index" && name.rfind(L".git\\refs\\", 0) != 0;
             if (!gitNoise) relevant = true;
+            if (!gitNoise && info->Action != FILE_ACTION_MODIFIED) filesDirty_ = true;
             if (!tabs_.empty()) {
                 const auto changed = pathKey(root_ / name), selected = pathKey(selectedPath());
                 if (changed == selected || selected.rfind(changed + L"\\", 0) == 0) fileDirty_ = true;
@@ -823,7 +826,7 @@ void App::pollWatch() {
 void App::stopWatch() {
     KillTimer(window_, timerId);
     if (watchDirectory_ && watchPending_) { CancelIoEx(watchDirectory_.value, &watchOperation_); DWORD bytes = 0; GetOverlappedResult(watchDirectory_.value, &watchOperation_, &bytes, TRUE); }
-    watchDirectory_.reset(); watchEvent_.reset(); watchPending_ = dirty_ = fileDirty_ = false;
+    watchDirectory_.reset(); watchEvent_.reset(); watchPending_ = dirty_ = fileDirty_ = filesDirty_ = false;
 }
 void App::toggleTerminal() {
     terminalVisible_ = !terminalVisible_; layout(); SetFocus(terminalVisible_ ? terminal_.window() : viewer_.window());
@@ -849,7 +852,7 @@ LRESULT App::handle(UINT m, WPARAM a, LPARAM b) {
         const int x = MulDiv(GET_X_LPARAM(b), 96, dpi_), y = GET_Y_LPARAM(b);
         if (y < toolbar_) {
             if (x >= 98 && x < 210) chooseFolder(); else if (x >= 220 && x < 292) refresh(); else if (x >= 305 && x < 360) showDiff(); else if (x >= 374 && x < 460) toggleTerminal();
-            else if (x >= 480 && x < 566) quickOpen_.show(root_);
+            else if (x >= 480 && x < 566) quickOpen_.show();
             return 0;
         }
         const POINT point{GET_X_LPARAM(b), y};
