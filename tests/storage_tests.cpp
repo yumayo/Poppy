@@ -33,11 +33,14 @@ bool same(const poppy::ViewState& a, const poppy::ViewState& b) {
 }
 bool same(const poppy::ProjectSession& a, const poppy::ProjectSession& b) {
     if (a.sidebar != b.sidebar || a.terminalHeight != b.terminalHeight || a.terminalVisible != b.terminalVisible ||
-        a.gitSidebar != b.gitSidebar || a.diffInline != b.diffInline || a.gitTree != b.gitTree || a.activeTab != b.activeTab || a.expanded != b.expanded || a.selected != b.selected || a.tabs.size() != b.tabs.size()) return false;
+        a.gitSidebar != b.gitSidebar || a.diffInline != b.diffInline || a.gitTree != b.gitTree || a.activeTab != b.activeTab || a.expanded != b.expanded || a.selected != b.selected || a.tabs.size() != b.tabs.size() || a.explorerTop != b.explorerTop || a.explorerLeft != b.explorerLeft ||
+        a.gitTop != b.gitTop || a.gitLeft != b.gitLeft || a.firstTabRow != b.firstTabRow || a.gitSelected != b.gitSelected ||
+        a.focusedPane != b.focusedPane || a.activeTerminal != b.activeTerminal || a.collapsedGit != b.collapsedGit || a.terminals.size() != b.terminals.size()) return false;
     for (size_t i = 0; i < a.tabs.size(); ++i) {
         const auto& x = a.tabs[i]; const auto& y = b.tabs[i];
         if (x.path != y.path || x.diff != y.diff || x.pinned != y.pinned || !same(x.fileView, y.fileView) || !same(x.diffView, y.diffView)) return false;
     }
+    for (size_t i = 0; i < a.terminals.size(); ++i) { const auto& x = a.terminals[i]; const auto& y = b.terminals[i]; if (x.id != y.id || x.name != y.name || x.directory != y.directory) return false; }
     return true;
 }
 void roundTripAndIsolation() {
@@ -47,12 +50,15 @@ void roundTripAndIsolation() {
     poppy::ProjectSession state;
     state.sidebar = 333; state.terminalHeight = 222; state.terminalVisible = false; state.gitSidebar = true; state.activeTab = 1;
     state.diffInline = true; state.gitTree = true;
+    state.explorerTop = 13; state.explorerLeft = 7; state.gitTop = 3; state.gitLeft = 4; state.firstTabRow = 2;
+    state.gitSelected = "src/日本語"; state.collapsedGit = {"docs", "src/nested"}; state.focusedPane = "terminal";
+    state.terminals = {{"codex", "Codex", path}, {"claude", "Claude Code", path}, {"shell", "確認用", path}}; state.activeTerminal = "claude";
     state.tabs = {{path + "\\日本語's file.cpp", false, {42, 17, 30, 50, false}, {20, 3, 2, 11, true}},
                   {path + "\\deleted.cpp", true, {5, 2, 1, 7, false}, {50, 4, 6, 14, true}}};
     state.tabs[0].pinned = true;
     state.expanded = {path, path + "\\src", path + "\\src\\日本語"}; state.selected = state.tabs.front().path;
     poppy::AppSession app;
-    app.lastProject = path; app.x = -1500; app.y = 120; app.width = 1200; app.height = 800; app.positioned = true; app.maximized = true;
+    app.lastProject = path; app.openProjects = {path, "D:\\other"}; app.openProjectKeys = {key, "d:\\other"}; app.projectListWidth = 233; app.x = -1500; app.y = 120; app.width = 1200; app.height = 800; app.positioned = true; app.maximized = true;
     fs::path projectDirectory;
     {
         poppy::Storage storage(fixture.directory);
@@ -67,7 +73,7 @@ void roundTripAndIsolation() {
         poppy::Storage storage(fixture.directory);
         const auto savedApp = storage.loadApp();
         check(savedApp.lastProject == app.lastProject && savedApp.x == app.x && savedApp.y == app.y && savedApp.width == app.width &&
-              savedApp.height == app.height && savedApp.positioned && savedApp.maximized, "App state did not survive reopening");
+              savedApp.height == app.height && savedApp.openProjects == app.openProjects && savedApp.openProjectKeys == app.openProjectKeys && savedApp.projectListWidth == app.projectListWidth && savedApp.positioned && savedApp.maximized, "App state did not survive reopening");
         auto saved = storage.loadProject(key, path);
         check(saved && same(*saved, state), "Project state did not survive reopening");
         const std::string a = "d:\\a.b", b = "d:\\a-b";
@@ -151,8 +157,9 @@ void migrateGitLayout() {
     original.expanded = {key}; original.selected = key;
     storage.saveProject(key, key, original);
     execute(storage.projectDirectory(key, key) / "storage.sql",
-        "ALTER TABLE session DROP COLUMN git_tree; ALTER TABLE tabs DROP COLUMN pinned; PRAGMA user_version=2;");
+        "DROP TABLE view_state; DROP TABLE terminals; DROP TABLE git_collapsed; ALTER TABLE session DROP COLUMN git_tree; ALTER TABLE tabs DROP COLUMN pinned; PRAGMA user_version=2;");
     const auto saved = storage.loadProject(key, key);
+    original.terminals[0].directory = key;
     check(saved && same(*saved, original), "Migrating version 2 changed existing project state");
     auto changed = *saved; changed.gitTree = true;
     storage.saveProject(key, key, changed);
@@ -168,8 +175,9 @@ void migratePinnedTabs() {
                      {key + "\\second.cpp", true, {}, {12, 3, 4, 5, true}}};
     storage.saveProject(key, key, original);
     execute(storage.projectDirectory(key, key) / "storage.sql",
-        "ALTER TABLE tabs DROP COLUMN pinned; PRAGMA user_version=3;");
+        "DROP TABLE view_state; DROP TABLE terminals; DROP TABLE git_collapsed; ALTER TABLE tabs DROP COLUMN pinned; PRAGMA user_version=3;");
     const auto saved = storage.loadProject(key, key);
+    original.terminals[0].directory = key;
     check(saved && same(*saved, original), "Migrating version 3 changed existing tabs or pinned them");
     auto changed = *saved; changed.tabs[0].pinned = true;
     storage.saveProject(key, key, changed);
@@ -178,25 +186,50 @@ void migratePinnedTabs() {
     storage.saveProject(key, key, changed);
     check(same(*storage.loadProject(key, key), original), "Unpinning a tab was not saved");
 }
+void migrateWorkspaceAndTerminals() {
+    Fixture fixture;
+    const auto appDb = fixture.directory / "storage.sql";
+    execute(appDb,
+        "CREATE TABLE projects(path_key TEXT PRIMARY KEY,path TEXT NOT NULL,directory TEXT NOT NULL UNIQUE);"
+        "CREATE TABLE app(id INTEGER PRIMARY KEY,last_project TEXT NOT NULL,x INTEGER NOT NULL,y INTEGER NOT NULL,width INTEGER NOT NULL,height INTEGER NOT NULL,positioned INTEGER NOT NULL,maximized INTEGER NOT NULL);"
+        "INSERT INTO app VALUES(1,'C:\\selected',20,30,1200,800,1,0);"
+        "INSERT INTO projects VALUES('c:\\recent','C:\\recent','-c-recent'); PRAGMA user_version=1;");
+    poppy::Storage storage(fixture.directory);
+    const auto app = storage.loadApp();
+    check(app.openProjects == std::vector<std::string>{"C:\\selected"} && app.projectListWidth == 180 && app.x == 20, "App migration opened recent projects or lost placement");
+    const std::string key = "c:\\terminals";
+    poppy::ProjectSession original;
+    original.terminalHeight = 333; original.terminalVisible = false;
+    storage.saveProject(key, key, original);
+    execute(storage.projectDirectory(key,key)/"storage.sql", "DROP TABLE view_state; DROP TABLE terminals; DROP TABLE git_collapsed; PRAGMA user_version=4;");
+    auto saved = storage.loadProject(key,key);
+    check(saved && saved->terminals.size() == 1 && saved->terminals[0].directory == key && saved->terminalHeight == 333 && !saved->terminalVisible, "Version 4 migration did not preserve terminal layout");
+    auto changed = *saved; changed.terminals.push_back(changed.terminals.front());
+    rejects([&]{storage.saveProject(key,key,changed);}, "Duplicate terminal IDs accepted");
+    check(same(*storage.loadProject(key,key),*saved), "Failed terminal save changed prior state");
+    auto duplicate = app; duplicate.openProjects.push_back(app.openProjects.front());
+    rejects([&]{storage.saveApp(duplicate);}, "Duplicate open projects accepted");
+    check(storage.loadApp().openProjects == app.openProjects, "Failed app save changed the open list");
+}
 void schemaAndRegistry() {
     Fixture fixture;
     const auto appDb = fixture.directory / "storage.sql";
     {
         poppy::Storage storage(fixture.directory);
         const auto projectDb = storage.projectDirectory("c:\\future", "c:\\future") / "storage.sql";
-        execute(projectDb, "PRAGMA user_version=5");
+        execute(projectDb, "PRAGMA user_version=6");
         rejects([&] { storage.loadProject("c:\\future", "c:\\future"); }, "A newer project schema was overwritten");
         storage.projectDirectory("c:\\invalid", "c:\\invalid");
         execute(appDb, R"(UPDATE projects SET directory='../../escape' WHERE path_key='c:\invalid')");
         rejects([&] { storage.projectDirectory("c:\\invalid", "c:\\invalid"); }, "An invalid registry path escaped the project directory");
     }
-    execute(appDb, "PRAGMA user_version=2");
+    execute(appDb, "PRAGMA user_version=3");
     rejects([&] { poppy::Storage storage(fixture.directory); }, "A newer app schema was overwritten");
 }
 }
 int main() {
     try {
-        roundTripAndIsolation(); atomicSave(); migrateProjectLayout(); migrateGitLayout(); migratePinnedTabs(); schemaAndRegistry();
+        roundTripAndIsolation(); atomicSave(); migrateProjectLayout(); migrateGitLayout(); migratePinnedTabs(); migrateWorkspaceAndTerminals(); schemaAndRegistry();
         std::cout << "Storage tests passed\n";
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
 }

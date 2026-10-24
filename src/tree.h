@@ -29,6 +29,9 @@ public:
     void select(TreeItem id, bool activate = true);
     TreeItem child(TreeItem parent = 0) const { return model_.child(parent); }
     TreeItem next(TreeItem id) const { return model_.next(id); }
+    int top() const { return top_; }
+    int left() const { return MulDiv(left_, 96, dpi_); }
+    void restoreScroll(int top, int left) { top_ = top; left_ = MulDiv(left, dpi_, 96); changed(); }
     TreeItem selection() const { return model_.selection(); }
     std::function<void(TreeItem)> activated;
     std::function<void(TreeItem, bool)> expanded;

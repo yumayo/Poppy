@@ -18,6 +18,7 @@ public:
     void message(const std::wstring& text, const fs::path& path = {});
     State state() const;
     void restore(const State& state);
+    size_t documentBytes() const;
     bool hasDocument() const { return document_ != nullptr; }
     HWND window() const { return window_; }
 private:

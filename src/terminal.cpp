@@ -1,10 +1,29 @@
 #include "terminal.h"
 #include <imm.h>
 #include <algorithm>
+#include <map>
+#include <stdexcept>
 
 namespace poppy {
-Terminal::~Terminal() { stop(); }
+namespace {
+std::vector<Terminal*> liveTerminals;
+size_t nextTerminal = 0;
+}
+Terminal::~Terminal() {
+    stop();
+    liveTerminals.erase(std::remove(liveTerminals.begin(), liveTerminals.end(), this), liveTerminals.end());
+}
+void Terminal::trackContainer(const std::string& id) {
+    const auto prefix = L"Local\\Poppy." + wide(id);
+    stopRequest_.reset(CreateEventW(nullptr, TRUE, FALSE, (prefix+L".stop").c_str()));
+    launching_.reset(CreateEventW(nullptr, TRUE, FALSE, (prefix+L".launching").c_str()));
+    cleaned_.reset(CreateEventW(nullptr, TRUE, FALSE, (prefix+L".cleaned").c_str()));
+    unconfirmed_.reset(CreateEventW(nullptr, TRUE, FALSE, (prefix+L".unconfirmed").c_str()));
+    if (!stopRequest_ || !launching_ || !cleaned_ || !unconfirmed_) throw std::runtime_error("Cannot create container lifecycle events");
+}
+
 void Terminal::create(HWND parent, HINSTANCE instance) {
+    liveTerminals.push_back(this);
     WNDCLASSW cls{}; cls.lpfnWndProc = procedure; cls.hInstance = instance; cls.lpszClassName = L"PoppyTerminal"; cls.hCursor = LoadCursorW(nullptr, IDC_IBEAM); RegisterClassW(&cls);
     window_ = CreateWindowExW(0, cls.lpszClassName, L"AI terminal", WS_CHILD | WS_VISIBLE | WS_TABSTOP, 0, 0, 0, 0, parent, nullptr, instance, this);
     model_.reply = [this](std::string response) { send(std::move(response)); };
@@ -20,7 +39,11 @@ void Terminal::setDirectory(const fs::path& directory) {
 }
 bool Terminal::start() {
     if (running()) return true;
-    stop(); error_.clear(); model_ = TerminalModel(model_.columns(), model_.rows()); model_.reply = [this](std::string s) { send(std::move(s)); };
+    stop();
+    std::error_code directoryError;
+    if (directory_.empty() || !fs::is_directory(directory_, directoryError)) { error_ = L"Project folder is missing. Restore the folder before starting a shell."; return false; }
+    if (starting) starting();
+    error_.clear(); model_ = TerminalModel(model_.columns(), model_.rows()); model_.reply = [this](std::string s) { send(std::move(s)); };
     scroll_ = 0; anchor_ = caret_ = -1;
     HANDLE read = nullptr, write = nullptr;
     if (!CreatePipe(&read, &write, nullptr, 0)) { error_ = winError(); return false; }
@@ -50,12 +73,34 @@ bool Terminal::start() {
     if (!UpdateProcThreadAttribute(attributes, 0, PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, console_, sizeof(console_), nullptr, nullptr)) { error_ = winError(); DeleteProcThreadAttributeList(attributes); stop(); return false; }
     STARTUPINFOEXW si{}; si.StartupInfo.cb = sizeof(si); si.lpAttributeList = attributes;
     wchar_t system[MAX_PATH]{}; GetSystemDirectoryW(system, MAX_PATH);
-    const std::wstring shell = std::wstring(system) + L"\\WindowsPowerShell\\v1.0\\powershell.exe";
+    const std::wstring shell = !command_.empty() ? command_.front() : std::wstring(system) + L"\\WindowsPowerShell\\v1.0\\powershell.exe";
     std::wstring command = quoteArg(shell) + L" -NoLogo -NoProfile -NoExit -Command \"[Console]::InputEncoding = [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new()\"";
+    if (!command_.empty()) { command.clear(); for (const auto& arg : command_) { if (!command.empty()) command += L' '; command += quoteArg(arg); } }
     job_.reset(CreateJobObjectW(nullptr, nullptr)); JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{}; limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
     if (!job_ || !SetInformationJobObject(job_.value, JobObjectExtendedLimitInformation, &limits, sizeof(limits))) { error_ = winError(); DeleteProcThreadAttributeList(attributes); stop(); return false; }
     PROCESS_INFORMATION pi{};
-    const BOOL ok = CreateProcessW(shell.c_str(), command.data(), nullptr, nullptr, FALSE, CREATE_SUSPENDED | EXTENDED_STARTUPINFO_PRESENT, nullptr, directory_.empty() ? nullptr : directory_.c_str(), &si.StartupInfo, &pi);
+    struct Less { bool operator()(const std::wstring& a, const std::wstring& b) const { return CompareStringOrdinal(a.c_str(), -1, b.c_str(), -1, TRUE) == CSTR_LESS_THAN; } };
+    std::map<std::wstring, std::wstring, Less> inherited;
+    if (auto block = GetEnvironmentStringsW()) {
+        for (auto entry = block; *entry; entry += wcslen(entry)+1) {
+            const std::wstring value(entry); const auto split = value.find(L'=', value.front() == L'=' ? 1 : 0);
+            if (split != std::wstring::npos) inherited[value.substr(0,split)] = value.substr(split+1);
+        }
+        FreeEnvironmentStringsW(block);
+    }
+    for (const auto& value : environment_) inherited[value.first] = value.second;
+    if (!environment_.empty()) {
+        auto& wslenv = inherited[L"WSLENV"];
+        for (const auto name : {L"WPF_TASKBAR_URL", L"WPF_TASKBAR_SESSION_ID"}) {
+            bool found = false;
+            for (size_t p = 0; p < wslenv.size();) { const auto end = wslenv.find(L':', p); const auto token = wslenv.substr(p, end == std::wstring::npos ? end : end-p); if (token.substr(0,token.find(L'/')) == name) found = true; if (end == std::wstring::npos) break; p = end+1; }
+            if (!found) { if (!wslenv.empty()) wslenv += L':'; wslenv += name; }
+        }
+    }
+    std::vector<wchar_t> environment;
+    for (const auto& value : inherited) { const auto entry = value.first + L"=" + value.second; environment.insert(environment.end(),entry.begin(),entry.end()); environment.push_back(0); }
+    environment.push_back(0);
+    const BOOL ok = CreateProcessW(shell.c_str(), command.data(), nullptr, nullptr, FALSE, CREATE_UNICODE_ENVIRONMENT | CREATE_SUSPENDED | EXTENDED_STARTUPINFO_PRESENT, environment.data(), directory_.empty() ? nullptr : directory_.c_str(), &si.StartupInfo, &pi);
     const DWORD error = ok ? 0 : GetLastError(); DeleteProcThreadAttributeList(attributes);
     if (!ok) { error_ = winError(error); stop(); return false; }
     process_.reset(pi.hProcess); Handle thread(pi.hThread);
@@ -78,6 +123,14 @@ bool Terminal::start() {
     ResumeThread(thread.value); started_ = true; InvalidateRect(window_, nullptr, FALSE); return true;
 }
 void Terminal::stop() {
+    bool unknownCleanup = cleanupUnconfirmed();
+    if (launching_ && WaitForSingleObject(launching_.value, 0) == WAIT_OBJECT_0) {
+        SetEvent(stopRequest_.value);
+        unknownCleanup = WaitForSingleObject(cleaned_.value, 15000) != WAIT_OBJECT_0;
+    }
+    if (unknownCleanup && window_) MessageBoxW(GetAncestor(window_, GA_ROOT), L"Container cleanup could not be confirmed. The launch profile is retained under .poppy-runtime. Check the host launcher's output before removing its resources.", L"Poppy — cleanup unconfirmed", MB_OK | MB_ICONWARNING);
+    stopRequest_.reset(); launching_.reset(); cleaned_.reset(); unconfirmed_.reset();
+    if (ended) ended();
     if (window_) KillTimer(window_, 2);
     stopping_ = true; condition_.notify_all();
     if (job_) TerminateJobObject(job_.value, 0);
@@ -98,7 +151,6 @@ void Terminal::send(std::string text) {
     condition_.notify_all(); scroll_ = 0; anchor_ = caret_ = -1; InvalidateRect(window_, nullptr, FALSE);
 }
 void Terminal::receive() {
-    KillTimer(window_, 2);
     std::string text;
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -109,14 +161,32 @@ void Terminal::receive() {
         notified_ = count != 0;
     }
     condition_.notify_all();
-    if (text.empty()) { InvalidateRect(window_, nullptr, FALSE); return; }
+    if (text.empty()) { if (started_ && !running() && ended) ended(); if (IsWindowVisible(window_)) InvalidateRect(window_, nullptr, FALSE); return; }
     model_.feed(text); scroll_ = std::min(scroll_, model_.historySize());
-    SetTimer(window_, 2, 16, nullptr);
-    imePosition(); InvalidateRect(window_, nullptr, FALSE);
+    if (!running() && ended) ended();
+    if (IsWindowVisible(window_)) { imePosition(); InvalidateRect(window_, nullptr, FALSE); }
+}
+void Terminal::pump() {
+    static LONGLONG cycleStart = 0, spent = 0;
+    LARGE_INTEGER now{}, frequency{}; QueryPerformanceCounter(&now); QueryPerformanceFrequency(&frequency);
+    if (now.QuadPart - cycleStart >= frequency.QuadPart / 60) { cycleStart = now.QuadPart; spent = 0; }
+    HWND root = nullptr;
+    for (size_t visited = 0; visited < liveTerminals.size() && spent < frequency.QuadPart / 200; ++visited) {
+        if (nextTerminal >= liveTerminals.size()) nextTerminal = 0;
+        auto terminal = liveTerminals[nextTerminal++];
+        if (!terminal->window_) continue;
+        root = GetAncestor(terminal->window_, GA_ROOT);
+        LARGE_INTEGER begin{}, end{}; QueryPerformanceCounter(&begin);
+        terminal->receive(); QueryPerformanceCounter(&end); spent += end.QuadPart - begin.QuadPart;
+    }
+    bool pending = false;
+    for (const auto terminal : liveTerminals) { std::lock_guard<std::mutex> lock(terminal->mutex_); pending |= !terminal->received_.empty() || terminal->notified_; if (terminal->window_) root = GetAncestor(terminal->window_, GA_ROOT); }
+    if (root) { if (pending) SetTimer(root, 77, 16, nullptr); else KillTimer(root, 77); }
 }
 void Terminal::resize() {
     if (!window_) return;
     RECT rect{}; GetClientRect(window_, &rect);
+    if (rect.right < cellWidth_ * 2 || rect.bottom <= header_) return;
     const int columns = std::clamp((static_cast<int>(rect.right) - 12) / cellWidth_, 2, 500);
     const int rows = std::clamp((static_cast<int>(rect.bottom) - header_ - 8) / cellHeight_, 1, 200);
     if (columns == model_.columns() && rows == model_.rows()) return;
@@ -200,11 +270,12 @@ LRESULT CALLBACK Terminal::procedure(HWND w, UINT m, WPARAM a, LPARAM b) {
 }
 LRESULT Terminal::handle(UINT m, WPARAM a, LPARAM b) {
     switch (m) {
+    case WM_NCDESTROY: { const auto result = DefWindowProcW(window_, m, a, b); window_ = nullptr; return result; }
     case WM_PAINT: paint(); return 0;
     case WM_ERASEBKGND: return 1;
     case WM_SIZE: resize(); return 0;
-    case wmTerminal: receive(); return 0;
-    case WM_TIMER: if (a == 2) receive(); return 0;
+    case wmTerminal: pump(); return 0;
+    case WM_TIMER: if (a == 2) pump(); return 0;
     case WM_GETDLGCODE: return DLGC_WANTALLKEYS;
     case WM_SETFOCUS: case WM_KILLFOCUS: InvalidateRect(window_, nullptr, FALSE); return 0;
     case WM_LBUTTONDOWN:
