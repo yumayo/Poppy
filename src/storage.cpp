@@ -109,7 +109,7 @@ void projectSchema(Database& db) {
         " terminal_visible INTEGER NOT NULL, git_sidebar INTEGER NOT NULL, active_tab INTEGER NOT NULL, selected_path TEXT NOT NULL, diff_inline INTEGER NOT NULL, git_tree INTEGER NOT NULL);"
         "CREATE TABLE IF NOT EXISTS tabs (position INTEGER PRIMARY KEY, path TEXT NOT NULL, diff INTEGER NOT NULL,"
         " file_top INTEGER NOT NULL, file_left INTEGER NOT NULL, file_anchor INTEGER NOT NULL, file_caret INTEGER NOT NULL, file_after INTEGER NOT NULL,"
-        " diff_top INTEGER NOT NULL, diff_left INTEGER NOT NULL, diff_anchor INTEGER NOT NULL, diff_caret INTEGER NOT NULL, diff_after INTEGER NOT NULL);"
+        " diff_top INTEGER NOT NULL, diff_left INTEGER NOT NULL, diff_anchor INTEGER NOT NULL, diff_caret INTEGER NOT NULL, diff_after INTEGER NOT NULL, pinned INTEGER NOT NULL);"
         "CREATE TABLE IF NOT EXISTS expanded (path TEXT PRIMARY KEY);", {
         "ALTER TABLE session ADD COLUMN diff_inline INTEGER NOT NULL DEFAULT 0;"
         "UPDATE session SET diff_inline=COALESCE((SELECT diff_inline FROM tabs WHERE diff<>0"
@@ -118,7 +118,8 @@ void projectSchema(Database& db) {
         "UPDATE tabs SET diff_top=0 WHERE diff_inline=0;"
         "ALTER TABLE tabs DROP COLUMN file_inline;"
         "ALTER TABLE tabs DROP COLUMN diff_inline;",
-        "ALTER TABLE session ADD COLUMN git_tree INTEGER NOT NULL DEFAULT 0;"});
+        "ALTER TABLE session ADD COLUMN git_tree INTEGER NOT NULL DEFAULT 0;",
+        "ALTER TABLE tabs ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0;"});
 }
 }
 struct Storage::Impl {
@@ -193,8 +194,8 @@ std::optional<ProjectSession> Storage::loadProject(const std::string& key, const
         state.diffInline = row.number(6) != 0;
         state.gitTree = row.number(7) != 0;
     }
-    Statement tabs(db, "SELECT path,diff,file_top,file_left,file_anchor,file_caret,file_after,diff_top,diff_left,diff_anchor,diff_caret,diff_after FROM tabs ORDER BY position LIMIT 10000");
-    while (tabs.row()) state.tabs.push_back({tabs.text(0), tabs.number(1) != 0, readView(tabs, 2), readView(tabs, 7)});
+    Statement tabs(db, "SELECT path,diff,file_top,file_left,file_anchor,file_caret,file_after,diff_top,diff_left,diff_anchor,diff_caret,diff_after,pinned FROM tabs ORDER BY position LIMIT 10000");
+    while (tabs.row()) state.tabs.push_back({tabs.text(0), tabs.number(1) != 0, readView(tabs, 2), readView(tabs, 7), tabs.number(12) != 0});
     Statement expanded(db, "SELECT path FROM expanded ORDER BY path LIMIT 50000");
     while (expanded.row()) state.expanded.push_back(expanded.text(0));
     return state;
@@ -208,11 +209,11 @@ void Storage::saveProject(const std::string& key, const std::string& path, const
     session.number(1, state.sidebar); session.number(2, state.terminalHeight); session.number(3, state.terminalVisible);
     session.number(4, state.gitSidebar); session.number(5, static_cast<sqlite3_int64>(state.activeTab)); session.text(6, state.selected);
     session.number(7, state.diffInline); session.number(8, state.gitTree); session.run();
-    Statement tab(db, "INSERT INTO tabs VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)");
+    Statement tab(db, "INSERT INTO tabs VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)");
     for (size_t i = 0; i < state.tabs.size(); ++i) {
         const auto& value = state.tabs[i];
         tab.number(1, static_cast<sqlite3_int64>(i)); tab.text(2, value.path); tab.number(3, value.diff);
-        bindView(tab, 4, value.fileView); bindView(tab, 9, value.diffView); tab.run(); tab.reset();
+        bindView(tab, 4, value.fileView); bindView(tab, 9, value.diffView); tab.number(14, value.pinned); tab.run(); tab.reset();
     }
     Statement expanded(db, "INSERT OR IGNORE INTO expanded VALUES(?)");
     for (const auto& value : state.expanded) { expanded.text(1, value); expanded.run(); expanded.reset(); }

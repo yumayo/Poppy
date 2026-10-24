@@ -14,6 +14,7 @@ struct SavedTab {
     std::string path;
     bool diff = false;
     ViewState fileView, diffView;
+    bool pinned = false;
 };
 struct ProjectSession {
     int sidebar = 245, terminalHeight = 260;

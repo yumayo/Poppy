@@ -162,6 +162,23 @@ void clickTab(const Application& app, int visibleIndex, bool middle = false, boo
     const int inset = MulDiv(close ? 14 : 16, GetDpiForWindow(app.window), 96);
     click(app.window, close ? rect.right - inset : rect.left + inset, (rect.top + rect.bottom) / 2, middle);
 }
+void toggleTabPin(const Application& app, int visibleIndex) {
+    const auto rect = tabBounds(app, visibleIndex);
+    POINT point{rect.left + 1, (rect.top + rect.bottom) / 2}; ClientToScreen(app.window, &point);
+    check(PostMessageW(app.window, WM_CONTEXTMENU, reinterpret_cast<WPARAM>(app.window), MAKELPARAM(point.x, point.y)) != FALSE,
+          "Could not open a tab's context menu");
+    const auto menuOpen = [&] {
+        GUITHREADINFO info{}; info.cbSize = sizeof(info);
+        check(GetGUIThreadInfo(app.process.dwThreadId, &info) != FALSE, "Could not read the menu state");
+        return (info.flags & GUI_INMENUMODE) != 0;
+    };
+    waitFor(menuOpen, "The tab context menu did not open");
+    // Select the first item (Pin tab / Unpin tab) through the native menu loop.
+    PostMessageW(app.window, WM_KEYDOWN, VK_HOME, 0);
+    PostMessageW(app.window, WM_KEYDOWN, VK_RETURN, 0);
+    waitFor([&] { return !menuOpen(); }, "The tab context menu did not close");
+    send(app.window, WM_NULL);
+}
 void tabTests(const fs::path& executable) {
     Fixture fixture;
     writeLines(fixture.root / L"a 日本語.txt", 200); writeLines(fixture.root / L"b.txt", 300);
@@ -214,6 +231,54 @@ void tabTests(const fs::path& executable) {
     send(tree, WM_KEYDOWN, VK_RETURN); waitLines(viewer, 300);
     click(app.window, pane.left + px(30), tabY, true);
     check(bounds(app.window, viewer).top == empty.top && scrollInfo(viewer).nMax == 0, "A stale load restored a closed tab");
+}
+void pinnedTabTests(const fs::path& executable) {
+    Fixture fixture;
+    writeLines(fixture.root / L"a.txt", 200); writeLines(fixture.root / L"b.txt", 300); writeLines(fixture.root / L"c.txt", 400);
+    {
+        Application app(executable, fixture.root);
+        const auto tree = app.tree(), viewer = FindWindowExW(app.window, nullptr, L"PoppyViewer", nullptr);
+        waitFor([&] { return send(tree, treeGetCount) == 4; }, "The pinned tab test files did not appear");
+        auto item = nextItem(tree, TreeRelation::Child, nextItem(tree, TreeRelation::Root));
+        for (int lines : {200, 300, 400}) {
+            send(tree, treeSelect, item); waitLines(viewer, lines);
+            item = nextItem(tree, TreeRelation::Next, item);
+        }
+        toggleTabPin(app, 1);
+        check(scrollInfo(viewer).nMax == 400, "Pinning an inactive tab changed the active file");
+        clickTab(app, 0); waitLines(viewer, 300);
+        clickTab(app, 0, true);
+        check(visibleTabCount(app) == 3 && scrollInfo(viewer).nMax == 300, "Middle-click closed a pinned tab");
+        clickTab(app, 0, false, true);
+        check(visibleTabCount(app) == 3 && scrollInfo(viewer).nMax == 300, "A pinned tab retained a close button");
+        toggleTabPin(app, 0);
+        clickTab(app, 0, false, true); waitLines(viewer, 200);
+        check(visibleTabCount(app) == 2, "An unpinned tab could not be closed");
+        toggleTabPin(app, 1);
+        check(scrollInfo(viewer).nMax == 200, "Moving a pinned tab lost the active file");
+        toggleTabPin(app, 1);
+        clickTab(app, 0); waitLines(viewer, 400);
+        clickTab(app, 1); waitLines(viewer, 200);
+        send(viewer, WM_VSCROLL, SB_LINEDOWN);
+        check(scrollInfo(viewer).nPos > 0, "The pinned test tab did not scroll");
+    }
+    {
+        Application app(executable, fixture.root);
+        app.tree();
+        const auto viewer = FindWindowExW(app.window, nullptr, L"PoppyViewer", nullptr);
+        waitLines(viewer, 200);
+        check(scrollInfo(viewer).nPos > 0, "Restart lost a pinned tab's scroll position");
+        clickTab(app, 0, true); clickTab(app, 1, true);
+        check(visibleTabCount(app) == 2, "Restart lost pinned tab protection");
+        clickTab(app, 0); waitLines(viewer, 400);
+        clickTab(app, 1); waitLines(viewer, 200);
+        toggleTabPin(app, 0);
+        check(scrollInfo(viewer).nMax == 200, "Unpinning an inactive tab changed the active file");
+        clickTab(app, 1, true);
+        check(visibleTabCount(app) == 1 && scrollInfo(viewer).nMax == 200, "Closing an unpinned neighbor changed the pinned file");
+        toggleTabPin(app, 0); clickTab(app, 0, true);
+        check(visibleTabCount(app) == 0 && scrollInfo(viewer).nMax == 0, "The final unpinned tab could not be closed");
+    }
 }
 void wrappingTabTests(const fs::path& executable) {
     Fixture fixture;
@@ -675,6 +740,7 @@ int wmain(int argc, wchar_t** argv) {
         sidebarTests(fs::absolute(argv[1]));
         treeInteractionTests(fs::absolute(argv[1]));
         tabTests(fs::absolute(argv[1]));
+        pinnedTabTests(fs::absolute(argv[1]));
         wrappingTabTests(fs::absolute(argv[1]));
         quickOpenTests(fs::absolute(argv[1]));
         gitSidebarTests(fs::absolute(argv[1]));
