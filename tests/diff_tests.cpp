@@ -54,6 +54,38 @@ void additionsAndDeletions() {
     check(removed.selectedText(false, 0, removed.patch.text.size()) == "+++ literal\n@@ source",
         "Copy must preserve a missing final newline and source text resembling metadata");
     check(removed.selectedText(true, 0, removed.patch.text.size()).empty(), "An empty side must copy no text");
+    check(added.rowCount(true) == 3 && removed.rowCount(true) == 2,
+        "Inline additions and deletions must omit empty alignment cells");
+}
+void inlineLayout() {
+    const auto diff = parse("@@ -10,4 +20,5 @@\n context\n-old1\n-old2\n+new1\n+new2\n+new3\n tail\n");
+    check(diff.rowCount(false) == 5 && diff.rowCount(true) == 7, "Inline replacements must display both removed and added lines");
+    const std::vector<std::string> expected{"context", "old1", "old2", "new1", "new2", "new3", "tail"};
+    for (size_t i = 0; i < diff.rowCount(true); ++i) {
+        const auto row = diff.displayRow(i, true);
+        const auto source = row.after.number ? row.after : row.before;
+        check(diff.line(source) == expected[i], "Inline changes must list all removals before all additions");
+        if (i == 0 || i == 6) check(!row.changed && row.before.number && row.after.number, "Inline context must retain both line numbers and appear once");
+        else if (i < 3) check(row.changed && row.before.number == 10 + i && !row.after.number, "Inline removals must show only the original line number");
+        else check(row.changed && !row.before.number && row.after.number == 18 + i, "Inline additions must show only the new line number");
+        for (const bool after : {false, true}) {
+            const auto line = after ? row.after : row.before;
+            if (!line.number) continue;
+            check(diff.rowForLine(line, after, true) == i, "Switching to inline must find the same source line");
+            const auto split = diff.displayRow(diff.rowForLine(line, after, false), false);
+            check((after ? split.after : split.before).row == line.row, "Switching to split must find the same source line");
+        }
+    }
+    check(diff.selectedText(false, 0, diff.patch.text.size(), true) == "context\nold1\nold2\nnew1\nnew2\nnew3\ntail\n",
+        "Inline copy must include both kinds of changes and omit metadata and prefixes");
+    const auto oldLine = diff.displayRow(1, true).before, newLine = diff.displayRow(4, true).after;
+    check(diff.selectedText(true, diff.offset(oldLine) + 1, diff.offset(newLine) + 3, true) == "ld1\nold2\nnew1\nnew",
+        "An inline selection may span removed and added text");
+    check(diff.selectedText(false, diff.offset(newLine) + 3, diff.offset(oldLine) + 1, true) == "ld1\nold2\nnew1\nnew",
+        "Backward inline selections must copy the same mixed text");
+    const auto hunks = parse("@@ -1 +1 @@\n-old1\n+new1\n@@ -10 +10 @@\n-old2\n+new2\n");
+    check(hunks.selectedText(false, 0, hunks.patch.text.size(), true) == "old1\nnew1\nold2\nnew2\n",
+        "Inline ordering must preserve separate hunks without context rows");
 }
 void edgeCases() {
     const auto crlf = parse("@@ -2 +2 @@\r\n-\tあ\r\n+\tい\r\n\\ No newline at end of file\r\n");
@@ -64,16 +96,18 @@ void edgeCases() {
     const auto noNewlines = parse("@@ -1 +1 @@\n-old\n\\ No newline at end of file\n+new\n\\ No newline at end of file\n");
     check(noNewlines.rows.size() == 1 && noNewlines.selectedText(false, 0, noNewlines.patch.text.size()) == "old" &&
         noNewlines.selectedText(true, 0, noNewlines.patch.text.size()) == "new", "Newline markers must not split a replacement group");
+    check(noNewlines.selectedText(false, 0, noNewlines.patch.text.size(), true) == "old\nnew",
+        "Inline copy must separate displayed lines even when both sources lack a final newline");
     for (const auto* patch : {"", "diff --git a/a b/b\nold mode 100644\nnew mode 100755\n",
         "diff --git a/a b/b\nBinary files a/a and b/b differ\n", "@@@ -1,1 -1,1 +1,1 @@@\n--old\n++new\n",
         "@@ -4294967296 +1 @@\n-old\n+new\n", "@@ -0 +1 @@\n-old\n+new\n"})
         check(parse(patch).rows.empty(), "Metadata-only, binary and unsupported or invalid hunks must not become source text");
     auto reused = parse("@@ -1 +1 @@\n-a\n+b\n");
     reused.patch.text.clear(); indexDiff(reused);
-    check(reused.rows.empty() && reused.maxColumns == 0, "Reindexing must discard old rows and widths");
+    check(reused.rows.empty() && reused.inlineOrder.empty() && reused.maxColumns == 0, "Reindexing must discard old rows and widths");
 }
 }
 int main() {
-    try { alignment(); additionsAndDeletions(); edgeCases(); std::cout << "Diff tests passed.\n"; return EXIT_SUCCESS; }
+    try { alignment(); additionsAndDeletions(); inlineLayout(); edgeCases(); std::cout << "Diff tests passed.\n"; return EXIT_SUCCESS; }
     catch (const std::exception& error) { std::cerr << error.what() << '\n'; return EXIT_FAILURE; }
 }

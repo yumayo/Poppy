@@ -28,30 +28,57 @@ std::string_view DiffDocument::line(DiffLine source) const {
     return source.number ? patch.line(source.row).substr(1) : std::string_view{};
 }
 size_t DiffDocument::offset(DiffLine source) const { return patch.lines[source.row] + 1; }
-std::string DiffDocument::selectedText(bool after, size_t start, size_t end) const {
+DiffRow DiffDocument::displayRow(size_t index, bool inlineView) const {
+    if (!inlineView) return rows[index];
+    const auto entry = inlineOrder[index];
+    auto row = rows[entry / 2];
+    if (row.changed) {
+        if (entry % 2) row.before = {};
+        else row.after = {};
+    }
+    return row;
+}
+size_t DiffDocument::rowForLine(DiffLine source, bool after, bool inlineView) const {
+    if (!source.number) return 0;
+    for (size_t i = 0; i < rowCount(inlineView); ++i) {
+        const auto row = displayRow(i, inlineView);
+        const auto candidate = after ? row.after : row.before;
+        if (candidate.number && candidate.row == source.row) return i;
+    }
+    return 0;
+}
+std::string DiffDocument::selectedText(bool after, size_t start, size_t end, bool inlineView) const {
     if (start > end) std::swap(start, end);
     std::string result;
-    for (const auto& row : rows) {
-        const auto source = after ? row.after : row.before;
+    bool separate = false;
+    for (size_t i = 0; i < rowCount(inlineView); ++i) {
+        const auto row = displayRow(i, inlineView);
+        const auto source = (inlineView ? row.after.number != 0 : after) ? row.after : row.before;
         if (!source.number) continue;
         const size_t begin = offset(source), length = line(source).size();
         if (end <= begin || start > begin + length) continue;
         const size_t first = std::max(start, begin), last = std::min(end, begin + length);
+        if (inlineView && separate) result += '\n';
         result.append(patch.text, first, last - first);
+        separate = true;
         // A patch's terminating newline also represents an unterminated source
         // line. Git marks that case on the following line.
         const bool terminated = patch.line(source.row + 1) != "\\ No newline at end of file";
-        if (end > begin + length && terminated) result += '\n';
+        if (end > begin + length && terminated) { result += '\n'; separate = false; }
     }
     return result;
 }
 void indexDiff(DiffDocument& d) {
     d.patch.language = Language::Plain; indexDocument(d.patch);
-    d.rows.clear(); d.maxColumns = 0;
+    d.rows.clear(); d.inlineOrder.clear(); d.maxColumns = 0;
     std::vector<DiffLine> removed, added;
     auto flush = [&] {
+        const size_t first = d.rows.size();
         for (size_t i = 0; i < std::max(removed.size(), added.size()); ++i)
             d.rows.push_back({i < removed.size() ? removed[i] : DiffLine{}, i < added.size() ? added[i] : DiffLine{}, true});
+        // Keep every removal before every addition in this replacement block.
+        for (size_t i = 0; i < removed.size(); ++i) d.inlineOrder.push_back(static_cast<uint32_t>((first + i) * 2));
+        for (size_t i = 0; i < added.size(); ++i) d.inlineOrder.push_back(static_cast<uint32_t>((first + i) * 2 + 1));
         removed.clear(); added.clear();
     };
     uint32_t before = 0, beforeCount = 0, after = 0, afterCount = 0;
@@ -67,7 +94,8 @@ void indexDiff(DiffDocument& d) {
         if (text.front() == '-' && beforeCount) { removed.push_back(oldLine); ++before; --beforeCount; }
         else if (text.front() == '+' && afterCount) { added.push_back(newLine); ++after; --afterCount; }
         else if (text.front() == ' ' && beforeCount && afterCount) {
-            flush(); d.rows.push_back({oldLine, newLine, false}); ++before; ++after; --beforeCount; --afterCount;
+            flush(); d.inlineOrder.push_back(static_cast<uint32_t>(d.rows.size() * 2));
+            d.rows.push_back({oldLine, newLine, false}); ++before; ++after; --beforeCount; --afterCount;
         } else { flush(); beforeCount = afterCount = 0; }
         if (!beforeCount && !afterCount) flush();
     }
