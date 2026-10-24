@@ -10,6 +10,7 @@ void QuickOpen::create(HWND parent, HINSTANCE instance) {
     window_ = CreateWindowExW(WS_EX_CONTROLPARENT, cls.lpszClassName, L"Go to file", WS_CHILD | WS_CLIPSIBLINGS,
         0, 0, 0, 0, parent, nullptr, instance, this);
     worker_ = std::make_unique<Worker>(window_);
+    indexWorker_ = std::make_unique<Worker>(window_);
 }
 void QuickOpen::setDpi(UINT dpi) { dpi_ = dpi; renderer_.setDpi(dpi); layout(); }
 int QuickOpen::rows() const {
@@ -26,15 +27,21 @@ void QuickOpen::layout() {
     SetWindowPos(window_, HWND_TOP, (parent.right - width) / 2, px(8), width, px(116 + count * 44), SWP_NOACTIVATE);
     InvalidateRect(window_, nullptr, FALSE);
 }
-void QuickOpen::show(const fs::path& root) {
+void QuickOpen::setRoot(const fs::path& root) {
+    close(); ++revision_; ++indexRevision_;
+    worker_->cancelPending(); indexWorker_->cancelPending();
+    root_ = root; index_.reset(); indexing_ = indexAgain_ = false;
+    refresh();
+}
+void QuickOpen::show() {
     if (visible_) { SetFocus(window_); anchor_ = 0; caret_ = query_.size(); caretChanged(); return; }
-    previousFocus_ = GetFocus(); root_ = root; query_.clear(); caret_ = anchor_ = inputFirst_ = 0;
+    previousFocus_ = GetFocus(); query_.clear(); caret_ = anchor_ = inputFirst_ = 0;
     selected_ = first_ = 0; wheel_ = 0; highSurrogate_ = 0; result_ = {}; visible_ = true;
-    layout(); ShowWindow(window_, SW_SHOW); SetFocus(window_); refresh();
+    layout(); ShowWindow(window_, SW_SHOW); SetFocus(window_); request();
 }
 void QuickOpen::close(bool restoreFocus) {
     if (!visible_) return;
-    visible_ = false; ++revision_; KillTimer(window_, 1);
+    visible_ = false; ++revision_;
     worker_->cancelPending(); result_ = {}; loading_ = false;
     if (composing_) {
         const auto context = ImmGetContext(window_);
@@ -44,25 +51,48 @@ void QuickOpen::close(bool restoreFocus) {
     ShowWindow(window_, SW_HIDE);
     if (restoreFocus && IsWindow(previousFocus_) && IsWindowVisible(previousFocus_)) SetFocus(previousFocus_);
 }
-void QuickOpen::stop() { ++revision_; if (worker_) worker_->stop(); }
+void QuickOpen::stop() {
+    ++revision_; ++indexRevision_;
+    if (indexWorker_) indexWorker_->stop();
+    if (worker_) worker_->stop();
+}
 void QuickOpen::refresh() {
-    if (!visible_) return;
-    ++revision_; worker_->cancelPending(); KillTimer(window_, 1);
-    result_ = {}; selected_ = first_ = 0; loading_ = !root_.empty(); layout();
-    request();
+    if (root_.empty()) return;
+    // Publish the current scan even if more changes arrive, then scan again.
+    // Typing and closing the palette never cancel an initial file-list load.
+    if (indexing_) { indexAgain_ = true; return; }
+    const auto revision = ++indexRevision_; const auto root = root_;
+    indexing_ = true; layout();
+    indexWorker_->submit(L"index", [this, revision, root] {
+        auto index = std::make_shared<FileIndex>();
+        try { *index = indexFiles(root, [this, revision] { return indexRevision_.load() != revision; }); }
+        catch (const std::exception& error) { index->error = error.what(); }
+        if (indexRevision_.load() != revision) return;
+        indexWorker_->complete([this, revision, index] {
+            if (indexRevision_.load() != revision) return;
+            index_ = index; indexing_ = false;
+            request();
+            if (std::exchange(indexAgain_, false)) refresh();
+        });
+    });
 }
 void QuickOpen::changed() {
-    ++revision_; worker_->cancelPending();
-    result_ = {}; selected_ = first_ = 0; loading_ = !root_.empty();
-    KillTimer(window_, 1);
-    if (loading_) SetTimer(window_, 1, 120, nullptr);
-    layout(); caretChanged();
+    request(); caretChanged();
 }
 void QuickOpen::request() {
-    if (!visible_ || root_.empty()) return;
-    const auto revision = revision_.load(); const auto root = root_; const auto query = utf8(query_);
-    worker_->submit(L"files", [this, revision, root, query] {
-        auto result = std::make_shared<FileSearchResult>(searchFiles(root, query, [this, revision] { return revision_.load() != revision; }));
+    if (!visible_) return;
+    const auto revision = ++revision_; worker_->cancelPending();
+    result_ = {}; selected_ = first_ = 0; loading_ = !root_.empty();
+    const auto index = index_; const auto query = utf8(query_);
+    if (!index || query.empty()) {
+        if (index) { result_ = searchFiles(*index, query); loading_ = false; }
+        layout(); return;
+    }
+    layout();
+    worker_->submit(L"files", [this, revision, index, query] {
+        auto result = std::make_shared<FileSearchResult>();
+        try { *result = searchFiles(*index, query, [this, revision] { return revision_.load() != revision; }); }
+        catch (const std::exception& error) { result->error = error.what(); }
         if (revision_.load() != revision) return;
         worker_->complete([this, revision, result] {
             if (!visible_ || revision_.load() != revision) return;
@@ -144,10 +174,10 @@ void QuickOpen::paint() {
         renderer_.label({px(20), top + px(23), rect.right - px(20), top + px(43)}, match.relative.native(), muted, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_PATH_ELLIPSIS);
     }
     if (result_.matches.empty()) {
-        const auto message = root_.empty() ? L"Open a folder with Ctrl+O to search files." : loading_ ? L"Searching…" : !result_.error.empty() ? L"Cannot search this folder. Press F5 to retry." : L"No matching files.";
+        const auto message = root_.empty() ? L"Open a folder with Ctrl+O to search files." : !index_ ? L"Loading file list…" : loading_ ? L"Searching…" : !result_.error.empty() ? L"Cannot search this folder. Press F5 to retry." : L"No matching files.";
         renderer_.label({px(20), px(86), rect.right - px(20), px(130)}, message, muted);
     }
-    const auto hint = result_.scanLimited ? L"Search limited to 50,000 entries · Refine the workspace" : result_.resultsLimited ? L"Top 100 matches · Type to narrow the results" : L"↑↓ Select    Enter Open    Esc Close";
+    const auto hint = indexing_ ? L"Updating file list…" : result_.resultsLimited ? L"Top 100 matches · Type to narrow the results" : L"↑↓ Select    Enter Open    Esc Close";
     renderer_.label({px(16), rect.bottom - px(28), rect.right - px(16), rect.bottom}, hint, muted);
 }
 LRESULT CALLBACK QuickOpen::procedure(HWND window, UINT message, WPARAM a, LPARAM b) {
@@ -165,8 +195,7 @@ LRESULT QuickOpen::handle(UINT message, WPARAM a, LPARAM b) {
     case WM_SIZE: case WM_SETFOCUS: caretChanged(); return 0;
     case WM_KILLFOCUS: close(false); return 0;
     case WM_GETDLGCODE: return DLGC_WANTALLKEYS;
-    case wmWork: worker_->dispatch(); return 0;
-    case WM_TIMER: if (a == 1) { KillTimer(window_, 1); request(); } return 0;
+    case wmWork: indexWorker_->dispatch(); worker_->dispatch(); return 0;
     case WM_KEYDOWN: {
         if (!visible_ || composing_) break;
         const bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0, shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;

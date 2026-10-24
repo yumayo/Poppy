@@ -414,6 +414,15 @@ void quickOpenTests(const fs::path& executable) {
     pane = bounds(app.window, viewer);
     click(app.window, pane.left + px(30), pane.top - px(17), true);
     check(scrollInfo(viewer).nMax == 0, "Quick open created duplicate tabs");
+    // Directory changes refresh the cached list even while the palette is hidden.
+    writeLines(fixture.root / L"after-startup.txt", 401);
+    open(); type(L"after-startup"); accept(401);
+    fs::remove(fixture.root / L"after-startup.txt");
+    writeLines(fixture.root / L"after-delete.txt", 501);
+    open(); type(L"after-delete"); accept(501);
+    open(); type(L"after-startup"); send(palette, WM_KEYDOWN, VK_RETURN);
+    check(IsWindowVisible(palette), "A refreshed file list retained a deleted path");
+    send(palette, WM_KEYDOWN, VK_ESCAPE);
     open();
     click(app.window, px(12), px(22));
     check(!IsWindowVisible(palette), "Clicking outside quick open did not close it");

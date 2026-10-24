@@ -50,49 +50,69 @@ int scorePath(std::u32string_view path, std::u32string_view query) {
 int fileSearchScore(std::string_view relative, std::string_view query) {
     return scorePath(normalized(relative), normalized(query));
 }
-FileSearchResult searchFiles(const std::filesystem::path& root, std::string_view query,
-    const std::function<bool()>& cancelled, size_t resultLimit, size_t scanLimit) {
+FileIndex indexFiles(const std::filesystem::path& root, const std::function<bool()>& cancelled) {
     namespace fs = std::filesystem;
-    FileSearchResult result;
-    if (root.empty() || !resultLimit) return result;
-    const auto needle = normalized(query);
+    FileIndex result;
+    if (root.empty()) return result;
     std::error_code error;
     fs::recursive_directory_iterator it(root, fs::directory_options::skip_permission_denied, error), end;
     if (error) { result.error = error.message(); return result; }
-    size_t visited = 0;
-    const auto before = [](const FileMatch& a, const FileMatch& b) {
-        if (a.score != b.score) return a.score < b.score;
-        return a.relative.generic_u8string() < b.relative.generic_u8string();
-    };
     for (; it != end; it.increment(error)) {
         if (cancelled && cancelled()) return {};
         if (error) { result.error = error.message(); break; }
-        if (visited++ >= scanLimit) { result.scanLimited = true; break; }
         const auto& entry = *it;
         bool skip = entry.path().filename() == ".git" || entry.is_symlink(error);
 #ifdef _WIN32
         const DWORD attributes = GetFileAttributesW(entry.path().c_str());
         skip = skip || attributes == INVALID_FILE_ATTRIBUTES || (attributes & FILE_ATTRIBUTE_REPARSE_POINT);
 #endif
-        if (skip || it.depth() >= 64) {
+        if (skip) {
             it.disable_recursion_pending();
-            if (!skip) result.scanLimited = true;
             continue;
         }
         if (!entry.is_regular_file(error)) { error.clear(); continue; }
-        auto relative = entry.path().lexically_relative(root);
-        const int score = scorePath(normalized(relative.generic_u8string()), needle);
-        if (score < 0) continue;
-        FileMatch match{std::move(relative), score};
-        if (result.matches.size() == resultLimit) {
-            result.resultsLimited = true;
-            if (!before(match, result.matches.back())) continue;
-            result.matches.pop_back();
-        }
-        const auto position = std::lower_bound(result.matches.begin(), result.matches.end(), match, before);
-        result.matches.insert(position, std::move(match));
+        auto relative = entry.path().lexically_relative(root).generic_u8string();
+        auto name = normalized(relative);
+        result.files.push_back({std::move(relative), std::move(name)});
     }
     if (error) result.error = error.message();
+    if (cancelled && cancelled()) return {};
+    std::sort(result.files.begin(), result.files.end(), [](const IndexedFile& a, const IndexedFile& b) { return a.relative < b.relative; });
+    return result;
+}
+FileSearchResult searchFiles(const FileIndex& index, std::string_view query,
+    const std::function<bool()>& cancelled, size_t resultLimit) {
+    FileSearchResult result;
+    result.error = index.error;
+    if (!resultLimit) return result;
+    const auto needle = normalized(query);
+    if (needle.empty()) {
+        const auto count = std::min(resultLimit, index.files.size());
+        for (size_t i = 0; i < count; ++i) {
+            if (cancelled && cancelled()) return {};
+            result.matches.push_back({std::filesystem::u8path(index.files[i].relative), 0});
+        }
+        result.resultsLimited = index.files.size() > count;
+        return result;
+    }
+    struct Ranked { size_t index; int score; };
+    const auto before = [](const Ranked& a, const Ranked& b) { return a.score != b.score ? a.score < b.score : a.index < b.index; };
+    std::vector<Ranked> best;
+    best.reserve(std::min(resultLimit, index.files.size()));
+    for (size_t i = 0; i < index.files.size(); ++i) {
+        if (cancelled && cancelled()) return {};
+        const int score = scorePath(index.files[i].normalized, needle);
+        if (score < 0) continue;
+        const Ranked match{i, score};
+        if (best.size() == resultLimit) {
+            result.resultsLimited = true;
+            if (!before(match, best.front())) continue;
+            std::pop_heap(best.begin(), best.end(), before); best.back() = match;
+        } else best.push_back(match);
+        std::push_heap(best.begin(), best.end(), before);
+    }
+    std::sort_heap(best.begin(), best.end(), before);
+    for (const auto& match : best) result.matches.push_back({std::filesystem::u8path(index.files[match.index].relative), match.score});
     return result;
 }
 }
