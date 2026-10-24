@@ -1,4 +1,5 @@
 #include <windows.h>
+#include <commctrl.h>
 #include "tree_messages.h"
 #include "activity_button.h"
 #include <filesystem>
@@ -126,6 +127,41 @@ void click(HWND window, int x, int y, bool middle = false) {
     send(window, middle ? WM_MBUTTONDOWN : WM_LBUTTONDOWN, middle ? MK_MBUTTON : MK_LBUTTON, MAKELPARAM(x, y));
     send(window, middle ? WM_MBUTTONUP : WM_LBUTTONUP, 0, MAKELPARAM(x, y));
 }
+HWND tabTooltips(const Application& app) {
+    HWND result = nullptr;
+    struct Context { HWND owner; HWND& result; } context{app.window, result};
+    EnumThreadWindows(app.process.dwThreadId, [](HWND window, LPARAM data) -> BOOL {
+        auto& context = *reinterpret_cast<Context*>(data);
+        wchar_t name[64]{}; GetClassNameW(window, name, 64);
+        if (GetWindow(window, GW_OWNER) != context.owner || std::wstring(name) != TOOLTIPS_CLASSW) return TRUE;
+        context.result = window; return FALSE;
+    }, reinterpret_cast<LPARAM>(&context));
+    check(result != nullptr, "The tab tooltips are missing");
+    return result;
+}
+int visibleTabCount(const Application& app) {
+    return static_cast<int>(send(tabTooltips(app), TTM_GETTOOLCOUNT)) - 2;
+}
+RECT tabBounds(const Application& app, int visibleIndex) {
+    // Tooltip regions expose the actual clickable bounds without assuming a
+    // font's character widths. Tooltip messages need memory in Poppy's process.
+    struct RemoteMemory {
+        HANDLE process; void* value;
+        ~RemoteMemory() { if (value) VirtualFreeEx(process, value, 0, MEM_RELEASE); }
+    } memory{app.process.hProcess, VirtualAllocEx(app.process.hProcess, nullptr, sizeof(TOOLINFOW) + 2048, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE)};
+    check(memory.value != nullptr, "Could not allocate tooltip query memory");
+    TOOLINFOW tool{}; tool.cbSize = sizeof(tool); tool.hwnd = app.window; tool.uId = 100 + visibleIndex;
+    tool.lpszText = reinterpret_cast<wchar_t*>(static_cast<char*>(memory.value) + sizeof(tool));
+    check(WriteProcessMemory(memory.process, memory.value, &tool, sizeof(tool), nullptr) != FALSE, "Could not write a tooltip query");
+    check(send(tabTooltips(app), TTM_GETTOOLINFOW, 0, reinterpret_cast<LPARAM>(memory.value)) != FALSE, "A tab tooltip region is missing");
+    check(ReadProcessMemory(memory.process, memory.value, &tool, sizeof(tool), nullptr) != FALSE, "Could not read a tab tooltip region");
+    return tool.rect;
+}
+void clickTab(const Application& app, int visibleIndex, bool middle = false, bool close = false) {
+    const auto rect = tabBounds(app, visibleIndex);
+    const int inset = MulDiv(close ? 14 : 16, GetDpiForWindow(app.window), 96);
+    click(app.window, close ? rect.right - inset : rect.left + inset, (rect.top + rect.bottom) / 2, middle);
+}
 void tabTests(const fs::path& executable) {
     Fixture fixture;
     writeLines(fixture.root / L"a 日本語.txt", 200); writeLines(fixture.root / L"b.txt", 300);
@@ -148,6 +184,9 @@ void tabTests(const fs::path& executable) {
     const auto firstTop = scrollInfo(viewer).nPos, firstLeft = scrollInfo(viewer, SB_HORZ).nPos;
     check(firstTop > 0 && firstLeft > 0, "The test document did not scroll");
     send(tree, treeSelect, static_cast<WPARAM>(second)); waitLines(viewer, 300);
+    const auto firstBounds = tabBounds(app, 0), secondBounds = tabBounds(app, 1);
+    check(firstBounds.right - firstBounds.left > secondBounds.right - secondBounds.left,
+          "Tab widths did not follow Japanese and short file names");
     check(scrollInfo(viewer).nPos == 0 && scrollInfo(viewer, SB_HORZ).nPos == 0, "A new tab inherited another tab's scroll position");
     send(viewer, WM_VSCROLL, SB_PAGEDOWN); const auto secondTop = scrollInfo(viewer).nPos;
     const int tabY = pane.top - px(17);
@@ -160,7 +199,7 @@ void tabTests(const fs::path& executable) {
     click(app.window, pane.left + px(30), tabY); waitLines(viewer, 220);
     check(scrollInfo(viewer).nPos == firstTop, "Reloading a hidden tab lost its position");
     // Closing an inactive tab must keep the active document and position.
-    click(app.window, pane.left + px(180 + 166), tabY);
+    clickTab(app, 1, false, true);
     check(scrollInfo(viewer).nMax == 220 && scrollInfo(viewer).nPos == firstTop, "Closing an inactive tab changed the active document");
     click(app.window, pane.left + px(30), tabY, true);
     check(bounds(app.window, viewer).top == empty.top && scrollInfo(viewer).nMax == 0, "Closing the last tab left a duplicate tab or document");
@@ -168,7 +207,7 @@ void tabTests(const fs::path& executable) {
     // must not repopulate the viewer or replace the next selected document.
     send(tree, treeSelect, static_cast<WPARAM>(first)); waitLines(viewer, 220);
     send(tree, treeSelect, static_cast<WPARAM>(second));
-    click(app.window, pane.left + px(180 + 30), tabY, true);
+    clickTab(app, 1, true);
     click(app.window, pane.left + px(30), tabY, true);
     check(bounds(app.window, viewer).top == empty.top, "Closing tabs during loading did not clear the tab strip");
     // b.txt is still selected in the tree, so reopening also exercises Enter.
@@ -178,7 +217,8 @@ void tabTests(const fs::path& executable) {
 }
 void wrappingTabTests(const fs::path& executable) {
     Fixture fixture;
-    for (int i = 0; i < 8; ++i) writeLines(fixture.root / (L"tab-" + std::to_wstring(i) + L".txt"), 100 + i);
+    for (int i = 0; i < 8; ++i)
+        writeLines(fixture.root / (L"tab-" + std::to_wstring(i) + L"-" + std::wstring(12 + i % 3 * 3, L'x') + L".txt"), 100 + i);
     Application app(executable, fixture.root);
     const auto tree = app.tree(), viewer = FindWindowExW(app.window, nullptr, L"PoppyViewer", nullptr);
     check(viewer != nullptr, "The viewer is missing");
@@ -187,42 +227,55 @@ void wrappingTabTests(const fs::path& executable) {
     check(SetWindowPos(app.window, nullptr, 0, 0, px(820), px(820), SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE) != FALSE,
           "Could not resize the tab test window");
     const auto empty = bounds(app.window, viewer);
-    const int rowHeight = px(34), tabWidth = px(180);
-    const auto columns = [&] { const auto pane = bounds(app.window, viewer); return (pane.right - pane.left) / tabWidth; };
-    const auto rows = [&](int count) { return (count + columns() - 1) / columns(); };
-    const auto tabPoint = [&](int index, int offset = 30) -> POINT {
+    const int rowHeight = px(34);
+    const auto checkRows = [&](int count) {
         const auto pane = bounds(app.window, viewer);
-        return {pane.left + index % columns() * tabWidth + px(offset), empty.top + index / columns() * rowHeight + px(17)};
+        check(visibleTabCount(app) == count, "Wrapped tabs are missing");
+        RECT previous{pane.left, empty.top, pane.left, empty.top};
+        for (int i = 0; i < count; ++i) {
+            const auto rect = tabBounds(app, i);
+            check(rect.left >= pane.left && rect.right <= pane.right && rect.bottom - rect.top == rowHeight,
+                  "A tab extends outside its row");
+            if (!i || rect.top == previous.top)
+                check(rect.left == previous.right && rect.top == previous.top, "Tabs overlap or leave a gap in their row");
+            else {
+                check(rect.left == pane.left && rect.top == previous.bottom, "Tabs did not wrap to the next row");
+                check(rect.right - rect.left > pane.right - previous.right, "A tab wrapped before the row was full");
+            }
+            previous = rect;
+        }
+        check(pane.top == previous.bottom, "The viewer did not reserve the wrapped tab rows");
     };
-    const auto clickTab = [&](int index, bool middle = false) {
-        const auto point = tabPoint(index); click(app.window, point.x, point.y, middle);
-    };
-    check(columns() == 2, "The wrapping fixture needs two tabs per row");
     waitFor([&] { return send(tree, treeGetCount) == 9; }, "The wrapping test files did not appear");
     auto item = nextItem(tree, TreeRelation::Child, nextItem(tree, TreeRelation::Root));
     TreeItem lastRemaining = 0;
     for (int i = 0; i < 8; ++i) {
         check(item != 0, "A tab test tree item is missing");
         send(tree, treeSelect, static_cast<WPARAM>(item)); waitLines(viewer, 100 + i);
-        check(bounds(app.window, viewer).top == empty.top + rows(i + 1) * rowHeight, "Opening tabs did not wrap at the viewer width");
+        checkRows(i + 1);
         if (i == 6) lastRemaining = item;
         item = nextItem(tree, TreeRelation::Next, item);
     }
     check(bounds(app.window, viewer).bottom == empty.bottom, "Wrapping tabs moved the terminal boundary");
-    for (int i = 0; i < 8; ++i) { clickTab(i); waitLines(viewer, 100 + i); }
+    const auto shortTab = tabBounds(app, 0), longTab = tabBounds(app, 2);
+    check(shortTab.right - shortTab.left < longTab.right - longTab.left, "Wrapped tabs all have the same width");
+    for (int i = 0; i < 8; ++i) { clickTab(app, i); waitLines(viewer, 100 + i); }
     const auto wrapped = bounds(app.window, viewer);
     click(app.window, wrapped.right - px(3), empty.top + px(17));
     check(scrollInfo(viewer).nMax == 107, "Clicking the empty part of a tab row changed the active file");
     // Close an inactive tab in the third row, then the active last-row tab.
-    clickTab(5, true);
+    clickTab(app, 5, true);
     check(scrollInfo(viewer).nMax == 107, "Closing a wrapped inactive tab changed the document");
-    clickTab(6); waitLines(viewer, 107);
-    const auto close = tabPoint(6, 166); click(app.window, close.x, close.y); waitLines(viewer, 106);
-    check(bounds(app.window, viewer).top == empty.top + rows(6) * rowHeight, "Closing a wrapped tab did not remove the empty row");
+    clickTab(app, 6); waitLines(viewer, 107);
+    clickTab(app, 6, false, true); waitLines(viewer, 106);
+    checkRows(6);
+    const auto fewer = bounds(app.window, viewer);
+    check(fewer.top < wrapped.top, "Closing a wrapped tab did not remove the empty row");
     check(SetWindowPos(app.window, nullptr, 0, 0, px(1280), px(820), SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE) != FALSE,
           "Could not widen the tab test window");
-    check(bounds(app.window, viewer).top == empty.top + rows(6) * rowHeight && rows(6) < 3, "Widening the viewer did not reduce the tab rows");
-    clickTab(0); waitLines(viewer, 100); clickTab(5); waitLines(viewer, 106);
+    checkRows(6);
+    check(bounds(app.window, viewer).top < fewer.top, "Widening the viewer did not reduce the tab rows");
+    clickTab(app, 0); waitLines(viewer, 100); clickTab(app, 5); waitLines(viewer, 106);
     // A short window must keep the document visible and allow row navigation.
     check(SetWindowPos(app.window, nullptr, 0, 0, px(820), px(480), SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE) != FALSE,
           "Could not shorten the tab test window");
@@ -230,17 +283,17 @@ void wrappingTabTests(const fs::path& executable) {
     check(pane.top == empty.top + rowHeight && pane.bottom > pane.top, "Many tabs hid the document in a short window");
     for (int i = 0; i < 8; ++i) click(app.window, pane.right - px(42), tabY);
     check(scrollInfo(viewer).nMax == 106, "Scrolling the tab rows changed the active file");
-    click(app.window, pane.left + px(30), tabY); waitLines(viewer, 100);
+    clickTab(app, 0); waitLines(viewer, 100);
     for (int i = 0; i < 8; ++i) click(app.window, pane.right - px(14), tabY);
-    click(app.window, pane.left + px(180 + 30), tabY); waitLines(viewer, 106);
+    clickTab(app, visibleTabCount(app) - 1); waitLines(viewer, 106);
     click(app.window, pane.right - px(42), tabY);
     // Reactivating an existing file must reveal its row without adding a tab.
     send(tree, treeSelect, static_cast<WPARAM>(lastRemaining)); waitLines(viewer, 106);
-    click(app.window, pane.left + px(180 + 30), tabY, true); waitLines(viewer, 104);
+    clickTab(app, visibleTabCount(app) - 1, true); waitLines(viewer, 104);
     check(SetWindowPos(app.window, nullptr, 0, 0, px(820), px(820), SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE) != FALSE,
           "Could not restore the tab test window");
-    check(bounds(app.window, viewer).top == empty.top + rows(5) * rowHeight, "Growing the window did not restore the wrapped tabs");
-    clickTab(0); waitLines(viewer, 100); clickTab(4); waitLines(viewer, 104);
+    checkRows(5);
+    clickTab(app, 0); waitLines(viewer, 100); clickTab(app, 4); waitLines(viewer, 104);
 }
 void sidebarTests(const fs::path& executable) {
     Fixture fixture;
