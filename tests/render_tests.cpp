@@ -181,6 +181,12 @@ void themedScrollbars() {
     check(bitmap.pixel(client.right - 1, client.bottom - 1) == panel, "The scrollbar corner does not match its pane");
     check(bitmap.pixel(content.right, content.bottom / 2) == panel && bitmap.pixel(content.right / 2, content.bottom) == panel,
         "A scrollbar track does not match its pane");
+    const auto checkMouseTarget = [&](POINT point) {
+        ClientToScreen(pane.window, &point);
+        check(SendMessageW(pane.window, WM_NCHITTEST, 0, MAKELPARAM(point.x, point.y)) == HTCLIENT,
+            "A themed scrollbar routes real mouse input to native nonclient tracking");
+    };
+    checkMouseTarget({client.right - 1, client.bottom - 1});
     for (const int bar : {SB_VERT, SB_HORZ}) {
         draw();
         const int cross = bar == SB_VERT ? (content.right + client.right) / 2 : (content.bottom + client.bottom) / 2;
@@ -196,6 +202,7 @@ void themedScrollbars() {
         const int along = (first + last) / 2;
         const POINT point = bar == SB_VERT ? POINT{cross, along} : POINT{along, cross};
         const LPARAM location = MAKELPARAM(point.x, point.y);
+        checkMouseTarget(point);
         SendMessageW(pane.window, WM_MOUSEMOVE, 0, location); draw();
         check(bitmap.pixel(point.x, point.y) == scrollbarHover, "Hovering a thumb did not update its theme color");
         SendMessageW(pane.window, WM_LBUTTONDOWN, MK_LBUTTON, location); draw();
@@ -205,6 +212,7 @@ void themedScrollbars() {
         check(ScrollbarWindow::info(pane.window, bar).nPos == 999900, "Dragging truncated a scroll position above 65535 or did not reach the end");
         SendMessageW(pane.window, WM_LBUTTONUP, 0, MAKELPARAM(end.x, end.y));
         check(GetCapture() != pane.window, "Releasing the thumb left the pointer captured");
+        checkMouseTarget(bar == SB_VERT ? POINT{cross, 2} : POINT{2, cross});
         SendMessageW(pane.window, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(bar == SB_VERT ? cross : 2, bar == SB_VERT ? 2 : cross));
         check(ScrollbarWindow::info(pane.window, bar).nPos == 999899, "The scrollbar arrow did not scroll one line");
         SendMessageW(pane.window, WM_CANCELMODE, 0, 0);
