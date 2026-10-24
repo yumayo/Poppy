@@ -1,5 +1,7 @@
 #include "scrollbars.h"
+#include "quick_open.h"
 #include <algorithm>
+#include <fstream>
 #include <iostream>
 #include <stdexcept>
 
@@ -228,13 +230,93 @@ void themedScrollbars() {
     const auto empty = Scrollbars::contentRect(pane.window);
     check(empty.right == client.right && empty.bottom == client.bottom, "Hidden bars did not return their space to the content");
 }
+// Observe every intermediate window change on the UI thread, so a shrink and
+// expand within a few milliseconds cannot escape the regression check.
+struct QuickOpenWatch {
+    HWND window;
+    WNDPROC original;
+    RECT bounds{};
+    int geometryChanges = 0, unexpectedHides = 0, completions = 0;
+    bool allowClose = false;
+    explicit QuickOpenWatch(HWND value) : window(value) {
+        GetWindowRect(window, &bounds);
+        MapWindowPoints(nullptr, GetParent(window), reinterpret_cast<POINT*>(&bounds), 2);
+        check(SetPropW(window, L"PoppyQuickOpenWatch", this) != FALSE, "Could not observe quick open");
+        original = reinterpret_cast<WNDPROC>(SetWindowLongPtrW(window, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(procedure)));
+        check(original != nullptr, "Could not subclass quick open");
+    }
+    ~QuickOpenWatch() {
+        SetWindowLongPtrW(window, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(original));
+        RemovePropW(window, L"PoppyQuickOpenWatch");
+    }
+    static LRESULT CALLBACK procedure(HWND window, UINT message, WPARAM a, LPARAM b) {
+        auto& self = *static_cast<QuickOpenWatch*>(GetPropW(window, L"PoppyQuickOpenWatch"));
+        if (message == WM_WINDOWPOSCHANGING) {
+            const auto position = reinterpret_cast<WINDOWPOS*>(b);
+            if ((!(position->flags & SWP_NOSIZE) && (position->cx != self.bounds.right - self.bounds.left || position->cy != self.bounds.bottom - self.bounds.top)) ||
+                (!(position->flags & SWP_NOMOVE) && (position->x != self.bounds.left || position->y != self.bounds.top))) ++self.geometryChanges;
+        }
+        if (message == WM_SHOWWINDOW && !a && !self.allowClose) ++self.unexpectedHides;
+        const auto result = CallWindowProcW(self.original, window, message, a, b);
+        if (message == wmWork) ++self.completions;
+        return result;
+    }
+};
+void quickOpenStability() {
+    struct Files {
+        fs::path root = fs::temp_directory_path() / (L"Poppy popup test " + std::to_wstring(GetCurrentProcessId()) + L" " + std::to_wstring(GetTickCount64()));
+        Files() {
+            check(fs::create_directory(root), "Could not create popup test files");
+            for (const auto name : {L"alpha.txt", L"beta.txt", L"gamma.txt"}) {
+                std::ofstream file(root / name); file << "test\n";
+                check(file.good(), "Could not write a popup test file");
+            }
+        }
+        ~Files() { std::error_code error; fs::remove_all(root, error); }
+    } files;
+    QuickOpen palette;
+    const HWND parent = CreateWindowExW(0, L"STATIC", L"Quick open test", WS_POPUP | WS_CLIPCHILDREN, 0, 0, 800, 600, nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
+    check(parent != nullptr, "Could not create the popup test window");
+    struct WindowOwner { HWND value; ~WindowOwner() { DestroyWindow(value); } } owner{parent};
+    palette.create(parent, GetModuleHandleW(nullptr)); palette.setDpi(96);
+    fs::path opened;
+    palette.opened = [&](const fs::path& path) { opened = path; };
+    const auto wait = [](const auto& done) {
+        const auto start = GetTickCount64();
+        do {
+            MSG message{};
+            while (PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE)) { TranslateMessage(&message); DispatchMessageW(&message); }
+            if (done()) return;
+            MsgWaitForMultipleObjects(0, nullptr, FALSE, 10, QS_ALLINPUT);
+        } while (GetTickCount64() - start < 5000);
+        throw std::runtime_error("Quick open did not finish updating");
+    };
+    const auto accept = [&] { SendMessageW(palette.window(), WM_KEYDOWN, VK_RETURN, 0); return !palette.visible(); };
+    palette.setRoot(files.root); palette.show(); wait(accept); // Warm the startup list.
+    palette.show();
+    QuickOpenWatch observed(palette.window());
+    for (const auto ch : std::wstring(L"alpha")) SendMessageW(palette.window(), WM_CHAR, ch, 0);
+    observed.allowClose = true; wait(accept); observed.allowClose = false;
+    check(opened == files.root / L"alpha.txt", "Quick open opened an outdated match");
+    palette.show();
+    const auto completed = observed.completions;
+    SendMessageW(palette.window(), WM_CHAR, L'z', 0);
+    wait([&] { return observed.completions > completed; });
+    SendMessageW(palette.window(), WM_KEYDOWN, VK_RETURN, 0);
+    check(palette.visible(), "An empty result closed quick open");
+    SendMessageW(palette.window(), WM_KEYDOWN, VK_BACK, 0);
+    SendMessageW(palette.window(), WM_KEYDOWN, VK_DOWN, 0);
+    observed.allowClose = true;
+    check(accept() && opened == files.root / L"beta.txt", "Quick open lost keyboard selection after clearing the query");
+    check(!observed.geometryChanges && !observed.unexpectedHides, "Typing or completing a search resized or hid quick open");
+}
 }
 int main() {
     const HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     int result = 0;
     try {
         initializeRendering();
-        cellPositions(); colorsAndClipping(); windowTargets(); themedScrollbars();
+        cellPositions(); colorsAndClipping(); windowTargets(); themedScrollbars(); quickOpenStability();
         std::cout << "Direct2D rendering tests passed\n";
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; result = 1; }
     if (SUCCEEDED(com)) CoUninitialize();

@@ -399,8 +399,11 @@ void quickOpenTests(const fs::path& executable) {
         waitLines(viewer, lines);
     };
     open(); type(L"duplicate");
-    waitFor([&] { const auto pane = bounds(app.window, palette); return pane.bottom - pane.top >= px(204); }, "Quick open did not find files in collapsed directories");
-    send(palette, WM_KEYDOWN, VK_DOWN); accept(301);
+    waitFor([&] {
+        click(palette, px(24), px(86 + 44 + 22));
+        return !IsWindowVisible(palette);
+    }, "Quick open did not open the second match from collapsed directories");
+    waitLines(viewer, 301);
     open(); type(L"missing-file"); send(palette, WM_KEYDOWN, VK_RETURN);
     check(IsWindowVisible(palette), "Enter opened a stale result while a new query was pending");
     send(palette, WM_KEYDOWN, VK_ESCAPE);
