@@ -117,7 +117,7 @@ void Tree::paint() {
             }
         }
         renderer_.label({x + indent_ + padding, y, std::max<LONG>(r.right, x + indent_ + widths_[row.item] + padding), y + rowHeight_},
-            node->text, selected ? foreground : node->color, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+            node->text, node->color, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
     }
     scrollbars_.paint(window_, renderer_, panel);
 }
