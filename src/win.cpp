@@ -54,7 +54,7 @@ std::wstring quoteArg(std::wstring_view arg) {
     result.append(slashes * 2, L'\\'); result += L'"'; return result;
 }
 std::wstring pathKey(const fs::path& path) {
-    auto result = path.lexically_normal().native();
+    auto result = path.lexically_normal().make_preferred().native();
     std::transform(result.begin(), result.end(), result.begin(), [](wchar_t c) { return static_cast<wchar_t>(std::towlower(c)); });
     while (result.size() > 3 && (result.back() == L'\\' || result.back() == L'/')) result.pop_back();
     return result;

@@ -46,6 +46,19 @@ struct Fixture {
     }
     ~Fixture() { std::error_code error; fs::remove_all(root, error); }
 };
+struct AppDataEnvironment {
+    std::wstring previous;
+    bool existed = false;
+    explicit AppDataEnvironment(const fs::path& directory) {
+        const DWORD size = GetEnvironmentVariableW(L"APPDATA", nullptr, 0);
+        if (size) {
+            previous.resize(size); const DWORD count = GetEnvironmentVariableW(L"APPDATA", previous.data(), size);
+            check(count && count < size, "Cannot read APPDATA for test isolation"); previous.resize(count); existed = true;
+        }
+        check(SetEnvironmentVariableW(L"APPDATA", directory.c_str()) != FALSE, "Cannot isolate application storage");
+    }
+    ~AppDataEnvironment() { SetEnvironmentVariableW(L"APPDATA", existed ? previous.c_str() : nullptr); }
+};
 void writeFile(const fs::path& path) {
     std::ofstream file(path);
     file << "Poppy folder regression test\n";
@@ -61,8 +74,9 @@ void writeLines(const fs::path& path, int lines) {
 struct Application {
     PROCESS_INFORMATION process{};
     HWND window = nullptr;
-    Application(const fs::path& executable, const fs::path& folder) {
-        std::wstring command = L"\"" + executable.native() + L"\" \"" + folder.native() + L"\"";
+    Application(const fs::path& executable, const fs::path& folder = {}) {
+        std::wstring command = L"\"" + executable.native() + L"\"";
+        if (!folder.empty()) command += L" \"" + folder.native() + L"\"";
         STARTUPINFOW startup{}; startup.cb = sizeof(startup);
         check(CreateProcessW(executable.c_str(), command.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr, &startup, &process) != FALSE,
               "Could not launch Poppy");
@@ -361,17 +375,87 @@ void folderTests(const fs::path& executable) {
                 "A file added to an empty workspace did not appear");
     }
 }
+void sessionTests(const fs::path& executable) {
+    Fixture fixture;
+    const auto directory = fixture.root / L"nested 日本語";
+    fs::create_directory(directory);
+    writeLines(directory / L"a.txt", 200); writeLines(directory / L"b.txt", 300); writeLines(directory / L"c.txt", 100);
+    int firstTop = 0, firstLeft = 0, secondTop = 0, sidebarEdge = 0;
+    {
+        Application app(executable, fixture.root);
+        const auto tree = app.tree(), viewer = FindWindowExW(app.window, nullptr, L"PoppyViewer", nullptr);
+        TreeItem nested = 0;
+        waitFor([&] { nested = nextItem(tree, TreeRelation::Child, nextItem(tree, TreeRelation::Root)); return nested != 0; }, "Session fixture did not load");
+        expand(tree, nested);
+        TreeItem first = 0, second = 0, third = 0;
+        waitFor([&] {
+            first = nextItem(tree, TreeRelation::Child, nested); second = nextItem(tree, TreeRelation::Next, first); third = nextItem(tree, TreeRelation::Next, second);
+            return first && second && third;
+        }, "Session fixture did not expand");
+        send(tree, treeSelect, first); waitLines(viewer, 200);
+        for (int i = 0; i < 12; ++i) { send(viewer, WM_VSCROLL, SB_LINEDOWN); send(viewer, WM_HSCROLL, SB_LINEDOWN); }
+        firstTop = scrollInfo(viewer).nPos; firstLeft = scrollInfo(viewer, SB_HORZ).nPos;
+        send(tree, treeSelect, second); waitLines(viewer, 300);
+        send(viewer, WM_VSCROLL, SB_PAGEDOWN); secondTop = scrollInfo(viewer).nPos;
+        send(tree, treeSelect, third); waitLines(viewer, 100);
+        send(tree, treeSelect, second); waitLines(viewer, 300);
+        const auto px = [dpi = GetDpiForWindow(app.window)](int value) { return MulDiv(value, dpi, 96); };
+        click(app.window, px(410), px(22));
+        const auto pane = bounds(app.window, viewer);
+        const int splitter = pane.left - px(3), y = pane.top + px(50);
+        send(app.window, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(splitter, y));
+        send(app.window, WM_MOUSEMOVE, MK_LBUTTON, MAKELPARAM(splitter + px(60), y));
+        send(app.window, WM_LBUTTONUP, 0, MAKELPARAM(splitter + px(60), y));
+        sidebarEdge = bounds(app.window, viewer).left;
+        send(GetDlgItem(app.window, 3), BM_CLICK);
+        check(!IsWindowVisible(tree), "Session test did not select the Git sidebar");
+    }
+    fs::remove(directory / L"c.txt");
+    {
+        // Omit the command-line path to exercise last-project restoration.
+        Application app(executable);
+        const auto tree = app.tree(), viewer = FindWindowExW(app.window, nullptr, L"PoppyViewer", nullptr);
+        waitLines(viewer, 300);
+        check(scrollInfo(viewer).nPos == secondTop, "Restart lost the active tab or its scroll position");
+        check(!IsWindowVisible(FindWindowExW(app.window, nullptr, L"PoppyTerminal", nullptr)), "Restart lost terminal visibility");
+        check(!IsWindowVisible(tree), "Restart lost the active sidebar");
+        const auto pane = bounds(app.window, viewer);
+        check(pane.left == sidebarEdge, "Restart lost sidebar width");
+        TreeItem nested = 0, first = 0;
+        waitFor([&] {
+            nested = nextItem(tree, TreeRelation::Child, nextItem(tree, TreeRelation::Root));
+            first = nextItem(tree, TreeRelation::Child, nested); return nested && expanded(tree, nested) && first;
+        }, "Restart did not restore nested folder expansion");
+        waitFor([&] { return static_cast<TreeItem>(send(tree, treeGetSelection)) == nextItem(tree, TreeRelation::Next, first); }, "Restart lost tree selection");
+        const auto px = [dpi = GetDpiForWindow(app.window)](int value) { return MulDiv(value, dpi, 96); };
+        click(app.window, pane.left + px(30), pane.top - px(17)); waitLines(viewer, 200);
+        check(scrollInfo(viewer).nPos == firstTop && scrollInfo(viewer, SB_HORZ).nPos == firstLeft, "Restart lost an inactive tab's position");
+        click(app.window, pane.left + px(30), pane.top - px(17), true); waitLines(viewer, 300);
+        click(app.window, pane.left + px(30), pane.top - px(17), true);
+        check(scrollInfo(viewer).nMax == 0, "Restart retained a missing file's tab");
+        expand(tree, nextItem(tree, TreeRelation::Root), false);
+    }
+    {
+        Application app(executable, fixture.root);
+        const auto tree = app.tree();
+        const auto root = nextItem(tree, TreeRelation::Root);
+        check(root && !expanded(tree, root) && !nextItem(tree, TreeRelation::Child, root), "Restart reopened a collapsed root");
+    }
+}
 }
 int wmain(int argc, wchar_t** argv) {
     try {
         check(argc == 2, "Pass the path to Poppy.exe");
+        Fixture appData;
+        AppDataEnvironment environment(appData.root);
         SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         folderTests(fs::absolute(argv[1]));
         sidebarTests(fs::absolute(argv[1]));
         treeInteractionTests(fs::absolute(argv[1]));
         tabTests(fs::absolute(argv[1]));
         overflowingTabTests(fs::absolute(argv[1]));
-        std::cout << "Folder, sidebar and tab tests passed.\n"; return 0;
+        sessionTests(fs::absolute(argv[1]));
+        std::cout << "Folder, sidebar, tab and session tests passed.\n"; return 0;
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n'; return 1;
     }
