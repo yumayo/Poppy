@@ -1,12 +1,13 @@
 #pragma once
 #include "scrollbars.h"
 #include "diff.h"
+#include "session.h"
 #include <memory>
 
 namespace poppy {
 class Viewer {
 public:
-    struct State { int top = 0, left = 0; size_t anchor = 0, caret = 0; bool after = false, inlineView = false; };
+    using State = ViewState;
     void create(HWND parent, HINSTANCE instance);
     void setDpi(UINT dpi);
     void show(std::shared_ptr<const Document> document, const fs::path& path, bool preserve = false);
