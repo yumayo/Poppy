@@ -32,7 +32,7 @@ struct Node {
 };
 struct DirectoryResult { std::vector<Entry> entries; std::wstring error; bool truncated = false; };
 struct FileResult { std::shared_ptr<Document> document; std::wstring error; };
-struct Tab { fs::path path; bool diff = false; Viewer::State fileView, diffView; };
+struct Tab { fs::path path; bool diff = false; Viewer::State fileView, diffView; bool pinned = false; };
 struct GitEntry { fs::path path; wchar_t state; };
 struct GitResult { fs::path root; std::wstring branch, error; std::map<std::wstring, wchar_t> states; std::vector<GitEntry> entries; size_t changed = 0, untracked = 0; bool truncated = false; };
 
@@ -172,6 +172,8 @@ private:
     void saveTab();
     void selectTab(size_t index);
     void closeTab(size_t index);
+    void toggleTabPin(size_t index);
+    void tabMenu(POINT screen);
     void loadTab(bool preserve = false);
     void updateTabs(bool reveal = true);
     size_t tabEnd() const;
@@ -464,7 +466,15 @@ void App::paint() {
             if (active) dc.fill({rect.left, rect.top, rect.right, rect.top + scaled(2)}, accent);
             const auto title = tabs_[i].path.filename().native() + (tabs_[i].diff ? L" (diff)" : L"");
             dc.label({rect.left + scaled(12), rect.top, rect.right - scaled(28), rect.bottom}, title, active ? foreground : muted);
-            dc.label({rect.right - scaled(28), rect.top, rect.right - scaled(4), rect.bottom}, L"×", muted, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            if (tabs_[i].pinned) {
+                const float x = static_cast<float>(rect.right - scaled(16)), y = static_cast<float>((rect.top + rect.bottom) / 2);
+                const float unit = static_cast<float>(dpi_) / 96.0f;
+                const auto pinLine = [&](int x1, int y1, int x2, int y2) {
+                    dc.line(x + x1 * unit, y + y1 * unit, x + x2 * unit, y + y2 * unit, accent, unit);
+                };
+                pinLine(-4, -7, 4, -7); pinLine(-3, -7, -3, -2); pinLine(3, -7, 3, -2);
+                pinLine(-3, -2, -6, 2); pinLine(3, -2, 6, 2); pinLine(-6, 2, 6, 2); pinLine(0, 2, 0, 8);
+            } else dc.label({rect.right - scaled(28), rect.top, rect.right - scaled(4), rect.bottom}, L"×", muted, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
             dc.fill({rect.right - 1, rect.top, rect.right, rect.bottom}, border);
         }
         if (tabOverflow()) {
@@ -623,7 +633,7 @@ void App::saveSession() {
             state.gitSidebar = activeSidebar_ == Sidebar::Git; state.activeTab = activeTab_;
             state.diffInline = viewer_.diffInline();
             state.gitTree = gitTreeView_;
-            for (const auto& tab : tabs_) state.tabs.push_back({tab.path.u8string(), tab.diff, tab.fileView, tab.diffView});
+            for (const auto& tab : tabs_) state.tabs.push_back({tab.path.u8string(), tab.diff, tab.fileView, tab.diffView, tab.pinned});
             for (const auto& entry : expandedPaths_) state.expanded.push_back(entry.second.u8string());
             if (!pendingTreeSelection_.empty()) state.selected = pendingTreeSelection_.u8string();
             else if (const auto selected = node(explorer_.selection())) state.selected = selected->path.u8string();
@@ -666,7 +676,7 @@ void App::restoreProject(const ProjectSession& state) {
         const auto duplicate = std::find_if(tabs_.begin(), tabs_.end(), [&](const Tab& tab) { return pathKey(tab.path) == pathKey(path); });
         if (duplicate != tabs_.end()) continue;
         if (i <= state.activeTab) activeTab_ = tabs_.size();
-        tabs_.push_back({path, saved.diff, saved.fileView, saved.diffView});
+        tabs_.push_back({path, saved.diff, saved.fileView, saved.diffView, saved.pinned});
     }
 }
 void App::forgetExpanded(const fs::path& path) {
@@ -788,7 +798,7 @@ void App::selectTab(size_t index) {
     saveTab(); activeTab_ = index; updateTabs(); loadTab();
 }
 void App::closeTab(size_t index) {
-    if (index >= tabs_.size()) return;
+    if (index >= tabs_.size() || tabs_[index].pinned) return;
     saveTab(); const bool active = index == activeTab_;
     tabs_.erase(tabs_.begin() + static_cast<std::ptrdiff_t>(index));
     if (index < activeTab_) --activeTab_;
@@ -800,6 +810,45 @@ void App::closeTab(size_t index) {
         else { viewer_.message(L"Select a file on the left.\n\nFiles are read only. Your AI CLI can edit them from the terminal."); status(L"Ready"); }
     }
     SetFocus(viewer_.window());
+}
+void App::toggleTabPin(size_t index) {
+    if (index >= tabs_.size()) return;
+    saveTab();
+    const auto activePath = selectedPath();
+    auto tab = std::move(tabs_[index]);
+    tabs_.erase(tabs_.begin() + static_cast<std::ptrdiff_t>(index));
+    tab.pinned = !tab.pinned;
+    const auto position = std::find_if(tabs_.begin(), tabs_.end(), [](const Tab& value) { return !value.pinned; });
+    tabs_.insert(position, std::move(tab));
+    activeTab_ = static_cast<size_t>(std::find_if(tabs_.begin(), tabs_.end(), [&](const Tab& value) { return value.path == activePath; }) - tabs_.begin());
+    layout();
+}
+void App::tabMenu(POINT screen) {
+    if (tabs_.empty()) return;
+    size_t index;
+    if (screen.x == -1 && screen.y == -1) {
+        updateTabs(); index = activeTab_;
+        const auto rect = tabBounds(index);
+        screen = {rect.left, rect.bottom}; ClientToScreen(window_, &screen);
+    } else {
+        auto point = screen; ScreenToClient(window_, &point); index = tabAt(point);
+        if (index >= tabs_.size()) return;
+    }
+    const auto path = tabs_[index].path;
+    const bool pinned = tabs_[index].pinned;
+    HMENU menu = CreatePopupMenu();
+    if (!menu) return;
+    AppendMenuW(menu, MF_STRING, 1, pinned ? L"Unpin tab" : L"Pin tab");
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(menu, MF_STRING | (pinned ? MF_GRAYED : 0), 2, L"Close tab");
+    const UINT command = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, screen.x, screen.y, 0, window_, nullptr);
+    DestroyMenu(menu);
+    const auto found = std::find_if(tabs_.begin(), tabs_.end(), [&](const Tab& tab) { return tab.path == path; });
+    if (found != tabs_.end()) {
+        index = static_cast<size_t>(found - tabs_.begin());
+        if (command == 1) toggleTabPin(index);
+        else if (command == 2) closeTab(index);
+    }
 }
 void App::loadTab(bool preserve) {
     waitingForGit_ = false;
@@ -962,7 +1011,7 @@ LRESULT App::handle(UINT m, WPARAM a, LPARAM b) {
             const auto index = tabAt(point);
             if (index < tabs_.size()) {
                 const auto rect = tabBounds(index);
-                if (point.x >= rect.right - MulDiv(28, dpi_, 96)) closeTab(index);
+                if (!tabs_[index].pinned && point.x >= rect.right - MulDiv(28, dpi_, 96)) closeTab(index);
                 else { selectTab(index); SetFocus(viewer_.window()); }
             } else if (tabOverflow() && point.y >= tabsRect_.bottom - MulDiv(34, dpi_, 96)) {
                 const int button = MulDiv(28, dpi_, 96);
@@ -978,6 +1027,9 @@ LRESULT App::handle(UINT m, WPARAM a, LPARAM b) {
         return 0;
     }
     case WM_MBUTTONDOWN: { closeTab(tabAt({GET_X_LPARAM(b), GET_Y_LPARAM(b)})); return 0; }
+    case WM_CONTEXTMENU:
+        if (reinterpret_cast<HWND>(a) == window_) { tabMenu({GET_X_LPARAM(b), GET_Y_LPARAM(b)}); return 0; }
+        break;
     case WM_MOUSEMOVE:
         if (dragging_) {
             RECT r{}; GetClientRect(window_, &r);
