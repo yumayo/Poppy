@@ -35,7 +35,7 @@ struct AiSummary {
 AiSummary summarizeAi(const std::vector<AiStatus>& terminals);
 const char* aiStateName(AiState state);
 bool validNotificationId(std::string_view id);
-// Strict, bounded WpfTaskBar JSON. No inference from activity text or silence.
+// Strict, bounded Poppy status JSON. No inference from activity text or silence.
 std::optional<AiEvent> parseAiEvent(std::string_view id, bool activityOnly, std::string_view body);
 std::string jsonString(std::string_view text);
 }

@@ -54,7 +54,9 @@ endif()
 if(WIN32)
   enable_language(RC)
   add_executable(Poppy WIN32 src/workspace.cpp src/app.cpp src/hook_server.cpp src/terminal_pane.cpp src/viewer.cpp src/terminal.cpp src/win.cpp src/render.cpp src/tree.cpp src/activity_button.cpp src/scrollbars.cpp src/quick_open.cpp src/Poppy.rc)
-  add_custom_command(TARGET Poppy POST_BUILD COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_CURRENT_SOURCE_DIR}/integration/ai" "$<TARGET_FILE_DIR:Poppy>/ai")
+  add_custom_command(TARGET Poppy POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E rm -rf "$<TARGET_FILE_DIR:Poppy>/ai"
+    COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_CURRENT_SOURCE_DIR}/integration/ai" "$<TARGET_FILE_DIR:Poppy>/ai")
   target_include_directories(Poppy PRIVATE src)
   target_link_libraries(Poppy PRIVATE poppy_core poppy_storage ws2_32 comctl32 shell32 ole32 user32 d2d1 dwrite dwmapi imm32 uuid)
   target_compile_definitions(Poppy PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX WINVER=0x0A00 _WIN32_WINNT=0x0A00 NTDDI_VERSION=0x0A000006)
