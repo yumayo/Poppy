@@ -1,0 +1,67 @@
+{
+  "hooks": {
+    "SessionStart": [{
+      "hooks": [{
+        "type": "command",
+        "command": "python3 __POPPY_STATUS_SCRIPT__ none 2",
+        "timeout": 3
+      }]
+    }],
+    "UserPromptSubmit": [{
+      "hooks": [{
+        "type": "command",
+        "command": "python3 __POPPY_STATUS_SCRIPT__ running",
+        "timeout": 10
+      }]
+    }],
+    "PreToolUse": [{
+      "hooks": [{
+        "type": "command",
+        "command": "python3 __POPPY_STATUS_SCRIPT__ activity",
+        "timeout": 10
+      }]
+    }, {
+      "matcher": "(^|.*[.:/])(request_user_input|request_permissions)$",
+      "hooks": [{
+        "type": "command",
+        "command": "python3 __POPPY_STATUS_SCRIPT__ waiting",
+        "timeout": 10
+      }]
+    }],
+    "PermissionRequest": [{
+      "hooks": [{
+        "type": "command",
+        "command": "python3 __POPPY_STATUS_SCRIPT__ waiting",
+        "timeout": 10
+      }]
+    }],
+    "PostToolUse": [{
+      "hooks": [{
+        "type": "command",
+        "command": "python3 __POPPY_STATUS_SCRIPT__ resume",
+        "timeout": 10
+      }]
+    }],
+    "Stop": [{
+      "hooks": [{
+        "type": "command",
+        "command": "python3 __POPPY_STATUS_SCRIPT__ completed",
+        "timeout": 10
+      }]
+    }],
+    "Interrupt": [{
+      "hooks": [{
+        "type": "command",
+        "command": "python3 __POPPY_STATUS_SCRIPT__ interrupted 2",
+        "timeout": 3
+      }]
+    }],
+    "SessionEnd": [{
+      "hooks": [{
+        "type": "command",
+        "command": "python3 __POPPY_STATUS_SCRIPT__ none 2",
+        "timeout": 3
+      }]
+    }]
+  }
+}

@@ -91,7 +91,7 @@ bool Terminal::start() {
     for (const auto& value : environment_) inherited[value.first] = value.second;
     if (!environment_.empty()) {
         auto& wslenv = inherited[L"WSLENV"];
-        for (const auto name : {L"WPF_TASKBAR_URL", L"WPF_TASKBAR_SESSION_ID"}) {
+        for (const auto name : {L"POPPY_EVENTS_URL", L"POPPY_SESSION_ID"}) {
             bool found = false;
             for (size_t p = 0; p < wslenv.size();) { const auto end = wslenv.find(L':', p); const auto token = wslenv.substr(p, end == std::wstring::npos ? end : end-p); if (token.substr(0,token.find(L'/')) == name) found = true; if (end == std::wstring::npos) break; p = end+1; }
             if (!found) { if (!wslenv.empty()) wslenv += L':'; wslenv += name; }

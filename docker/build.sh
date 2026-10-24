@@ -34,5 +34,6 @@ x86_64-w64-mingw32-strip --strip-all \
 if mv -f "$build_output" /output/Poppy.exe; then
     build_output=/output/Poppy.exe
 fi
+rm -rf /output/ai
 cp -R "$source_dir/integration/ai" /output/
 printf 'Windows x64 build: %s (host: out/docker/)\n' "$build_output"

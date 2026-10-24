@@ -1,0 +1,81 @@
+{
+  "hooks": {
+    "UserPromptSubmit": [{
+      "hooks": [{
+        "type": "command",
+        "command": "python3 __POPPY_STATUS_SCRIPT__ running",
+        "timeout": 10
+      }]
+    }],
+    "PreToolUse": [{
+      "hooks": [{
+        "type": "command",
+        "command": "python3 __POPPY_STATUS_SCRIPT__ activity",
+        "timeout": 10
+      }]
+    }, {
+      "matcher": "^(AskUserQuestion|ExitPlanMode)$",
+      "hooks": [{
+        "type": "command",
+        "command": "python3 __POPPY_STATUS_SCRIPT__ waiting",
+        "timeout": 10
+      }]
+    }],
+    "PermissionRequest": [{
+      "hooks": [{
+        "type": "command",
+        "command": "python3 __POPPY_STATUS_SCRIPT__ waiting",
+        "timeout": 10
+      }]
+    }],
+    "PostToolUse": [{
+      "hooks": [{
+        "type": "command",
+        "command": "python3 __POPPY_STATUS_SCRIPT__ resume",
+        "timeout": 10
+      }]
+    }],
+    "PostToolUseFailure": [{
+      "hooks": [{
+        "type": "command",
+        "command": "python3 __POPPY_STATUS_SCRIPT__ tool-failed 2",
+        "timeout": 3
+      }]
+    }],
+    "Elicitation": [{
+      "hooks": [{
+        "type": "command",
+        "command": "python3 __POPPY_STATUS_SCRIPT__ waiting",
+        "timeout": 10
+      }]
+    }],
+    "ElicitationResult": [{
+      "hooks": [{
+        "type": "command",
+        "command": "python3 __POPPY_STATUS_SCRIPT__ resume",
+        "timeout": 10
+      }]
+    }],
+    "Stop": [{
+      "hooks": [{
+        "type": "command",
+        "command": "python3 __POPPY_STATUS_SCRIPT__ completed",
+        "timeout": 10
+      }]
+    }],
+    "StopFailure": [{
+      "hooks": [{
+        "type": "command",
+        "command": "python3 __POPPY_STATUS_SCRIPT__ interrupted 2",
+        "timeout": 3
+      }]
+    }],
+    "SessionEnd": [{
+      "hooks": [{
+        "type": "command",
+        "command": "python3 __POPPY_STATUS_SCRIPT__ none 2",
+        "timeout": 3
+      }]
+    }]
+  }
+}

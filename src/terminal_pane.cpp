@@ -27,8 +27,8 @@ void TerminalPane::add(SavedTerminal configuration) {
         ptr->terminal->trackContainer(ptr->notificationId);
         if (hooks_ && !hooks_->url().empty()) {
             hooks_->add(ptr->notificationId);
-            ptr->terminal->setEnvironment({{L"WPF_TASKBAR_URL",wide(hooks_->url())},{L"WPF_TASKBAR_SESSION_ID",wide(ptr->notificationId)}});
-        } else ptr->terminal->setEnvironment({{L"WPF_TASKBAR_URL", L""}, {L"WPF_TASKBAR_SESSION_ID", L""}});
+            ptr->terminal->setEnvironment({{L"POPPY_EVENTS_URL",wide(hooks_->url())},{L"POPPY_SESSION_ID",wide(ptr->notificationId)}});
+        } else ptr->terminal->setEnvironment({{L"POPPY_EVENTS_URL", L""}, {L"POPPY_SESSION_ID", L""}});
         if (changed) changed();
     };
     session->terminal->ended = [this,ptr] {
