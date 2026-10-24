@@ -16,6 +16,7 @@ struct DiffDocument {
     size_t rowCount(bool inlineView) const { return inlineView ? inlineOrder.size() : rows.size(); }
     DiffRow displayRow(size_t index, bool inlineView) const;
     size_t rowForLine(DiffLine source, bool after, bool inlineView) const;
+    size_t mapRow(size_t index, bool fromInline, bool toInline, bool after) const;
     std::string selectedText(bool after, size_t start, size_t end, bool inlineView = false) const;
 };
 void indexDiff(DiffDocument& document);

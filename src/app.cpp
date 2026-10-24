@@ -515,6 +515,7 @@ void App::saveSession() {
             ProjectSession state;
             state.sidebar = sidebar_; state.terminalHeight = terminalHeight_; state.terminalVisible = terminalVisible_;
             state.gitSidebar = activeSidebar_ == Sidebar::Git; state.activeTab = activeTab_;
+            state.diffInline = viewer_.diffInline();
             for (const auto& tab : tabs_) state.tabs.push_back({tab.path.u8string(), tab.diff, tab.fileView, tab.diffView});
             for (const auto& entry : expandedPaths_) state.expanded.push_back(entry.second.u8string());
             if (!pendingTreeSelection_.empty()) state.selected = pendingTreeSelection_.u8string();
@@ -536,6 +537,7 @@ void App::saveSession() {
     } catch (const std::exception& error) { storageError(error); }
 }
 void App::restoreProject(const ProjectSession& state) {
+    viewer_.setDiffLayout(state.diffInline);
     sidebar_ = state.sidebar; terminalHeight_ = state.terminalHeight; terminalVisible_ = state.terminalVisible;
     activeSidebar_ = state.gitSidebar ? Sidebar::Git : Sidebar::Explorer;
     explorerActivity_.select(!state.gitSidebar); gitActivity_.select(state.gitSidebar);

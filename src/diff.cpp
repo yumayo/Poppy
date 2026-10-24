@@ -47,6 +47,14 @@ size_t DiffDocument::rowForLine(DiffLine source, bool after, bool inlineView) co
     }
     return 0;
 }
+size_t DiffDocument::mapRow(size_t index, bool fromInline, bool toInline, bool after) const {
+    if (!rowCount(fromInline)) return 0;
+    index = std::min(index, rowCount(fromInline) - 1);
+    if (fromInline == toInline) return index;
+    const auto row = displayRow(index, fromInline);
+    if (!(after ? row.after.number : row.before.number)) after = !after;
+    return rowForLine(after ? row.after : row.before, after, toInline);
+}
 std::string DiffDocument::selectedText(bool after, size_t start, size_t end, bool inlineView) const {
     if (start > end) std::swap(start, end);
     std::string result;

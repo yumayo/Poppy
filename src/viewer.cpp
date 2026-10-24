@@ -21,39 +21,39 @@ void Viewer::setDpi(UINT dpi) {
 }
 void Viewer::show(std::shared_ptr<const Document> d, const fs::path& path, bool preserve) {
     diff_.reset(); document_ = std::move(d); path_ = path; message_.clear();
-    if (!preserve) { top_ = left_ = 0; anchor_ = caret_ = 0; after_ = inlineView_ = false; }
+    if (!preserve) { top_ = left_ = 0; anchor_ = caret_ = 0; after_ = false; }
     else { anchor_ = std::min(anchor_, document_->text.size()); caret_ = std::min(caret_, document_->text.size()); }
     scrollbars(); InvalidateRect(window_, nullptr, FALSE);
 }
 void Viewer::showDiff(std::shared_ptr<const DiffDocument> d, const fs::path& path, bool preserve) {
     // Share the patch snapshot; both panes only keep references to its lines.
     document_ = std::shared_ptr<const Document>(d, &d->patch); diff_ = std::move(d); path_ = path; message_.clear();
-    if (!preserve) { top_ = left_ = 0; anchor_ = caret_ = 0; after_ = inlineView_ = false; }
+    if (!preserve) { top_ = left_ = 0; anchor_ = caret_ = 0; after_ = false; }
     else { anchor_ = std::min(anchor_, document_->text.size()); caret_ = std::min(caret_, document_->text.size()); }
     scrollbars(); InvalidateRect(window_, nullptr, FALSE);
 }
 void Viewer::message(const std::wstring& text, const fs::path& path) {
-    diff_.reset(); document_.reset(); path_ = path; message_ = text; top_ = left_ = 0; anchor_ = caret_ = 0; after_ = inlineView_ = false;
+    diff_.reset(); document_.reset(); path_ = path; message_ = text; top_ = left_ = 0; anchor_ = caret_ = 0; after_ = false;
     scrollbars(); InvalidateRect(window_, nullptr, FALSE);
+}
+Viewer::State Viewer::state() const {
+    // Inline row indices retain both sides without storing a layout per tab.
+    const int top = diff_ ? static_cast<int>(diff_->mapRow(static_cast<size_t>(top_), inlineView_, true, after_)) : top_;
+    return {top, left_, anchor_, caret_, after_};
 }
 void Viewer::restore(const State& state) {
     if (!document_) return;
-    top_ = state.top; left_ = state.left; after_ = state.after; inlineView_ = state.inlineView;
+    top_ = diff_ ? static_cast<int>(diff_->mapRow(static_cast<size_t>(std::max(0, state.top)), true, inlineView_, state.after)) : state.top;
+    left_ = state.left; after_ = state.after;
     anchor_ = std::min(state.anchor, document_->text.size()); caret_ = std::min(state.caret, document_->text.size());
     scrollbars(); InvalidateRect(window_, nullptr, FALSE);
 }
-void Viewer::toggleDiffLayout() { setDiffLayout(!inlineView_); }
+void Viewer::toggleDiffLayout() { if (diff_) setDiffLayout(!inlineView_); }
 void Viewer::setDiffLayout(bool inlineView) {
-    if (!diff_ || inlineView_ == inlineView) return;
+    if (inlineView_ == inlineView) return;
     // Keep the source line at the top when the two layouts have different row counts.
-    DiffLine source; bool after = after_;
-    if (rowCount()) {
-        const auto row = diff_->displayRow(static_cast<size_t>(top_), inlineView_);
-        if (!(after ? row.after.number : row.before.number)) after = !after;
-        source = after ? row.after : row.before;
-    }
+    if (diff_) top_ = static_cast<int>(diff_->mapRow(static_cast<size_t>(top_), inlineView_, inlineView, after_));
     inlineView_ = inlineView;
-    top_ = static_cast<int>(diff_->rowForLine(source, after, inlineView_));
     if (selecting_) { selecting_ = false; ReleaseCapture(); }
     scrollbars(); InvalidateRect(window_, nullptr, FALSE);
 }
