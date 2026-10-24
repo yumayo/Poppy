@@ -21,10 +21,17 @@ void QuickOpen::layout() {
     if (!visible_) return;
     RECT parent{}; GetClientRect(GetParent(window_), &parent);
     const int width = std::max(0, std::min(px(640), static_cast<int>(parent.right) - px(32)));
-    const int count = std::max(1, std::min(static_cast<int>(result_.matches.size()), rows()));
+    // Keep the popup's surface stable while typing, including zero matches.
+    // Only a parent resize or DPI change should resize its Direct2D target.
+    const int count = rows();
     if (selected_ < first_) first_ = selected_;
     if (selected_ >= first_ + count) first_ = selected_ - count + 1;
-    SetWindowPos(window_, HWND_TOP, (parent.right - width) / 2, px(8), width, px(116 + count * 44), SWP_NOACTIVATE);
+    const int x = (parent.right - width) / 2, y = px(8), height = px(116 + count * 44);
+    RECT current{}; GetWindowRect(window_, &current);
+    MapWindowPoints(nullptr, GetParent(window_), reinterpret_cast<POINT*>(&current), 2);
+    const RECT desired{x, y, x + width, y + height};
+    if (!EqualRect(&current, &desired))
+        SetWindowPos(window_, HWND_TOP, x, y, width, height, SWP_NOACTIVATE | SWP_NOCOPYBITS);
     InvalidateRect(window_, nullptr, FALSE);
 }
 void QuickOpen::setRoot(const fs::path& root) {
@@ -37,7 +44,7 @@ void QuickOpen::show() {
     if (visible_) { SetFocus(window_); anchor_ = 0; caret_ = query_.size(); caretChanged(); return; }
     previousFocus_ = GetFocus(); query_.clear(); caret_ = anchor_ = inputFirst_ = 0;
     selected_ = first_ = 0; wheel_ = 0; highSurrogate_ = 0; result_ = {}; visible_ = true;
-    layout(); ShowWindow(window_, SW_SHOW); SetFocus(window_); request();
+    request(); ShowWindow(window_, SW_SHOW); SetFocus(window_);
 }
 void QuickOpen::close(bool restoreFocus) {
     if (!visible_) return;
@@ -82,13 +89,17 @@ void QuickOpen::changed() {
 void QuickOpen::request() {
     if (!visible_) return;
     const auto revision = ++revision_; worker_->cancelPending();
-    result_ = {}; selected_ = first_ = 0; loading_ = !root_.empty();
+    loading_ = !root_.empty();
     const auto index = index_; const auto query = utf8(query_);
     if (!index || query.empty()) {
-        if (index) { result_ = searchFiles(*index, query); loading_ = false; }
+        result_ = index ? searchFiles(*index, query) : FileSearchResult{};
+        if (index) loading_ = false;
+        selected_ = first_ = 0;
         layout(); return;
     }
-    layout();
+    // Keep the last completed list until its replacement is ready. accept()
+    // blocks activation while loading, so an old match cannot be opened.
+    InvalidateRect(window_, nullptr, FALSE);
     worker_->submit(L"files", [this, revision, index, query] {
         auto result = std::make_shared<FileSearchResult>();
         try { *result = searchFiles(*index, query, [this, revision] { return revision_.load() != revision; }); }
@@ -128,7 +139,7 @@ void QuickOpen::accept() {
     close(false); if (opened) opened(path);
 }
 void QuickOpen::move(int delta) {
-    if (result_.matches.empty()) return;
+    if (loading_ || result_.matches.empty()) return;
     selected_ = static_cast<size_t>(std::clamp(static_cast<int>(selected_) + delta, 0, static_cast<int>(result_.matches.size()) - 1));
     layout();
 }
