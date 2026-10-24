@@ -8,7 +8,7 @@ namespace poppy {
 struct ViewState {
     int top = 0, left = 0;
     size_t anchor = 0, caret = 0;
-    bool after = false, inlineView = false;
+    bool after = false;
 };
 struct SavedTab {
     std::string path;
@@ -17,7 +17,7 @@ struct SavedTab {
 };
 struct ProjectSession {
     int sidebar = 245, terminalHeight = 260;
-    bool terminalVisible = true, gitSidebar = false;
+    bool terminalVisible = true, gitSidebar = false, diffInline = false;
     size_t activeTab = 0;
     std::vector<SavedTab> tabs;
     std::vector<std::string> expanded;

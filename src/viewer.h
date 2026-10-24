@@ -13,8 +13,10 @@ public:
     void show(std::shared_ptr<const Document> document, const fs::path& path, bool preserve = false);
     void showDiff(std::shared_ptr<const DiffDocument> document, const fs::path& path, bool preserve = false);
     void toggleDiffLayout();
+    void setDiffLayout(bool inlineView);
+    bool diffInline() const { return inlineView_; }
     void message(const std::wstring& text, const fs::path& path = {});
-    State state() const { return {top_, left_, anchor_, caret_, after_, inlineView_}; }
+    State state() const;
     void restore(const State& state);
     bool hasDocument() const { return document_ != nullptr; }
     HWND window() const { return window_; }
@@ -26,7 +28,6 @@ private:
     void scroll(int vertical, int horizontal);
     size_t position(int x, int y) const;
     void copy();
-    void setDiffLayout(bool inlineView);
     RECT layoutButton(bool inlineView) const;
     int visibleRows() const;
     bool splitDiff() const { return diff_ && !inlineView_; }

@@ -29,11 +29,11 @@ void execute(const fs::path& path, const char* sql) {
     if (result != SQLITE_OK) throw std::runtime_error(error);
 }
 bool same(const poppy::ViewState& a, const poppy::ViewState& b) {
-    return a.top == b.top && a.left == b.left && a.anchor == b.anchor && a.caret == b.caret && a.after == b.after && a.inlineView == b.inlineView;
+    return a.top == b.top && a.left == b.left && a.anchor == b.anchor && a.caret == b.caret && a.after == b.after;
 }
 bool same(const poppy::ProjectSession& a, const poppy::ProjectSession& b) {
     if (a.sidebar != b.sidebar || a.terminalHeight != b.terminalHeight || a.terminalVisible != b.terminalVisible ||
-        a.gitSidebar != b.gitSidebar || a.activeTab != b.activeTab || a.expanded != b.expanded || a.selected != b.selected || a.tabs.size() != b.tabs.size()) return false;
+        a.gitSidebar != b.gitSidebar || a.diffInline != b.diffInline || a.activeTab != b.activeTab || a.expanded != b.expanded || a.selected != b.selected || a.tabs.size() != b.tabs.size()) return false;
     for (size_t i = 0; i < a.tabs.size(); ++i) {
         const auto& x = a.tabs[i]; const auto& y = b.tabs[i];
         if (x.path != y.path || x.diff != y.diff || !same(x.fileView, y.fileView) || !same(x.diffView, y.diffView)) return false;
@@ -46,8 +46,9 @@ void roundTripAndIsolation() {
     const std::string path = "D:\\repository\\yumayo\\PoppyWorktrees\\PoppyDirect2D";
     poppy::ProjectSession state;
     state.sidebar = 333; state.terminalHeight = 222; state.terminalVisible = false; state.gitSidebar = true; state.activeTab = 1;
-    state.tabs = {{path + "\\日本語's file.cpp", false, {42, 17, 30, 50, false, false}, {20, 3, 2, 11, true, true}},
-                  {path + "\\deleted.cpp", true, {5, 2, 1, 7, false, true}, {50, 4, 6, 14, true, false}}};
+    state.diffInline = true;
+    state.tabs = {{path + "\\日本語's file.cpp", false, {42, 17, 30, 50, false}, {20, 3, 2, 11, true}},
+                  {path + "\\deleted.cpp", true, {5, 2, 1, 7, false}, {50, 4, 6, 14, true}}};
     state.expanded = {path, path + "\\src", path + "\\src\\日本語"}; state.selected = state.tabs.front().path;
     poppy::AppSession app;
     app.lastProject = path; app.x = -1500; app.y = 120; app.width = 1200; app.height = 800; app.positioned = true; app.maximized = true;
@@ -81,6 +82,9 @@ void roundTripAndIsolation() {
         check(same(*storage.loadProject(a, a), state) && same(*storage.loadProject(b, b), empty), "One project overwrote another");
         storage.saveProject(key, path, empty);
         check(same(*storage.loadProject(key, path), empty), "Closed tabs or collapsed directories were retained");
+        empty.diffInline = true;
+        storage.saveProject(key, path, empty);
+        check(same(*storage.loadProject(key, path), empty), "A project's layout was lost when no files were open");
     }
 }
 void atomicSave() {
@@ -91,12 +95,48 @@ void atomicSave() {
     storage.saveProject(key, key, original);
     execute(storage.projectDirectory(key, key) / "storage.sql",
         "CREATE TRIGGER reject_tab BEFORE INSERT ON tabs WHEN NEW.path='reject' BEGIN SELECT RAISE(ABORT,'test write failure'); END;");
-    auto changed = original; changed.sidebar = 500; changed.tabs[0].path = "reject"; changed.expanded.clear();
+    auto changed = original; changed.sidebar = 500; changed.diffInline = true; changed.tabs[0].path = "reject"; changed.expanded.clear();
     rejects([&] { storage.saveProject(key, key, changed); }, "A failed SQLite write reported success");
     check(same(*storage.loadProject(key, key), original), "A failed save partially overwrote the previous session");
     changed.tabs.resize(10001);
     rejects([&] { storage.saveProject(key, key, changed); }, "Oversized sessions were silently truncated");
     check(same(*storage.loadProject(key, key), original), "An oversized session overwrote previous state");
+}
+void migrateProjectLayout() {
+    Fixture fixture;
+    poppy::Storage storage(fixture.directory);
+    for (int active : {0, 2}) {
+        const std::string key = "c:\\legacy-" + std::to_string(active);
+        const auto db = storage.projectDirectory(key, key) / "storage.sql";
+        execute(db,
+            "CREATE TABLE session (id INTEGER PRIMARY KEY CHECK(id=1), sidebar INTEGER NOT NULL, terminal_height INTEGER NOT NULL,"
+            " terminal_visible INTEGER NOT NULL, git_sidebar INTEGER NOT NULL, active_tab INTEGER NOT NULL, selected_path TEXT NOT NULL);"
+            "CREATE TABLE tabs (position INTEGER PRIMARY KEY, path TEXT NOT NULL, diff INTEGER NOT NULL,"
+            " file_top INTEGER NOT NULL, file_left INTEGER NOT NULL, file_anchor INTEGER NOT NULL, file_caret INTEGER NOT NULL, file_after INTEGER NOT NULL, file_inline INTEGER NOT NULL,"
+            " diff_top INTEGER NOT NULL, diff_left INTEGER NOT NULL, diff_anchor INTEGER NOT NULL, diff_caret INTEGER NOT NULL, diff_after INTEGER NOT NULL, diff_inline INTEGER NOT NULL);"
+            "CREATE TABLE expanded (path TEXT PRIMARY KEY);"
+            "INSERT INTO session VALUES(1,333,222,0,1,0,'selected');"
+            "INSERT INTO tabs VALUES(0,'normal',0,42,17,30,50,0,1,20,3,2,11,1,0);"
+            "INSERT INTO tabs VALUES(1,'split',1,5,2,1,7,0,0,50,4,6,14,1,0);"
+            "INSERT INTO tabs VALUES(2,'inline',1,5,2,1,7,0,0,30,4,6,14,1,1);"
+            "INSERT INTO expanded VALUES('expanded');"
+            "PRAGMA user_version=1;");
+        if (active == 2) execute(db, "UPDATE session SET active_tab=2;");
+        const auto saved = storage.loadProject(key, key);
+        check(saved && saved->diffInline == (active == 2), "Migration did not prefer the active diff or first diff tab's layout");
+        check(saved->activeTab == static_cast<size_t>(active) && saved->sidebar == 333 && saved->terminalHeight == 222 &&
+              !saved->terminalVisible && saved->gitSidebar && saved->selected == "selected" && saved->expanded == std::vector<std::string>{"expanded"},
+              "Migration lost project settings");
+        check(saved->tabs.size() == 3 && saved->tabs[0].path == "normal" && !saved->tabs[0].diff &&
+              same(saved->tabs[0].fileView, {42, 17, 30, 50, false}) && same(saved->tabs[1].diffView, {0, 4, 6, 14, true}) &&
+              same(saved->tabs[2].diffView, {30, 4, 6, 14, true}), "Migration lost tab state or retained incompatible split row indices");
+        rejects([&] { execute(db, "SELECT file_inline FROM tabs;"); }, "Normal tabs still store a layout setting");
+        rejects([&] { execute(db, "SELECT diff_inline FROM tabs;"); }, "Diff tabs still store a layout setting");
+        check(same(*storage.loadProject(key, key), *saved), "Reopening repeated the migration");
+        auto changed = *saved; changed.diffInline = !saved->diffInline;
+        storage.saveProject(key, key, changed);
+        check(same(*storage.loadProject(key, key), changed), "Migrated project layouts cannot be updated");
+    }
 }
 void schemaAndRegistry() {
     Fixture fixture;
@@ -104,7 +144,7 @@ void schemaAndRegistry() {
     {
         poppy::Storage storage(fixture.directory);
         const auto projectDb = storage.projectDirectory("c:\\future", "c:\\future") / "storage.sql";
-        execute(projectDb, "PRAGMA user_version=2");
+        execute(projectDb, "PRAGMA user_version=3");
         rejects([&] { storage.loadProject("c:\\future", "c:\\future"); }, "A newer project schema was overwritten");
         storage.projectDirectory("c:\\invalid", "c:\\invalid");
         execute(appDb, R"(UPDATE projects SET directory='../../escape' WHERE path_key='c:\invalid')");
@@ -116,7 +156,7 @@ void schemaAndRegistry() {
 }
 int main() {
     try {
-        roundTripAndIsolation(); atomicSave(); schemaAndRegistry();
+        roundTripAndIsolation(); atomicSave(); migrateProjectLayout(); schemaAndRegistry();
         std::cout << "Storage tests passed\n";
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
 }

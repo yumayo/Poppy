@@ -106,8 +106,29 @@ void edgeCases() {
     reused.patch.text.clear(); indexDiff(reused);
     check(reused.rows.empty() && reused.inlineOrder.empty() && reused.maxColumns == 0, "Reindexing must discard old rows and widths");
 }
+void viewPositions() {
+    const auto diff = parse("@@ -10,4 +20,5 @@\n context\n-old1\n-old2\n+new1\n+new2\n+new3\n tail\n");
+    for (const bool after : {false, true}) {
+        for (size_t row = 0; row < diff.rowCount(true); ++row)
+            check(diff.mapRow(row, true, true, after) == row, "Saved inline positions must retain the exact row independently of the selection side");
+        for (size_t row = 0; row < diff.rowCount(false); ++row)
+            check(diff.mapRow(diff.mapRow(row, false, true, after), true, false, after) == row,
+                "Saving split positions in inline coordinates must preserve their source rows");
+    }
+    check(diff.mapRow(6, true, false, false) == 4 && diff.mapRow(4, false, true, false) == 6,
+        "A tab's context position must survive changing the project layout in another tab");
+    check(diff.mapRow(1, false, true, false) == 1 && diff.mapRow(1, false, true, true) == 3,
+        "Restoring a replacement must retain the selected side");
+    check(diff.mapRow(5, true, false, false) == 3 && diff.mapRow(3, false, true, false) == 5,
+        "Positions on unpaired additions must fall back to the available side");
+    const auto deleted = parse("@@ -1,2 +0,0 @@\n-first\n-second\n");
+    check(deleted.mapRow(1, false, true, true) == 1, "Positions in deleted files must fall back to the original side");
+    check(diff.mapRow(100, false, true, false) == 6 && diff.mapRow(100, true, false, true) == 4 &&
+          diff.mapRow(100, false, false, true) == 4 && parse("").mapRow(100, false, true, false) == 0,
+        "Restoring positions after a diff shrinks must stay within the document");
+}
 }
 int main() {
-    try { alignment(); additionsAndDeletions(); inlineLayout(); edgeCases(); std::cout << "Diff tests passed.\n"; return EXIT_SUCCESS; }
+    try { alignment(); additionsAndDeletions(); inlineLayout(); edgeCases(); viewPositions(); std::cout << "Diff tests passed.\n"; return EXIT_SUCCESS; }
     catch (const std::exception& error) { std::cerr << error.what() << '\n'; return EXIT_FAILURE; }
 }
