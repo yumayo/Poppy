@@ -217,6 +217,7 @@ int App::run(HINSTANCE instance, int show, fs::path initial) {
         if (key && ctrl && msg.wParam == 'W' && GetFocus() != terminal_.window()) { closeTab(activeTab_); continue; }
         if (key && msg.wParam == VK_F5 && GetFocus() != terminal_.window()) { refresh(); continue; }
         if (key && msg.wParam == VK_F6 && GetFocus() != terminal_.window()) { showDiff(); continue; }
+        if (key && msg.wParam == VK_F7 && GetFocus() != terminal_.window()) { viewer_.toggleDiffLayout(); continue; }
         if (key && msg.wParam == VK_TAB && GetFocus() != terminal_.window()) {
             const HWND files = activeSidebar_ == Sidebar::Explorer ? (IsWindowVisible(tree_) ? tree_ : explorerButton_) : (IsWindowVisible(gitTree_) ? gitTree_ : gitButton_);
             SetFocus(GetFocus() == files ? viewer_.window() : terminalVisible_ ? terminal_.window() : files); continue;
@@ -595,7 +596,7 @@ void App::loadTab(bool preserve) {
             else if (doc->patch.text.empty()) viewer_.message(L"No tracked changes for this file.\nUntracked files can be read in the normal preview.\n\nPress F6 to return to the file.", path);
             else if (doc->rows.empty()) viewer_.message(L"No text changes to display.\n\nPress F6 to return to the file.", path);
             else { viewer_.showDiff(doc, path, preserve); if (!preserve) viewer_.restore(state); }
-            status(staged ? L"Staged diff  ·  F6: return to file" : L"Working tree diff  ·  F6: return to file");
+            status(staged ? L"Staged diff  ·  F6: return to file  ·  F7: split / inline" : L"Working tree diff  ·  F6: return to file  ·  F7: split / inline");
         });
     });
 }

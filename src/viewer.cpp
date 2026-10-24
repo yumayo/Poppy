@@ -21,26 +21,47 @@ void Viewer::setDpi(UINT dpi) {
 }
 void Viewer::show(std::shared_ptr<const Document> d, const fs::path& path, bool preserve) {
     diff_.reset(); document_ = std::move(d); path_ = path; message_.clear();
-    if (!preserve) { top_ = left_ = 0; anchor_ = caret_ = 0; after_ = false; }
+    if (!preserve) { top_ = left_ = 0; anchor_ = caret_ = 0; after_ = inlineView_ = false; }
     else { anchor_ = std::min(anchor_, document_->text.size()); caret_ = std::min(caret_, document_->text.size()); }
     scrollbars(); InvalidateRect(window_, nullptr, FALSE);
 }
 void Viewer::showDiff(std::shared_ptr<const DiffDocument> d, const fs::path& path, bool preserve) {
     // Share the patch snapshot; both panes only keep references to its lines.
     document_ = std::shared_ptr<const Document>(d, &d->patch); diff_ = std::move(d); path_ = path; message_.clear();
-    if (!preserve) { top_ = left_ = 0; anchor_ = caret_ = 0; after_ = false; }
+    if (!preserve) { top_ = left_ = 0; anchor_ = caret_ = 0; after_ = inlineView_ = false; }
     else { anchor_ = std::min(anchor_, document_->text.size()); caret_ = std::min(caret_, document_->text.size()); }
     scrollbars(); InvalidateRect(window_, nullptr, FALSE);
 }
 void Viewer::message(const std::wstring& text, const fs::path& path) {
-    diff_.reset(); document_.reset(); path_ = path; message_ = text; top_ = left_ = 0; anchor_ = caret_ = 0; after_ = false;
+    diff_.reset(); document_.reset(); path_ = path; message_ = text; top_ = left_ = 0; anchor_ = caret_ = 0; after_ = inlineView_ = false;
     scrollbars(); InvalidateRect(window_, nullptr, FALSE);
 }
 void Viewer::restore(const State& state) {
     if (!document_) return;
-    top_ = state.top; left_ = state.left; after_ = state.after;
+    top_ = state.top; left_ = state.left; after_ = state.after; inlineView_ = state.inlineView;
     anchor_ = std::min(state.anchor, document_->text.size()); caret_ = std::min(state.caret, document_->text.size());
     scrollbars(); InvalidateRect(window_, nullptr, FALSE);
+}
+void Viewer::toggleDiffLayout() { setDiffLayout(!inlineView_); }
+void Viewer::setDiffLayout(bool inlineView) {
+    if (!diff_ || inlineView_ == inlineView) return;
+    // Keep the source line at the top when the two layouts have different row counts.
+    DiffLine source; bool after = after_;
+    if (rowCount()) {
+        const auto row = diff_->displayRow(static_cast<size_t>(top_), inlineView_);
+        if (!(after ? row.after.number : row.before.number)) after = !after;
+        source = after ? row.after : row.before;
+    }
+    inlineView_ = inlineView;
+    top_ = static_cast<int>(diff_->rowForLine(source, after, inlineView_));
+    if (selecting_) { selecting_ = false; ReleaseCapture(); }
+    scrollbars(); InvalidateRect(window_, nullptr, FALSE);
+}
+RECT Viewer::layoutButton(bool inlineView) const {
+    const auto rect = Scrollbars::contentRect(window_);
+    const int width = header_ * 2, right = static_cast<int>(rect.right) - header_ / 3;
+    return {right - width * (inlineView ? 1 : 2), header_ / 6,
+        right - (inlineView ? 0 : width), header_ - header_ / 6};
 }
 int Viewer::visibleRows() const { const auto r = Scrollbars::contentRect(window_); return std::max(1, (static_cast<int>(r.bottom) - contentTop()) / cellHeight_); }
 void Viewer::scrollbars() {
@@ -50,8 +71,8 @@ void Viewer::scrollbars() {
     // Each bar can change the space available to the other.
     for (int pass = 0; pass < 3; ++pass) {
         const auto r = Scrollbars::contentRect(window_);
-        const int width = diff_ ? (static_cast<int>(r.right) - 1) / 2 : static_cast<int>(r.right);
-        const int pageRows = visibleRows(), pageCols = std::max(1, (width - gutter_) / cellWidth_);
+        const int width = splitDiff() ? (static_cast<int>(r.right) - 1) / 2 : static_cast<int>(r.right);
+        const int pageRows = visibleRows(), pageCols = std::max(1, (width - textGutter()) / cellWidth_);
         top_ = std::clamp(top_, 0, std::max(0, rows - pageRows)); left_ = std::clamp(left_, 0, std::max(0, cols - pageCols));
         SCROLLINFO vertical{sizeof(vertical), SIF_RANGE | SIF_PAGE | SIF_POS, 0, rows - 1, static_cast<UINT>(pageRows), top_, 0}; SetScrollInfo(window_, SB_VERT, &vertical, FALSE);
         SCROLLINFO horizontal{sizeof(horizontal), SIF_RANGE | SIF_PAGE | SIF_POS, 0, cols - 1, static_cast<UINT>(pageCols), left_, 0}; SetScrollInfo(window_, SB_HORZ, &horizontal, FALSE);
@@ -61,22 +82,25 @@ void Viewer::scroll(int vertical, int horizontal) { top_ += vertical; left_ += h
 size_t Viewer::position(int x, int y) const {
     if (!document_ || !rowCount()) return 0;
     size_t row = std::min(rowCount() - 1, static_cast<size_t>(std::max(0, (y - contentTop()) / cellHeight_ + top_)));
-    int origin = gutter_;
+    int origin = textGutter();
     auto line = document_->line(row); size_t offset = document_->lines[row];
     if (diff_) {
         const auto rect = Scrollbars::contentRect(window_);
-        origin += after_ ? static_cast<int>(rect.right) / 2 + 1 : 0;
-        x = std::min(x, static_cast<int>(after_ ? rect.right : rect.right / 2));
-        auto source = after_ ? diff_->rows[row].after : diff_->rows[row].before;
+        if (splitDiff()) {
+            origin += after_ ? static_cast<int>(rect.right) / 2 + 1 : 0;
+            x = std::min(x, static_cast<int>(after_ ? rect.right : rect.right / 2));
+        }
+        auto change = diff_->displayRow(row, inlineView_);
+        auto source = (inlineView_ ? change.after.number != 0 : after_) ? change.after : change.before;
         if (!source.number) {
             // Empty alignment cells map to the next source line's start, or
             // the preceding line's end when this side has no more content.
             for (size_t next = row + 1; next < rowCount(); ++next) {
-                source = after_ ? diff_->rows[next].after : diff_->rows[next].before;
+                change = diff_->displayRow(next, inlineView_); source = after_ ? change.after : change.before;
                 if (source.number) return diff_->offset(source);
             }
             for (size_t previous = row; previous > 0; --previous) {
-                source = after_ ? diff_->rows[previous - 1].after : diff_->rows[previous - 1].before;
+                change = diff_->displayRow(previous - 1, inlineView_); source = after_ ? change.after : change.before;
                 if (source.number) return diff_->offset(source) + diff_->line(source).size();
             }
             return 0;
@@ -95,7 +119,7 @@ size_t Viewer::position(int x, int y) const {
 void Viewer::copy() {
     if (!document_ || anchor_ == caret_) return;
     const size_t start = std::min(anchor_, caret_), end = std::max(anchor_, caret_);
-    if (diff_) copyText(window_, wide(diff_->selectedText(after_, start, end)));
+    if (diff_) copyText(window_, wide(diff_->selectedText(after_, start, end, inlineView_)));
     else copyText(window_, wide(std::string_view(document_->text).substr(start, end - start)));
 }
 void Viewer::paint() {
@@ -103,10 +127,17 @@ void Viewer::paint() {
     auto& dc = renderer_; dc.font(Renderer::Font::Ui);
     const auto r = Scrollbars::contentRect(window_);
     RECT header{0, 0, r.right, header_}; dc.fill(header, panel);
-    RECT title{14, 0, std::max<LONG>(14, r.right - 175), header_};
+    const LONG titleRight = diff_ ? layoutButton(false).left - 14 : r.right - 175;
+    RECT title{14, 0, std::max<LONG>(14, titleRight), header_};
     dc.label(title, path_.empty() ? L"POPPY" : path_.filename().native(), foreground);
     RECT tag{std::max<LONG>(14, r.right - 175), 0, r.right - 12, header_};
-    dc.label(tag, diff_ ? L"GIT DIFF  ·  READ ONLY" : document_ ? wide(document_->encoding) + L"  ·  READ ONLY" : L"READ ONLY", muted, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+    if (diff_) {
+        for (const bool inlineView : {false, true}) {
+            const auto button = layoutButton(inlineView);
+            dc.fill(button, inlineView == inlineView_ ? rgb(50, 70, 94) : background);
+            dc.label(button, inlineView ? L"Inline" : L"Split", inlineView == inlineView_ ? foreground : muted, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        }
+    } else dc.label(tag, document_ ? wide(document_->encoding) + L"  ·  READ ONLY" : L"READ ONLY", muted, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
     dc.fill({0, header_ - 1, r.right, header_}, border);
     if (!document_) {
         dc.fill({0, header_, r.right, r.bottom}, background);
@@ -116,31 +147,43 @@ void Viewer::paint() {
         const int body = contentTop(), middle = static_cast<int>(r.right) / 2;
         if (diff_) {
             dc.fill({0, header_, r.right, body}, panel);
-            dc.label({14, header_, middle, body}, L"Before", muted);
-            dc.label({middle + 14, header_, r.right, body}, L"After", muted);
+            if (inlineView_) {
+                dc.label({0, header_, gutter_ - 14, body}, L"Before", muted, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+                dc.label({gutter_, header_, 2 * gutter_ - 14, body}, L"After", muted, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+            } else {
+                dc.label({14, header_, middle, body}, L"Before", muted);
+                dc.label({middle + 14, header_, r.right, body}, L"After", muted);
+            }
             dc.fill({0, body - 1, r.right, body}, border);
         }
         dc.font(Renderer::Font::Code);
         const int rows = std::max(0, (static_cast<int>(r.bottom) - body + cellHeight_ - 1) / cellHeight_);
         const size_t selectionStart = std::min(anchor_, caret_), selectionEnd = std::max(anchor_, caret_);
         std::vector<Token> tokens;
-        for (int side = 0; side < (diff_ ? 2 : 1); ++side) {
-            const int paneLeft = side ? middle + 1 : 0, paneRight = diff_ && !side ? middle : static_cast<int>(r.right);
-            const int textLeft = paneLeft + gutter_;
+        for (int side = 0; side < (splitDiff() ? 2 : 1); ++side) {
+            const int paneLeft = side ? middle + 1 : 0, paneRight = splitDiff() && !side ? middle : static_cast<int>(r.right);
+            const int textLeft = paneLeft + textGutter();
             const int columns = std::max(0, (paneRight - textLeft) / cellWidth_ + 1);
             std::vector<Cell> cells(static_cast<size_t>(columns));
             for (int screenRow = 0; screenRow < rows; ++screenRow) {
                 const int y = body + screenRow * cellHeight_; const size_t row = static_cast<size_t>(top_ + screenRow);
-                Color rowBackground = background; DiffLine source;
+                Color rowBackground = background; DiffLine source; DiffRow change;
                 if (diff_ && row < rowCount()) {
-                    const auto& change = diff_->rows[row]; source = side ? change.after : change.before;
-                    if (source.number && change.changed) rowBackground = side ? addedBackground : removedBackground;
+                    change = diff_->displayRow(row, inlineView_);
+                    const bool after = inlineView_ ? change.after.number != 0 : side != 0;
+                    source = after ? change.after : change.before;
+                    if (source.number && change.changed) rowBackground = after ? addedBackground : removedBackground;
                     else if (!source.number) rowBackground = panel;
                 }
                 dc.fill({paneLeft, y, paneRight, y + cellHeight_}, rowBackground);
                 if (row >= rowCount() || (diff_ && !source.number)) continue;
-                RECT number{paneLeft, y, std::min(paneRight, textLeft - 14), y + cellHeight_};
-                dc.label(number, std::to_wstring(diff_ ? source.number : row + 1), muted, DT_RIGHT | DT_SINGLELINE);
+                if (diff_ && inlineView_) {
+                    if (change.before.number) dc.label({0, y, std::min(paneRight, gutter_ - 14), y + cellHeight_}, std::to_wstring(change.before.number), muted, DT_RIGHT | DT_SINGLELINE);
+                    if (change.after.number) dc.label({gutter_, y, std::min(paneRight, textLeft - 14), y + cellHeight_}, std::to_wstring(change.after.number), muted, DT_RIGHT | DT_SINGLELINE);
+                } else {
+                    RECT number{paneLeft, y, std::min(paneRight, textLeft - 14), y + cellHeight_};
+                    dc.label(number, std::to_wstring(diff_ ? source.number : row + 1), muted, DT_RIGHT | DT_SINGLELINE);
+                }
                 auto line = diff_ ? diff_->line(source) : document_->line(row);
                 const size_t lineOffset = diff_ ? diff_->offset(source) : document_->lines[row];
                 line = line.substr(0, std::min(line.size(), maxLineColumns * 4));
@@ -154,7 +197,7 @@ void Viewer::paint() {
                     while (token < tokens.size() && tokens[token].end <= begin) ++token;
                     const auto style = token < tokens.size() && tokens[token].begin <= begin ? tokens[token].style : Style::Text;
                     const size_t offset = lineOffset + begin;
-                    const Color bg = (!diff_ || static_cast<bool>(side) == after_) && offset >= selectionStart && offset < selectionEnd ? rgb(50, 70, 94) : rowBackground;
+                    const Color bg = (!splitDiff() || static_cast<bool>(side) == after_) && offset >= selectionStart && offset < selectionEnd ? rgb(50, 70, 94) : rowBackground;
                     if (c < 32) c = U' ';
                     for (int i = 0; i < width; ++i) {
                         const int x = col + i - left_; if (x < 0 || x >= columns) continue;
@@ -167,7 +210,7 @@ void Viewer::paint() {
                 RECT clip{textLeft, body, paneRight, r.bottom}; dc.cells(textLeft, y, cellWidth_, cellHeight_, cells, columns, clip);
             }
         }
-        if (diff_) dc.fill({middle, header_, middle + 1, r.bottom}, border);
+        if (splitDiff()) dc.fill({middle, body, middle + 1, r.bottom}, border);
     }
     scrollbars_.paint(window_, dc, background);
 }
@@ -183,11 +226,30 @@ LRESULT Viewer::handle(UINT m, WPARAM a, LPARAM b) {
     case WM_PAINT: paint(); return 0;
     case WM_ERASEBKGND: return 1;
     case WM_SIZE: scrollbars(); return 0;
+    case WM_SETCURSOR:
+        if (diff_ && LOWORD(b) == HTCLIENT) {
+            POINT point{}; GetCursorPos(&point); ScreenToClient(window_, &point);
+            for (const bool inlineView : {false, true}) {
+                const auto button = layoutButton(inlineView);
+                if (PtInRect(&button, point)) { SetCursor(LoadCursorW(nullptr, IDC_HAND)); return TRUE; }
+            }
+        }
+        return DefWindowProcW(window_, m, a, b);
     case WM_GETDLGCODE: return DLGC_WANTARROWS | DLGC_WANTCHARS;
     case WM_LBUTTONDOWN: {
-        SetFocus(window_); if (GET_Y_LPARAM(b) < contentTop()) return 0;
-        const bool after = diff_ && GET_X_LPARAM(b) >= Scrollbars::contentRect(window_).right / 2;
-        const bool extend = (GetKeyState(VK_SHIFT) & 0x8000) && after == after_;
+        SetFocus(window_);
+        const POINT point{GET_X_LPARAM(b), GET_Y_LPARAM(b)};
+        if (diff_) for (const bool inlineView : {false, true}) {
+            const auto button = layoutButton(inlineView);
+            if (PtInRect(&button, point)) { setDiffLayout(inlineView); return 0; }
+        }
+        if (point.y < contentTop()) return 0;
+        bool after = splitDiff() && point.x >= Scrollbars::contentRect(window_).right / 2;
+        if (diff_ && inlineView_ && rowCount()) {
+            const size_t row = std::min(rowCount() - 1, static_cast<size_t>((point.y - contentTop()) / cellHeight_ + top_));
+            after = diff_->displayRow(row, true).after.number != 0;
+        }
+        const bool extend = (GetKeyState(VK_SHIFT) & 0x8000) && (!splitDiff() || after == after_);
         after_ = after;
         if (!extend) anchor_ = position(GET_X_LPARAM(b), GET_Y_LPARAM(b));
         caret_ = position(GET_X_LPARAM(b), GET_Y_LPARAM(b)); selecting_ = true; SetCapture(window_); InvalidateRect(window_, nullptr, FALSE); return 0;
