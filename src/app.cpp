@@ -195,6 +195,7 @@ private:
     UINT dpi_ = 96;
     int sidebar_ = 245, terminalHeight_ = 260, toolbar_ = 44, footer_ = 26, splitter_ = 5;
     int activityWidth_ = 48, sidebarHeader_ = 34, gitHeader_ = 84;
+    int tabWidth_ = 180;
     RECT sidebarRect_{}, sidebarSplitter_{}, terminalSplitter_{}, tabsRect_{};
     int dragging_ = 0, dragOffset_ = 0;
     bool terminalVisible_ = true;
@@ -217,6 +218,7 @@ private:
     bool projectStorageAvailable_ = true;
     std::vector<Tab> tabs_;
     size_t activeTab_ = 0, firstTab_ = 0, tabTools_ = 0;
+    size_t tabsPerRow_ = 1, tabRows_ = 0;
     TreeItem rootItem_ = 0;
     uint64_t generation_ = 0, serial_ = 0, nextId_ = 1;
     std::map<uint64_t, TreeItem> nodes_;
@@ -354,7 +356,21 @@ void App::layout(bool revealTab) {
     const int gitTop = toolbar_ + sidebarHeader_ + gitHeader_;
     const bool showExplorer = activeSidebar_ == Sidebar::Explorer && !root_.empty();
     const bool showGitFiles = activeSidebar_ == Sidebar::Git && git_ && git_->error.empty() && !git_->root.empty() && !git_->entries.empty();
-    const int tabHeight = tabs_.empty() ? 0 : MulDiv(34, dpi_, 96);
+    const int rowHeight = MulDiv(34, dpi_, 96), tabAreaWidth = std::max(0, width - right);
+    const int preferredTabWidth = MulDiv(180, dpi_, 96);
+    const size_t maxRows = static_cast<size_t>(std::max(1, (viewerSize - MulDiv(100, dpi_, 96)) / rowHeight));
+    tabsPerRow_ = static_cast<size_t>(std::max(1, tabAreaWidth / preferredTabWidth));
+    tabRows_ = tabs_.empty() ? 0 : std::min(maxRows, 1 + (tabs_.size() - 1) / tabsPerRow_);
+    int available = tabAreaWidth;
+    // Keep the document usable even with many tabs. Only reserve navigation
+    // buttons when all rows no longer fit above the document.
+    if (tabs_.size() > tabCapacity()) {
+        available = std::max(0, tabAreaWidth - MulDiv(56, dpi_, 96));
+        tabsPerRow_ = static_cast<size_t>(std::max(1, available / preferredTabWidth));
+        tabRows_ = std::min(maxRows, 1 + (tabs_.size() - 1) / tabsPerRow_);
+    }
+    tabWidth_ = std::min(preferredTabWidth, available);
+    const int tabHeight = static_cast<int>(tabRows_) * rowHeight;
     tabsRect_ = {right, toolbar_, width, toolbar_ + tabHeight};
     updateTabs(revealTab);
 
@@ -438,11 +454,14 @@ void App::paint() {
             dc.fill({rect.right - 1, rect.top, rect.right, rect.bottom}, border);
         }
         if (tabs_.size() > tabCapacity()) {
-            const int edge = tabsRect_.right, button = scaled(28);
-            dc.label({edge - 2 * button, tabsRect_.top, edge - button, tabsRect_.bottom}, L"‹", firstTab_ ? foreground : muted, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-            dc.label({edge - button, tabsRect_.top, edge, tabsRect_.bottom}, L"›", firstTab_ + tabCapacity() < tabs_.size() ? foreground : muted, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            const int edge = tabsRect_.right, button = scaled(28), top = tabsRect_.bottom - scaled(34);
+            dc.label({edge - 2 * button, top, edge - button, tabsRect_.bottom}, L"‹", firstTab_ ? foreground : muted, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            dc.label({edge - button, top, edge, tabsRect_.bottom}, L"›", firstTab_ + tabCapacity() < tabs_.size() ? foreground : muted, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
         }
-        dc.fill({tabsRect_.left, tabsRect_.bottom - 1, tabsRect_.right, tabsRect_.bottom}, border);
+        for (size_t row = 1; row <= tabRows_; ++row) {
+            const int bottom = tabsRect_.top + static_cast<int>(row) * scaled(34);
+            dc.fill({tabsRect_.left, bottom - 1, tabsRect_.right, bottom}, border);
+        }
     }
 }
 void App::selectSidebar(Sidebar sidebar) {
@@ -695,13 +714,13 @@ void App::applyDirectory(TreeItem item, Node*, const DirectoryResult& result) {
     if (result.truncated || nodes_.size() >= maxTreeNodes) status(L"Explorer limit: 10,000 items/folder, 50,000 visible nodes.");
 }
 size_t App::tabCapacity() const {
-    const int width = std::max(0L, tabsRect_.right - tabsRect_.left), tabWidth = MulDiv(180, dpi_, 96);
-    const int arrows = tabs_.size() > static_cast<size_t>(width / tabWidth) ? MulDiv(56, dpi_, 96) : 0;
-    return static_cast<size_t>(std::max(1, (width - arrows) / tabWidth));
+    return tabsPerRow_ * tabRows_;
 }
 RECT App::tabBounds(size_t index) const {
-    const int left = tabsRect_.left + static_cast<int>(index - firstTab_) * MulDiv(180, dpi_, 96);
-    return {left, tabsRect_.top, left + MulDiv(180, dpi_, 96), tabsRect_.bottom};
+    const size_t offset = index - firstTab_;
+    const int left = tabsRect_.left + static_cast<int>(offset % tabsPerRow_) * tabWidth_;
+    const int top = tabsRect_.top + static_cast<int>(offset / tabsPerRow_) * MulDiv(34, dpi_, 96);
+    return {left, top, left + tabWidth_, top + MulDiv(34, dpi_, 96)};
 }
 size_t App::tabAt(POINT point) const {
     if (PtInRect(&tabsRect_, point)) {
@@ -714,10 +733,13 @@ size_t App::tabAt(POINT point) const {
 }
 void App::updateTabs(bool reveal) {
     const size_t capacity = tabCapacity();
-    firstTab_ = std::min(firstTab_, tabs_.size() > capacity ? tabs_.size() - capacity : 0);
+    const size_t totalRows = tabs_.empty() ? 0 : 1 + (tabs_.size() - 1) / tabsPerRow_;
+    const size_t lastFirst = totalRows > tabRows_ ? (totalRows - tabRows_) * tabsPerRow_ : 0;
+    firstTab_ = std::min(firstTab_ / tabsPerRow_ * tabsPerRow_, lastFirst);
     if (reveal && !tabs_.empty()) {
-        if (activeTab_ < firstTab_) firstTab_ = activeTab_;
-        else if (activeTab_ >= firstTab_ + capacity) firstTab_ = activeTab_ - capacity + 1;
+        const size_t activeRow = activeTab_ / tabsPerRow_;
+        if (activeTab_ < firstTab_) firstTab_ = activeRow * tabsPerRow_;
+        else if (activeTab_ >= firstTab_ + capacity) firstTab_ = (activeRow - tabRows_ + 1) * tabsPerRow_;
     }
     // Only visible tabs need tooltip regions. Resolve their paths on demand.
     for (size_t i = 0; i < tabTools_; ++i) {
@@ -929,10 +951,10 @@ LRESULT App::handle(UINT m, WPARAM a, LPARAM b) {
                 const auto rect = tabBounds(index);
                 if (point.x >= rect.right - MulDiv(28, dpi_, 96)) closeTab(index);
                 else { selectTab(index); SetFocus(viewer_.window()); }
-            } else if (tabs_.size() > tabCapacity()) {
+            } else if (tabs_.size() > tabCapacity() && point.y >= tabsRect_.bottom - MulDiv(34, dpi_, 96)) {
                 const int button = MulDiv(28, dpi_, 96);
-                if (point.x >= tabsRect_.right - button && firstTab_ + tabCapacity() < tabs_.size()) ++firstTab_;
-                else if (point.x >= tabsRect_.right - 2 * button && point.x < tabsRect_.right - button && firstTab_) --firstTab_;
+                if (point.x >= tabsRect_.right - button && firstTab_ + tabCapacity() < tabs_.size()) firstTab_ += tabsPerRow_;
+                else if (point.x >= tabsRect_.right - 2 * button && point.x < tabsRect_.right - button && firstTab_) firstTab_ -= tabsPerRow_;
                 updateTabs(false);
             }
             return 0;
