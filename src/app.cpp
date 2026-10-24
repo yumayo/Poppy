@@ -488,7 +488,6 @@ void App::updateGitFiles() {
                 if (!node.directory()) {
                     const auto& entry = git_->entries[node.entry];
                     if (!gitTreeView_) text = entry.path.lexically_relative(root_).native();
-                    text = std::wstring(1, entry.state) + L"  " + text;
                     color = stateColor(entry.state);
                 }
                 const auto item = changes_.insert(parent, std::move(text), node.directory(), i, color);
@@ -542,8 +541,7 @@ wchar_t App::stateFor(const fs::path& path) const {
 void App::updateLabel(TreeItem item) {
     const auto n = node(item); if (!n) return;
     std::wstring text = n->path.filename().empty() ? n->path.native() : n->path.filename().native();
-    if (const wchar_t state = stateFor(n->path)) text = std::wstring(1, state) + L"  " + text;
-    if (n->directory) text += n->reparse ? L"  [link]" : L"\\";
+    if (n->directory && n->reparse) text += L"  [link]";
     const auto state = stateFor(n->path);
     explorer_.label(item, std::move(text), state ? stateColor(state) : foreground);
 }
