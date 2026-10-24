@@ -196,7 +196,8 @@ void sidebarTests(const fs::path& executable) {
     const auto explorer = FindWindowExW(app.window, nullptr, activityButtonClassName, L"Explorer");
     const auto git = FindWindowExW(app.window, nullptr, activityButtonClassName, L"Source Control");
     const auto viewer = FindWindowExW(app.window, nullptr, L"PoppyViewer", nullptr);
-    check(explorer && git && viewer, "Activity buttons or editor pane are missing");
+    const auto terminal = FindWindowExW(app.window, nullptr, L"PoppyTerminal", nullptr);
+    check(explorer && git && viewer && terminal, "Activity buttons or panes are missing");
     TreeItem nested = 0;
     waitFor([&] {
         nested = nextItem(tree, TreeRelation::Child, nextItem(tree, TreeRelation::Root));
@@ -239,13 +240,32 @@ void sidebarTests(const fs::path& executable) {
     const int delta = MulDiv(48, dpi, 96);
     const int x = (treeRect.right + viewerRect.left) / 2, y = treeRect.top + 20;
     send(app.window, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(x, y));
-    send(app.window, WM_MOUSEMOVE, MK_LBUTTON, MAKELPARAM(x + delta, y));
+    // Keep the button held while reversing direction, as in a live resize.
+    for (const int offset : {delta, 2 * delta, -delta, 0, delta}) {
+        send(app.window, WM_MOUSEMOVE, MK_LBUTTON, MAKELPARAM(x + offset, y));
+        const auto resizedTree = bounds(app.window, tree), resizedViewer = bounds(app.window, viewer);
+        const auto resizedTerminal = bounds(app.window, terminal);
+        check(resizedTree.right >= treeRect.right + offset - 1 && resizedTree.right <= treeRect.right + offset + 1,
+              "Dragging the sidebar boundary did not resize the sidebar");
+        check(resizedViewer.left - resizedTree.right == viewerRect.left - treeRect.right && resizedTree.left == treeRect.left,
+              "Resizing moved the activity bar or overlapped the editor");
+        check(resizedTerminal.left == resizedViewer.left && resizedTerminal.right == resizedViewer.right,
+              "Dragging the sidebar boundary did not align the terminal with the editor");
+    }
     send(app.window, WM_LBUTTONUP, 0, MAKELPARAM(x + delta, y));
-    const auto resizedTree = bounds(app.window, tree), resizedViewer = bounds(app.window, viewer);
-    check(resizedTree.right >= treeRect.right + delta - 1 && resizedTree.right <= treeRect.right + delta + 1,
-          "Dragging the sidebar boundary did not resize the sidebar");
-    check(resizedViewer.left - resizedTree.right == viewerRect.left - treeRect.right && resizedTree.left == treeRect.left,
-          "Resizing moved the activity bar or overlapped the editor");
+
+    const auto editor = bounds(app.window, viewer), console = bounds(app.window, terminal);
+    const int terminalX = editor.left + delta, terminalY = editor.bottom;
+    send(app.window, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(terminalX, terminalY));
+    for (const int offset : {-delta, delta, -2 * delta, 0}) {
+        send(app.window, WM_MOUSEMOVE, MK_LBUTTON, MAKELPARAM(terminalX, terminalY + offset));
+        const auto resizedViewer = bounds(app.window, viewer), resizedTerminal = bounds(app.window, terminal);
+        check(resizedTerminal.top >= console.top + offset - 1 && resizedTerminal.top <= console.top + offset + 1,
+              "Dragging the terminal boundary did not change its height");
+        check(resizedTerminal.top - resizedViewer.bottom == console.top - editor.bottom && resizedTerminal.bottom == console.bottom,
+              "Dragging the terminal boundary overlapped the editor or moved the footer");
+    }
+    send(app.window, WM_LBUTTONUP, 0, MAKELPARAM(terminalX, terminalY));
 }
 void treeInteractionTests(const fs::path& executable) {
     Fixture fixture;
