@@ -22,10 +22,12 @@ bool TerminalDisplay::update(TerminalModel& model, size_t scroll, uint64_t now, 
     }
     synchronizing_ = false;
     if (!dirty_ && !force && !scrollChanged) return false;
-    // Let bursts settle, but continue to show progress during unbounded output.
+    // Echo uses a frame deadline from the first chunk: a quiet-period debounce
+    // keeps restarting during key repeat. Still let queued/resize bursts settle.
+    const bool waitForEcho = now < inputUntil_ ? now - firstChange_ < 16 : now - lastChange_ < 32;
     // User scrolling bypasses batching, while the sync guard above still holds.
     if (!force && !completedSync && !scrollChanged && now - firstChange_ < 120 &&
-        (queued || now < resizeUntil_ || now - lastChange_ < 32)) return false;
+        (queued || now < resizeUntil_ || waitForEcho)) return false;
 
     columns_ = model.columns(); scroll_ = scroll;
     cells_.resize(static_cast<size_t>(model.rows()));

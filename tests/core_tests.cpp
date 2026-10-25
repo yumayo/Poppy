@@ -174,6 +174,42 @@ void terminalDisplayTests() {
     burst.feed("\r\na\r\nb\r\nc"); batched.changed(700);
     check(batched.update(burst, 1, 732) && !batched.cursorVisible() && line(batched, 0) == line(burst, 0, 1), "scrollback is captured with its cursor hidden");
 }
+void terminalInputTests() {
+    TerminalModel model(80, 3); TerminalDisplay display;
+    model.feed(std::string(60, 'x'));
+    display.update(model, 0, 0, false, true);
+    for (uint64_t now = 100; now < 400; now += 30) {
+        display.input(now);
+        check(!display.pending() && !display.update(model, 0, now), "typing alone does not redraw an unchanged frame");
+        model.feed("\b"); display.changed(now);
+        check(!display.update(model, 0, now), "echo chunks are coalesced for one frame");
+        model.feed("\x1b[K"); display.changed(now + 10);
+        check(!display.update(model, 0, now + 15), "split echo waits for its frame deadline");
+        check(display.update(model, 0, now + 16), "held backspace presents each repeat without waiting for quiet output");
+        check(line(display, 0) == std::string(static_cast<size_t>(model.cursorX()), 'x') && display.cursorX() == model.cursorX(), "backspace echo commits the erased text and cursor together");
+    }
+
+    // A delayed echo still gets a single-frame wait after its first byte.
+    model.feed("!"); display.changed(500);
+    check(!display.update(model, 0, 500) && display.update(model, 0, 516), "recent input covers delayed echo");
+    model.feed("?"); display.changed(700);
+    check(!display.update(model, 0, 716) && display.update(model, 0, 732), "ordinary output batching resumes after input stops");
+
+    display.input(800);
+    model.feed("queued"); display.changed(800);
+    check(!display.update(model, 0, 816, true), "typing does not expose queued partial output");
+    check(display.update(model, 0, 820), "drained echo need not wait for a new quiet period");
+    model.resize(40, 3); display.resized(850);
+    check(!display.update(model, 0, 866) && display.columns() == 80, "typing preserves resize settling");
+    check(display.update(model, 0, 950) && display.columns() == 40, "resized input frame commits once settled");
+
+    const std::string beforeSync = line(display, 0);
+    display.input(1000);
+    model.feed("\x1b[?2026h\r\x1b[Kincomplete"); display.changed(1000);
+    check(!display.update(model, 0, 1016) && line(display, 0) == beforeSync && model.synchronizedOutput(), "typing cannot release synchronized output or expose partial text");
+    model.feed("\r\x1b[Kcomplete\x1b[?2026l"); display.changed(1017);
+    check(display.update(model, 0, 1017) && line(display, 0) == "complete", "synchronized echo commits as soon as its frame completes");
+}
 void terminalScrollTests() {
     TerminalModel model(16, 3); TerminalDisplay display;
     for (int i = 0; i < 12; ++i) model.feed("line " + std::to_string(i) + "\r\n");
@@ -220,6 +256,6 @@ void terminalCopyTests() {
 }
 }
 int main() {
-    try { textTests(); terminalTests(); terminalDisplayTests(); terminalScrollTests(); terminalCopyTests(); std::cout << "Text and terminal core tests passed.\n"; return EXIT_SUCCESS; }
+    try { textTests(); terminalTests(); terminalDisplayTests(); terminalInputTests(); terminalScrollTests(); terminalCopyTests(); std::cout << "Text and terminal core tests passed.\n"; return EXIT_SUCCESS; }
     catch (const std::exception& error) { std::cerr << error.what() << '\n'; return EXIT_FAILURE; }
 }
