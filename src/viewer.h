@@ -4,7 +4,6 @@
 #include "session.h"
 #include "edit_buffer.h"
 #include <memory>
-#include <unordered_map>
 
 namespace poppy {
 class Viewer {
@@ -58,8 +57,6 @@ private:
     std::shared_ptr<EditBuffer> edit_;
     wchar_t highSurrogate_ = 0;
     std::shared_ptr<const DiffDocument> diff_;
-    struct CachedLine { LineIndex index; bool used = false; };
-    std::unordered_map<size_t, CachedLine> lineIndexes_;
     fs::path path_;
     std::wstring message_ = L"Open a folder to start\n\nSelect a file on the left. Run your AI CLI in the terminal below.";
 };
