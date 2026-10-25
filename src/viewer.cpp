@@ -18,14 +18,14 @@ void Viewer::setDpi(UINT dpi) {
     renderer_.setDpi(dpi);
     cellWidth_ = renderer_.cellWidth(); cellHeight_ = renderer_.textHeight() + MulDiv(3, dpi, 96);
     header_ = MulDiv(34, dpi, 96); gutter_ = MulDiv(70, dpi, 96);
-    scrollbars(); InvalidateRect(window_, nullptr, FALSE);
+    scrollbars(); caretPosition(); InvalidateRect(window_, nullptr, FALSE);
 }
 void Viewer::show(std::shared_ptr<const Document> d, const fs::path& path, bool preserve) {
     edit_.reset(); highSurrogate_ = 0;
     diff_.reset(); document_ = std::move(d); path_ = path; message_.clear();
     if (!preserve) { top_ = left_ = 0; anchor_ = caret_ = 0; after_ = false; }
     else { anchor_ = std::min(anchor_, document_->text.size()); caret_ = std::min(caret_, document_->text.size()); }
-    scrollbars(); InvalidateRect(window_, nullptr, FALSE);
+    scrollbars(); caretPosition(); InvalidateRect(window_, nullptr, FALSE);
 }
 void Viewer::edit(std::shared_ptr<EditBuffer> buffer, const fs::path& path, bool preserve) {
     show(std::shared_ptr<const Document>(buffer, &buffer->document), path, preserve);
@@ -37,12 +37,12 @@ void Viewer::showDiff(std::shared_ptr<const DiffDocument> d, const fs::path& pat
     document_ = std::shared_ptr<const Document>(d, &d->patch); diff_ = std::move(d); path_ = path; message_.clear();
     if (!preserve) { top_ = left_ = 0; anchor_ = caret_ = 0; after_ = false; }
     else { anchor_ = std::min(anchor_, document_->text.size()); caret_ = std::min(caret_, document_->text.size()); }
-    scrollbars(); InvalidateRect(window_, nullptr, FALSE);
+    scrollbars(); caretPosition(); InvalidateRect(window_, nullptr, FALSE);
 }
 void Viewer::message(const std::wstring& text, const fs::path& path) {
     edit_.reset(); highSurrogate_ = 0;
     diff_.reset(); document_.reset(); path_ = path; message_ = text; top_ = left_ = 0; anchor_ = caret_ = 0; after_ = false;
-    scrollbars(); InvalidateRect(window_, nullptr, FALSE);
+    scrollbars(); caretPosition(); InvalidateRect(window_, nullptr, FALSE);
 }
 Viewer::State Viewer::state() const {
     // Inline row indices retain both sides without storing a layout per tab.
@@ -54,7 +54,7 @@ void Viewer::restore(const State& state) {
     top_ = diff_ ? static_cast<int>(diff_->mapRow(static_cast<size_t>(std::max(0, state.top)), true, inlineView_, state.after)) : state.top;
     left_ = state.left; after_ = state.after;
     anchor_ = std::min(state.anchor, document_->text.size()); caret_ = std::min(state.caret, document_->text.size());
-    scrollbars(); InvalidateRect(window_, nullptr, FALSE);
+    scrollbars(); caretPosition(); InvalidateRect(window_, nullptr, FALSE);
 }
 void Viewer::toggleDiffLayout() { if (diff_) setDiffLayout(!inlineView_); }
 void Viewer::setDiffLayout(bool inlineView) {
@@ -63,7 +63,8 @@ void Viewer::setDiffLayout(bool inlineView) {
     if (diff_) top_ = static_cast<int>(diff_->mapRow(static_cast<size_t>(top_), inlineView_, inlineView, after_));
     inlineView_ = inlineView;
     if (selecting_) { selecting_ = false; ReleaseCapture(); }
-    scrollbars(); InvalidateRect(window_, nullptr, FALSE);
+    scrollbars(); caretPosition(); InvalidateRect(window_, nullptr, FALSE);
+    if (diffLayoutChanged) diffLayoutChanged();
 }
 RECT Viewer::layoutButton(bool inlineView) const {
     const auto rect = Scrollbars::contentRect(window_);
@@ -139,7 +140,7 @@ POINT Viewer::caretPoint() const {
     return {gutter_ + (col - left_) * cellWidth_, contentTop() + (static_cast<int>(row) - top_) * cellHeight_};
 }
 void Viewer::caretPosition(bool reveal) {
-    if (!edit_) { if (GetFocus() == window_) HideCaret(window_); return; }
+    if (!edit_) { if (GetFocus() == window_) DestroyCaret(); return; }
     auto point = caretPoint();
     if (reveal) {
         const auto r = Scrollbars::contentRect(window_);
@@ -150,7 +151,7 @@ void Viewer::caretPosition(bool reveal) {
         scrollbars(); point = caretPoint();
     }
     if (GetFocus() == window_) {
-        SetCaretPos(point.x, point.y);
+        DestroyCaret(); CreateCaret(window_, nullptr, 2, cellHeight_); SetCaretPos(point.x, point.y); ShowCaret(window_);
         const auto context = ImmGetContext(window_);
         if (context) { COMPOSITIONFORM form{}; form.dwStyle = CFS_POINT; form.ptCurrentPos = point; ImmSetCompositionWindow(context, &form); CANDIDATEFORM candidate{}; candidate.dwStyle = CFS_CANDIDATEPOS; candidate.ptCurrentPos = {point.x, point.y + cellHeight_}; ImmSetCandidateWindow(context, &candidate); ImmReleaseContext(window_, context); }
     }
@@ -286,7 +287,7 @@ LRESULT Viewer::handle(UINT m, WPARAM a, LPARAM b) {
     case WM_PAINT: paint(); return 0;
     case WM_ERASEBKGND: return 1;
     case WM_SIZE: scrollbars(); caretPosition(); return 0;
-    case WM_SETFOCUS: CreateCaret(window_, nullptr, 2, cellHeight_); ShowCaret(window_); caretPosition(); if (focused) focused(); return 0;
+    case WM_SETFOCUS: caretPosition(); if (focused) focused(); return 0;
     case WM_KILLFOCUS: highSurrogate_ = 0; DestroyCaret(); return 0;
     case WM_SETCURSOR:
         if (diff_ && LOWORD(b) == HTCLIENT) {

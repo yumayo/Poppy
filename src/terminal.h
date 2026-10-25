@@ -16,7 +16,7 @@ public:
     bool cleanupUnconfirmed() const { return unconfirmed_ && WaitForSingleObject(unconfirmed_.value, 0) == WAIT_OBJECT_0; }
     void stop();
     void setEnvironment(std::vector<std::pair<std::wstring, std::wstring>> values) { environment_ = std::move(values); }
-    std::function<void()> starting, ended;
+    std::function<void()> starting, ended, focused;
     HWND window() const { return window_; }
     bool running() const { return process_ && WaitForSingleObject(process_.value, 0) == WAIT_TIMEOUT; }
 private:

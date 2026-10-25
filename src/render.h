@@ -74,4 +74,16 @@ private:
     Font font_ = Font::Ui;
     int cellWidth_ = 8, textHeight_ = 18;
 };
+
+// A child overlay keeps the drop target visible above the editor/ConPTY views.
+class DropPreview {
+public:
+    void create(HWND parent, HINSTANCE instance);
+    void show(const RECT& rect);
+    void hide() { ShowWindow(window_, SW_HIDE); }
+private:
+    static LRESULT CALLBACK procedure(HWND, UINT, WPARAM, LPARAM);
+    HWND window_ = nullptr;
+    Renderer renderer_;
+};
 }

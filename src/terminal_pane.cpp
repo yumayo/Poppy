@@ -11,6 +11,7 @@ void TerminalPane::create(HWND parent,HINSTANCE instance) {
     window_ = CreateWindowExW(0,cls.lpszClassName,L"Terminals",WS_CHILD|WS_CLIPCHILDREN|WS_CLIPSIBLINGS,0,0,0,0,parent,nullptr,instance,this);
     tooltips_ = CreateWindowExW(WS_EX_TOPMOST,TOOLTIPS_CLASSW,nullptr,WS_POPUP|TTS_ALWAYSTIP|TTS_NOPREFIX,CW_USEDEFAULT,CW_USEDEFAULT,CW_USEDEFAULT,CW_USEDEFAULT,window_,nullptr,instance,nullptr);
     SendMessageW(tooltips_, TTM_SETMAXTIPWIDTH, 0, 700);
+    preview_.create(window_, instance_);
     add(); setDpi(GetDpiForWindow(parent));
 }
 void TerminalPane::add(SavedTerminal configuration) {
@@ -22,6 +23,10 @@ void TerminalPane::add(SavedTerminal configuration) {
     session->terminal = std::make_unique<Terminal>(); session->terminal->create(window_,instance_);
     session->terminal->setDpi(dpi_); session->terminal->setDirectory(fs::u8path(session->configuration.directory));
     auto ptr = session.get();
+    session->terminal->focused = [this, ptr] {
+        const auto found = std::find_if(sessions_.begin(), sessions_.end(), [ptr](const auto& s) { return s.get() == ptr; });
+        if (found != sessions_.end()) { active_ = static_cast<size_t>(found - sessions_.begin()); acknowledge(); InvalidateRect(window_, nullptr, FALSE); }
+    };
     session->terminal->starting = [this,ptr] {
         ptr->ai = {}; ptr->notificationId = newSessionId();
         ptr->terminal->trackContainer(ptr->notificationId);
@@ -43,16 +48,17 @@ void TerminalPane::add(SavedTerminal configuration) {
 void TerminalPane::setDpi(UINT dpi) { dpi_=dpi; renderer_.setDpi(dpi); header_=MulDiv(32,dpi,96); for(auto& s:sessions_) s->terminal->setDpi(dpi); layout(); }
 void TerminalPane::setDirectory(const fs::path& directory) { directory_=directory; for(auto& s:sessions_) if(s->configuration.directory.empty()) {s->configuration.directory=directory.u8string();s->terminal->setDirectory(directory);} }
 void TerminalPane::restore(const ProjectSession& state) {
-    stop(); for(auto& s:sessions_) DestroyWindow(s->terminal->window()); sessions_.clear();
+    endDrag(); ratio_ = state.terminalRatio; stop(); for(auto& s:sessions_) DestroyWindow(s->terminal->window()); sessions_.clear();
     for(const auto& saved:state.terminals) add(saved);
     if(sessions_.empty()) add();
+    for (size_t i = 0; i < state.terminals.size() && i < sessions_.size(); ++i) { sessions_[i]->configuration.displayed = state.terminals[i].displayed; sessions_[i]->configuration.group = state.terminals[i].group; }
     const auto found=std::find_if(sessions_.begin(),sessions_.end(),[&](const auto& s){return s->configuration.id==state.activeTerminal;});
     select(found==sessions_.end()?0:static_cast<size_t>(found-sessions_.begin()));
 }
-void TerminalPane::snapshot(ProjectSession& state) const { state.terminals.clear();for(const auto& s:sessions_)state.terminals.push_back(s->configuration);state.activeTerminal=active().configuration.id; }
+void TerminalPane::snapshot(ProjectSession& state) const { state.terminals.clear();for(const auto& s:sessions_)state.terminals.push_back(s->configuration);state.activeTerminal=active().configuration.id; state.terminalRatio = ratio_; }
 bool TerminalPane::apply(const AiEvent& event) {
     for(size_t i=0;i<sessions_.size();++i) if(sessions_[i]->notificationId==event.sessionId) {
-        const bool visible=i==active_ && IsWindowVisible(window_) && GetForegroundWindow()==GetAncestor(window_,GA_ROOT) && !IsIconic(GetAncestor(window_,GA_ROOT));
+        const bool visible=sessions_[i]->configuration.displayed && IsWindowVisible(window_) && GetForegroundWindow()==GetAncestor(window_,GA_ROOT) && !IsIconic(GetAncestor(window_,GA_ROOT));
         sessions_[i]->ai.apply(event,GetTickCount64(),visible); InvalidateRect(window_,nullptr,FALSE); if(changed)changed();return true;
     }
     return false;
@@ -62,7 +68,7 @@ void TerminalPane::focusAttention() {
     for (size_t i = 0; i < sessions_.size(); ++i) if (sessions_[i]->ai.detected && sessions_[i]->ai.state == state) { select(i); break; }
     SetFocus(window());
 }
-void TerminalPane::acknowledge() { if(IsWindowVisible(window_) && GetForegroundWindow()==GetAncestor(window_,GA_ROOT) && !IsIconic(GetAncestor(window_,GA_ROOT))) active().ai.acknowledge(); }
+void TerminalPane::acknowledge() { if(IsWindowVisible(window_) && GetForegroundWindow()==GetAncestor(window_,GA_ROOT) && !IsIconic(GetAncestor(window_,GA_ROOT))) for (const auto& session : sessions_) if (session->configuration.displayed) session->ai.acknowledge(); }
 AiSummary TerminalPane::summary() const { std::vector<AiStatus> states; for(const auto& s:sessions_)states.push_back(s->ai);return summarizeAi(states); }
 std::wstring TerminalPane::description() const {
     std::wstring text;
@@ -78,47 +84,127 @@ std::wstring TerminalPane::description() const {
     if(hooks_ && !hooks_->error().empty())text+=L"\n"+hooks_->error();
     return text;
 }
-void TerminalPane::select(size_t index) { if(index>=sessions_.size())return;active_=index;layout();acknowledge();if(changed)changed(); }
+void TerminalPane::select(size_t index) {
+    if(index>=sessions_.size())return;
+    active_=index; const int group = active().configuration.group;
+    for (auto& s : sessions_) if (s->configuration.group == group) s->configuration.displayed = false;
+    active().configuration.displayed = true;
+    layout(); acknowledge(); if(changed)changed();
+}
 void TerminalPane::close(size_t index) {
     if(index>=sessions_.size())return;
+    endDrag(); if(rename_){DestroyWindow(rename_);rename_=nullptr;}
     sessions_[index]->terminal->stop();DestroyWindow(sessions_[index]->terminal->window());sessions_.erase(sessions_.begin()+static_cast<std::ptrdiff_t>(index));
     if(index<active_)--active_;
     if(sessions_.empty())add(); else select(std::min(active_,sessions_.size()-1));
 }
 void TerminalPane::stop(){for(auto& s:sessions_)s->terminal->stop();}
+size_t TerminalPane::groupTab(int group) const {
+    for (size_t i = 0; i < sessions_.size(); ++i) if (sessions_[i]->configuration.group == group && sessions_[i]->configuration.displayed) return i;
+    return sessions_.size();
+}
+void TerminalPane::normalizeGroups() {
+    if (std::none_of(sessions_.begin(), sessions_.end(), [](const auto& s) { return s->configuration.group == 0; })) for (auto& s : sessions_) s->configuration.group = 0;
+    for (int group = 0; group < 2; ++group) {
+        bool selected = false;
+        for (auto& s : sessions_) if (s->configuration.group == group && s->configuration.displayed) { if (selected) s->configuration.displayed = false; selected = true; }
+        if (!selected) { const auto found = std::find_if(sessions_.begin(), sessions_.end(), [group](const auto& s) { return s->configuration.group == group; }); if (found != sessions_.end()) (*found)->configuration.displayed = true; }
+    }
+}
+RECT TerminalPane::groupBounds(int group) const {
+    RECT r{}; GetClientRect(window_, &r);
+    const bool split = groupTab(1) < sessions_.size();
+    const int width = MulDiv(5, dpi_, 96), middle = MulDiv(std::max(0L, r.right - width), ratio_, 1000);
+    return {group ? middle + width : 0, 0, group || !split ? r.right : middle, r.bottom};
+}
 std::vector<RECT> TerminalPane::bounds() const {
-    std::vector<RECT> result;int x=-offset_; const int padding=MulDiv(74,dpi_,96);
-    for(const auto& s:sessions_){const int width=std::max(MulDiv(110,dpi_,96),renderer_.textWidth(wide(s->configuration.name))+padding);result.push_back({x,0,x+width,header_});x+=width;}
+    std::vector<RECT> result; const int padding=MulDiv(74,dpi_,96);
+    int x[2] = {groupBounds(0).left - offset_[0], groupBounds(1).left - offset_[1]};
+    for(const auto& s:sessions_) { const int group = s->configuration.group; const int width=std::max(MulDiv(110,dpi_,96),renderer_.textWidth(wide(s->configuration.name))+padding); result.push_back({x[group],0,x[group]+width,header_}); x[group]+=width; }
     return result;
 }
 void TerminalPane::layout(){
     if(!window_||sessions_.empty())return;
-    RECT r{};GetClientRect(window_,&r);
-    auto rects=bounds();const int edge=std::max(0L,r.right-MulDiv(34,dpi_,96));
-    if(rects[active_].left<0)offset_+=rects[active_].left;
-    else if(rects[active_].right>edge)offset_+=rects[active_].right-edge;
-    offset_=std::max(0,offset_);rects=bounds();
-    for(size_t i=0;i<sessions_.size();++i){
-        const auto w=sessions_[i]->terminal->window();
-        if(i!=active_)ShowWindow(w,SW_HIDE);
-        else SetWindowPos(w,nullptr,0,header_,r.right,std::max(0L,r.bottom-header_),SWP_NOZORDER|SWP_NOACTIVATE|SWP_SHOWWINDOW);
+    normalizeGroups(); auto rects=bounds();
+    for (int group = 0; group < 2; ++group) {
+        const auto selected = groupTab(group); if (selected == sessions_.size()) continue;
+        const auto pane = groupBounds(group); const int edge = std::max(pane.left, pane.right - MulDiv(34, dpi_, 96));
+        if(rects[selected].left < pane.left) offset_[group] += rects[selected].left - pane.left;
+        else if(rects[selected].right > edge) offset_[group] += rects[selected].right - edge;
+        offset_[group] = std::max(0, offset_[group]);
     }
+    rects=bounds();
+    for(size_t i=0;i<sessions_.size();++i){
+        const auto w=sessions_[i]->terminal->window(); const auto& config = sessions_[i]->configuration;
+        const auto pane = groupBounds(config.group);
+        if(!config.displayed)ShowWindow(w,SW_HIDE);
+        else SetWindowPos(w,nullptr,pane.left,header_,std::max(0L,pane.right-pane.left),std::max(0L,pane.bottom-header_),SWP_NOZORDER|SWP_NOACTIVATE|SWP_SHOWWINDOW);
+    }
+    const auto left = groupBounds(0), right = groupBounds(1);
+    splitter_ = groupTab(1) < sessions_.size() ? RECT{left.right, 0, right.left, left.bottom} : RECT{};
     for(size_t i=0;i<tools_;++i){TOOLINFOW tip{};tip.cbSize=sizeof(tip);tip.hwnd=window_;tip.uId=i+1;SendMessageW(tooltips_,TTM_DELTOOLW,0,reinterpret_cast<LPARAM>(&tip));}
     tools_=rects.size();
-    for(size_t i=0;i<rects.size();++i){TOOLINFOW tip{};tip.cbSize=sizeof(tip);tip.hwnd=window_;tip.uId=i+1;tip.uFlags=TTF_SUBCLASS;tip.rect=rects[i];tip.rect.left=std::max(0L,tip.rect.left);tip.rect.right=std::min<LONG>(edge,tip.rect.right);tip.lpszText=LPSTR_TEXTCALLBACKW;SendMessageW(tooltips_,TTM_ADDTOOLW,0,reinterpret_cast<LPARAM>(&tip));}
+    for(size_t i=0;i<rects.size();++i){TOOLINFOW tip{};tip.cbSize=sizeof(tip);tip.hwnd=window_;tip.uId=i+1;tip.uFlags=TTF_SUBCLASS;tip.rect=rects[i];const auto pane = groupBounds(sessions_[i]->configuration.group);tip.rect.left=std::max(pane.left,tip.rect.left);tip.rect.right=std::min<LONG>(pane.right-MulDiv(34,dpi_,96),tip.rect.right);tip.lpszText=LPSTR_TEXTCALLBACKW;if(tip.rect.right>tip.rect.left)SendMessageW(tooltips_,TTM_ADDTOOLW,0,reinterpret_cast<LPARAM>(&tip));}
     InvalidateRect(window_,nullptr,FALSE);
 }
 void TerminalPane::paint(){
     Renderer::Paint paint(renderer_,window_);if(!paint)return;RECT r{};GetClientRect(window_,&r);renderer_.fill(r,background);
-    const auto rects=bounds();const int unit=MulDiv(26,dpi_,96),edge=r.right-MulDiv(34,dpi_,96);
-    for(size_t i=0;i<rects.size();++i){auto rect=rects[i];rect.right=std::min<LONG>(rect.right,edge);if(rect.left>=rect.right)continue;
-        renderer_.fill(rect,i==active_?panel:background);if(i==active_)renderer_.fill({rect.left,header_-2,rect.right,header_},accent);
+    const auto rects=bounds();const int unit=MulDiv(26,dpi_,96);
+    for(size_t i=0;i<rects.size();++i){auto rect=rects[i];const auto pane = groupBounds(sessions_[i]->configuration.group);rect.left=std::max(rect.left,pane.left);rect.right=std::min<LONG>(rect.right,pane.right-MulDiv(34,dpi_,96));if(rect.left>=rect.right)continue;
+        const bool selected = sessions_[i]->configuration.displayed;
+        renderer_.fill(rect,selected?panel:background);if(selected)renderer_.fill({rect.left,header_-2,rect.right,header_},accent);
         drawAiStatus(renderer_,{rect.left,0,rect.left+unit,header_},sessions_[i]->ai.state,dpi_,static_cast<unsigned>(GetTickCount64()/80));
         renderer_.label({rect.left+unit,0,rect.right-unit,header_},wide(sessions_[i]->configuration.name),foreground);
         renderer_.label({rect.right-unit,0,rect.right,header_},L"×",muted,DT_CENTER|DT_VCENTER|DT_SINGLELINE);
         if(sessions_[i]->ai.unread)renderer_.fill({rect.left+unit-4,4,rect.left+unit,8},accent);
     }
-    renderer_.fill({edge,0,r.right,header_},panel);renderer_.label({edge,0,r.right,header_},L"+",accent,DT_CENTER|DT_VCENTER|DT_SINGLELINE);
+    for (int group = 0; group < 2; ++group) if (groupTab(group) < sessions_.size()) {
+        const auto pane = groupBounds(group); RECT button{pane.right-MulDiv(34,dpi_,96),0,pane.right,header_}; renderer_.fill(button,panel);renderer_.label(button,L"+",accent,DT_CENTER|DT_VCENTER|DT_SINGLELINE);
+    }
+    renderer_.fill(splitter_, border);
+}
+void TerminalPane::drag(POINT point) {
+    if (!drag_) return;
+    auto& d = *drag_; d.point = point;
+    if (!d.active) {
+        if (std::abs(point.x-d.origin.x)<GetSystemMetricsForDpi(SM_CXDRAG,dpi_) && std::abs(point.y-d.origin.y)<GetSystemMetricsForDpi(SM_CYDRAG,dpi_)) return;
+        d.active=true; SendMessageW(tooltips_,TTM_ACTIVATE,FALSE,0);
+    }
+    RECT client{}; GetClientRect(window_,&client); d.group = -1; d.position = sessions_.size();
+    if (!PtInRect(&client,point)) { preview_.hide(); return; }
+    const bool split = groupTab(1) < sessions_.size(); const int middle = split ? splitter_.left : client.right/2;
+    const int target = point.x < middle ? 0 : 1;
+    if (point.y < header_) {
+        d.group = split ? target : 0; const auto pane = groupBounds(d.group); const auto rects = bounds();
+        LONG x = pane.left;
+        for (size_t i=0;i<rects.size();++i) if(sessions_[i]->configuration.group==d.group) {
+            if(point.x < (rects[i].left+rects[i].right)/2) { d.position=i; x=rects[i].left; break; }
+            d.position=i+1; x=rects[i].right;
+        }
+        x=std::clamp<LONG>(x,pane.left,std::max(pane.left,pane.right-MulDiv(34,dpi_,96)));
+        preview_.show({x,0,x+3,header_}); return;
+    }
+    if ((!split && sessions_.size()<2) || (split && target==sessions_[d.index]->configuration.group)) { preview_.hide(); return; }
+    d.group=target;
+    const auto pane = split ? groupBounds(target) : RECT{target?middle:0,0,target?client.right:middle,client.bottom};
+    preview_.show({pane.left,header_,pane.right,pane.bottom});
+}
+void TerminalPane::endDrag(bool drop) {
+    if (!drag_) return;
+    const auto d = *drag_; drag_.reset(); preview_.hide(); if(GetCapture()==window_)ReleaseCapture();
+    SendMessageW(tooltips_,TTM_ACTIVATE,TRUE,0);
+    if (!drop || !d.active || d.group<0) return;
+    if (groupTab(1)==sessions_.size() && d.group==0 && d.point.y>=header_) for(auto& s:sessions_)s->configuration.group=1;
+    auto session=std::move(sessions_[d.index]);session->configuration.group=d.group;session->configuration.displayed=true;
+    for(auto& s:sessions_)if(s && s->configuration.group==d.group)s->configuration.displayed=false;
+    sessions_.erase(sessions_.begin()+static_cast<std::ptrdiff_t>(d.index));
+    size_t position=d.position;if(position>d.index)--position;position=std::min(position,sessions_.size());
+    sessions_.insert(sessions_.begin()+static_cast<std::ptrdiff_t>(position),std::move(session));
+    active_=position;layout();SetFocus(window());if(changed)changed();
+}
+bool TerminalPane::key(const MSG& message) {
+    if (message.message==WM_KEYDOWN && message.wParam==VK_ESCAPE && (drag_ || resizing_)) { endDrag();resizing_=false;if(GetCapture()==window_)ReleaseCapture();return true; }
+    return false;
 }
 void TerminalPane::menu(size_t index,POINT point){
     HMENU menu=CreatePopupMenu();AppendMenuW(menu,MF_STRING,1,L"Rename terminal");AppendMenuW(menu,MF_STRING,2,L"Close terminal");
@@ -141,7 +227,8 @@ void TerminalPane::addAi(const std::wstring& tool) {
     const auto script = fs::path(executable).parent_path() / L"ai" / L"start-ai.ps1";
     std::error_code error;
     if (!fs::is_regular_file(script, error) || !fs::is_regular_file(fs::path(repository) / L"wsl-containers" / L"wsl-containers.ps1", error)) { MessageBoxW(GetAncestor(window_, GA_ROOT), L"Poppy's ai folder or the ai-container launcher is missing. See ai/README.md.", L"Poppy", MB_OK | MB_ICONWARNING); return; }
-    add({"", utf8(tool == L"codex" ? L"Codex" : L"Claude"), directory_.u8string()});
+    const int group = active().configuration.group;
+    add({"", utf8(tool == L"codex" ? L"Codex" : L"Claude"), directory_.u8string(), group});
     wchar_t system[MAX_PATH]{}; GetSystemDirectoryW(system, MAX_PATH);
     active().terminal->setCommand({std::wstring(system) + L"\\WindowsPowerShell\\v1.0\\powershell.exe", L"-NoLogo", L"-NoProfile", L"-ExecutionPolicy", L"Bypass", L"-File", script.native(), L"-Repository", repository, L"-Workspace", directory_.native(), L"-Tool", tool});
     active().terminal->launch(); SetFocus(window());
@@ -149,7 +236,7 @@ void TerminalPane::addAi(const std::wstring& tool) {
 void TerminalPane::addMenu(POINT point) {
     HMENU menu = CreatePopupMenu(); AppendMenuW(menu, MF_STRING, 1, L"New shell"); AppendMenuW(menu, MF_STRING, 2, L"New Codex (ai-container)"); AppendMenuW(menu, MF_STRING, 3, L"New Claude Code (ai-container)");
     const auto command = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, point.x, point.y, 0, window_, nullptr); DestroyMenu(menu);
-    if (command == 1) { add({"", "Shell", directory_.u8string()}); SetFocus(window()); }
+    if (command == 1) { const int group = active().configuration.group; add({"", "Shell", directory_.u8string(), group}); SetFocus(window()); }
     else if (command == 2 || command == 3) addAi(command == 2 ? L"codex" : L"claude");
 }
 LRESULT CALLBACK TerminalPane::renameProcedure(HWND window, UINT message, WPARAM a, LPARAM b, UINT_PTR, DWORD_PTR data) {
@@ -166,9 +253,24 @@ LRESULT TerminalPane::handle(UINT m,WPARAM a,LPARAM b){switch(m){
 case WM_PAINT:paint();return 0;case WM_ERASEBKGND:return 1;case WM_SIZE:layout();return 0;
 case WM_SETFOCUS:SetFocus(window());return 0;
 case WM_COMMAND:if(LOWORD(a)==1001&&HIWORD(a)==EN_KILLFOCUS&&rename_){wchar_t text[121]{};GetWindowTextW(rename_,text,121);if(*text&&renaming_<sessions_.size())sessions_[renaming_]->configuration.name=utf8(text);auto edit=std::exchange(rename_,nullptr);DestroyWindow(edit);layout();if(changed)changed();}return 0;
-case WM_LBUTTONDOWN:{RECT r{};GetClientRect(window_,&r);const int x=GET_X_LPARAM(b);if(x>=r.right-MulDiv(34,dpi_,96)){add({"","Shell",directory_.u8string()});SetFocus(window());return 0;}const auto rects=bounds();for(size_t i=0;i<rects.size();++i)if(PtInRect(&rects[i],{x,GET_Y_LPARAM(b)})){if(x>=rects[i].right-MulDiv(26,dpi_,96))close(i);else select(i);SetFocus(window());break;}return 0;}
-case WM_MOUSEWHEEL:offset_=std::max(0,offset_-GET_WHEEL_DELTA_WPARAM(a)/WHEEL_DELTA*MulDiv(90,dpi_,96));InvalidateRect(window_,nullptr,FALSE);return 0;
-case WM_CONTEXTMENU:{POINT point{GET_X_LPARAM(b),GET_Y_LPARAM(b)};if(point.x==-1&&point.y==-1){point={0,header_};ClientToScreen(window_,&point);menu(active_,point);return 0;}auto local=point;ScreenToClient(window_,&local);RECT client{};GetClientRect(window_,&client);if(local.x>=client.right-MulDiv(34,dpi_,96)&&local.y<header_){addMenu(point);return 0;}const auto rects=bounds();for(size_t i=0;i<rects.size();++i)if(PtInRect(&rects[i],local)){menu(i,point);break;}return 0;}
+case WM_LBUTTONDOWN:{
+    const POINT point{GET_X_LPARAM(b),GET_Y_LPARAM(b)};
+    if (PtInRect(&splitter_,point)) { resizing_=true;SetCapture(window_);return 0; }
+    for(int group=0;group<2;++group)if(groupTab(group)<sessions_.size()) {
+        const auto pane=groupBounds(group);const RECT button{pane.right-MulDiv(34,dpi_,96),0,pane.right,header_};
+        if(PtInRect(&button,point)){add({"","Shell",directory_.u8string(),group});SetFocus(window());return 0;}
+    }
+    const auto rects=bounds();for(size_t i=0;i<rects.size();++i) {
+        auto rect=rects[i];const auto pane=groupBounds(sessions_[i]->configuration.group);rect.left=std::max(rect.left,pane.left);rect.right=std::min<LONG>(rect.right,pane.right-MulDiv(34,dpi_,96));
+        if(PtInRect(&rect,point)){if(point.x>=rect.right-MulDiv(26,dpi_,96))close(i);else{select(i);drag_=Drag{i,point,point,false,-1,sessions_.size()};SetCapture(window_);}SetFocus(window());break;}
+    }return 0;
+}
+case WM_MOUSEMOVE:if(drag_)drag({GET_X_LPARAM(b),GET_Y_LPARAM(b)});else if(resizing_){RECT r{};GetClientRect(window_,&r);ratio_=std::clamp(MulDiv(GET_X_LPARAM(b),1000,std::max(1L,r.right-MulDiv(5,dpi_,96))),200,800);layout();if(changed)changed();}return 0;
+case WM_LBUTTONUP:if(drag_)drag({GET_X_LPARAM(b),GET_Y_LPARAM(b)});endDrag(true);resizing_=false;if(GetCapture()==window_)ReleaseCapture();return 0;
+case WM_CANCELMODE:case WM_CAPTURECHANGED:endDrag();resizing_=false;if(GetCapture()==window_)ReleaseCapture();return 0;
+case WM_SETCURSOR:{POINT point{};GetCursorPos(&point);ScreenToClient(window_,&point);if(PtInRect(&splitter_,point)){SetCursor(LoadCursorW(nullptr,IDC_SIZEWE));return TRUE;}break;}
+case WM_MOUSEWHEEL:{POINT point{GET_X_LPARAM(b),GET_Y_LPARAM(b)};ScreenToClient(window_,&point);const int group=groupTab(1)<sessions_.size() && point.x>splitter_.left?1:0;offset_[group]=std::max(0,offset_[group]-GET_WHEEL_DELTA_WPARAM(a)/WHEEL_DELTA*MulDiv(90,dpi_,96));InvalidateRect(window_,nullptr,FALSE);return 0;}
+case WM_CONTEXTMENU:{POINT point{GET_X_LPARAM(b),GET_Y_LPARAM(b)};if(point.x==-1&&point.y==-1){point={0,header_};ClientToScreen(window_,&point);menu(active_,point);return 0;}auto local=point;ScreenToClient(window_,&local);for(int group=0;group<2;++group)if(groupTab(group)<sessions_.size()){auto pane=groupBounds(group);RECT button{pane.right-MulDiv(34,dpi_,96),0,pane.right,header_};if(PtInRect(&button,local)){active_=groupTab(group);addMenu(point);return 0;}}const auto rects=bounds();for(size_t i=0;i<rects.size();++i)if(PtInRect(&rects[i],local)){menu(i,point);break;}return 0;}
 case WM_NOTIFY:if(reinterpret_cast<NMHDR*>(b)->code==TTN_GETDISPINFOW){tooltipText_=description();reinterpret_cast<NMTTDISPINFOW*>(b)->lpszText=tooltipText_.data();}return 0;
 }return DefWindowProcW(window_,m,a,b);}
 }

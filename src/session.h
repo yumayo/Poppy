@@ -15,9 +15,13 @@ struct SavedTab {
     bool diff = false;
     ViewState fileView, diffView;
     bool pinned = false;
+    int group = 0;
+    bool displayed = false;
 };
 struct SavedTerminal {
     std::string id = "shell-1", name = "Shell", directory;
+    int group = 0;
+    bool displayed = false;
 };
 struct ProjectSession {
     int sidebar = 245, terminalHeight = 260;
@@ -28,6 +32,8 @@ struct ProjectSession {
     std::string selected;
     int explorerTop = 0, explorerLeft = 0, gitTop = 0, gitLeft = 0;
     size_t firstTabRow = 0;
+    size_t rightTabRow = 0;
+    int editorRatio = 500, terminalRatio = 500;
     std::string gitSelected, focusedPane = "viewer", activeTerminal = "shell-1";
     std::vector<std::string> collapsedGit;
     std::vector<SavedTerminal> terminals = {SavedTerminal{}};

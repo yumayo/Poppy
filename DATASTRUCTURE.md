@@ -198,3 +198,15 @@ Poppyは、アプリ全体の状態とプロジェクトごとの状態を別々
 | [tests/session_tests.cpp](tests/session_tests.cpp) | ディレクトリー名、長いパス、衝突に使うハッシュの検証 |
 | [tests/storage_tests.cpp](tests/storage_tests.cpp) | 日本語パスを含む保存と再読み込み、プロジェクトの分離、衝突、ロールバック、保存形式の保護 |
 | [tests/folder_tests.cpp](tests/folder_tests.cpp) | Windows上での再起動後のタブ・表示位置・ツリー展開・ペイン配置の復元 |
+
+## 左右分割（プロジェクトDB version 6）
+
+version 5からの移行では既存のタブ・ターミナルを保ち、以下のテーブルを追加します。旧状態は1グループ・幅比500 / 1000として復元します。
+
+| テーブル | カラム | 用途 |
+| --- | --- | --- |
+| split_layout | id=1, editor_ratio, terminal_ratio, right_tab_row | 左側の幅（200〜800 / 1000）、右Editorの先頭タブ行 |
+| tab_groups | path PRIMARY KEY, pane, displayed | ファイルタブの所属（0=左、1=右）、グループ内の選択 |
+| terminal_groups | terminal_id PRIMARY KEY, pane, displayed | ターミナルの所属と選択 |
+
+既存のactive_tabとactive_terminalは入力先を表します。左右で各1タブを同時表示し、空のグループは統合します。分割状態も同じSQLiteトランザクションで保存し、未保存のEditor本文はDBに書き込みません。

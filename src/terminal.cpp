@@ -277,7 +277,8 @@ LRESULT Terminal::handle(UINT m, WPARAM a, LPARAM b) {
     case wmTerminal: pump(); return 0;
     case WM_TIMER: if (a == 2) pump(); return 0;
     case WM_GETDLGCODE: return DLGC_WANTALLKEYS;
-    case WM_SETFOCUS: case WM_KILLFOCUS: InvalidateRect(window_, nullptr, FALSE); return 0;
+    case WM_SETFOCUS: if (focused) focused(); InvalidateRect(window_, nullptr, FALSE); return 0;
+    case WM_KILLFOCUS: InvalidateRect(window_, nullptr, FALSE); return 0;
     case WM_LBUTTONDOWN:
         SetFocus(window_);
         if (!started_ || (!running() && GET_Y_LPARAM(b) < header_)) { start(); InvalidateRect(window_, nullptr, FALSE); return 0; }

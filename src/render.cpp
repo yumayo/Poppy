@@ -261,3 +261,26 @@ void Renderer::outline(const RECT& rect, COLORREF value, float width) {
     color(value); target_->DrawRectangle(rectangle(rect), brush_.get(), width);
 }
 }
+
+void poppy::DropPreview::create(HWND parent, HINSTANCE instance) {
+    WNDCLASSW cls{}; cls.lpfnWndProc = procedure; cls.hInstance = instance; cls.lpszClassName = L"PoppyDropPreview";
+    RegisterClassW(&cls);
+    window_ = CreateWindowExW(WS_EX_TRANSPARENT | WS_EX_NOACTIVATE, cls.lpszClassName, L"", WS_CHILD | WS_CLIPSIBLINGS, 0, 0, 0, 0, parent, nullptr, instance, this);
+}
+void poppy::DropPreview::show(const RECT& rect) {
+    SetWindowPos(window_, HWND_TOP, rect.left, rect.top, std::max(0L, rect.right - rect.left), std::max(0L, rect.bottom - rect.top), SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    InvalidateRect(window_, nullptr, FALSE);
+}
+LRESULT CALLBACK poppy::DropPreview::procedure(HWND window, UINT message, WPARAM a, LPARAM b) {
+    auto* self = reinterpret_cast<DropPreview*>(GetWindowLongPtrW(window, GWLP_USERDATA));
+    if (message == WM_NCCREATE) { self = static_cast<DropPreview*>(reinterpret_cast<CREATESTRUCTW*>(b)->lpCreateParams); self->window_ = window; SetWindowLongPtrW(window, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(self)); }
+    if (message == WM_NCHITTEST) return HTTRANSPARENT;
+    if (message == WM_ERASEBKGND) return 1;
+    if (self && message == WM_PAINT) {
+        self->renderer_.setDpi(GetDpiForWindow(window)); Renderer::Paint paint(self->renderer_, window); if (!paint) return 0;
+        RECT rect{}; GetClientRect(window, &rect); self->renderer_.fill(rect, rgb(35, 58, 65)); self->renderer_.outline(rect, accent, 2);
+        if (rect.right > 80 && rect.bottom > 40) self->renderer_.label(rect, L"Move tab here", accent, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        return 0;
+    }
+    return DefWindowProcW(window, message, a, b);
+}
