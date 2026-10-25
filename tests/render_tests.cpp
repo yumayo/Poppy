@@ -286,6 +286,83 @@ struct ScrollbarWindow {
     }
     ~ScrollbarWindow() { DestroyWindow(window); }
 };
+struct ViewerPaintWatch {
+    HWND window;
+    WNDPROC original;
+    size_t paints = 0;
+    POINT painted{};
+    explicit ViewerPaintWatch(HWND value) : window(value) {
+        check(SetPropW(window, L"PoppyViewerPaintWatch", this) != FALSE, "Could not observe viewer paints");
+        original = reinterpret_cast<WNDPROC>(SetWindowLongPtrW(window, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(procedure)));
+        check(original != nullptr, "Could not subclass the viewer");
+    }
+    ~ViewerPaintWatch() {
+        SetWindowLongPtrW(window, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(original));
+        RemovePropW(window, L"PoppyViewerPaintWatch");
+    }
+    static LRESULT CALLBACK procedure(HWND window, UINT message, WPARAM a, LPARAM b) {
+        auto& self = *static_cast<ViewerPaintWatch*>(GetPropW(window, L"PoppyViewerPaintWatch"));
+        const auto result = CallWindowProcW(self.original, window, message, a, b);
+        if (message == WM_PAINT) {
+            ++self.paints;
+            self.painted = {ScrollbarWindow::info(window, SB_HORZ).nPos, ScrollbarWindow::info(window, SB_VERT).nPos};
+        }
+        return result;
+    }
+};
+void continuousViewerScrolling() {
+    Viewer viewer;
+    const HWND parent = CreateWindowExW(0, L"STATIC", L"Continuous scrolling test", WS_POPUP | WS_CLIPCHILDREN,
+        0, 0, 640, 360, nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
+    check(parent != nullptr, "Could not create the scrolling test window");
+    struct WindowOwner { HWND value; ~WindowOwner() { DestroyWindow(value); } } owner{parent};
+    viewer.create(parent, GetModuleHandleW(nullptr)); viewer.setDpi(96);
+    const HWND window = viewer.window();
+    check(MoveWindow(window, 0, 0, 640, 360, FALSE) != FALSE, "Could not size the scrolling test viewer");
+    auto buffer = std::make_shared<EditBuffer>();
+    const auto line = std::string(maxLineColumns, 'x') + '\n';
+    for (int row = 0; row < 256; ++row) buffer->document.text += line;
+    indexDocument(buffer->document); buffer->initialize(buffer->document.text);
+    viewer.edit(buffer, L"long-lines.html");
+    ShowWindow(parent, SW_SHOWNOACTIVATE); SetFocus(window);
+    ViewerPaintWatch observed(window);
+    const auto checkPaint = [&](size_t before) {
+        check(observed.paints > before, "Continuous input deferred the viewer paint until scrolling stopped");
+        check(observed.painted.x == viewer.state().left && observed.painted.y == viewer.state().top,
+            "The viewer painted an outdated scroll position");
+    };
+    for (const int bar : {SB_HORZ, SB_VERT}) {
+        viewer.restore({}); UpdateWindow(window);
+        RECT client{}; GetClientRect(window, &client);
+        const auto content = Scrollbars::contentRect(window);
+        const int cross = bar == SB_VERT ? (content.right + client.right) / 2 : (content.bottom + client.bottom) / 2;
+        const int arrow = bar == SB_VERT ? client.right - content.right : client.bottom - content.bottom;
+        const auto point = [&](int along) { return bar == SB_VERT ? MAKELPARAM(cross, along) : MAKELPARAM(along, cross); };
+        SendMessageW(window, WM_LBUTTONDOWN, MK_LBUTTON, point(arrow + 1));
+        check(GetCapture() == window, "The viewer did not capture its scrollbar thumb");
+        const int length = bar == SB_VERT ? content.bottom : content.right;
+        // Keep input queued, with jumps large enough to replace the visible
+        // text. Do not dispatch a queued WM_PAINT between mouse moves.
+        for (int step = 1; step <= 10; ++step)
+            check(PostMessageW(window, WM_MOUSEMOVE, MK_LBUTTON, point(arrow + 1 + length * step / 10)) != FALSE,
+                "Could not queue a continuous thumb drag");
+        MSG message{}; size_t moved = 0;
+        while (PeekMessageW(&message, window, WM_MOUSEMOVE, WM_MOUSEMOVE, PM_REMOVE)) {
+            const int before = ScrollbarWindow::info(window, bar).nPos;
+            const auto paints = observed.paints; DispatchMessageW(&message);
+            if (ScrollbarWindow::info(window, bar).nPos != before) { checkPaint(paints); ++moved; }
+        }
+        check(moved >= 6, "The drag did not exercise enough distinct large scroll positions");
+        SendMessageW(window, WM_LBUTTONUP, 0, point(length));
+        check(GetCapture() != window, "Continuous scrolling retained mouse capture");
+    }
+    viewer.restore({}); UpdateWindow(window);
+    for (int step = 0; step < 8; ++step) {
+        const auto paints = observed.paints;
+        SendMessageW(window, WM_MOUSEWHEEL, MAKEWPARAM(0, static_cast<WORD>(-WHEEL_DELTA)), 0);
+        checkPaint(paints);
+    }
+}
 void themedScrollbars() {
     ScrollbarWindow pane;
     Renderer renderer; renderer.setDpi(96);
@@ -438,7 +515,7 @@ int main() {
     int result = 0;
     try {
         initializeRendering();
-        cellPositions(); colorsAndClipping(); scrollingCellLayouts(); windowTargets(); editorCaret(); themedScrollbars(); quickOpenStability();
+        cellPositions(); colorsAndClipping(); scrollingCellLayouts(); windowTargets(); editorCaret(); continuousViewerScrolling(); themedScrollbars(); quickOpenStability();
         std::cout << "Direct2D rendering tests passed\n";
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; result = 1; }
     if (SUCCEEDED(com)) CoUninitialize();

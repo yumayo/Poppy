@@ -90,7 +90,13 @@ void Viewer::scrollbars() {
         SCROLLINFO horizontal{sizeof(horizontal), SIF_RANGE | SIF_PAGE | SIF_POS, 0, cols - 1, static_cast<UINT>(pageCols), left_, 0}; SetScrollInfo(window_, SB_HORZ, &horizontal, FALSE);
     }
 }
-void Viewer::scroll(int vertical, int horizontal) { top_ += vertical; left_ += horizontal; scrollbars(); caretPosition(); InvalidateRect(window_, nullptr, FALSE); }
+void Viewer::scroll(int vertical, int horizontal) {
+    top_ += vertical; left_ += horizontal; scrollbars(); caretPosition();
+    InvalidateRect(window_, nullptr, FALSE);
+    // WM_PAINT has lower priority than mouse input. Present this position
+    // before handling another move, including while a thumb is dragged quickly.
+    UpdateWindow(window_);
+}
 size_t Viewer::position(int x, int y) const {
     if (!document_ || !rowCount()) return 0;
     size_t row = std::min(rowCount() - 1, static_cast<size_t>(std::max(0, (y - contentTop()) / cellHeight_ + top_)));
@@ -376,9 +382,9 @@ LRESULT Viewer::handle(UINT m, WPARAM a, LPARAM b) {
         case SB_PAGEUP: pos -= static_cast<int>(info.nPage); break; case SB_PAGEDOWN: pos += static_cast<int>(info.nPage); break;
         case SB_THUMBTRACK: case SB_THUMBPOSITION: pos = scrollbars_.trackPosition(vertical ? SB_VERT : SB_HORZ, info.nTrackPos); break;
         case SB_TOP: pos = 0; break; case SB_BOTTOM: pos = info.nMax; break;
-        default: break;
+        default: return 0;
         }
-        scrollbars(); caretPosition(); InvalidateRect(window_, nullptr, FALSE); return 0;
+        scroll(0, 0); return 0;
     }
     case WM_KEYDOWN:
         if (edit_) {
