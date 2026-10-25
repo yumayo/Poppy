@@ -174,8 +174,32 @@ void terminalDisplayTests() {
     burst.feed("\r\na\r\nb\r\nc"); batched.changed(700);
     check(batched.update(burst, 1, 732) && !batched.cursorVisible() && line(batched, 0) == line(burst, 0, 1), "scrollback is captured with its cursor hidden");
 }
+void terminalScrollTests() {
+    TerminalModel model(16, 3); TerminalDisplay display;
+    for (int i = 0; i < 12; ++i) model.feed("line " + std::to_string(i) + "\r\n");
+    display.update(model, 0, 0, false, true);
+    uint64_t now = 1;
+    for (size_t scroll : {1u, 2u, 3u, 4u, 3u, 2u, 1u, 0u}) {
+        check(display.update(model, scroll, now++), "each scroll position is presented immediately during continuous wheel input");
+        check(line(display, 0) == line(model, 0, scroll) && display.cursorVisible() == (scroll == 0), "scroll presents the requested history and cursor state");
+        check(!display.pending(), "scrolling alone does not start an output batching timer");
+    }
+
+    model.feed("new"); display.changed(20);
+    check(!display.update(model, 0, 21, true), "new output is still batched before scrolling");
+    check(display.update(model, 1, 21, true) && line(display, 0) == line(model, 0, 1), "scrolling bypasses the output wait even with queued output");
+    model.feed("!"); display.changed(22);
+    check(!display.update(model, 1, 23, true), "subsequent output remains batched at the same scroll position");
+    check(display.update(model, 0, 23) && line(display, 2) == line(model, 2), "returning to the live screen is immediate");
+
+    const std::string beforeSync = line(display, 0);
+    model.feed("\x1b[?2026h\x1b[H\x1b[2Jincomplete"); display.changed(30);
+    check(!display.update(model, 2, 31) && model.synchronizedOutput() && line(display, 0) == beforeSync, "scrolling cannot release synchronized output or expose a partial frame");
+    model.feed("\x1b[?2026l"); display.changed(32);
+    check(display.update(model, 2, 32) && line(display, 0) == line(model, 0, 2), "a scroll requested during synchronized output appears when the frame completes");
+}
 }
 int main() {
-    try { textTests(); terminalTests(); terminalDisplayTests(); std::cout << "Text and terminal core tests passed.\n"; return EXIT_SUCCESS; }
+    try { textTests(); terminalTests(); terminalDisplayTests(); terminalScrollTests(); std::cout << "Text and terminal core tests passed.\n"; return EXIT_SUCCESS; }
     catch (const std::exception& error) { std::cerr << error.what() << '\n'; return EXIT_FAILURE; }
 }
