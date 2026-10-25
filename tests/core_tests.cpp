@@ -198,8 +198,28 @@ void terminalScrollTests() {
     model.feed("\x1b[?2026l"); display.changed(32);
     check(display.update(model, 2, 32) && line(display, 0) == line(model, 0, 2), "a scroll requested during synchronized output appears when the frame completes");
 }
+void terminalCopyTests() {
+    TerminalModel model(12, 3); TerminalDisplay display;
+    model.feed("A日本😀Z\r\n  two  \r\nlast");
+    display.update(model, 0, 0, false, true);
+    check(display.selectedText(0, 1) == "A", "copy can select exactly one character");
+    check(display.selectedText(8, 0) == "A日本😀Z", "backward selection copies in reading order");
+    check(display.selectedText(2, 3) == "日" && display.selectedText(1, 2) == "日", "copy includes a whole CJK character from either half");
+    check(display.selectedText(5, 6) == "😀" && display.selectedText(6, 7) == "😀", "copy retains a whole supplementary Unicode character");
+    check(display.selectionRange(6, 7) == std::make_pair(5, 7), "copy and highlighting use the same wide-character range");
+    check(display.selectedText(2, 2).empty() && display.selectionRange(2, 2) == std::make_pair(2, 2), "a single click does not select even half of a wide character");
+    check(display.selectedText(-1, 3).empty() && display.selectedText(1000, 1001).empty(), "absent and out-of-view selections are empty");
+    check(display.selectedText(0, 19) == "A日本😀Z\r\n  two", "multiline copy uses CRLF, keeps indentation and drops row padding");
+    check(display.selectedText(0, 1000) == "A日本😀Z\r\n  two\r\nlast", "selection extending past the screen is bounded");
+    model.feed("\x1b[?2026h\x1b[H\x1b[2Jincomplete"); display.changed(10); display.update(model, 0, 10);
+    check(display.selectedText(0, 8) == "A日本😀Z", "copy uses the displayed frame during synchronized output");
+
+    TerminalModel history(8, 2); TerminalDisplay scrolled;
+    history.feed("first\r\nsecond\r\nthird"); scrolled.update(history, 1, 0, false, true);
+    check(scrolled.selectedText(0, 16) == "first\r\nsecond", "copy uses the visible scrollback rather than the live screen");
+}
 }
 int main() {
-    try { textTests(); terminalTests(); terminalDisplayTests(); terminalScrollTests(); std::cout << "Text and terminal core tests passed.\n"; return EXIT_SUCCESS; }
+    try { textTests(); terminalTests(); terminalDisplayTests(); terminalScrollTests(); terminalCopyTests(); std::cout << "Text and terminal core tests passed.\n"; return EXIT_SUCCESS; }
     catch (const std::exception& error) { std::cerr << error.what() << '\n'; return EXIT_FAILURE; }
 }

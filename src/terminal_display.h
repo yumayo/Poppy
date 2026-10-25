@@ -1,6 +1,7 @@
 #pragma once
 #include "terminal_model.h"
 #include <cstdint>
+#include <utility>
 
 namespace poppy {
 // Only the committed visible cells reach the renderer, including incidental
@@ -17,6 +18,9 @@ public:
     int cursorX() const { return cursorX_; }
     int cursorY() const { return cursorY_; }
     bool cursorVisible() const { return cursorVisible_ && !scroll_; }
+    // Selection endpoints are cell boundaries; the end is exclusive.
+    std::pair<int, int> selectionRange(int anchor, int caret) const;
+    std::string selectedText(int anchor, int caret) const;
 private:
     std::vector<std::vector<Cell>> cells_;
     int columns_ = 0, cursorX_ = 0, cursorY_ = 0;

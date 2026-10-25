@@ -253,21 +253,18 @@ void Terminal::paste() {
 }
 int Terminal::point(int x, int y) const {
     const int columns = std::max(1, display_.columns()), rows = std::max(1, display_.rows());
-    return std::clamp((y - header_ - 4) / cellHeight_, 0, rows - 1) * columns + std::clamp((x - 6) / cellWidth_, 0, columns - 1);
+    if (y < header_ + 4) return 0;
+    if (y >= header_ + 4 + rows * cellHeight_) return rows * columns;
+    return ((y - header_ - 4) / cellHeight_) * columns + std::clamp((x - 6 + cellWidth_ / 2) / cellWidth_, 0, columns);
 }
 void Terminal::copy() {
-    if (anchor_ < 0 || caret_ < 0 || !display_.columns()) return;
-    const int begin = std::min(anchor_, caret_), end = std::max(anchor_, caret_); std::string result;
-    for (int y = begin / display_.columns(); y <= end / display_.columns() && y < display_.rows(); ++y) {
-        const auto& line = display_.row(y); std::string part;
-        const int first = y == begin / display_.columns() ? begin % display_.columns() : 0;
-        const int last = y == end / display_.columns() ? end % display_.columns() + 1 : display_.columns();
-        for (int x = first; x < last && x < static_cast<int>(line.size()); ++x) if (!line[x].continuation) appendUtf8(part, line[x].ch);
-        while (!part.empty() && part.back() == ' ') part.pop_back();
-        result += part;
-        if (y != end / display_.columns()) result += "\r\n";
+    if (!hasSelection()) return;
+    if (copyText(window_, wide(display_.selectedText(anchor_, caret_)))) {
+        anchor_ = caret_ = -1;
+        InvalidateRect(window_, nullptr, FALSE); UpdateWindow(window_);
+    } else {
+        MessageBeep(MB_ICONWARNING);
     }
-    copyText(window_, wide(result));
 }
 void Terminal::paint() {
     Renderer::Paint paint(renderer_, window_); if (!paint) return;
@@ -283,11 +280,11 @@ void Terminal::paint() {
     } else {
         RECT clip{6, header_ + 4, rect.right - 6, rect.bottom};
         dc.fill({0, header_, rect.right, rect.bottom}, background);
-        const int begin = std::min(anchor_, caret_), end = std::max(anchor_, caret_);
+        const auto [begin, end] = display_.selectionRange(anchor_, caret_);
         std::vector<Cell> visible;
         for (int y = 0; y < display_.rows(); ++y) {
             visible = display_.row(y);
-            if (begin >= 0) for (int x = 0; x < display_.columns(); ++x) { const int index = y * display_.columns() + x; if (index >= begin && index <= end) visible[x].bg = rgb(50,70,94); }
+            if (begin < end) for (int x = 0; x < display_.columns(); ++x) { const int index = y * display_.columns() + x; if (index >= begin && index < end) visible[x].bg = rgb(50,70,94); }
             const int sy = header_ + 4 + y * cellHeight_;
             dc.cells(6, sy, cellWidth_, cellHeight_, visible, display_.columns(), clip);
         }
@@ -313,16 +310,17 @@ LRESULT Terminal::handle(UINT m, WPARAM a, LPARAM b) {
     case wmTerminal: pump(); return 0;
     case WM_TIMER: if (a == 2) pump(); return 0;
     case WM_GETDLGCODE: return DLGC_WANTALLKEYS;
+    case WM_COPY: copy(); return 0;
     case WM_SETFOCUS: if (focused) focused(); InvalidateRect(window_, nullptr, FALSE); return 0;
     case WM_KILLFOCUS: InvalidateRect(window_, nullptr, FALSE); return 0;
     case WM_LBUTTONDOWN:
         SetFocus(window_);
         if (!started_ || (!running() && GET_Y_LPARAM(b) < header_)) { start(); InvalidateRect(window_, nullptr, FALSE); return 0; }
         if (GET_Y_LPARAM(b) >= header_) { anchor_ = caret_ = point(GET_X_LPARAM(b), GET_Y_LPARAM(b)); selecting_ = true; SetCapture(window_); InvalidateRect(window_, nullptr, FALSE); } return 0;
-    case WM_MOUSEMOVE: if (selecting_) { caret_ = point(GET_X_LPARAM(b), GET_Y_LPARAM(b)); InvalidateRect(window_, nullptr, FALSE); } return 0;
-    case WM_LBUTTONUP: if (selecting_) { selecting_ = false; ReleaseCapture(); } return 0;
+    case WM_MOUSEMOVE: if (selecting_) { caret_ = point(GET_X_LPARAM(b), GET_Y_LPARAM(b)); InvalidateRect(window_, nullptr, FALSE); UpdateWindow(window_); } return 0;
+    case WM_LBUTTONUP: if (selecting_) { caret_ = point(GET_X_LPARAM(b), GET_Y_LPARAM(b)); selecting_ = false; ReleaseCapture(); InvalidateRect(window_, nullptr, FALSE); UpdateWindow(window_); } return 0;
     case WM_CAPTURECHANGED: selecting_ = false; return 0;
-    case WM_RBUTTONUP: if (!started_) start(); paste(); return 0;
+    case WM_RBUTTONUP: if (hasSelection()) copy(); else { if (!started_) start(); paste(); } return 0;
     case WM_MOUSEWHEEL: {
         const int delta = GET_WHEEL_DELTA_WPARAM(a) / WHEEL_DELTA * 3;
         scroll_ = static_cast<size_t>(std::clamp<long long>(static_cast<long long>(scroll_) + delta, 0, static_cast<long long>(model_.historySize())));
@@ -338,7 +336,7 @@ LRESULT Terminal::handle(UINT m, WPARAM a, LPARAM b) {
     }
     case WM_KEYDOWN: case WM_SYSKEYDOWN: {
         const bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0, shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0, alt = (GetKeyState(VK_MENU) & 0x8000) != 0;
-        if (ctrl && shift && a == 'C') { copy(); return 0; }
+        if (ctrl && shift && !alt && a == 'C') { copy(); return 0; }
         if ((ctrl && shift && a == 'V') || (shift && a == VK_INSERT)) { if (!started_) start(); paste(); return 0; }
         if (!started_ && a != VK_CONTROL && a != VK_SHIFT && a != VK_MENU) { start(); }
         const int modifier = 1 + (shift ? 1 : 0) + (alt ? 2 : 0) + (ctrl ? 4 : 0);
@@ -349,7 +347,10 @@ LRESULT Terminal::handle(UINT m, WPARAM a, LPARAM b) {
         case VK_DELETE: send("\x1b[3~"); return 0; case VK_INSERT: send("\x1b[2~"); return 0;
         case VK_PRIOR: send("\x1b[5~"); return 0; case VK_NEXT: send("\x1b[6~"); return 0;
         case VK_TAB: if (shift) send("\x1b[Z"); return 0;
-        case VK_ESCAPE: send("\x1b"); return 0;
+        case VK_ESCAPE:
+            if (hasSelection()) { anchor_ = caret_ = -1; InvalidateRect(window_, nullptr, FALSE); }
+            else send("\x1b");
+            return 0;
         default: break;
         }
         if (a >= VK_F1 && a <= VK_F4) { send(std::string("\x1bO") + static_cast<char>('P' + a - VK_F1)); return 0; }
@@ -360,6 +361,9 @@ LRESULT Terminal::handle(UINT m, WPARAM a, LPARAM b) {
     case WM_CHAR: case WM_SYSCHAR: {
         if (a == VK_ESCAPE || (a == '\t' && (GetKeyState(VK_SHIFT) & 0x8000))) return 0;
         if ((GetKeyState(VK_CONTROL) & 0x8000) && (GetKeyState(VK_SHIFT) & 0x8000) && (a == 3 || a == 22)) return 0;
+        // Handle Ctrl+C's character here so copying cannot also send ETX after
+        // clearing the selection. A plain click is not a selection.
+        if (a == 3 && !(GetKeyState(VK_MENU) & 0x8000) && hasSelection()) { copy(); return 0; }
         const wchar_t c = static_cast<wchar_t>(a); if (c >= 0xd800 && c <= 0xdbff) { highSurrogate_ = c; return 0; }
         std::wstring text; if (highSurrogate_) { text += highSurrogate_; highSurrogate_ = 0; } text += c;
         send((m == WM_SYSCHAR ? "\x1b" : "") + utf8(text)); return 0;
