@@ -14,7 +14,7 @@ public:
     void show(std::shared_ptr<const Document> document, const fs::path& path, bool preserve = false);
     void edit(std::shared_ptr<EditBuffer> buffer, const fs::path& path, bool preserve = false);
     std::shared_ptr<EditBuffer> buffer() const { return edit_; }
-    std::function<void()> changed, save, focused;
+    std::function<void()> changed, save, focused, diffLayoutChanged;
     void showDiff(std::shared_ptr<const DiffDocument> document, const fs::path& path, bool preserve = false);
     void toggleDiffLayout();
     void setDiffLayout(bool inlineView);

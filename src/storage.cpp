@@ -15,6 +15,10 @@ constexpr const char* projectViews =
     " git_top INTEGER NOT NULL, git_left INTEGER NOT NULL, first_tab_row INTEGER NOT NULL, git_selected TEXT NOT NULL, focused_pane TEXT NOT NULL, active_terminal TEXT NOT NULL);"
     "CREATE TABLE terminals (position INTEGER PRIMARY KEY, terminal_id TEXT NOT NULL UNIQUE, name TEXT NOT NULL, directory TEXT NOT NULL);"
     "CREATE TABLE git_collapsed (path TEXT PRIMARY KEY);";
+constexpr const char* splitViews =
+    "CREATE TABLE split_layout (id INTEGER PRIMARY KEY CHECK(id=1), editor_ratio INTEGER NOT NULL, terminal_ratio INTEGER NOT NULL, right_tab_row INTEGER NOT NULL);"
+    "CREATE TABLE tab_groups (path TEXT PRIMARY KEY, pane INTEGER NOT NULL, displayed INTEGER NOT NULL);"
+    "CREATE TABLE terminal_groups (terminal_id TEXT PRIMARY KEY, pane INTEGER NOT NULL, displayed INTEGER NOT NULL);";
 
 class Database {
 public:
@@ -115,7 +119,7 @@ void projectSchema(Database& db) {
         "CREATE TABLE IF NOT EXISTS tabs (position INTEGER PRIMARY KEY, path TEXT NOT NULL, diff INTEGER NOT NULL,"
         " file_top INTEGER NOT NULL, file_left INTEGER NOT NULL, file_anchor INTEGER NOT NULL, file_caret INTEGER NOT NULL, file_after INTEGER NOT NULL,"
         " diff_top INTEGER NOT NULL, diff_left INTEGER NOT NULL, diff_anchor INTEGER NOT NULL, diff_caret INTEGER NOT NULL, diff_after INTEGER NOT NULL, pinned INTEGER NOT NULL);"
-        "CREATE TABLE IF NOT EXISTS expanded (path TEXT PRIMARY KEY);") + projectViews).c_str(), {
+        "CREATE TABLE IF NOT EXISTS expanded (path TEXT PRIMARY KEY);") + projectViews + splitViews).c_str(), {
         "ALTER TABLE session ADD COLUMN diff_inline INTEGER NOT NULL DEFAULT 0;"
         "UPDATE session SET diff_inline=COALESCE((SELECT diff_inline FROM tabs WHERE diff<>0"
         " ORDER BY (position=(SELECT active_tab FROM session WHERE id=1)) DESC,position LIMIT 1),0);"
@@ -124,7 +128,7 @@ void projectSchema(Database& db) {
         "ALTER TABLE tabs DROP COLUMN file_inline;"
         "ALTER TABLE tabs DROP COLUMN diff_inline;",
         "ALTER TABLE session ADD COLUMN git_tree INTEGER NOT NULL DEFAULT 0;",
-        "ALTER TABLE tabs ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0;", projectViews});
+        "ALTER TABLE tabs ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0;", projectViews, splitViews});
 }
 }
 struct Storage::Impl {
@@ -237,6 +241,12 @@ std::optional<ProjectSession> Storage::loadProject(const std::string& key, const
     if (std::none_of(state.terminals.begin(), state.terminals.end(), [&](const SavedTerminal& terminal) { return terminal.id == state.activeTerminal; })) state.activeTerminal = state.terminals.front().id;
     Statement collapsed(db, "SELECT path FROM git_collapsed ORDER BY path LIMIT 50000");
     while (collapsed.row()) state.collapsedGit.push_back(collapsed.text(0));
+    Statement layout(db, "SELECT editor_ratio,terminal_ratio,right_tab_row FROM split_layout WHERE id=1");
+    if (layout.row()) { state.editorRatio = bounded(layout.number(0), 200, 800); state.terminalRatio = bounded(layout.number(1), 200, 800); state.rightTabRow = position(layout.number(2)); }
+    Statement groups(db, "SELECT path,pane,displayed FROM tab_groups");
+    while (groups.row()) for (auto& tab : state.tabs) if (tab.path == groups.text(0)) { tab.group = bounded(groups.number(1), 0, 1); tab.displayed = groups.number(2) != 0; break; }
+    Statement terminalGroups(db, "SELECT terminal_id,pane,displayed FROM terminal_groups");
+    while (terminalGroups.row()) for (auto& terminal : state.terminals) if (terminal.id == terminalGroups.text(0)) { terminal.group = bounded(terminalGroups.number(1), 0, 1); terminal.displayed = terminalGroups.number(2) != 0; break; }
     snapshot.commit();
     return state;
 }
@@ -269,6 +279,13 @@ void Storage::saveProject(const std::string& key, const std::string& path, const
     }
     Statement collapsed(db, "INSERT OR IGNORE INTO git_collapsed VALUES(?)");
     for (const auto& value : state.collapsedGit) { collapsed.text(1, value); collapsed.run(); collapsed.reset(); }
+    db.exec("DELETE FROM tab_groups; DELETE FROM terminal_groups;");
+    Statement layout(db, "INSERT OR REPLACE INTO split_layout VALUES(1,?,?,?)");
+    layout.number(1, state.editorRatio); layout.number(2, state.terminalRatio); layout.number(3, static_cast<sqlite3_int64>(state.rightTabRow)); layout.run();
+    Statement groups(db, "INSERT INTO tab_groups VALUES(?,?,?)");
+    for (const auto& tab : state.tabs) { groups.text(1, tab.path); groups.number(2, tab.group); groups.number(3, tab.displayed); groups.run(); groups.reset(); }
+    Statement terminalGroups(db, "INSERT INTO terminal_groups VALUES(?,?,?)");
+    for (const auto& terminal : state.terminals) { terminalGroups.text(1, terminal.id); terminalGroups.number(2, terminal.group); terminalGroups.number(3, terminal.displayed); terminalGroups.run(); terminalGroups.reset(); }
     transaction.commit();
 }
 }

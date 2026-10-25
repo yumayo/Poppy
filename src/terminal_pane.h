@@ -3,6 +3,7 @@
 #include "hook_server.h"
 #include "session.h"
 #include <memory>
+#include <optional>
 
 namespace poppy {
 // Each session retains its ConPTY, VT model and view while other tabs are shown.
@@ -28,6 +29,8 @@ public:
     AiSummary summary() const;
     std::wstring description() const;
     void stop();
+    bool key(const MSG& message);
+    bool contains(HWND window) const { return window == window_ || IsChild(window_, window); }
     HWND window() const { return active().terminal->window(); }
     HWND container() const { return window_; }
     std::function<void()> changed;
@@ -46,12 +49,22 @@ private:
     void layout();
     void paint();
     std::vector<RECT> bounds() const;
+    void normalizeGroups();
+    void drag(POINT point);
+    void endDrag(bool drop = false);
+    size_t groupTab(int group) const;
+    RECT groupBounds(int group) const;
     HWND window_ = nullptr, rename_ = nullptr, tooltips_ = nullptr;
     size_t renaming_ = 0, tools_ = 0;
     HINSTANCE instance_ = nullptr;
     Renderer renderer_;
     UINT dpi_ = 96;
-    int header_ = 32, offset_ = 0;
+    int header_ = 32, offset_[2]{}, ratio_ = 500;
+    RECT splitter_{};
+    bool resizing_ = false;
+    struct Drag { size_t index; POINT origin, point; bool active = false; int group = -1; size_t position = 0; };
+    std::optional<Drag> drag_;
+    DropPreview preview_;
     fs::path directory_;
     std::vector<std::unique_ptr<TerminalSession>> sessions_;
     size_t active_ = 0;

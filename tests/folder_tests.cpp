@@ -514,6 +514,55 @@ void wrappingTabTests(const fs::path& executable) {
     checkRows(5);
     clickTab(app, 0); waitLines(viewer, 100); clickTab(app, 4); waitLines(viewer, 104);
 }
+void splitPaneTests(const fs::path& executable) {
+    Fixture fixture; writeLines(fixture.root / L"a.txt", 120); writeLines(fixture.root / L"b.txt", 240);
+    LONG divider = 0;
+    {
+        Application app(executable, fixture.root); const auto tree = app.tree();
+        const auto left = FindWindowExW(app.window, nullptr, L"PoppyViewer", nullptr);
+        const auto right = FindWindowExW(app.window, left, L"PoppyViewer", nullptr);
+        waitFor([&] { return send(tree, treeGetCount) == 3; }, "Split fixture did not load");
+        const auto first = nextItem(tree, TreeRelation::Child, nextItem(tree, TreeRelation::Root));
+        send(tree, treeSelect, first); waitLines(left, 120);
+        send(tree, treeSelect, nextItem(tree, TreeRelation::Next, first)); waitLines(left, 240);
+        const auto original = bounds(app.window, left);
+        dragTab(app, 1, {original.left + (original.right-original.left)*3/4, original.top + 60});
+        waitFor([&] { return IsWindowVisible(right); }, "Editor drag did not create a right group");
+        waitLines(left, 120); waitLines(right, 240);
+        const auto l = bounds(app.window,left), r = bounds(app.window,right);
+        check(l.right < r.left && l.bottom == r.bottom, "Editors overlap or do not share a bottom edge");
+        send(right, WM_CHAR, '\r'); waitLines(right, 241);
+        clickTab(app, 0); waitLines(left, 120); clickTab(app, 1); waitLines(right, 241);
+        send(right, WM_KEYDOWN, VK_BACK); waitLines(right, 240);
+        const int x = (l.right+r.left)/2, y = l.top+40;
+        send(app.window,WM_LBUTTONDOWN,MK_LBUTTON,MAKELPARAM(x,y));
+        send(app.window,WM_MOUSEMOVE,MK_LBUTTON,MAKELPARAM(x+30,y));
+        send(app.window,WM_LBUTTONUP,0,MAKELPARAM(x+30,y)); divider=bounds(app.window,left).right;
+        check(divider>l.right,"Editor divider did not move");
+        const auto terminalPane=FindWindowExW(app.window,nullptr,L"PoppyTerminalPane",nullptr);
+        RECT client{};GetClientRect(terminalPane,&client);const auto dpi=GetDpiForWindow(terminalPane);
+        click(terminalPane,client.right-MulDiv(17,dpi,96),MulDiv(16,dpi,96));
+        send(terminalPane,WM_LBUTTONDOWN,MK_LBUTTON,MAKELPARAM(MulDiv(135,dpi,96),MulDiv(16,dpi,96)));
+        send(terminalPane,WM_MOUSEMOVE,MK_LBUTTON,MAKELPARAM(client.right*3/4,client.bottom/2));
+        send(terminalPane,WM_LBUTTONUP,0,MAKELPARAM(client.right*3/4,client.bottom/2));
+        const auto terminalLeft=FindWindowExW(terminalPane,nullptr,L"PoppyTerminal",nullptr);
+        const auto terminalRight=FindWindowExW(terminalPane,terminalLeft,L"PoppyTerminal",nullptr);
+        check(IsWindowVisible(terminalLeft)&&IsWindowVisible(terminalRight),"Terminal drag did not show two sessions");
+        check(bounds(terminalPane,terminalLeft).right<bounds(terminalPane,terminalRight).left,"Terminal sessions overlap");
+    }
+    {
+        Application app(executable,fixture.root);app.tree();
+        const auto left=FindWindowExW(app.window,nullptr,L"PoppyViewer",nullptr),right=FindWindowExW(app.window,left,L"PoppyViewer",nullptr);
+        waitLines(left,120);waitLines(right,240);
+        check(IsWindowVisible(right)&&bounds(app.window,left).right==divider,"Restart lost editor groups or divider");
+        const auto pane=FindWindowExW(app.window,nullptr,L"PoppyTerminalPane",nullptr);
+        const auto a=FindWindowExW(pane,nullptr,L"PoppyTerminal",nullptr),b=FindWindowExW(pane,a,L"PoppyTerminal",nullptr);
+        check(IsWindowVisible(a)&&IsWindowVisible(b),"Restart lost terminal groups");
+        const auto target=tabBounds(app,0);dragTab(app,1,{target.right-1,(target.top+target.bottom)/2});
+        waitFor([&]{return !IsWindowVisible(right);},"Moving the last right tab did not collapse the split");
+        waitLines(left,240);
+    }
+}
 void sidebarTests(const fs::path& executable) {
     Fixture fixture;
     const auto folder = fixture.root / L"nested";
@@ -954,7 +1003,7 @@ int wmain(int argc, wchar_t** argv) {
         check(argc == 2, "Pass the path to Poppy.exe");
         SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         for (const auto test : {folderTests, sidebarTests, treeInteractionTests, tabTests, pinnedTabTests,
-                tabDragTests, wrappingTabDragTests, wrappingTabTests, quickOpenTests, gitSidebarTests, sessionTests, multiProjectTests}) {
+                tabDragTests, wrappingTabDragTests, wrappingTabTests, splitPaneTests, quickOpenTests, gitSidebarTests, sessionTests, multiProjectTests}) {
             Fixture appData; AppDataEnvironment environment(appData.root);
             test(fs::absolute(argv[1]));
         }
