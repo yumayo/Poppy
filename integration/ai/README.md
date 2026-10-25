@@ -1,20 +1,29 @@
 # Poppyとai-containerの接続
 
+通知の受信口は既定で `0.0.0.0:5010` です。通知のためにPoppy起動時の環境変数を設定する必要はありません。コンテナからの通知先は `.aicontainer` に設定します。
+
+```ini
+allow-ip=172.17.176.1
+env=POPPY_EVENTS_URL=http://172.17.176.1:5010
+env=POPPY_SESSION_ID
+```
+
+`172.17.176.1` は例です。コンテナから到達できるWindowsのIPv4に置き換えてください。`POPPY_SESSION_ID` はPoppyがターミナルごとに発行するため、値を固定せず名前だけを指定します。設定変更後はAIコンテナを作り直してください。CLI別hookの導入も必要です（後述）。
+
+WindowsファイアウォールでPoppyへの受信を許可し、コンテナからWindowsへの経路があることを確認してください。`allow-ip` は通信の許可であり、経路は作りません。コンテナ内のlocalhostはWindowsを指しません。
+
+必要な場合だけ `POPPY_HOOK_BIND` と `POPPY_HOOK_PORT` で待受を変更できます。ポートを変更する場合は `.aicontainer` の通知先も合わせてください。`POPPY_HOOK_HOST` はWindows上の通常シェルへ渡すURLの宛先を変更する設定で、コンテナの通知先URLは `.aicontainer` の値を使います。
+
+## AIコンテナの起動
+
 Poppyのターミナルの「＋」は通常のシェルを追加します。「＋」の右クリックで、通常のシェル、Codex、Claude Codeを選べます。AIを起動する場合は、Windows側の環境変数 `POPPY_AI_CONTAINER_DIR` に、利用しているai-containerのチェックアウトを指定してからPoppyを起動してください。
 
 ```powershell
 $env:POPPY_AI_CONTAINER_DIR = 'C:\work\ai-container'
-# コンテナから到達できるWindowsのIPv4を、この環境に合わせて指定する。
-$env:POPPY_HOOK_BIND = '0.0.0.0'
-$env:POPPY_HOOK_HOST = '<Windowsの到達可能なIPv4>'
-# 省略時はOSが空いているポートを選ぶ。固定ポートも指定できる。
-$env:POPPY_HOOK_PORT = '5010'
 .\Poppy.exe 'C:\work\feature-a'
 ```
 
-初期値は `127.0.0.1` の空きポートへの待受です。`POPPY_HOOK_HOST` は通知URLに載せる宛先、`POPPY_HOOK_BIND` はWindows側の待受インターフェースです。コンテナからWindowsへ到達する経路、起動前の `.aicontainer` の `allow-ip` / `allow-dns`、Windowsファイアウォールの許可を用意してください。コンテナ内のlocalhostはWindowsを指しません。Poppyはネットワーク設定やファイアウォールを変更しません。
-
-Poppy本体と同じ場所の `ai/` フォルダーを配布してください。アダプターは既存の `wsl-containers/wsl-containers.ps1` の関数と `LaunchProfileFile` を使います。AI用の起動プロファイルは、ワークスペースの `.poppy-runtime/<UUID>/launch.json` に作成します。各プロジェクトのGit除外設定に `.poppy-runtime/` を追加してください。共有の `.aicontainer`、CLI設定、認証情報は起動ごとに書き換えません。
+Poppy本体と同じ場所の `ai/` フォルダーを配布してください。アダプターは既存の `wsl-containers/wsl-containers.ps1` の関数と `LaunchProfileFile` を使います。AI用の起動プロファイルは、ワークスペースの `.poppy-runtime/<UUID>/launch.json` に作成し、ターミナルの通知IDだけを渡します。通知先URLはコンテナの設定を引き継ぎます。各プロジェクトのGit除外設定に `.poppy-runtime/` を追加してください。共有の `.aicontainer`、CLI設定、認証情報は起動ごとに書き換えません。
 
 ## hookの導入・解除
 
@@ -42,12 +51,7 @@ python3 /path/to/ai/scripts/uninstall-hooks.py claude
 
 ## 通常のシェルから起動する場合
 
-Poppyはシェル起動ごとに `POPPY_EVENTS_URL` と32文字の `POPPY_SESSION_ID` を設定します。`WSLENV` の既存設定を維持して、この2変数も引き継ぎます。WSL経由で手動起動する場合、ai-containerの `.aicontainer` に名前だけの次の設定を追加し、コンテナ起動前から引き継いでください。
-
-```ini
-env=POPPY_EVENTS_URL
-env=POPPY_SESSION_ID
-```
+Poppyはシェル起動ごとにWindows上のCLI向けの `POPPY_EVENTS_URL`（既定は `http://127.0.0.1:5010`）と32文字の `POPPY_SESSION_ID` を設定します。`WSLENV` の既存設定を維持して、この2変数も引き継ぎます。WSL経由で手動起動する場合も、冒頭の `.aicontainer` 設定を使ってください。コンテナでは通知先URLをWindowsのIPv4に切り替え、通知IDをPoppyのシェルから引き継ぎます。
 
 固定の通知IDを共有設定へ書かないでください。同じターミナル内で独立したAIを並列実行すると通知が混ざるため、AIごとに別ターミナルを使ってください。
 

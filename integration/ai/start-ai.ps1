@@ -13,7 +13,7 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 [Console]::InputEncoding = [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
 $notification = $env:POPPY_SESSION_ID
-if ($notification -notmatch '^[a-f0-9]{32}$' -or -not $env:POPPY_EVENTS_URL) {
+if ($notification -notmatch '^[a-f0-9]{32}$') {
     throw 'Run this adapter in a Poppy terminal with AI notifications enabled.'
 }
 $prefix = "Local\Poppy.$notification"
@@ -60,7 +60,9 @@ try {
     $profileDirectory = Join-Path $Workspace ('.poppy-runtime\' + [guid]::NewGuid().ToString('N'))
     $null = New-Item -ItemType Directory -Path $profileDirectory
     $profile = Join-Path $profileDirectory 'launch.json'
-    $json = @{ arguments = @(); environment = @{ POPPY_EVENTS_URL = $env:POPPY_EVENTS_URL; POPPY_SESSION_ID = $notification } } | ConvertTo-Json -Depth 4
+    # The destination is configured inside .aicontainer. The host's loopback URL
+    # is for native Windows tools and must not replace the container's endpoint.
+    $json = @{ arguments = @(); environment = @{ POPPY_SESSION_ID = $notification } } | ConvertTo-Json -Depth 4
     [IO.File]::WriteAllText($profile, $json, (New-Object Text.UTF8Encoding($false)))
     $result = Initialize-AiWsl
     if ($result.ExitCode -ne 0) { throw "ai-container initialization failed: $($result.ExitCode)" }
