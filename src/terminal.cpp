@@ -25,14 +25,14 @@ void Terminal::trackContainer(const std::string& id) {
 void Terminal::create(HWND parent, HINSTANCE instance) {
     liveTerminals.push_back(this);
     WNDCLASSW cls{}; cls.lpfnWndProc = procedure; cls.hInstance = instance; cls.lpszClassName = L"PoppyTerminal"; cls.hCursor = LoadCursorW(nullptr, IDC_IBEAM); RegisterClassW(&cls);
-    window_ = CreateWindowExW(0, cls.lpszClassName, L"AI terminal", WS_CHILD | WS_VISIBLE | WS_TABSTOP, 0, 0, 0, 0, parent, nullptr, instance, this);
+    window_ = CreateWindowExW(0, cls.lpszClassName, L"AI terminal", WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_VSCROLL, 0, 0, 0, 0, parent, nullptr, instance, this);
     model_.reply = [this](std::string response) { send(std::move(response), false); };
     setDpi(GetDpiForWindow(parent));
 }
 void Terminal::setDpi(UINT dpi) {
     renderer_.setDpi(dpi);
     cellWidth_ = renderer_.cellWidth(); cellHeight_ = renderer_.textHeight() + MulDiv(2, dpi, 96); header_ = MulDiv(30, dpi, 96);
-    resize(); InvalidateRect(window_, nullptr, FALSE);
+    scrollbars(); resize(); InvalidateRect(window_, nullptr, FALSE);
 }
 void Terminal::setDirectory(const fs::path& directory) {
     if (!started_) { directory_ = directory; error_.clear(); InvalidateRect(window_, nullptr, FALSE); }
@@ -47,6 +47,7 @@ bool Terminal::start() {
     scroll_ = 0; anchor_ = caret_ = -1;
     endedNotified_ = false;
     display_ = TerminalDisplay{}; display_.update(model_, scroll_, GetTickCount64(), false, true);
+    scrollbars();
     HANDLE read = nullptr, write = nullptr;
     if (!CreatePipe(&read, &write, nullptr, 0)) { error_ = winError(); return false; }
     Handle childInput(read); input_.reset(write);
@@ -147,6 +148,7 @@ void Terminal::stop() {
     input_.reset(); output_.reset(); process_.reset(); job_.reset(); started_ = false;
     { std::lock_guard<std::mutex> lock(mutex_); received_.clear(); writes_.clear(); writeBytes_ = 0; notified_ = resizePending_ = false; }
     display_.update(model_, scroll_, GetTickCount64(), false, true);
+    scrollbars();
 }
 void Terminal::send(std::string text, bool userInput) {
     if (!running() || text.empty()) return;
@@ -205,6 +207,7 @@ void Terminal::pump() {
             finished && !queued && terminal->display_.pending())) {
             if (oldColumns != terminal->display_.columns() || oldRows != terminal->display_.rows())
                 terminal->anchor_ = terminal->caret_ = -1;
+            terminal->scrollbars();
             terminal->imePosition();
             if (IsWindowVisible(terminal->window_)) InvalidateRect(terminal->window_, nullptr, FALSE);
         }
@@ -218,12 +221,13 @@ void Terminal::pump() {
 }
 void Terminal::resize() {
     if (!window_) return;
-    RECT rect{}; GetClientRect(window_, &rect);
+    const auto rect = Scrollbars::contentRect(window_);
     if (rect.right < cellWidth_ * 2 || rect.bottom <= header_) return;
     const int columns = std::clamp((static_cast<int>(rect.right) - 12) / cellWidth_, 2, 500);
     const int rows = std::clamp((static_cast<int>(rect.bottom) - header_ - 8) / cellHeight_, 1, 200);
     if (columns == model_.columns() && rows == model_.rows()) return;
     model_.resize(columns, rows); scroll_ = 0; anchor_ = caret_ = -1;
+    scrollbars();
     display_.resized(GetTickCount64());
     if (console_) {
         { std::lock_guard<std::mutex> lock(mutex_); requestedColumns_ = columns; requestedRows_ = rows; resizePending_ = true; }
@@ -232,6 +236,24 @@ void Terminal::resize() {
     else display_.update(model_, scroll_, GetTickCount64(), false, true);
     InvalidateRect(window_, nullptr, FALSE);
     if (console_) pump();
+}
+void Terminal::scrollbars() {
+    if (!window_) return;
+    const int history = static_cast<int>(model_.historySize());
+    scroll_ = std::min(scroll_, model_.historySize());
+    // Reserve a stable width even without history so new output does not
+    // resize ConPTY and cause the running application to redraw its screen.
+    SCROLLINFO info{sizeof(info), SIF_RANGE | SIF_PAGE | SIF_POS | SIF_DISABLENOSCROLL,
+        0, history + model_.rows() - 1, static_cast<UINT>(model_.rows()), history - static_cast<int>(scroll_), 0};
+    SetScrollInfo(window_, SB_VERT, &info, FALSE);
+}
+void Terminal::scroll(int offset) {
+    scroll_ = static_cast<size_t>(std::clamp(offset, 0, static_cast<int>(model_.historySize())));
+    anchor_ = caret_ = -1;
+    display_.update(model_, scroll_, GetTickCount64());
+    scrollbars(); imePosition(); InvalidateRect(window_, nullptr, FALSE);
+    // Present each wheel or thumb position while input continues to arrive.
+    UpdateWindow(window_);
 }
 void Terminal::imePosition() {
     const auto context = ImmGetContext(window_); if (!context) return;
@@ -269,7 +291,7 @@ void Terminal::copy() {
 void Terminal::paint() {
     Renderer::Paint paint(renderer_, window_); if (!paint) return;
     auto& dc = renderer_; dc.font(Renderer::Font::Ui);
-    RECT rect{}; GetClientRect(window_, &rect);
+    const auto rect = Scrollbars::contentRect(window_);
     dc.fill({0, 0, rect.right, header_}, panel);
     dc.label({12, 0, rect.right - 12, header_}, L"TERMINAL  ·  " + (directory_.empty() ? std::wstring(L"PowerShell") : directory_.native()), muted);
     dc.fill({0, header_ - 1, rect.right, header_}, border);
@@ -295,6 +317,7 @@ void Terminal::paint() {
         }
         if (!running()) dc.label({12, 0, rect.right - 12, header_}, L"SESSION ENDED  ·  Click header to restart", accent, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
     }
+    scrollbars_.paint(window_, dc, background);
 }
 LRESULT CALLBACK Terminal::procedure(HWND w, UINT m, WPARAM a, LPARAM b) {
     auto* self = reinterpret_cast<Terminal*>(GetWindowLongPtrW(w, GWLP_USERDATA));
@@ -302,6 +325,8 @@ LRESULT CALLBACK Terminal::procedure(HWND w, UINT m, WPARAM a, LPARAM b) {
     return self ? self->handle(m, a, b) : DefWindowProcW(w, m, a, b);
 }
 LRESULT Terminal::handle(UINT m, WPARAM a, LPARAM b) {
+    LRESULT result = 0;
+    if (scrollbars_.handle(window_, m, a, b, result)) return result;
     switch (m) {
     case WM_NCDESTROY: { const auto result = DefWindowProcW(window_, m, a, b); window_ = nullptr; return result; }
     case WM_PAINT: paint(); return 0;
@@ -323,15 +348,23 @@ LRESULT Terminal::handle(UINT m, WPARAM a, LPARAM b) {
     case WM_RBUTTONUP: if (hasSelection()) copy(); else { if (!started_) start(); paste(); } return 0;
     case WM_MOUSEWHEEL: {
         const int delta = GET_WHEEL_DELTA_WPARAM(a) / WHEEL_DELTA * 3;
-        scroll_ = static_cast<size_t>(std::clamp<long long>(static_cast<long long>(scroll_) + delta, 0, static_cast<long long>(model_.historySize())));
-        const bool selected = anchor_ >= 0;
-        anchor_ = caret_ = -1;
-        if (display_.update(model_, scroll_, GetTickCount64()) || selected) {
-            imePosition(); InvalidateRect(window_, nullptr, FALSE);
-            // Wheel input can keep WM_PAINT waiting. Present this position
-            // immediately without parsing every terminal's pending output.
-            UpdateWindow(window_);
+        scroll(static_cast<int>(scroll_) + delta);
+        return 0;
+    }
+    case WM_VSCROLL: {
+        SCROLLINFO info{sizeof(info), SIF_ALL, 0, 0, 0, 0, 0}; GetScrollInfo(window_, SB_VERT, &info);
+        int position = info.nPos;
+        switch (LOWORD(a)) {
+        case SB_LINEUP: --position; break;
+        case SB_LINEDOWN: ++position; break;
+        case SB_PAGEUP: position -= static_cast<int>(info.nPage); break;
+        case SB_PAGEDOWN: position += static_cast<int>(info.nPage); break;
+        case SB_TOP: position = 0; break;
+        case SB_BOTTOM: position = static_cast<int>(model_.historySize()); break;
+        case SB_THUMBTRACK: case SB_THUMBPOSITION: position = scrollbars_.trackPosition(SB_VERT, info.nTrackPos); break;
+        default: return 0;
         }
+        scroll(static_cast<int>(model_.historySize()) - position);
         return 0;
     }
     case WM_KEYDOWN: case WM_SYSKEYDOWN: {
