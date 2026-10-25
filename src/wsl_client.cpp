@@ -103,7 +103,7 @@ void Connection::start() {
     STARTUPINFOEXW startup{}; startup.StartupInfo.cb = sizeof(startup); startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES; startup.StartupInfo.hStdInput = childInput.value; startup.StartupInfo.hStdOutput = childOutput.value; startup.StartupInfo.hStdError = childError.value; startup.lpAttributeList = list;
     job_.reset(CreateJobObjectW(nullptr, nullptr)); JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{}; limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
     if (!job_ || !SetInformationJobObject(job_.value, JobObjectExtendedLimitInformation, &limits, sizeof(limits))) throw std::runtime_error(utf8(winError()));
-    std::wstring line; for (const auto& arg : args) { if (!line.empty()) line += L' '; line += quoteArg(arg); }
+    auto line = processCommandLine(args);
     PROCESS_INFORMATION pi{}; const auto cwd = windowsProcessDirectory();
     if (!CreateProcessW(args[0].c_str(), line.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW | CREATE_SUSPENDED | EXTENDED_STARTUPINFO_PRESENT, nullptr, cwd.c_str(), &startup.StartupInfo, &pi)) throw std::runtime_error(utf8(winError()));
     process_.reset(pi.hProcess); Handle thread(pi.hThread);

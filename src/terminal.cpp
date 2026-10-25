@@ -81,7 +81,7 @@ bool Terminal::start() {
     wchar_t system[MAX_PATH]{}; GetSystemDirectoryW(system, MAX_PATH);
     const std::wstring shell = !command_.empty() ? command_.front() : std::wstring(system) + L"\\WindowsPowerShell\\v1.0\\powershell.exe";
     std::wstring command = quoteArg(shell) + L" -NoLogo -NoProfile -NoExit -Command \"[Console]::InputEncoding = [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new()\"";
-    if (!command_.empty()) { command.clear(); for (const auto& arg : command_) { if (!command.empty()) command += L' '; command += quoteArg(arg); } }
+    if (!command_.empty()) command = processCommandLine(command_);
     job_.reset(CreateJobObjectW(nullptr, nullptr)); JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{}; limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
     if (!job_ || !SetInformationJobObject(job_.value, JobObjectExtendedLimitInformation, &limits, sizeof(limits))) { error_ = winError(); DeleteProcThreadAttributeList(attributes); stop(); return false; }
     PROCESS_INFORMATION pi{};

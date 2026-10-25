@@ -9,6 +9,7 @@
 #include <windowsx.h>
 #include "terminal_model.h"
 #include "resource.h"
+#include "command_line.h"
 #include <atomic>
 #include <condition_variable>
 #include <deque>
@@ -55,7 +56,6 @@ private:
 std::wstring wide(std::string_view utf8);
 std::string utf8(std::wstring_view text);
 std::wstring winError(DWORD error = GetLastError());
-std::wstring quoteArg(std::wstring_view arg);
 std::wstring pathKey(const fs::path& path);
 inline std::wstring pathKey(const ResourceId& path) { return resourceWide(path.key()); }
 fs::path relocatePath(const fs::path& path, const fs::path& source, const fs::path& destination);
