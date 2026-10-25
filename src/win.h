@@ -56,6 +56,7 @@ std::string utf8(std::wstring_view text);
 std::wstring winError(DWORD error = GetLastError());
 std::wstring quoteArg(std::wstring_view arg);
 std::wstring pathKey(const fs::path& path);
+fs::path relocatePath(const fs::path& path, const fs::path& source, const fs::path& destination);
 bool copyText(HWND owner, const std::wstring& text);
 std::wstring clipboardText(HWND owner);
 

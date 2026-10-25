@@ -5,6 +5,7 @@
 #include "git_changes.h"
 #include "activity_button.h"
 #include "quick_open.h"
+#include "file_name.h"
 #include <commctrl.h>
 #include <dwmapi.h>
 #include <shobjidl.h>
@@ -183,6 +184,7 @@ private:
     Node* node(TreeItem item) const;
     void clearChildren(TreeItem parent);
     void updateLabel(TreeItem item);
+    void renameFile(TreeItem item, const std::wstring& name);
     wchar_t stateFor(const fs::path& path) const;
     void openFile(const fs::path& path, bool diff = false);
     void saveTab();
@@ -224,6 +226,7 @@ private:
     int dragging_ = 0, dragOffset_ = 0;
     bool terminalVisible_ = true;
     bool updatingGitFiles_ = false;
+    bool renamePending_ = false;
     bool gitTreeView_ = false;
     std::vector<GitChangeNode> gitChangeNodes_;
     std::set<std::wstring> collapsedGitPaths_;
@@ -283,6 +286,9 @@ void ProjectRuntime::Impl::create() {
         else { forgetExpanded(n->path); n->expandRequested = false; clearChildren(item); n->loaded = false; }
     };
     explorer_.removed = [this](uintptr_t data) { const auto n = reinterpret_cast<Node*>(data); if (n) { nodes_.erase(n->id); delete n; } };
+    explorer_.canRename = [this](TreeItem item) { return item != rootItem_ && node(item) && !renamePending_; };
+    explorer_.renameRequested = [this](TreeItem item) { if (const auto n = node(item); n && item != rootItem_ && !renamePending_) explorer_.rename(item, n->path.filename().native()); };
+    explorer_.renameCommitted = [this](TreeItem item, const std::wstring& name) { renameFile(item, name); };
     changes_.activated = [this](TreeItem item) { openGitFile(item); };
     changes_.expanded = [this](TreeItem item, bool value) {
         if (updatingGitFiles_) return;
@@ -587,6 +593,48 @@ void ProjectRuntime::Impl::updateLabel(TreeItem item) {
     const auto state = stateFor(n->path);
     explorer_.label(item, std::move(text), state ? stateColor(state) : foreground);
 }
+void ProjectRuntime::Impl::renameFile(TreeItem item, const std::wstring& name) {
+    const auto n = node(item); if (!n || item == rootItem_ || renamePending_) return;
+    std::wstring error;
+    if (!validFileName(name, error)) { MessageBoxW(window_, error.c_str(), L"Poppy — Rename", MB_OK | MB_ICONWARNING); return; }
+    const auto source = n->path, destination = source.parent_path() / name;
+    if (source.native() == destination.native()) return;
+    saveTab(); endTabDrag(); renamePending_ = true; status(L"Renaming " + source.filename().native() + L"…");
+    const auto generation = generation_;
+    worker_->submit(L"rename", [this, source, destination, generation] {
+        // Deliberately omit MOVEFILE_REPLACE_EXISTING: collisions must never overwrite.
+        const auto error = MoveFileExW(source.c_str(), destination.c_str(), MOVEFILE_WRITE_THROUGH) ? std::wstring{} : winError();
+        worker_->complete([this, source, destination, generation, error] {
+            renamePending_ = false; if (generation != generation_) return;
+            if (!error.empty()) { status(L"Rename failed"); MessageBoxW(window_, (source.native() + L"\n\n" + error).c_str(), L"Poppy — Rename", MB_OK | MB_ICONWARNING); return; }
+            saveTab(); ++generation_; ++serial_[0]; ++serial_[1];
+            std::map<std::wstring, fs::path> expanded;
+            for (const auto& pair : expandedPaths_) { auto path = relocatePath(pair.second, source, destination); expanded[pathKey(path)] = std::move(path); }
+            expandedPaths_ = std::move(expanded); pendingTreeSelection_ = destination;
+            {
+                Tree::Batch batch(explorer_);
+                for (const auto& pair : nodes_) if (auto current = node(pair.second)) {
+                    current->path = relocatePath(current->path, source, destination); current->loading = false; updateLabel(pair.second);
+                }
+                for (const auto& pair : nodes_) if (const auto current = node(pair.second); current && current->directory) explorer_.sort(pair.second, [](uintptr_t a, uintptr_t b) {
+                    const auto x = reinterpret_cast<Node*>(a), y = reinterpret_cast<Node*>(b);
+                    if (x->directory != y->directory) return x->directory;
+                    return CompareStringOrdinal(x->path.filename().c_str(), -1, y->path.filename().c_str(), -1, TRUE) == CSTR_LESS_THAN;
+                });
+            }
+            for (auto& tab : tabs_) {
+                const auto path = relocatePath(tab.path, source, destination);
+                if (path == tab.path) continue;
+                tab.path = path;
+                if (tab.buffer) { tab.buffer->document.language = path.filename() == L"CMakeLists.txt" ? Language::Config : languageFor(utf8(path.extension().native())); indexDocument(tab.buffer->document); }
+            }
+            terminal_.relocate(source, destination);
+            layout(); refresh();
+            status(L"Renamed to " + destination.filename().native());
+            if (owner_ && owner_->changed) owner_->changed();
+        });
+    });
+}
 TreeItem ProjectRuntime::Impl::insert(TreeItem parent, const Entry& entry) {
     if (nodes_.size() >= maxTreeNodes) return 0;
     auto n = std::make_unique<Node>(); n->path = entry.path; n->id = nextId_++; n->directory = entry.directory; n->reparse = entry.reparse;
@@ -849,6 +897,7 @@ void ProjectRuntime::Impl::saveTab() {
     }
 }
 bool ProjectRuntime::Impl::saveFile(size_t index, bool wait) {
+    if (renamePending_) { if (wait) { worker_->drain(); worker_->dispatch(); } else { status(L"Rename in progress. Save again when it finishes."); return false; } }
     saveTab(); if (index >= tabs_.size()) return true;
     const auto buffer = tabs_[index].buffer; const auto path = tabs_[index].path;
     if (!buffer) return true;
@@ -1234,7 +1283,7 @@ void ProjectRuntime::shutdown() {
     if (impl_->worker_) impl_->worker_->stop();
     impl_->terminal_.stop();
 }
-bool ProjectRuntime::canClose() { impl_->saveTab(); for (size_t i = 0; i < impl_->tabs_.size(); ++i) if (!impl_->confirmTab(i)) return false; return true; }
+bool ProjectRuntime::canClose() { if (impl_->renamePending_) { impl_->worker_->drain(); impl_->worker_->dispatch(); } impl_->saveTab(); for (size_t i = 0; i < impl_->tabs_.size(); ++i) if (!impl_->confirmTab(i)) return false; return true; }
 void ProjectRuntime::revalidate() { PostMessageW(window(), WM_APP+13, 0, 0); }
 void ProjectRuntime::initialize(const fs::path& path, const ProjectSession& state, bool saved) { if (saved) impl_->initialState_ = state; impl_->openFolder(path); }
 void ProjectRuntime::activate(bool active) {

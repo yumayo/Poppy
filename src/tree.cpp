@@ -1,5 +1,6 @@
 #include "tree.h"
 #include <algorithm>
+#include <commctrl.h>
 
 namespace poppy {
 void Tree::create(HWND parent, HINSTANCE instance, const wchar_t* title, int id) {
@@ -29,7 +30,7 @@ void Tree::label(TreeItem id, std::wstring text, COLORREF color) {
     model_.label(id, std::move(text), color); changed();
 }
 void Tree::release(const std::vector<std::pair<TreeItem, uintptr_t>>& items) {
-    for (const auto& pair : items) { widths_.erase(pair.first); if (removed) removed(pair.second); }
+    for (const auto& pair : items) { if (pair.first == renaming_) finishRename(false); widths_.erase(pair.first); if (removed) removed(pair.second); }
 }
 void Tree::erase(TreeItem id) { release(model_.erase(id)); changed(); }
 void Tree::clearChildren(TreeItem id) { release(model_.eraseChildren(id)); changed(); }
@@ -87,7 +88,39 @@ void Tree::layout() {
         SCROLLINFO horizontal{sizeof(horizontal), SIF_RANGE | SIF_PAGE | SIF_POS, 0, std::max(0, extent - 1), static_cast<UINT>(width), left_, 0};
         SetScrollInfo(window_, SB_VERT, &vertical, FALSE); SetScrollInfo(window_, SB_HORZ, &horizontal, FALSE);
     }
-    layingOut_ = false; InvalidateRect(window_, nullptr, FALSE);
+    layingOut_ = false; layoutRename(); InvalidateRect(window_, nullptr, FALSE);
+}
+void Tree::rename(TreeItem id, const std::wstring& name) {
+    finishRename(false); if (!item(id)) return;
+    select(id, false); renaming_ = id;
+    rename_ = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", name.c_str(), WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
+        0, 0, 0, 0, window_, reinterpret_cast<HMENU>(1002), reinterpret_cast<HINSTANCE>(GetWindowLongPtrW(window_, GWLP_HINSTANCE)), nullptr);
+    if (!rename_) { renaming_ = 0; return; }
+    SetWindowSubclass(rename_, renameProcedure, 1, reinterpret_cast<DWORD_PTR>(this));
+    SendMessageW(rename_, EM_SETLIMITTEXT, 255, 0); layoutRename();
+    const auto extension = item(id)->expandable ? std::wstring::npos : name.find_last_of(L'.');
+    SendMessageW(rename_, EM_SETSEL, 0, extension == std::wstring::npos || extension == 0 ? -1 : static_cast<LPARAM>(extension)); SetFocus(rename_);
+}
+void Tree::layoutRename() {
+    if (!rename_) return;
+    const int index = row(renaming_); if (index < top_ || index >= top_ + page()) { finishRename(false); return; }
+    const auto& value = model_.visible()[static_cast<size_t>(index)]; const auto r = Scrollbars::contentRect(window_);
+    const int left = std::clamp(static_cast<int>(value.depth + 1) * indent_ - left_, 0, static_cast<int>(std::max(0L, r.right - MulDiv(80, dpi_, 96))));
+    SetWindowPos(rename_, HWND_TOP, left, (index - top_) * rowHeight_, std::max(0L, r.right - left), rowHeight_, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+}
+void Tree::finishRename(bool commit) {
+    if (!rename_) return;
+    const auto id = renaming_; const auto edit = std::exchange(rename_, nullptr); renaming_ = 0;
+    wchar_t name[256]{}; GetWindowTextW(edit, name, 256);
+    const bool focus = GetFocus() == edit; DestroyWindow(edit); if (focus) SetFocus(window_);
+    if (commit && item(id) && renameCommitted) renameCommitted(id, name);
+}
+LRESULT CALLBACK Tree::renameProcedure(HWND window, UINT message, WPARAM a, LPARAM b, UINT_PTR, DWORD_PTR data) {
+    auto& self = *reinterpret_cast<Tree*>(data);
+    if (message == WM_KEYDOWN && (a == VK_RETURN || a == VK_ESCAPE)) { self.finishRename(a == VK_RETURN); return 0; }
+    if (message == WM_GETDLGCODE) return DLGC_WANTALLKEYS;
+    if (message == WM_NCDESTROY) RemoveWindowSubclass(window, renameProcedure, 1);
+    return DefSubclassProc(window, message, a, b);
 }
 void Tree::scroll(int vertical, int horizontal) { top_ += vertical; left_ += horizontal; changed(); }
 void Tree::paint() {
@@ -133,6 +166,18 @@ LRESULT Tree::handle(UINT m, WPARAM a, LPARAM b) {
     case WM_PAINT: paint(); return 0;
     case WM_ERASEBKGND: return 1;
     case WM_SIZE: changed(); return 0;
+    case WM_COMMAND: if (LOWORD(a) == 1002 && HIWORD(a) == EN_KILLFOCUS) finishRename(false); return 0;
+    case WM_CONTEXTMENU: {
+        if (!renameRequested) return 0;
+        POINT screen{GET_X_LPARAM(b), GET_Y_LPARAM(b)}; auto id = selection();
+        if (screen.x == -1 && screen.y == -1) { screen = {indent_, (row(id) - top_ + 1) * rowHeight_}; ClientToScreen(window_, &screen); }
+        else { auto point = screen; ScreenToClient(window_, &point); id = hit(point.y); if (id) select(id, false); }
+        if (!id) return 0;
+        HMENU menu = CreatePopupMenu(); AppendMenuW(menu, MF_STRING | (canRename && !canRename(id) ? MF_GRAYED : 0), 1, L"Rename\tF2");
+        const auto command = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, screen.x, screen.y, 0, window_, nullptr); DestroyMenu(menu);
+        if (command == 1 && item(id) && (!canRename || canRename(id))) renameRequested(id);
+        return 0;
+    }
     case WM_GETDLGCODE: return DLGC_WANTARROWS | DLGC_WANTCHARS;
     case WM_SETFOCUS: if (!selection() && child()) select(child(), false); InvalidateRect(window_, nullptr, FALSE); return 0;
     case WM_KILLFOCUS: InvalidateRect(window_, nullptr, FALSE); return 0;
@@ -179,6 +224,7 @@ LRESULT Tree::handle(UINT m, WPARAM a, LPARAM b) {
         const auto id = selection(); const auto node = item(id);
         int index = row(id); if (index < 0) index = 0;
         switch (a) {
+        case VK_F2: if (id && renameRequested && (!canRename || canRename(id))) renameRequested(id); return 0;
         case VK_LEFT: if (node && node->expanded) expand(id, false); else if (node && node->parent) select(node->parent); return 0;
         case VK_RIGHT: if (node && node->expandable) { if (!node->expanded) expand(id, true); else if (child(id)) select(child(id)); } return 0;
         case VK_RETURN: case VK_SPACE: if (node && node->expandable) expand(id, !node->expanded); else select(id); return 0;

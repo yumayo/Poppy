@@ -33,11 +33,18 @@ public:
     int left() const { return MulDiv(left_, 96, dpi_); }
     void restoreScroll(int top, int left) { top_ = top; left_ = MulDiv(left, dpi_, 96); changed(); }
     TreeItem selection() const { return model_.selection(); }
+    void rename(TreeItem item, const std::wstring& name);
+    std::function<bool(TreeItem)> canRename;
+    std::function<void(TreeItem)> renameRequested;
+    std::function<void(TreeItem, const std::wstring&)> renameCommitted;
     std::function<void(TreeItem)> activated;
     std::function<void(TreeItem, bool)> expanded;
     std::function<void(uintptr_t)> removed;
 private:
     static LRESULT CALLBACK procedure(HWND, UINT, WPARAM, LPARAM);
+    static LRESULT CALLBACK renameProcedure(HWND, UINT, WPARAM, LPARAM, UINT_PTR, DWORD_PTR);
+    void finishRename(bool commit);
+    void layoutRename();
     LRESULT handle(UINT, WPARAM, LPARAM);
     void paint();
     void layout();
@@ -49,6 +56,8 @@ private:
     void release(const std::vector<std::pair<TreeItem, uintptr_t>>& items);
     int page() const;
     HWND window_ = nullptr;
+    HWND rename_ = nullptr;
+    TreeItem renaming_ = 0;
     Renderer renderer_;
     Scrollbars scrollbars_;
     TreeModel model_;

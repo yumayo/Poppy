@@ -20,6 +20,7 @@ public:
     void create(HWND parent, HINSTANCE instance);
     void setDpi(UINT dpi);
     void setDirectory(const fs::path& directory);
+    void relocate(const fs::path& source, const fs::path& destination);
     void restore(const ProjectSession& state);
     void snapshot(ProjectSession& state) const;
     void connect(HookServer* hooks) { hooks_ = hooks; }
