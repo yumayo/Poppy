@@ -1,6 +1,7 @@
 #pragma once
 #include "render.h"
 #include "file_search.h"
+#include "project_provider.h"
 #include <memory>
 
 namespace poppy {
@@ -9,7 +10,8 @@ public:
     ~QuickOpen() { stop(); }
     void create(HWND parent, HINSTANCE instance);
     void setDpi(UINT dpi);
-    void setRoot(const fs::path& root);
+    void setProvider(std::shared_ptr<ProjectProvider> provider) { provider_ = std::move(provider); }
+    void setRoot(const ResourceId& root);
     void show();
     void close(bool restoreFocus = true);
     void layout();
@@ -17,7 +19,7 @@ public:
     void stop();
     bool visible() const { return visible_; }
     HWND window() const { return window_; }
-    std::function<void(const fs::path&)> opened;
+    std::function<void(const ResourceId&)> opened;
 private:
     static LRESULT CALLBACK procedure(HWND, UINT, WPARAM, LPARAM);
     LRESULT handle(UINT, WPARAM, LPARAM);
@@ -38,7 +40,8 @@ private:
     std::unique_ptr<Worker> worker_, indexWorker_;
     std::atomic<uint64_t> revision_{0}, indexRevision_{0};
     UINT dpi_ = 96;
-    fs::path root_;
+    ResourceId root_;
+    std::shared_ptr<ProjectProvider> provider_;
     std::shared_ptr<const FileIndex> index_;
     std::wstring query_;
     FileSearchResult result_;

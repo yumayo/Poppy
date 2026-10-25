@@ -13,11 +13,12 @@ public:
     static void pump();
     void trackContainer(const std::string& id);
     void setCommand(std::vector<std::wstring> command) { command_ = std::move(command); }
+    void setDisplayDirectory(std::wstring label) { displayDirectory_ = std::move(label); }
     bool launch() { return start(); }
     bool cleanupUnconfirmed() const { return unconfirmed_ && WaitForSingleObject(unconfirmed_.value, 0) == WAIT_OBJECT_0; }
     void stop();
     void setEnvironment(std::vector<std::pair<std::wstring, std::wstring>> values) { environment_ = std::move(values); }
-    std::function<void()> starting, ended, focused;
+    std::function<void()> starting, ended, focused, stopping;
     HWND window() const { return window_; }
     bool running() const { return process_ && WaitForSingleObject(process_.value, 0) == WAIT_TIMEOUT; }
 private:
@@ -39,6 +40,7 @@ private:
     Scrollbars scrollbars_;
     int cellWidth_ = 8, cellHeight_ = 20, header_ = 30;
     fs::path directory_;
+    std::wstring displayDirectory_;
     std::vector<std::pair<std::wstring, std::wstring>> environment_;
     TerminalModel model_;
     TerminalDisplay display_;

@@ -24,6 +24,7 @@ struct SavedTerminal {
     bool displayed = false;
 };
 struct ProjectSession {
+    std::string wslUid;
     int sidebar = 245, terminalHeight = 260;
     bool terminalVisible = true, gitSidebar = false, diffInline = false, gitTree = false;
     size_t activeTab = 0;

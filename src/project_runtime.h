@@ -12,7 +12,7 @@ public:
     ProjectRuntime();
     ~ProjectRuntime();
     void create(HWND parent, HINSTANCE instance, HookServer* hooks);
-    void initialize(const fs::path& path, const ProjectSession& state, bool saved);
+    void initialize(const ResourceId& path, const ProjectSession& state, bool saved);
     void activate(bool active);
     void shutdown();
     bool canClose();
@@ -29,7 +29,11 @@ public:
     void releaseDocument();
     HWND window() const;
     bool ready() const;
+    bool hasUnsaved() const;
+    std::wstring connectionDescription() const;
     std::function<void(const fs::path&)> openFolder;
+    std::function<void()> chooseProject;
+    std::function<void(const ResourceId&)> resolved;
     std::function<void()> changed;
 private:
     class Impl;

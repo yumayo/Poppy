@@ -1,6 +1,8 @@
 #include "project_runtime.h"
 #include "storage.h"
 #include "terminal.h"
+#include "project_provider.h"
+#include "wsl_dialog.h"
 #include <commctrl.h>
 #include <dwmapi.h>
 #include <shlobj.h>
@@ -22,7 +24,7 @@ fs::path stateDirectory() {
 }
 struct OpenProject {
     uint64_t id = 0;
-    fs::path path;
+    ResourceId path;
     std::unique_ptr<ProjectRuntime> runtime;
     bool missing = false, storageAvailable = true, dirty = false;
     ULONGLONG used = 0, changedAt = 0;
@@ -38,7 +40,10 @@ private:
     void layout();
     void paint();
     void choose();
+    void chooseWindows();
+    void chooseWsl();
     void open(fs::path path, bool select = true);
+    void open(ResourceId path, bool select = true);
     void select(size_t index, bool attention = false);
     void close(size_t index);
     void tick();
@@ -68,6 +73,7 @@ private:
     uint64_t nextId_ = 1;
     UINT dpi_ = 96;
     int scroll_ = 0, wheel_ = 0;
+    bool listingWsl_ = false;
     bool dragging_ = false, restoring_ = true, appDirty_ = false, closing_ = false;
     ULONGLONG appChanged_ = 0;
     std::wstring tipText_, storageError_;
@@ -117,15 +123,15 @@ void Workspace::create(){
             }
             const auto paths=session_.openProjects;
             if (!initial_.empty()) open(initial_, false);
-            else if (std::find(paths.begin(), paths.end(), session_.lastProject) != paths.end()) open(fs::u8path(session_.lastProject), false);
-            for(const auto& path:paths)open(fs::u8path(path),false);
+            else if (std::find(paths.begin(), paths.end(), session_.lastProject) != paths.end()) open(ResourceId::parse(session_.lastProject), false);
+            for(const auto& path:paths)open(ResourceId::parse(path),false);
             std::map<std::wstring, size_t> order;
-            for (size_t i = 0; i < paths.size(); ++i) order[pathKey(fs::u8path(paths[i]))] = i;
+            for (size_t i = 0; i < paths.size(); ++i) order[pathKey(ResourceId::parse(paths[i]))] = i;
             std::stable_sort(projects_.begin(), projects_.end(), [&](const OpenProject& a, const OpenProject& b) {
                 const auto left = order.find(pathKey(a.path)), right = order.find(pathKey(b.path));
                 return (left == order.end() ? paths.size() : left->second) < (right == order.end() ? paths.size() : right->second);
             });
-            if(!session_.lastProject.empty())for(size_t i=0;i<projects_.size();++i)if(pathKey(projects_[i].path)==pathKey(fs::u8path(session_.lastProject))){active_=i;break;}
+            if(!session_.lastProject.empty())for(size_t i=0;i<projects_.size();++i)if(pathKey(projects_[i].path)==pathKey(ResourceId::parse(session_.lastProject))){active_=i;break;}
             if(!initial_.empty())open(initial_);
             else if(!projects_.empty())select(active_);
             layout();if(!error.empty())report(error);
@@ -134,6 +140,24 @@ void Workspace::create(){
     SetTimer(window_,1,80,nullptr);
 }
 void Workspace::choose(){
+    HMENU menu = CreatePopupMenu(); AppendMenuW(menu, MF_STRING, 1, L"Open Windows folder…"); AppendMenuW(menu, MF_STRING | (listingWsl_ ? MF_GRAYED : 0), 2, L"Open WSL folder…");
+    POINT point{}; GetCursorPos(&point); const auto command = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, point.x, point.y, 0, window_, nullptr); DestroyMenu(menu);
+    if (command == 1) chooseWindows(); else if (command == 2) chooseWsl();
+}
+void Workspace::chooseWsl(){
+    if (listingWsl_) return;
+    listingWsl_ = true;
+    storageWorker_->submit(L"list-wsl", [this] {
+        std::vector<std::string> distributions; std::wstring error;
+        try { distributions = installedWslDistributions(); } catch (const std::exception& failure) { error = wide(failure.what()); }
+        storageWorker_->complete([this, distributions, error] {
+            listingWsl_ = false;
+            if (!error.empty()) { MessageBoxW(window_, error.c_str(), L"Poppy — WSL", MB_OK | MB_ICONWARNING); return; }
+            if (const auto location = chooseWslFolder(window_, distributions)) open(*location);
+        });
+    });
+}
+void Workspace::chooseWindows(){
     IFileOpenDialog* dialog=nullptr;if(FAILED(CoCreateInstance(CLSID_FileOpenDialog,nullptr,CLSCTX_INPROC_SERVER,IID_PPV_ARGS(&dialog))))return;
     DWORD options=0;dialog->GetOptions(&options);dialog->SetOptions(options|FOS_PICKFOLDERS|FOS_FORCEFILESYSTEM|FOS_PATHMUSTEXIST);dialog->SetTitle(L"Add project folder");
     if(SUCCEEDED(dialog->Show(window_))){IShellItem* item=nullptr;if(SUCCEEDED(dialog->GetResult(&item))){PWSTR path=nullptr;if(SUCCEEDED(item->GetDisplayName(SIGDN_FILESYSPATH,&path))){open(fs::path(path));CoTaskMemFree(path);}item->Release();}}
@@ -141,21 +165,48 @@ void Workspace::choose(){
 }
 void Workspace::open(fs::path path,bool shouldSelect){
     if (restoring_) { initial_ = std::move(path); return; }
-    std::error_code error;path=fs::absolute(path,error).lexically_normal().make_preferred();if(error)return;
+    if (const auto location = wslUncLocation(path.u8string())) {
+        storageWorker_->submit(L"normalize-wsl:" + path.native(), [this, location = *location, shouldSelect] {
+            ResourceId resource; std::wstring error;
+            try {
+                const auto distributions = installedWslDistributions();
+                const auto found = std::find_if(distributions.begin(), distributions.end(), [&](const std::string& distro) { return CompareStringOrdinal(wide(distro).c_str(), -1, wide(location.distro).c_str(), -1, TRUE) == CSTR_EQUAL; });
+                if (found == distributions.end()) throw std::runtime_error("The WSL distribution is not registered: " + location.distro);
+                resource = ResourceId::wsl(*found, location.root);
+            } catch (const std::exception& failure) { error = wide(failure.what()); }
+            storageWorker_->complete([this, resource, error, shouldSelect] { if (error.empty()) open(resource, shouldSelect); else MessageBoxW(window_, error.c_str(), L"Poppy — WSL", MB_OK | MB_ICONWARNING); });
+        }); return;
+    }
+    open(ResourceId(path), shouldSelect);
+}
+void Workspace::open(ResourceId path,bool shouldSelect){
+    if (restoring_) return;
+    if (!path.wsl() && wslUncLocation(path.u8string())) { open(path.local(), shouldSelect); return; }
+    if (!path.wsl()) { std::error_code error; const auto local = fs::absolute(path.local(), error).lexically_normal().make_preferred(); if (error) return; path = ResourceId(local); }
     const auto key=pathKey(path);
     for(size_t i=0;i<projects_.size();++i)if(pathKey(projects_[i].path)==key){if(shouldSelect)select(i);return;}
     if (projects_.size() >= 1000) return;
     OpenProject project;project.id=nextId_++;project.path=path;project.runtime=std::make_unique<ProjectRuntime>();
     project.runtime->openFolder=[this](const fs::path& folder){open(folder);};
-    project.runtime->changed=[this]{InvalidateRect(window_,nullptr,FALSE);};
+    project.runtime->chooseProject=[this]{choose();};
+    project.runtime->changed=[this, id = project.id]{ if (auto project = find(id)) { project->dirty = true; project->changedAt = GetTickCount64(); } InvalidateRect(window_,nullptr,FALSE); };
+    project.runtime->resolved=[this, id = project.id](const ResourceId& resolved){
+        if (auto project = find(id)) {
+            for (const auto& existing : projects_) if (existing.id != id && pathKey(existing.path) == pathKey(resolved)) {
+                if (!project->runtime->hasUnsaved()) PostMessageW(window_, WM_APP + 21, static_cast<WPARAM>(id), static_cast<LPARAM>(existing.id));
+                return;
+            }
+            project->path = resolved; project->dirty = true; project->changedAt = GetTickCount64(); appDirty_ = true; appChanged_ = GetTickCount64();
+        }
+    };
     project.runtime->create(window_,instance_,&hooks_);project.runtime->setDpi(dpi_);
     const auto id=project.id;projects_.push_back(std::move(project));
     if(shouldSelect)select(projects_.size()-1);else layout();
     storageWorker_->submit(L"load:"+std::to_wstring(id),[this,id,path,key]{
         std::optional<ProjectSession> state;std::string failure;std::error_code folderError;
-        const bool missing=!fs::is_directory(path,folderError);
-        try{if(storage_)state=storage_->loadProject(utf8(key),path.u8string());}catch(const std::exception& error){failure=error.what();}
-        if (state && !missing) {
+        const bool missing=!path.wsl() && !fs::is_directory(path.local(),folderError);
+        try{if(storage_)state=storage_->loadProject(utf8(key),path.serialized());}catch(const std::exception& error){failure=error.what();}
+        if (state && !missing && !path.wsl()) {
             std::vector<SavedTab> tabs; size_t active = 0;
             for (size_t i = 0; i < state->tabs.size(); ++i) {
                 const auto& tab = state->tabs[i]; std::error_code error;
@@ -206,14 +257,14 @@ void Workspace::save(OpenProject& project){
     if(!project.runtime->ready()||!project.storageAvailable)return;
     const auto state=project.runtime->snapshot();const auto path=project.path;const auto key=utf8(pathKey(path));
     storageWorker_->submit(L"save:"+std::to_wstring(project.id),[this,state,path,key]{
-        try{if(storage_)storage_->saveProject(key,path.u8string(),state);}catch(const std::exception& error){const std::string text=error.what();storageWorker_->complete([this,text]{report(text);});}
+        try{if(storage_)storage_->saveProject(key,path.serialized(),state);}catch(const std::exception& error){const std::string text=error.what();storageWorker_->complete([this,text]{report(text);});}
     });project.dirty=false;
 }
 void Workspace::saveApp(){
     if(restoring_)return;
     session_.openProjects.clear(); session_.openProjectKeys.clear();
-    for(const auto& project:projects_) { session_.openProjects.push_back(project.path.u8string()); session_.openProjectKeys.push_back(utf8(pathKey(project.path))); }
-    session_.lastProject=projects_.empty()?std::string{}:projects_[active_].path.u8string();
+    for(const auto& project:projects_) { session_.openProjects.push_back(project.path.serialized()); session_.openProjectKeys.push_back(utf8(pathKey(project.path))); }
+    session_.lastProject=projects_.empty()?std::string{}:projects_[active_].path.serialized();
     WINDOWPLACEMENT placement{};placement.length=sizeof(placement);
     if(GetWindowPlacement(window_,&placement)){
         auto rect=placement.rcNormalPosition;MONITORINFO monitor{};monitor.cbSize=sizeof(monitor);
@@ -232,10 +283,10 @@ void Workspace::close(size_t index){
     appDirty_=true;appChanged_=GetTickCount64();updateTools();InvalidateRect(window_,nullptr,FALSE);
 }
 void Workspace::checkFolder(OpenProject& project) {
-    if (!project.runtime->ready()) return;
+    if (!project.runtime->ready() || project.path.wsl()) return;
     const auto path = project.path; const auto id = project.id; const auto request = ++project.statRequest;
     storageWorker_->submit(L"stat:" + std::to_wstring(id), [this, path, id, request] {
-        std::error_code error; const bool missing = !fs::is_directory(path, error);
+        std::error_code error; const bool missing = !fs::is_directory(path.local(), error);
         storageWorker_->complete([this, id, request, missing] {
             const auto project = find(id); if (!project || project->statRequest != request) return;
             const bool restored = project->missing && !missing; project->missing = missing;
@@ -257,11 +308,13 @@ void Workspace::tick(){
 RECT Workspace::row(size_t index) const {const int top=px(44)+(static_cast<int>(index)-scroll_)*px(48);return {0,top,px(session_.projectListWidth),top+px(48)};}
 size_t Workspace::hit(POINT point) const {RECT r{};GetClientRect(window_,&r);if(point.x<0||point.x>=px(session_.projectListWidth)||point.y<px(44)||point.y>=r.bottom-px(44))return projects_.size();const auto index=scroll_+(point.y-px(44))/px(48);return index>=0?static_cast<size_t>(index):projects_.size();}
 std::wstring Workspace::subtitle(size_t index) const {
-    const auto& path=projects_[index].path;const auto name=path.filename().native();bool duplicate=false;
-    for(size_t i=0;i<projects_.size();++i)if(i!=index&&CompareStringOrdinal(name.c_str(),-1,projects_[i].path.filename().c_str(),-1,TRUE)==CSTR_EQUAL)duplicate=true;
+    const auto& path=projects_[index].path;
+    if (path.wsl()) { const auto state = projects_[index].runtime->connectionDescription(); return L"WSL · " + wide(path.location().distro) + (state.empty() || state == L"Connected" ? L"" : L" · " + state); }
+    const auto name=path.filename().native();bool duplicate=false;
+    for(size_t i=0;i<projects_.size();++i)if(i!=index&&CompareStringOrdinal(name.c_str(),-1,projects_[i].path.filename().native().c_str(),-1,TRUE)==CSTR_EQUAL)duplicate=true;
     if(!duplicate)return projects_[index].missing?L"Folder not found":L"";
     size_t depth=1;auto suffix=[](fs::path parent,size_t count){fs::path result;while(count--&&!parent.empty()){result=parent.filename()/result;const auto next=parent.parent_path();if(next==parent){result=parent.root_path()/result;break;}parent=next;}return result.native();};
-    for(;;++depth){auto text=suffix(path.parent_path(),depth);bool unique=true;for(size_t i=0;i<projects_.size();++i)if(i!=index&&path.filename()==projects_[i].path.filename()&&text==suffix(projects_[i].path.parent_path(),depth))unique=false;if(unique||depth>32)return text;}
+    for(;;++depth){auto text=suffix(path.local().parent_path(),depth);bool unique=true;for(size_t i=0;i<projects_.size();++i)if(i!=index&&path.filename()==projects_[i].path.filename()&&text==suffix(projects_[i].path.wsl() ? fs::path{} : projects_[i].path.local().parent_path(),depth))unique=false;if(unique||depth>32)return text;}
 }
 void Workspace::layout(){
     if(!window_)return;
@@ -299,6 +352,7 @@ case WM_CREATE:create();return 0;case WM_PAINT:paint();return 0;case WM_ERASEBKG
 case WM_GETMINMAXINFO:reinterpret_cast<MINMAXINFO*>(b)->ptMinTrackSize={px(900),px(480)};return 0;
 case WM_DPICHANGED:{dpi_=HIWORD(a);renderer_.setDpi(dpi_);for(auto& project:projects_)project.runtime->setDpi(dpi_);const auto rect=reinterpret_cast<RECT*>(b);SetWindowPos(window_,nullptr,rect->left,rect->top,rect->right-rect->left,rect->bottom-rect->top,SWP_NOZORDER|SWP_NOACTIVATE);layout();return 0;}
 case wmWork:storageWorker_->dispatch();return 0;
+case WM_APP + 21:{ const auto project = find(static_cast<uint64_t>(a)); if (!project || project->runtime->hasUnsaved()) return 0; const bool active = project == &projects_[active_]; const auto index = static_cast<size_t>(project - projects_.data()); close(index); if (active) for (size_t i = 0; i < projects_.size(); ++i) if (projects_[i].id == static_cast<uint64_t>(b)) { select(i); break; } return 0; }
 case wmAiEvent:for(const auto& event:hooks_.drain())for(auto& project:projects_)if(project.runtime->apply(event))break;return 0;
 case WM_TIMER:if(a==77)Terminal::pump();else tick();return 0;
 case WM_ACTIVATE:if(LOWORD(a)!=WA_INACTIVE&&!projects_.empty())PostMessageW(projects_[active_].runtime->window(),WM_APP+12,0,0);return 0;
@@ -308,9 +362,9 @@ case WM_MOUSEMOVE:if(dragging_){session_.projectListWidth=std::clamp(MulDiv(GET_
 case WM_LBUTTONUP:case WM_CANCELMODE:dragging_=false;if(GetCapture()==window_)ReleaseCapture();return 0;case WM_CAPTURECHANGED:dragging_=false;return 0;
 case WM_MOUSEWHEEL:{POINT point{GET_X_LPARAM(b),GET_Y_LPARAM(b)};ScreenToClient(window_,&point);if(point.x<px(session_.projectListWidth)){wheel_+=GET_WHEEL_DELTA_WPARAM(a);scroll_-=wheel_/WHEEL_DELTA*3;wheel_%=WHEEL_DELTA;layout();}return 0;}
 case WM_MBUTTONDOWN:close(hit({GET_X_LPARAM(b),GET_Y_LPARAM(b)}));return 0;
-case WM_CONTEXTMENU:{POINT point{GET_X_LPARAM(b),GET_Y_LPARAM(b)};auto local=point;ScreenToClient(window_,&local);const auto index=hit(local);if(index>=projects_.size())break;HMENU menu=CreatePopupMenu();AppendMenuW(menu,MF_STRING,1,L"Close project");const auto command=TrackPopupMenu(menu,TPM_RETURNCMD|TPM_RIGHTBUTTON,point.x,point.y,0,window_,nullptr);DestroyMenu(menu);if(command==1)close(index);return 0;}
+case WM_CONTEXTMENU:{POINT point{GET_X_LPARAM(b),GET_Y_LPARAM(b)};auto local=point;ScreenToClient(window_,&local);const auto index=hit(local);if(index>=projects_.size()){choose();return 0;}HMENU menu=CreatePopupMenu();AppendMenuW(menu,MF_STRING,1,L"Close project");if(projects_[index].path.wsl())AppendMenuW(menu,MF_STRING,2,L"Reconnect");const auto command=TrackPopupMenu(menu,TPM_RETURNCMD|TPM_RIGHTBUTTON,point.x,point.y,0,window_,nullptr);DestroyMenu(menu);if(command==1)close(index);else if(command==2){select(index);projects_[index].runtime->revalidate();}return 0;}
 case WM_SETCURSOR:{POINT point{};GetCursorPos(&point);ScreenToClient(window_,&point);if(point.x>=px(session_.projectListWidth)&&point.x<px(session_.projectListWidth)+px(5)){SetCursor(LoadCursorW(nullptr,IDC_SIZEWE));return TRUE;}break;}
-case WM_NOTIFY:{const auto header=reinterpret_cast<NMHDR*>(b);if(header->hwndFrom==tooltips_&&header->code==TTN_GETDISPINFOW&&header->idFrom>0&&header->idFrom<=projects_.size()){const auto& project=projects_[header->idFrom-1];tipText_=project.path.native()+project.runtime->description();reinterpret_cast<NMTTDISPINFOW*>(b)->lpszText=tipText_.data();}return 0;}
+case WM_NOTIFY:{const auto header=reinterpret_cast<NMHDR*>(b);if(header->hwndFrom==tooltips_&&header->code==TTN_GETDISPINFOW&&header->idFrom>0&&header->idFrom<=projects_.size()){const auto& project=projects_[header->idFrom-1];tipText_=project.path.native()+(project.path.wsl() ? L"\nWSL · "+wide(project.path.location().distro)+L" · "+project.runtime->connectionDescription() : L"")+project.runtime->description();reinterpret_cast<NMTTDISPINFOW*>(b)->lpszText=tipText_.data();}return 0;}
 case WM_COPYDATA:{const auto data=reinterpret_cast<COPYDATASTRUCT*>(b);if(data->dwData!=0x50505901||data->cbData<sizeof(wchar_t)||data->cbData>65536||data->cbData%sizeof(wchar_t)||!data->lpData)return FALSE;const auto text=static_cast<const wchar_t*>(data->lpData);if(text[data->cbData/sizeof(wchar_t)-1])return FALSE;open(fs::path(text));return TRUE;}
 case WM_QUERYENDSESSION:if(!closing_){for(auto& project:projects_)if(!project.runtime->canClose())return FALSE;saveAll();}return TRUE;
 case WM_ENDSESSION:if(a&&!closing_){closing_=true;saveAll();for(auto& project:projects_)project.runtime->shutdown();DestroyWindow(window_);}return 0;

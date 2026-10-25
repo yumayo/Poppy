@@ -429,7 +429,7 @@ void quickOpenStability() {
     struct WindowOwner { HWND value; ~WindowOwner() { DestroyWindow(value); } } owner{parent};
     palette.create(parent, GetModuleHandleW(nullptr)); palette.setDpi(96);
     fs::path opened;
-    palette.opened = [&](const fs::path& path) { opened = path; };
+    palette.opened = [&](const ResourceId& path) { opened = path.local(); };
     const auto wait = [](const auto& done) {
         const auto start = GetTickCount64();
         do {

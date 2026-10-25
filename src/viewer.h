@@ -11,15 +11,15 @@ public:
     using State = ViewState;
     void create(HWND parent, HINSTANCE instance);
     void setDpi(UINT dpi);
-    void show(std::shared_ptr<const Document> document, const fs::path& path, bool preserve = false);
-    void edit(std::shared_ptr<EditBuffer> buffer, const fs::path& path, bool preserve = false);
+    void show(std::shared_ptr<const Document> document, const ResourceId& path, bool preserve = false);
+    void edit(std::shared_ptr<EditBuffer> buffer, const ResourceId& path, bool preserve = false);
     std::shared_ptr<EditBuffer> buffer() const { return edit_; }
     std::function<void()> changed, save, focused, diffLayoutChanged;
-    void showDiff(std::shared_ptr<const DiffDocument> document, const fs::path& path, bool preserve = false);
+    void showDiff(std::shared_ptr<const DiffDocument> document, const ResourceId& path, bool preserve = false);
     void toggleDiffLayout();
     void setDiffLayout(bool inlineView);
     bool diffInline() const { return inlineView_; }
-    void message(const std::wstring& text, const fs::path& path = {});
+    void message(const std::wstring& text, const ResourceId& path = {});
     State state() const;
     void restore(const State& state);
     size_t documentBytes() const;
@@ -57,7 +57,7 @@ private:
     std::shared_ptr<EditBuffer> edit_;
     wchar_t highSurrogate_ = 0;
     std::shared_ptr<const DiffDocument> diff_;
-    fs::path path_;
+    ResourceId path_;
     std::wstring message_ = L"Open a folder to start\n\nSelect a file on the left. Run your AI CLI in the terminal below.";
 };
 }

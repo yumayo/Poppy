@@ -1,4 +1,5 @@
 #include "storage.h"
+#include "resource.h"
 #include <sqlite3.h>
 #include <algorithm>
 #include <cstdint>
@@ -19,6 +20,13 @@ constexpr const char* splitViews =
     "CREATE TABLE split_layout (id INTEGER PRIMARY KEY CHECK(id=1), editor_ratio INTEGER NOT NULL, terminal_ratio INTEGER NOT NULL, right_tab_row INTEGER NOT NULL);"
     "CREATE TABLE tab_groups (path TEXT PRIMARY KEY, pane INTEGER NOT NULL, displayed INTEGER NOT NULL);"
     "CREATE TABLE terminal_groups (terminal_id TEXT PRIMARY KEY, pane INTEGER NOT NULL, displayed INTEGER NOT NULL);";
+constexpr const char* projectConnection =
+    "CREATE TABLE IF NOT EXISTS connection (id INTEGER PRIMARY KEY CHECK(id=1), kind INTEGER NOT NULL, distro TEXT NOT NULL, user TEXT NOT NULL, remote_root TEXT NOT NULL, uid TEXT NOT NULL);";
+constexpr const char* appLocations =
+    "ALTER TABLE projects ADD COLUMN kind INTEGER NOT NULL DEFAULT 0;"
+    "ALTER TABLE projects ADD COLUMN distro TEXT NOT NULL DEFAULT '';"
+    "ALTER TABLE projects ADD COLUMN user TEXT NOT NULL DEFAULT '';"
+    "ALTER TABLE projects ADD COLUMN remote_root TEXT NOT NULL DEFAULT '';";
 
 class Database {
 public:
@@ -119,7 +127,7 @@ void projectSchema(Database& db) {
         "CREATE TABLE IF NOT EXISTS tabs (position INTEGER PRIMARY KEY, path TEXT NOT NULL, diff INTEGER NOT NULL,"
         " file_top INTEGER NOT NULL, file_left INTEGER NOT NULL, file_anchor INTEGER NOT NULL, file_caret INTEGER NOT NULL, file_after INTEGER NOT NULL,"
         " diff_top INTEGER NOT NULL, diff_left INTEGER NOT NULL, diff_anchor INTEGER NOT NULL, diff_caret INTEGER NOT NULL, diff_after INTEGER NOT NULL, pinned INTEGER NOT NULL);"
-        "CREATE TABLE IF NOT EXISTS expanded (path TEXT PRIMARY KEY);") + projectViews + splitViews).c_str(), {
+        "CREATE TABLE IF NOT EXISTS expanded (path TEXT PRIMARY KEY);") + projectViews + splitViews + projectConnection).c_str(), {
         "ALTER TABLE session ADD COLUMN diff_inline INTEGER NOT NULL DEFAULT 0;"
         "UPDATE session SET diff_inline=COALESCE((SELECT diff_inline FROM tabs WHERE diff<>0"
         " ORDER BY (position=(SELECT active_tab FROM session WHERE id=1)) DESC,position LIMIT 1),0);"
@@ -128,7 +136,7 @@ void projectSchema(Database& db) {
         "ALTER TABLE tabs DROP COLUMN file_inline;"
         "ALTER TABLE tabs DROP COLUMN diff_inline;",
         "ALTER TABLE session ADD COLUMN git_tree INTEGER NOT NULL DEFAULT 0;",
-        "ALTER TABLE tabs ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0;", projectViews, splitViews});
+        "ALTER TABLE tabs ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0;", projectViews, splitViews, projectConnection});
 }
 }
 struct Storage::Impl {
@@ -140,13 +148,13 @@ Storage::Storage(fs::path directory) : impl_(std::make_unique<Impl>()) {
     fs::create_directories(impl_->directory / "projects");
     impl_->app = std::make_unique<Database>(impl_->directory / "storage.sql");
     schema(*impl_->app,
-        "CREATE TABLE IF NOT EXISTS projects (path_key TEXT PRIMARY KEY, path TEXT NOT NULL, directory TEXT NOT NULL UNIQUE);"
+        "CREATE TABLE IF NOT EXISTS projects (path_key TEXT PRIMARY KEY, path TEXT NOT NULL, directory TEXT NOT NULL UNIQUE, kind INTEGER NOT NULL DEFAULT 0, distro TEXT NOT NULL DEFAULT '', user TEXT NOT NULL DEFAULT '', remote_root TEXT NOT NULL DEFAULT '');"
         "CREATE TABLE IF NOT EXISTS app (id INTEGER PRIMARY KEY CHECK(id=1), last_project TEXT NOT NULL, x INTEGER NOT NULL, y INTEGER NOT NULL,"
         " width INTEGER NOT NULL, height INTEGER NOT NULL, positioned INTEGER NOT NULL, maximized INTEGER NOT NULL, project_list_width INTEGER NOT NULL DEFAULT 180);"
         "CREATE TABLE open_projects (path_key TEXT PRIMARY KEY, path TEXT NOT NULL, position INTEGER NOT NULL UNIQUE);", {
         "ALTER TABLE app ADD COLUMN project_list_width INTEGER NOT NULL DEFAULT 180;"
         "CREATE TABLE open_projects (path_key TEXT PRIMARY KEY, path TEXT NOT NULL, position INTEGER NOT NULL UNIQUE);"
-        "INSERT INTO open_projects SELECT COALESCE((SELECT path_key FROM projects WHERE path=last_project),lower(last_project)),last_project,0 FROM app WHERE last_project<>'';"});
+        "INSERT INTO open_projects SELECT COALESCE((SELECT path_key FROM projects WHERE path=last_project),lower(last_project)),last_project,0 FROM app WHERE last_project<>'';", appLocations});
 }
 Storage::~Storage() = default;
 AppSession Storage::loadApp() {
@@ -188,7 +196,8 @@ fs::path Storage::projectDirectory(const std::string& key, const std::string& pa
         Statement existing(*impl_->app, "SELECT directory FROM projects WHERE path_key=?"); existing.text(1, key);
         if (existing.row()) name = existing.text(0);
         else {
-            const auto base = projectDirectoryName(key);
+            const auto resource = ResourceId::parse(path);
+            const auto base = resource.wsl() ? "wsl" + projectDirectoryName(resource.location().distro).substr(0, 40) + projectDirectoryName(resource.u8string()).substr(0, 60) + '-' + projectPathHash(key) : projectDirectoryName(key);
             name = base;
             // The readable name is intentionally lossy. Resolve collisions in
             // the registry before assigning a directory, including hash ties.
@@ -198,13 +207,13 @@ fs::path Storage::projectDirectory(const std::string& key, const std::string& pa
                 name = base + '-' + projectPathHash(key);
                 if (attempt) name += '-' + std::to_string(attempt);
             }
-            Statement insert(*impl_->app, "INSERT INTO projects VALUES(?,?,?)");
-            insert.text(1, key); insert.text(2, path); insert.text(3, name); insert.run();
+            Statement insert(*impl_->app, "INSERT INTO projects(path_key,path,directory,kind,distro,user,remote_root) VALUES(?,?,?,?,?,?,?)");
+            insert.text(1, key); insert.text(2, path); insert.text(3, name); insert.number(4, resource.wsl()); insert.text(5, resource.location().distro); insert.text(6, resource.location().user); insert.text(7, resource.wsl() ? resource.u8string() : ""); insert.run();
         }
         transaction.commit();
     }
     // Registry values must remain a single component below projects/.
-    if (name.empty() || name.front() != '-' || name.find_first_not_of("-abcdefghijklmnopqrstuvwxyz0123456789_") != std::string::npos)
+    if (name.empty() || (name.front() != '-' && name.rfind("wsl-", 0) != 0) || name.find_first_not_of("-abcdefghijklmnopqrstuvwxyz0123456789_") != std::string::npos)
         throw std::runtime_error("Invalid project directory in state database");
     const auto directory = impl_->directory / "projects" / name;
     fs::create_directories(directory);
@@ -214,6 +223,8 @@ std::optional<ProjectSession> Storage::loadProject(const std::string& key, const
     Database db(projectDirectory(key, path) / "storage.sql"); projectSchema(db);
     Transaction snapshot(db, false);
     ProjectSession state;
+    Statement identity(db, "SELECT uid FROM connection WHERE id=1");
+    if (identity.row()) state.wslUid = identity.text(0);
     {
         Statement row(db, "SELECT sidebar,terminal_height,terminal_visible,git_sidebar,active_tab,selected_path,diff_inline,git_tree FROM session WHERE id=1");
         if (!row.row()) return std::nullopt;
@@ -254,6 +265,9 @@ void Storage::saveProject(const std::string& key, const std::string& path, const
     if (state.tabs.size() > maxSavedTabs || state.expanded.size() > maxSavedDirectories || state.collapsedGit.size() > maxSavedDirectories || state.terminals.size() > 100) throw std::runtime_error("Too many items to save the project session");
     Database db(projectDirectory(key, path) / "storage.sql"); projectSchema(db);
     Transaction transaction(db);
+    const auto resource = ResourceId::parse(path);
+    Statement connection(db, "INSERT OR REPLACE INTO connection VALUES(1,?,?,?,?,?)");
+    connection.number(1, resource.wsl()); connection.text(2, resource.location().distro); connection.text(3, resource.location().user); connection.text(4, resource.wsl() ? resource.u8string() : ""); connection.text(5, state.wslUid); connection.run();
     db.exec("DELETE FROM tabs; DELETE FROM expanded;");
     Statement session(db, "INSERT OR REPLACE INTO session VALUES(1,?,?,?,?,?,?,?,?)");
     session.number(1, state.sidebar); session.number(2, state.terminalHeight); session.number(3, state.terminalVisible);

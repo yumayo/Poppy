@@ -2,25 +2,29 @@
 #include "terminal.h"
 #include "hook_server.h"
 #include "session.h"
+#include "project_provider.h"
 #include <memory>
 #include <optional>
 
 namespace poppy {
 // Each session retains its ConPTY, VT model and view while other tabs are shown.
 struct TerminalSession {
-    ~TerminalSession() { if (terminal) { terminal->stop(); terminal->starting = {}; terminal->ended = {}; } }
+    ~TerminalSession() { if (terminal) { terminal->stop(); terminal->starting = {}; terminal->ended = {}; terminal->stopping = {}; } }
     SavedTerminal configuration;
     std::unique_ptr<Terminal> terminal;
     std::string notificationId;
     AiStatus ai;
+    std::string wslToken;
+    std::wstring wslTool;
 };
 class TerminalPane {
 public:
     ~TerminalPane();
     void create(HWND parent, HINSTANCE instance);
     void setDpi(UINT dpi);
-    void setDirectory(const fs::path& directory);
-    void relocate(const fs::path& source, const fs::path& destination);
+    void setDirectory(const ResourceId& directory);
+    void relocate(const ResourceId& source, const ResourceId& destination);
+    void setProvider(std::shared_ptr<ProjectProvider> provider) { provider_ = std::move(provider); }
     void restore(const ProjectSession& state);
     void snapshot(ProjectSession& state) const;
     void connect(HookServer* hooks) { hooks_ = hooks; }
@@ -66,7 +70,8 @@ private:
     struct Drag { size_t index; POINT origin, point; bool active = false; int group = -1; size_t position = 0; };
     std::optional<Drag> drag_;
     DropPreview preview_;
-    fs::path directory_;
+    ResourceId directory_;
+    std::shared_ptr<ProjectProvider> provider_;
     std::vector<std::unique_ptr<TerminalSession>> sessions_;
     size_t active_ = 0;
     HookServer* hooks_ = nullptr;

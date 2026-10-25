@@ -34,7 +34,7 @@ void QuickOpen::layout() {
         SetWindowPos(window_, HWND_TOP, x, y, width, height, SWP_NOACTIVATE | SWP_NOCOPYBITS);
     InvalidateRect(window_, nullptr, FALSE);
 }
-void QuickOpen::setRoot(const fs::path& root) {
+void QuickOpen::setRoot(const ResourceId& root) {
     close(); ++revision_; ++indexRevision_;
     worker_->cancelPending(); indexWorker_->cancelPending();
     root_ = root; index_.reset(); indexing_ = indexAgain_ = false;
@@ -72,7 +72,7 @@ void QuickOpen::refresh() {
     indexing_ = true; layout();
     indexWorker_->submit(L"index", [this, revision, root] {
         auto index = std::make_shared<FileIndex>();
-        try { *index = indexFiles(root, [this, revision] { return indexRevision_.load() != revision; }); }
+        try { *index = provider_ ? provider_->indexFiles(root, [this, revision] { return indexRevision_.load() != revision; }) : poppy::indexFiles(root.local(), [this, revision] { return indexRevision_.load() != revision; }); }
         catch (const std::exception& error) { index->error = error.what(); }
         if (indexRevision_.load() != revision) return;
         indexWorker_->complete([this, revision, index] {
@@ -135,7 +135,7 @@ void QuickOpen::replace(std::wstring text) {
 }
 void QuickOpen::accept() {
     if (loading_ || selected_ >= result_.matches.size()) return;
-    const auto path = root_ / result_.matches[selected_].relative;
+    const auto path = root_ / std::string_view(result_.matches[selected_].exactRelative);
     close(false); if (opened) opened(path);
 }
 void QuickOpen::move(int delta) {
@@ -181,8 +181,8 @@ void QuickOpen::paint() {
         const auto index = first_ + row; const auto& match = result_.matches[index];
         const int top = px(86 + row * 44);
         if (index == selected_) renderer_.fill({px(8), top, rect.right - px(8), top + px(44)}, RGB(43, 55, 66));
-        renderer_.label({px(20), top, rect.right - px(20), top + px(23)}, match.relative.filename().native(), foreground);
-        renderer_.label({px(20), top + px(23), rect.right - px(20), top + px(43)}, match.relative.native(), muted, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_PATH_ELLIPSIS);
+        renderer_.label({px(20), top, rect.right - px(20), top + px(23)}, root_.at(match.exactRelative).filename().native(), foreground);
+        renderer_.label({px(20), top + px(23), rect.right - px(20), top + px(43)}, wide(match.exactRelative), muted, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_PATH_ELLIPSIS);
     }
     if (result_.matches.empty()) {
         const auto message = root_.empty() ? L"Open a folder with Ctrl+O to search files." : !index_ ? L"Loading file list…" : loading_ ? L"Searching…" : !result_.error.empty() ? L"Cannot search this folder. Press F5 to retry." : L"No matching files.";

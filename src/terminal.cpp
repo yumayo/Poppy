@@ -44,7 +44,8 @@ bool Terminal::start() {
     stop();
     std::error_code directoryError;
     if (directory_.empty() || !fs::is_directory(directory_, directoryError)) { error_ = L"Project folder is missing. Restore the folder before starting a shell."; return false; }
-    if (starting) starting();
+    try { if (starting) starting(); }
+    catch (const std::exception& failure) { error_ = wide(failure.what()); return false; }
     error_.clear(); model_ = TerminalModel(model_.columns(), model_.rows()); model_.reply = [this](std::string s) { send(std::move(s), false); };
     scroll_ = 0; anchor_ = caret_ = -1;
     endedNotified_ = false;
@@ -128,6 +129,7 @@ bool Terminal::start() {
     ResumeThread(thread.value); started_ = true; InvalidateRect(window_, nullptr, FALSE); return true;
 }
 void Terminal::stop() {
+    if (stopping) stopping();
     bool unknownCleanup = cleanupUnconfirmed();
     if (launching_ && WaitForSingleObject(launching_.value, 0) == WAIT_OBJECT_0) {
         SetEvent(stopRequest_.value);
@@ -307,12 +309,12 @@ void Terminal::paint() {
     auto& dc = renderer_; dc.font(Renderer::Font::Ui);
     const auto rect = Scrollbars::contentRect(window_);
     dc.fill({0, 0, rect.right, header_}, panel);
-    dc.label({12, 0, rect.right - 12, header_}, L"TERMINAL  ·  " + (directory_.empty() ? std::wstring(L"PowerShell") : directory_.native()), muted);
+    dc.label({12, 0, rect.right - 12, header_}, L"TERMINAL  ·  " + (!displayDirectory_.empty() ? displayDirectory_ : directory_.empty() ? std::wstring(L"PowerShell") : directory_.native()), muted);
     dc.fill({0, header_ - 1, rect.right, header_}, border);
     if (!started_) {
         dc.fill({0, header_, rect.right, rect.bottom}, background);
         RECT text{20, header_ + 18, std::max<LONG>(20, rect.right - 20), rect.bottom};
-        dc.label(text, error_.empty() ? L"Click to start PowerShell, then run your AI CLI.\nThe shell starts only when needed." : error_ + L"\nClick to retry.", muted, DT_LEFT | DT_TOP | DT_WORDBREAK);
+        dc.label(text, error_.empty() ? !displayDirectory_.empty() ? L"Click to start the WSL shell.\nThe shell starts only when needed." : L"Click to start PowerShell, then run your AI CLI.\nThe shell starts only when needed." : error_ + L"\nClick to retry.", muted, DT_LEFT | DT_TOP | DT_WORDBREAK);
     } else {
         RECT clip{6, header_ + 4, rect.right - 6, rect.bottom};
         dc.fill({0, header_, rect.right, rect.bottom}, background);

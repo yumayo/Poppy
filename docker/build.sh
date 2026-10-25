@@ -21,6 +21,7 @@ ctest --test-dir /build/linux --output-on-failure
 # Windows executables cannot be tested natively in this Linux container.
 cmake -S "$source_dir" -B /build/windows -G Ninja \
     "-DCMAKE_TOOLCHAIN_FILE=$source_dir/cmake/mingw-w64-x86_64.cmake" \
+    -DPOPPY_WSL_HELPER=/build/linux/poppy-wsl-helper \
     -DCMAKE_BUILD_TYPE=Release \
     -DBUILD_TESTING=OFF
 cmake --build /build/windows --parallel "$build_jobs"
@@ -36,4 +37,6 @@ if mv -f "$build_output" /output/Poppy.exe; then
 fi
 rm -rf /output/ai
 cp -R "$source_dir/integration/ai" /output/
+mkdir -p /output/wsl
+cp /build/linux/poppy-wsl-helper /output/wsl/poppy-wsl-helper
 printf 'Windows x64 build: %s (host: out/docker/)\n' "$build_output"
