@@ -21,6 +21,7 @@ void Viewer::setDpi(UINT dpi) {
     scrollbars(); caretPosition(); InvalidateRect(window_, nullptr, FALSE);
 }
 void Viewer::show(std::shared_ptr<const Document> d, const fs::path& path, bool preserve) {
+    lineIndexes_.clear();
     edit_.reset(); highSurrogate_ = 0;
     diff_.reset(); document_ = std::move(d); path_ = path; message_.clear();
     if (!preserve) { top_ = left_ = 0; anchor_ = caret_ = 0; after_ = false; }
@@ -32,6 +33,7 @@ void Viewer::edit(std::shared_ptr<EditBuffer> buffer, const fs::path& path, bool
     edit_ = std::move(buffer); caretPosition();
 }
 void Viewer::showDiff(std::shared_ptr<const DiffDocument> d, const fs::path& path, bool preserve) {
+    lineIndexes_.clear();
     edit_.reset(); highSurrogate_ = 0;
     // Share the patch snapshot; both panes only keep references to its lines.
     document_ = std::shared_ptr<const Document>(d, &d->patch); diff_ = std::move(d); path_ = path; message_.clear();
@@ -40,6 +42,7 @@ void Viewer::showDiff(std::shared_ptr<const DiffDocument> d, const fs::path& pat
     scrollbars(); caretPosition(); InvalidateRect(window_, nullptr, FALSE);
 }
 void Viewer::message(const std::wstring& text, const fs::path& path) {
+    lineIndexes_.clear();
     edit_.reset(); highSurrogate_ = 0;
     diff_.reset(); document_.reset(); path_ = path; message_ = text; top_ = left_ = 0; anchor_ = caret_ = 0; after_ = false;
     scrollbars(); caretPosition(); InvalidateRect(window_, nullptr, FALSE);
@@ -166,7 +169,7 @@ void Viewer::caretPosition(bool reveal) {
         if (context) { COMPOSITIONFORM form{}; form.dwStyle = CFS_POINT; form.ptCurrentPos = point; ImmSetCompositionWindow(context, &form); CANDIDATEFORM candidate{}; candidate.dwStyle = CFS_CANDIDATEPOS; candidate.ptCurrentPos = {point.x, point.y + cellHeight_}; ImmSetCandidateWindow(context, &candidate); ImmReleaseContext(window_, context); }
     }
 }
-void Viewer::edited() { scrollbars(); caretPosition(true); InvalidateRect(window_, nullptr, FALSE); if (changed) changed(); }
+void Viewer::edited() { lineIndexes_.clear(); scrollbars(); caretPosition(true); InvalidateRect(window_, nullptr, FALSE); if (changed) changed(); }
 void Viewer::replace(std::string text) {
     if (!edit_) return;
     std::string normalized; const auto newline = edit_->newline();
@@ -230,11 +233,17 @@ void Viewer::paint() {
         dc.font(Renderer::Font::Code);
         const int rows = std::max(0, (static_cast<int>(r.bottom) - body + cellHeight_ - 1) / cellHeight_);
         const size_t selectionStart = std::min(anchor_, caret_), selectionEnd = std::max(anchor_, caret_);
-        std::vector<Token> tokens;
+        for (auto& entry : lineIndexes_) entry.second.used = false;
         for (int side = 0; side < (splitDiff() ? 2 : 1); ++side) {
             const int paneLeft = side ? middle + 1 : 0, paneRight = splitDiff() && !side ? middle : static_cast<int>(r.right);
             const int textLeft = paneLeft + textGutter();
-            const int columns = std::max(0, (paneRight - textLeft) / cellWidth_ + 1);
+            // Align the small overscan to the renderer's layout blocks so a
+            // horizontal scroll can reuse shaping for the overlapping text.
+            // Include the preceding block for wide glyphs crossing the edge.
+            const int firstColumn = std::max(0, left_ / Renderer::cellBlockColumns - 1) * Renderer::cellBlockColumns;
+            const int visibleColumns = std::max(0, (paneRight - textLeft) / cellWidth_ + 1);
+            const int columns = (left_ - firstColumn + visibleColumns + Renderer::cellBlockColumns - 1)
+                / Renderer::cellBlockColumns * Renderer::cellBlockColumns;
             std::vector<Cell> cells(static_cast<size_t>(columns));
             for (int screenRow = 0; screenRow < rows; ++screenRow) {
                 const int y = body + screenRow * cellHeight_; const size_t row = static_cast<size_t>(top_ + screenRow);
@@ -258,11 +267,18 @@ void Viewer::paint() {
                 auto line = diff_ ? diff_->line(source) : document_->line(row);
                 const size_t lineOffset = diff_ ? diff_->offset(source) : document_->lines[row];
                 line = line.substr(0, std::min(line.size(), maxLineColumns * 4));
-                tokens.clear();
-                if (!diff_) { LexState state = document_->states[row]; lexLine(line, document_->language, state, &tokens); }
+                auto inserted = lineIndexes_.try_emplace(lineOffset);
+                auto& cached = inserted.first->second;
+                if (inserted.second) cached.index.build(line, diff_ ? Language::Plain : document_->language,
+                    diff_ ? LexState::Normal : document_->states[row]);
+                cached.used = true;
+                const auto& tokens = cached.index.tokens();
                 std::fill(cells.begin(), cells.end(), Cell{U' ', foreground, rowBackground, false});
-                int col = 0; size_t token = 0;
-                for (size_t p = 0; p < line.size() && col < left_ + columns && col < static_cast<int>(maxLineColumns);) {
+                const auto start = cached.index.before(static_cast<uint32_t>(firstColumn));
+                int col = static_cast<int>(start.column);
+                size_t token = static_cast<size_t>(std::lower_bound(tokens.begin(), tokens.end(), start.byte,
+                    [](const Token& value, size_t byte) { return value.end <= byte; }) - tokens.begin());
+                for (size_t p = start.byte; p < line.size() && col < firstColumn + columns && col < static_cast<int>(maxLineColumns);) {
                     const size_t begin = p; char32_t c = decodeUtf8(line, p);
                     const int width = c == '\t' ? 4 - col % 4 : std::max(1, cellWidth(c));
                     while (token < tokens.size() && tokens[token].end <= begin) ++token;
@@ -271,15 +287,20 @@ void Viewer::paint() {
                     const Color bg = (!splitDiff() || static_cast<bool>(side) == after_) && offset >= selectionStart && offset < selectionEnd ? rgb(50, 70, 94) : rowBackground;
                     if (c < 32) c = U' ';
                     for (int i = 0; i < width; ++i) {
-                        const int x = col + i - left_; if (x < 0 || x >= columns) continue;
+                        const int x = col + i - firstColumn; if (x < 0 || x >= columns) continue;
                         const bool wideContinuation = cellWidth(c) == 2 && i == 1;
                         cells[x] = {i == 0 ? c : U' ', styles[static_cast<size_t>(style)], bg, wideContinuation};
-                        if (i > 0 && col < left_) cells[x] = {U' ', foreground, bg, false};
+                        if (i > 0 && col < firstColumn) cells[x] = {U' ', foreground, bg, false};
                     }
                     col += width;
                 }
-                RECT clip{textLeft, body, paneRight, r.bottom}; dc.cells(textLeft, y, cellWidth_, cellHeight_, cells, columns, clip);
+                RECT clip{textLeft, body, paneRight, r.bottom};
+                dc.cells(textLeft - (left_ - firstColumn) * cellWidth_, y, cellWidth_, cellHeight_, cells, columns, clip);
             }
+        }
+        for (auto entry = lineIndexes_.begin(); entry != lineIndexes_.end();) {
+            if (!entry->second.used) entry = lineIndexes_.erase(entry);
+            else ++entry;
         }
         if (splitDiff()) dc.fill({middle, body, middle + 1, r.bottom}, border);
         if (edit_ && caretVisible_ && GetFocus() == window_) {
@@ -416,5 +437,7 @@ LRESULT Viewer::handle(UINT m, WPARAM a, LPARAM b) {
 size_t poppy::Viewer::documentBytes() const {
     size_t bytes = document_ ? document_->text.capacity() + document_->lines.capacity() * sizeof(uint32_t) + document_->states.capacity() * sizeof(LexState) : 0;
     if (diff_) bytes += diff_->rows.capacity() * sizeof(DiffRow) + diff_->inlineOrder.capacity() * sizeof(uint32_t);
+    bytes += lineIndexes_.size() * sizeof(decltype(lineIndexes_)::value_type);
+    for (const auto& entry : lineIndexes_) bytes += entry.second.index.bytes();
     return bytes;
 }

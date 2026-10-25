@@ -96,6 +96,56 @@ void colorsAndClipping() {
     check(other.pixel(0, 0) == accent && other.pixel(511, 127) == accent, "A replacement WIC bitmap was not rendered");
     check(bitmap.pixel(0, 0) == untouched, "Switching WIC targets changed the old bitmap");
 }
+void scrollingCellLayouts() {
+    Renderer renderer;
+    Bitmap actual, expected;
+    std::vector<Cell> line(maxLineColumns);
+    for (size_t col = 0; col < line.size(); ++col) line[col].ch = U'a' + col % 26;
+    for (size_t col = 63; col + 1 < line.size(); col += 64) {
+        line[col].ch = col % 128 == 63 ? U'日' : U'\U0001f642';
+        line[col + 1].ch = U' '; line[col + 1].continuation = true;
+    }
+    // Draw the overscan used by Viewer against an independently drawn full
+    // line. Reuse layouts while scrolling, recoloring, and changing metrics.
+    for (const UINT dpi : {96u, 144u, 192u}) {
+        renderer.setDpi(dpi);
+        for (const int cw : {8, 12}) for (const int left : {0, 1, 63, 64, 65, 127, 128, 129, 4095, 8001, 0}) {
+            for (size_t col = 0; col < line.size(); ++col) {
+                line[col].fg = (col + left) % 19 < 9 ? foreground : accent;
+                line[col].bg = (col + left) % 23 < 7 ? panel : background;
+            }
+            const int ch = renderer.textHeight() + 4;
+            const RECT clip{8, 8, Bitmap::width - 8, 8 + ch};
+            const int first = std::max(0, left / Renderer::cellBlockColumns - 1) * Renderer::cellBlockColumns;
+            const int last = std::min(static_cast<int>(line.size()),
+                ((left + Bitmap::width / cw + Renderer::cellBlockColumns - 1) / Renderer::cellBlockColumns) * Renderer::cellBlockColumns);
+            std::vector<Cell> visible(line.begin() + first, line.begin() + last);
+            // A leading continuation outside the clip has no leading glyph in
+            // this buffer, matching the editor's cell construction.
+            if (visible.front().continuation) visible.front() = Cell{U' ', visible.front().fg, visible.front().bg, false};
+            check(renderer.begin(actual.bitmap.get()), "Could not draw a scrolled row");
+            renderer.fill(actual.bounds(), background);
+            renderer.cells(8 - (left - first) * cw, 8, cw, ch, visible, static_cast<int>(visible.size()), clip);
+            finish(renderer); actual.read();
+            Renderer reference; reference.setDpi(dpi);
+            check(reference.begin(expected.bitmap.get()), "Could not draw the full reference row");
+            reference.fill(expected.bounds(), background);
+            reference.cells(8 - left * cw, 8, cw, ch, line, static_cast<int>(line.size()), clip);
+            finish(reference); expected.read();
+            check(actual.pixels == expected.pixels, "Cached scrolling changed glyphs, colors, clipping, or DPI metrics");
+        }
+    }
+    // Exercise LRU eviction, then redraw content that was at the oldest end.
+    for (int value = 0; value < 600; ++value) {
+        std::vector<Cell> cells(16); const auto text = std::to_wstring(value);
+        for (size_t i = 0; i < text.size(); ++i) cells[i].ch = text[i];
+        drawCells(renderer, actual, cells, 12, 32);
+    }
+    Renderer reference; reference.setDpi(192);
+    std::vector<Cell> cells(16, Cell{U' ', accent, panel, false}); cells[0].ch = U'0';
+    drawCells(renderer, actual, cells, 12, 32); drawCells(reference, expected, cells, 12, 32);
+    check(actual.pixels == expected.pixels, "Evicting text layouts changed subsequent rendering");
+}
 void windowTargets() {
     HWND window = CreateWindowExW(0, L"STATIC", L"Poppy render test", WS_POPUP, 0, 0, 320, 200, nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
     check(window != nullptr, "Could not create a hidden render-test window");
@@ -388,7 +438,7 @@ int main() {
     int result = 0;
     try {
         initializeRendering();
-        cellPositions(); colorsAndClipping(); windowTargets(); editorCaret(); themedScrollbars(); quickOpenStability();
+        cellPositions(); colorsAndClipping(); scrollingCellLayouts(); windowTargets(); editorCaret(); themedScrollbars(); quickOpenStability();
         std::cout << "Direct2D rendering tests passed\n";
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; result = 1; }
     if (SUCCEEDED(com)) CoUninitialize();

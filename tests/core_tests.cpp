@@ -1,5 +1,6 @@
 #include "terminal_model.h"
 #include "text.h"
+#include <algorithm>
 #include <cstdlib>
 #include <iostream>
 #include <stdexcept>
@@ -47,6 +48,52 @@ void textTests() {
     check(cellWidth(U'あ') == 2 && cellWidth(U'A') == 1 && cellWidth(U'\u0301') == 0, "CJK and combining widths");
     check(languageFor(".TSX") == Language::CLike && languageFor(".unknown") == Language::Plain, "language detection");
     state = LexState::Normal; lexLine("-old", Language::Diff, state, &tokens); check(tokens[0].style == Style::Removed, "diff removal highlighted");
+}
+void lineIndexTests() {
+    // Put a wide glyph across a checkpoint, then mix UTF-8, tabs, surrogate
+    // pairs and combining marks throughout a line longer than the display cap.
+    std::string text(63, 'x'); text += "日\t";
+    while (text.size() < maxLineColumns * 4) text += "ab日\t🙂e\xcc\x81";
+    LineIndex index; index.build(text, Language::Plain, LexState::Normal);
+    const auto boundary = index.before(64);
+    check(boundary.column == 63 && boundary.byte == 63, "checkpoint keeps the leading byte of a wide glyph");
+    std::vector<LineIndex::Position> expected(maxLineColumns + 1);
+    uint32_t column = 0;
+    for (size_t p = 0; p < text.size() && column < maxLineColumns;) {
+        const LineIndex::Position start{static_cast<uint32_t>(p), column};
+        const auto c = decodeUtf8(text, p);
+        const auto width = c == '\t' ? 4 - column % 4 : std::max(1, cellWidth(c));
+        for (int i = 0; i < width && column + i <= maxLineColumns; ++i) expected[column + i] = start;
+        column += width;
+        if (column <= maxLineColumns) expected[column] = {static_cast<uint32_t>(p), column};
+    }
+    for (uint32_t target = 0; target <= maxLineColumns; ++target) {
+        const auto start = index.before(target);
+        check(start.column <= target && target - start.column <= LineIndex::stride + 3,
+            "horizontal scrolling decoded an unbounded line prefix");
+        size_t byte = start.byte; auto col = start.column;
+        while (col < target) {
+            const auto before = byte;
+            const auto c = decodeUtf8(text, byte);
+            const auto width = c == '\t' ? 4 - col % 4 : std::max(1, cellWidth(c));
+            if (col + width > target) { byte = before; break; }
+            col += width;
+        }
+        check(byte == expected[target].byte && col == expected[target].column,
+            "scrolling from a checkpoint changed a UTF-8 byte or cell position");
+    }
+    check(index.bytes() < 4096, "plain long-line checkpoints exceeded their sparse memory budget");
+    check(index.before(1000000).column <= maxLineColumns, "checkpoints exceed the long-line display cap");
+    index.build(std::string(5000, 'x') + " */ int n = 42;", Language::CLike, LexState::BlockComment);
+    bool keyword = false, number = false;
+    for (const auto& token : index.tokens()) { keyword |= token.style == Style::Keyword; number |= token.style == Style::Number; }
+    check(index.tokens().front().style == Style::Comment && keyword && number,
+        "cached tokens lost a multiline comment or the code after it");
+    index.build("", Language::Plain, LexState::Normal);
+    check(index.before(8192).byte == 0 && index.before(8192).column == 0 && index.tokens().empty(),
+        "rebuilding an empty line retained stale positions or styles");
+    index.build("a\tb", Language::Plain, LexState::Normal);
+    check(index.before(8192).byte == 0, "a short line produced an invalid checkpoint");
 }
 void terminalTests() {
     TerminalModel terminal(8, 3);
@@ -104,6 +151,6 @@ void terminalTests() {
 }
 }
 int main() {
-    try { textTests(); terminalTests(); std::cout << "Text and terminal core tests passed.\n"; return EXIT_SUCCESS; }
+    try { textTests(); lineIndexTests(); terminalTests(); std::cout << "Text and terminal core tests passed.\n"; return EXIT_SUCCESS; }
     catch (const std::exception& error) { std::cerr << error.what() << '\n'; return EXIT_FAILURE; }
 }

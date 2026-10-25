@@ -3,6 +3,8 @@
 #include <d2d1.h>
 #include <dwrite.h>
 #include <wincodec.h>
+#include <list>
+#include <unordered_map>
 
 namespace poppy {
 // Small COM owner, also supported by the MinGW build.
@@ -27,6 +29,7 @@ void initializeRendering();
 class Renderer {
 public:
     enum class Font { Ui, Code };
+    static constexpr int cellBlockColumns = 64;
     // Keeps both the Win32 paint validation and the Direct2D drawing balanced,
     // including empty windows and failed render-target creation.
     class Paint {
@@ -62,6 +65,13 @@ public:
     void ellipse(const RECT& rect, COLORREF color, float width);
     void outline(const RECT& rect, COLORREF color, float width = 1.0f);
 private:
+    struct CellLayout {
+        std::u32string key;
+        std::wstring text;
+        std::vector<float> positions;
+        ComPtr<IDWriteTextLayout> layout;
+    };
+    const CellLayout* cellLayout(const std::vector<Cell>& cells, int begin, int end, int cw, int ch);
     bool prepare(HRESULT result);
     void color(COLORREF value);
     HWND window_ = nullptr;
@@ -71,6 +81,10 @@ private:
     ID2D1RenderTarget* target_ = nullptr;
     ComPtr<ID2D1SolidColorBrush> brush_;
     ComPtr<IDWriteTextFormat> uiFont_, codeFont_;
+    // DirectWrite layouts do not own render-target resources. Keep a bounded
+    // LRU across paints/target recreation; colors and selection are drawn live.
+    std::list<CellLayout> cellLayouts_;
+    std::unordered_map<std::u32string, std::list<CellLayout>::iterator> cellLayoutIndex_;
     Font font_ = Font::Ui;
     int cellWidth_ = 8, textHeight_ = 18;
 };

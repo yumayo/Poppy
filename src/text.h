@@ -20,6 +20,20 @@ struct Document {
 };
 constexpr size_t maxFileBytes = 16 * 1024 * 1024;
 constexpr size_t maxLineColumns = 8192;
+// Sparse UTF-8 checkpoints let a visible line start near the horizontal scroll
+// position without decoding its entire prefix on every repaint.
+class LineIndex {
+public:
+    struct Position { uint32_t byte = 0, column = 0; };
+    static constexpr uint32_t stride = 64;
+    void build(std::string_view line, Language language, LexState state);
+    Position before(uint32_t column) const;
+    const std::vector<Token>& tokens() const { return tokens_; }
+    size_t bytes() const { return positions_.capacity() * sizeof(Position) + tokens_.capacity() * sizeof(Token); }
+private:
+    std::vector<Position> positions_;
+    std::vector<Token> tokens_;
+};
 Language languageFor(std::string extension);
 bool decodeText(std::string bytes, std::string& text, std::string& encoding, std::string& error);
 void indexDocument(Document& document);

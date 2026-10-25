@@ -100,6 +100,7 @@ Renderer::Paint::Paint(Renderer& renderer, HWND window) : renderer_(renderer), w
 Renderer::Paint::~Paint() { if (drawing_) renderer_.end(); EndPaint(window_, &paint_); }
 
 void Renderer::setDpi(UINT dpi) {
+    cellLayoutIndex_.clear(); cellLayouts_.clear();
     const float scale = static_cast<float>(dpi) / 96.0f;
     auto& text = factories().text;
     check(text->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL,
@@ -212,6 +213,43 @@ void Renderer::label(const RECT& rect, const std::wstring& text, COLORREF value,
     color(value);
     target_->DrawTextLayout(D2D1::Point2F(static_cast<float>(rect.left), static_cast<float>(rect.top)), layout.get(), brush_.get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
 }
+const Renderer::CellLayout* Renderer::cellLayout(const std::vector<Cell>& cells, int begin, int end, int cw, int ch) {
+    std::u32string key{static_cast<char32_t>(cw), static_cast<char32_t>(ch), static_cast<char32_t>(end - begin)};
+    for (int col = begin; col < std::min(end, static_cast<int>(cells.size())); ++col)
+        key.push_back(cells[col].continuation ? 0x110000 : cells[col].ch);
+    const auto found = cellLayoutIndex_.find(key);
+    if (found != cellLayoutIndex_.end()) {
+        cellLayouts_.splice(cellLayouts_.begin(), cellLayouts_, found->second);
+        return &*found->second;
+    }
+    cellLayouts_.emplace_front();
+    auto& entry = cellLayouts_.front(); entry.key = std::move(key);
+    for (int col = begin; col < std::min(end, static_cast<int>(cells.size()));) {
+        if (cells[col].continuation) { ++col; continue; }
+        char32_t scalar = cells[col].ch;
+        const int width = poppy::cellWidth(scalar) == 2 ? 2 : 1;
+        if (scalar < 32 || scalar > 0x10ffff || (scalar >= 0xd800 && scalar <= 0xdfff)) scalar = U' ';
+        entry.positions.push_back(static_cast<float>((col - begin) * cw));
+        if (scalar > 0xffff) {
+            scalar -= 0x10000;
+            entry.text += static_cast<wchar_t>(0xd800 + (scalar >> 10)); entry.text += static_cast<wchar_t>(0xdc00 + (scalar & 1023));
+            entry.positions.push_back(entry.positions.back());
+        } else entry.text += static_cast<wchar_t>(scalar);
+        col += width;
+    }
+    if (entry.text.find_first_not_of(L' ') == std::wstring::npos || FAILED(factories().text->CreateTextLayout(
+        entry.text.data(), static_cast<UINT32>(entry.text.size()), codeFont_.get(),
+        static_cast<float>((end - begin) * cw), static_cast<float>(ch), entry.layout.put()))) {
+        cellLayouts_.pop_front(); return nullptr;
+    }
+    entry.layout->SetTypography(factories().typography.get(), {0, static_cast<UINT32>(entry.text.size())});
+    cellLayoutIndex_.emplace(entry.key, cellLayouts_.begin());
+    constexpr size_t maxLayouts = 512;
+    if (cellLayouts_.size() > maxLayouts) {
+        cellLayoutIndex_.erase(cellLayouts_.back().key); cellLayouts_.pop_back();
+    }
+    return &entry;
+}
 void Renderer::cells(int x, int y, int cw, int ch, const std::vector<Cell>& cells, int columns, const RECT& clip) {
     const int count = std::min(columns, static_cast<int>(cells.size()));
     RECT row{x, y, x + count * cw, y + ch}, visible{};
@@ -225,27 +263,17 @@ void Renderer::cells(int x, int y, int cw, int ch, const std::vector<Cell>& cell
     for (int col = 0; col < count;) {
         if (cells[col].continuation) { ++col; continue; }
         const int begin = col; const auto fg = cells[col].fg;
-        std::wstring text; std::vector<float> positions;
-        while (col < count && cells[col].fg == fg) {
+        const int blockEnd = std::min(count, (begin / cellBlockColumns + 1) * cellBlockColumns);
+        while (col < blockEnd && cells[col].fg == fg) {
             if (cells[col].continuation) { ++col; continue; }
-            char32_t scalar = cells[col].ch;
-            const int width = poppy::cellWidth(scalar) == 2 ? 2 : 1;
-            if (scalar < 32 || scalar > 0x10ffff || (scalar >= 0xd800 && scalar <= 0xdfff)) scalar = U' ';
-            positions.push_back(static_cast<float>((col - begin) * cw));
-            if (scalar > 0xffff) {
-                scalar -= 0x10000;
-                text += static_cast<wchar_t>(0xd800 + (scalar >> 10)); text += static_cast<wchar_t>(0xdc00 + (scalar & 1023));
-                positions.push_back(positions.back());
-            } else text += static_cast<wchar_t>(scalar);
-            col += width;
+            col += poppy::cellWidth(cells[col].ch) == 2 ? 2 : 1;
         }
-        ComPtr<IDWriteTextLayout> layout;
-        if (text.find_first_not_of(L' ') == std::wstring::npos || FAILED(factories().text->CreateTextLayout(text.data(), static_cast<UINT32>(text.size()), codeFont_.get(),
-            static_cast<float>((col - begin) * cw), static_cast<float>(ch), layout.put()))) continue;
-        layout->SetTypography(factories().typography.get(), {0, static_cast<UINT32>(text.size())});
+        if (x + col * cw <= visible.left || x + begin * cw >= visible.right) continue;
+        const auto* layout = cellLayout(cells, begin, col, cw, ch);
+        if (!layout) continue;
         color(fg);
-        CellTextRenderer renderer(target_, brush_.get(), static_cast<float>(x + begin * cw), positions);
-        layout->Draw(nullptr, &renderer, static_cast<float>(x + begin * cw), static_cast<float>(y));
+        CellTextRenderer renderer(target_, brush_.get(), static_cast<float>(x + begin * cw), layout->positions);
+        layout->layout->Draw(nullptr, &renderer, static_cast<float>(x + begin * cw), static_cast<float>(y));
     }
     target_->PopAxisAlignedClip();
 }
