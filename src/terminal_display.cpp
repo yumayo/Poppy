@@ -36,4 +36,31 @@ bool TerminalDisplay::update(TerminalModel& model, size_t scroll, uint64_t now, 
     dirty_ = false; resizeUntil_ = 0;
     return true;
 }
+std::pair<int, int> TerminalDisplay::selectionRange(int anchor, int caret) const {
+    if (anchor < 0 || caret < 0 || !columns_) return {0, 0};
+    const int limit = columns_ * rows();
+    int begin = std::clamp(std::min(anchor, caret), 0, limit);
+    int end = std::clamp(std::max(anchor, caret), 0, limit);
+    if (begin == end) return {begin, end};
+    // Include a whole wide character when either boundary cuts its cells.
+    if (row(begin / columns_)[begin % columns_].continuation) --begin;
+    if (end < limit && row(end / columns_)[end % columns_].continuation) ++end;
+    return {begin, end};
+}
+std::string TerminalDisplay::selectedText(int anchor, int caret) const {
+    const auto [begin, end] = selectionRange(anchor, caret);
+    std::string result;
+    for (int position = begin; position < end;) {
+        const int y = position / columns_, rowEnd = std::min(end, (y + 1) * columns_);
+        std::string part;
+        for (; position < rowEnd; ++position) {
+            const auto& cell = row(y)[position % columns_];
+            if (!cell.continuation) appendUtf8(part, cell.ch);
+        }
+        while (!part.empty() && part.back() == ' ') part.pop_back();
+        result += part;
+        if (position < end) result += "\r\n";
+    }
+    return result;
+}
 }

@@ -27,6 +27,7 @@ private:
     void send(std::string text, bool userInput = true);
     void paste();
     void copy();
+    bool hasSelection() const { return anchor_ >= 0 && caret_ >= 0 && anchor_ != caret_; }
     void paint();
     void resize();
     void imePosition();
