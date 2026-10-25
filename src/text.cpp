@@ -131,25 +131,6 @@ std::string_view Document::line(size_t row) const {
     if (end > start && text[end - 1] == '\r') --end;
     return std::string_view(text).substr(start, end - start);
 }
-void LineIndex::build(std::string_view line, Language language, LexState state) {
-    line = line.substr(0, std::min(line.size(), maxLineColumns * 4));
-    lexLine(line, language, state, &tokens_);
-    positions_.clear(); positions_.push_back({0, 0});
-    uint32_t column = 0, next = stride;
-    for (size_t p = 0; p < line.size() && column < maxLineColumns;) {
-        const Position start{static_cast<uint32_t>(p), column};
-        const auto c = decodeUtf8(line, p);
-        column += c == '\t' ? 4 - column % 4 : std::max(1, cellWidth(c));
-        if (column >= next) {
-            // A checkpoint inside a tab or wide glyph keeps its leading byte.
-            positions_.push_back(column == next ? Position{static_cast<uint32_t>(p), column} : start);
-            next += stride;
-        }
-    }
-}
-LineIndex::Position LineIndex::before(uint32_t column) const {
-    return positions_.empty() ? Position{} : positions_[std::min<size_t>(column / stride, positions_.size() - 1)];
-}
 void indexDocument(Document& d) {
     d.lines.clear(); d.states.clear(); d.maxColumns = 0;
     d.lines.push_back(0);
