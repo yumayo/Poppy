@@ -168,14 +168,20 @@ LRESULT Tree::handle(UINT m, WPARAM a, LPARAM b) {
     case WM_SIZE: changed(); return 0;
     case WM_COMMAND: if (LOWORD(a) == 1002 && HIWORD(a) == EN_KILLFOCUS) finishRename(false); return 0;
     case WM_CONTEXTMENU: {
-        if (!renameRequested) return 0;
+        if (!renameRequested && !openWithDefaultAppRequested) return 0;
         POINT screen{GET_X_LPARAM(b), GET_Y_LPARAM(b)}; auto id = selection();
         if (screen.x == -1 && screen.y == -1) { screen = {indent_, (row(id) - top_ + 1) * rowHeight_}; ClientToScreen(window_, &screen); }
         else { auto point = screen; ScreenToClient(window_, &point); id = hit(point.y); if (id) select(id, false); }
         if (!id) return 0;
-        HMENU menu = CreatePopupMenu(); AppendMenuW(menu, MF_STRING | (canRename && !canRename(id) ? MF_GRAYED : 0), 1, L"Rename\tF2");
+        const bool canOpen = openWithDefaultAppRequested && (!canOpenWithDefaultApp || canOpenWithDefaultApp(id));
+        if (!renameRequested && !canOpen) return 0;
+        HMENU menu = CreatePopupMenu(); if (!menu) return 0;
+        if (canOpen) AppendMenuW(menu, MF_STRING, 2, L"デフォルトのアプリケーションで開く");
+        if (renameRequested) AppendMenuW(menu, MF_STRING | (canRename && !canRename(id) ? MF_GRAYED : 0), 1, L"Rename\tF2");
         const auto command = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, screen.x, screen.y, 0, window_, nullptr); DestroyMenu(menu);
-        if (command == 1 && item(id) && (!canRename || canRename(id))) renameRequested(id);
+        if (!item(id)) return 0;
+        if (command == 2 && openWithDefaultAppRequested && (!canOpenWithDefaultApp || canOpenWithDefaultApp(id))) openWithDefaultAppRequested(id);
+        else if (command == 1 && renameRequested && (!canRename || canRename(id))) renameRequested(id);
         return 0;
     }
     case WM_GETDLGCODE: return DLGC_WANTARROWS | DLGC_WANTCHARS;
