@@ -187,6 +187,7 @@ private:
     void renameFile(TreeItem item, const std::wstring& name);
     wchar_t stateFor(const fs::path& path) const;
     void openFile(const fs::path& path, bool diff = false);
+    void openWithDefaultApp(fs::path path);
     void saveTab();
     bool saveFile(size_t index, bool wait = false);
     bool confirmTab(size_t index);
@@ -289,6 +290,8 @@ void ProjectRuntime::Impl::create() {
     explorer_.canRename = [this](TreeItem item) { return item != rootItem_ && node(item) && !renamePending_; };
     explorer_.renameRequested = [this](TreeItem item) { if (const auto n = node(item); n && item != rootItem_ && !renamePending_) explorer_.rename(item, n->path.filename().native()); };
     explorer_.renameCommitted = [this](TreeItem item, const std::wstring& name) { renameFile(item, name); };
+    explorer_.canOpenWithDefaultApp = [this](TreeItem item) { const auto n = node(item); return n && !n->directory; };
+    explorer_.openWithDefaultAppRequested = [this](TreeItem item) { if (const auto n = node(item); n && !n->directory) openWithDefaultApp(n->path); };
     changes_.activated = [this](TreeItem item) { openGitFile(item); };
     changes_.expanded = [this](TreeItem item, bool value) {
         if (updatingGitFiles_) return;
@@ -565,6 +568,16 @@ void ProjectRuntime::Impl::openGitFile(TreeItem item) {
     if (node.directory() || node.entry >= git_->entries.size()) return;
     const auto entry = git_->entries[node.entry];
     openFile(entry.path, entry.state != L'?');
+}
+void ProjectRuntime::Impl::openWithDefaultApp(fs::path path) {
+    const auto directory = path.parent_path();
+    SHELLEXECUTEINFOW execute{}; execute.cbSize = sizeof(execute);
+    execute.fMask = SEE_MASK_FLAG_NO_UI | SEE_MASK_NOASYNC;
+    execute.hwnd = window_; execute.lpFile = path.c_str(); execute.lpDirectory = directory.c_str(); execute.nShow = SW_SHOWNORMAL;
+    if (!ShellExecuteExW(&execute)) {
+        const auto error = winError();
+        MessageBoxW(window_, (path.native() + L"\n\n" + error).c_str(), L"Poppy — デフォルトのアプリケーションで開く", MB_OK | MB_ICONWARNING);
+    }
 }
 void ProjectRuntime::Impl::status(std::wstring message) { status_ = std::move(message); RECT r{}; GetClientRect(window_, &r); r.top = r.bottom - footer_; InvalidateRect(window_, &r, FALSE); }
 void ProjectRuntime::Impl::chooseFolder() {

@@ -37,6 +37,8 @@ public:
     std::function<bool(TreeItem)> canRename;
     std::function<void(TreeItem)> renameRequested;
     std::function<void(TreeItem, const std::wstring&)> renameCommitted;
+    std::function<bool(TreeItem)> canOpenWithDefaultApp;
+    std::function<void(TreeItem)> openWithDefaultAppRequested;
     std::function<void(TreeItem)> activated;
     std::function<void(TreeItem, bool)> expanded;
     std::function<void(uintptr_t)> removed;
