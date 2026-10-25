@@ -21,8 +21,8 @@ bool HookServer::start(HWND target) {
     target_ = target;
     WSADATA data{}; if (WSAStartup(MAKEWORD(2,2), &data)) { error_ = L"Winsock unavailable"; return false; } winsock_ = true;
     const auto bindEnv = std::getenv("POPPY_HOOK_BIND"), portEnv = std::getenv("POPPY_HOOK_PORT"), hostEnv = std::getenv("POPPY_HOOK_HOST");
-    const std::string bind = bindEnv ? bindEnv : "127.0.0.1";
-    const std::string port = portEnv ? portEnv : "0";
+    const std::string bind = bindEnv ? bindEnv : "0.0.0.0";
+    const std::string port = portEnv ? portEnv : "5010";
     if (port.empty() || port.size() > 5 || port.find_first_not_of("0123456789") != std::string::npos || std::strtoul(port.c_str(), nullptr, 10) > 65535) { error_ = L"Invalid POPPY_HOOK_PORT"; return false; }
     sockaddr_in address{}; address.sin_family = AF_INET; address.sin_port = htons(static_cast<u_short>(std::strtoul(port.c_str(), nullptr, 10)));
     if (inet_pton(AF_INET, bind.c_str(), &address.sin_addr) != 1) { error_ = L"POPPY_HOOK_BIND must be an IPv4 address"; return false; }
