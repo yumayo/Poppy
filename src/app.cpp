@@ -1006,6 +1006,7 @@ void ProjectRuntime::Impl::tabMenu(POINT screen) {
     HMENU menu = CreatePopupMenu();
     if (!menu) return;
     AppendMenuW(menu, MF_STRING, 1, pinned ? L"Unpin tab" : L"Pin tab");
+    AppendMenuW(menu, MF_STRING, 3, L"デフォルトのアプリケーションで開く");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING | (pinned ? MF_GRAYED : 0), 2, L"Close tab");
     const UINT command = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, screen.x, screen.y, 0, window_, nullptr);
@@ -1015,6 +1016,7 @@ void ProjectRuntime::Impl::tabMenu(POINT screen) {
         index = static_cast<size_t>(found - tabs_.begin());
         if (command == 1) toggleTabPin(index);
         else if (command == 2) closeTab(index);
+        else if (command == 3) openWithDefaultApp(path);
     }
 }
 void ProjectRuntime::Impl::loadTab(bool preserve, int group) {
