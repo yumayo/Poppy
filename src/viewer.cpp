@@ -140,7 +140,11 @@ POINT Viewer::caretPoint() const {
     return {gutter_ + (col - left_) * cellWidth_, contentTop() + (static_cast<int>(row) - top_) * cellHeight_};
 }
 void Viewer::caretPosition(bool reveal) {
-    if (!edit_) { if (GetFocus() == window_) DestroyCaret(); return; }
+    if (!edit_) {
+        KillTimer(window_, caretTimer); caretVisible_ = false;
+        if (GetFocus() == window_) DestroyCaret();
+        return;
+    }
     auto point = caretPoint();
     if (reveal) {
         const auto r = Scrollbars::contentRect(window_);
@@ -151,7 +155,13 @@ void Viewer::caretPosition(bool reveal) {
         scrollbars(); point = caretPoint();
     }
     if (GetFocus() == window_) {
-        DestroyCaret(); CreateCaret(window_, nullptr, 2, cellHeight_); SetCaretPos(point.x, point.y); ShowCaret(window_);
+        // Keep the native caret hidden for IME/accessibility. Its XOR drawing
+        // races with Direct2D presentation and can leave marks after a move.
+        DestroyCaret(); CreateCaret(window_, nullptr, 2, cellHeight_); SetCaretPos(point.x, point.y);
+        caretVisible_ = true; KillTimer(window_, caretTimer);
+        const UINT blink = GetCaretBlinkTime();
+        if (blink != INFINITE) SetTimer(window_, caretTimer, blink ? blink : 500, nullptr);
+        InvalidateRect(window_, nullptr, FALSE);
         const auto context = ImmGetContext(window_);
         if (context) { COMPOSITIONFORM form{}; form.dwStyle = CFS_POINT; form.ptCurrentPos = point; ImmSetCompositionWindow(context, &form); CANDIDATEFORM candidate{}; candidate.dwStyle = CFS_CANDIDATEPOS; candidate.ptCurrentPos = {point.x, point.y + cellHeight_}; ImmSetCandidateWindow(context, &candidate); ImmReleaseContext(window_, context); }
     }
@@ -272,6 +282,13 @@ void Viewer::paint() {
             }
         }
         if (splitDiff()) dc.fill({middle, body, middle + 1, r.bottom}, border);
+        if (edit_ && caretVisible_ && GetFocus() == window_) {
+            const auto point = caretPoint();
+            const RECT caret{point.x, point.y, point.x + 2, point.y + cellHeight_};
+            const RECT bodyRect{gutter_, body, r.right, r.bottom};
+            RECT clipped{};
+            if (IntersectRect(&clipped, &caret, &bodyRect)) dc.fill(clipped, foreground);
+        }
     }
     scrollbars_.paint(window_, dc, background);
 }
@@ -287,8 +304,17 @@ LRESULT Viewer::handle(UINT m, WPARAM a, LPARAM b) {
     case WM_PAINT: paint(); return 0;
     case WM_ERASEBKGND: return 1;
     case WM_SIZE: scrollbars(); caretPosition(); return 0;
+    case WM_SETTINGCHANGE: caretPosition(); return 0;
     case WM_SETFOCUS: caretPosition(); if (focused) focused(); return 0;
-    case WM_KILLFOCUS: highSurrogate_ = 0; DestroyCaret(); return 0;
+    case WM_KILLFOCUS:
+        highSurrogate_ = 0; caretVisible_ = false; KillTimer(window_, caretTimer); DestroyCaret();
+        InvalidateRect(window_, nullptr, FALSE); return 0;
+    case WM_TIMER:
+        if (a == caretTimer && edit_ && GetFocus() == window_ && GetCaretBlinkTime() != INFINITE) {
+            caretVisible_ = !caretVisible_; InvalidateRect(window_, nullptr, FALSE);
+        }
+        return 0;
+    case WM_DESTROY: KillTimer(window_, caretTimer); return 0;
     case WM_SETCURSOR:
         if (diff_ && LOWORD(b) == HTCLIENT) {
             POINT point{}; GetCursorPos(&point); ScreenToClient(window_, &point);

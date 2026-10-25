@@ -51,6 +51,8 @@ private:
     int top_ = 0, left_ = 0;
     size_t anchor_ = 0, caret_ = 0;
     bool selecting_ = false, after_ = false, inlineView_ = false;
+    static constexpr UINT_PTR caretTimer = 0x5056;
+    bool caretVisible_ = false;
     std::shared_ptr<const Document> document_;
     std::shared_ptr<EditBuffer> edit_;
     wchar_t highSurrogate_ = 0;

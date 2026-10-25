@@ -1,5 +1,6 @@
 #include "scrollbars.h"
 #include "quick_open.h"
+#include "viewer.h"
 #include <algorithm>
 #include <fstream>
 #include <iostream>
@@ -121,6 +122,77 @@ void windowTargets() {
     renderer.discard();
     check(renderer.begin(window), "Could not recreate the HWND render target");
     finish(renderer);
+}
+void editorCaret() {
+    Viewer viewer;
+    const HWND parent = CreateWindowExW(0, L"STATIC", L"Editor caret test", WS_POPUP | WS_CLIPCHILDREN,
+        0, 0, 640, 360, nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
+    check(parent != nullptr, "Could not create the editor test window");
+    struct WindowOwner { HWND value; ~WindowOwner() { DestroyWindow(value); } } owner{parent};
+    viewer.create(parent, GetModuleHandleW(nullptr)); viewer.setDpi(96);
+    const HWND window = viewer.window();
+    check(MoveWindow(window, 0, 0, 640, 360, FALSE) != FALSE, "Could not size the editor");
+    auto buffer = std::make_shared<EditBuffer>();
+    indexDocument(buffer->document); buffer->initialize("");
+    viewer.edit(buffer, L"caret.txt"); SetFocus(window);
+    check(GetFocus() == window, "Could not focus the editor");
+    const auto caret = [&] {
+        GUITHREADINFO info{}; info.cbSize = sizeof(info);
+        check(GetGUIThreadInfo(GetCurrentThreadId(), &info) != FALSE, "Could not inspect the editor caret");
+        check(info.hwndCaret == window, "The editor lost its native caret for IME/accessibility");
+        check(!(info.flags & GUI_CARETBLINKING), "The native XOR caret is still drawing over Direct2D");
+        return info.rcCaret;
+    };
+    const auto initial = caret();
+    const LONG height = initial.bottom - initial.top;
+    for (int row = 1; row <= 4; ++row) {
+        SendMessageW(window, WM_CHAR, '\r', 0);
+        SendMessageW(window, WM_PAINT, 0, 0);
+        const auto current = caret();
+        check(current.left == initial.left && current.top == initial.top + row * height,
+            "A newline left the caret on the previous line");
+    }
+    for (int row = 0; row < 40; ++row) {
+        SendMessageW(window, WM_CHAR, '\r', 0);
+        SendMessageW(window, WM_PAINT, 0, 0);
+        const auto current = caret();
+        check(current.top >= initial.top && current.bottom <= Scrollbars::contentRect(window).bottom,
+            "Newlines scrolled the caret outside the editor body");
+    }
+    check(viewer.state().caret == buffer->document.text.size(), "Repeated newlines lost the insertion point");
+    SendMessageW(window, WM_KEYDOWN, VK_BACK, 0); caret();
+    SendMessageW(window, WM_KEYDOWN, VK_UP, 0); caret();
+    viewer.setDpi(144);
+    check(caret().bottom - caret().top > height, "DPI changes did not resize the editor caret");
+
+    // Use a real timer message so this also verifies that blinking was started.
+    const UINT blink = GetCaretBlinkTime();
+    MSG timer{};
+    if (blink != INFINITE && blink <= 5000) {
+        const auto start = GetTickCount64();
+        while (!PeekMessageW(&timer, window, WM_TIMER, WM_TIMER, PM_REMOVE)) {
+            check(GetTickCount64() - start < (blink ? blink : 500) + 1000, "The editor did not start its caret blink timer");
+            MsgWaitForMultipleObjects(0, nullptr, FALSE, 10, QS_TIMER);
+        }
+        for (int phase = 0; phase < 2; ++phase) {
+            ValidateRect(window, nullptr); DispatchMessageW(&timer);
+            check(GetUpdateRect(window, nullptr, FALSE) != FALSE, "Caret blinking did not request a Direct2D repaint");
+            SendMessageW(window, WM_PAINT, 0, 0); caret();
+        }
+    }
+    SetFocus(parent);
+    check(GetUpdateRect(window, nullptr, FALSE) != FALSE, "Leaving the editor did not repaint its visible caret");
+    ValidateRect(window, nullptr);
+    if (timer.hwnd) DispatchMessageW(&timer);
+    check(!GetUpdateRect(window, nullptr, FALSE), "A stale blink timer repainted an unfocused editor");
+    SetFocus(window); caret();
+    viewer.show(std::make_shared<Document>(buffer->document), L"read-only.txt");
+    ValidateRect(window, nullptr);
+    if (timer.hwnd) DispatchMessageW(&timer);
+    check(!GetUpdateRect(window, nullptr, FALSE), "A stale blink timer repainted a read-only viewer");
+    GUITHREADINFO info{}; info.cbSize = sizeof(info);
+    check(GetGUIThreadInfo(GetCurrentThreadId(), &info) && info.hwndCaret != window,
+        "A read-only viewer retained the editor caret");
 }
 struct ScrollbarWindow {
     Scrollbars bars;
@@ -316,7 +388,7 @@ int main() {
     int result = 0;
     try {
         initializeRendering();
-        cellPositions(); colorsAndClipping(); windowTargets(); themedScrollbars(); quickOpenStability();
+        cellPositions(); colorsAndClipping(); windowTargets(); editorCaret(); themedScrollbars(); quickOpenStability();
         std::cout << "Direct2D rendering tests passed\n";
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; result = 1; }
     if (SUCCEEDED(com)) CoUninitialize();
