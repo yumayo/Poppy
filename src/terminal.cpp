@@ -153,7 +153,6 @@ void Terminal::send(std::string text, bool userInput) {
     { std::lock_guard<std::mutex> lock(mutex_); if (writeBytes_ + text.size() > 1024 * 1024) { MessageBeep(MB_ICONWARNING); return; } writeBytes_ += text.size(); writes_.push_back(std::move(text)); }
     condition_.notify_all();
     if (userInput) {
-        if (scroll_) display_.changed(GetTickCount64());
         scroll_ = 0; anchor_ = caret_ = -1; InvalidateRect(window_, nullptr, FALSE);
         pump();
     }
@@ -327,7 +326,15 @@ LRESULT Terminal::handle(UINT m, WPARAM a, LPARAM b) {
     case WM_MOUSEWHEEL: {
         const int delta = GET_WHEEL_DELTA_WPARAM(a) / WHEEL_DELTA * 3;
         scroll_ = static_cast<size_t>(std::clamp<long long>(static_cast<long long>(scroll_) + delta, 0, static_cast<long long>(model_.historySize())));
-        anchor_ = caret_ = -1; display_.changed(GetTickCount64()); pump(); return 0;
+        const bool selected = anchor_ >= 0;
+        anchor_ = caret_ = -1;
+        if (display_.update(model_, scroll_, GetTickCount64()) || selected) {
+            imePosition(); InvalidateRect(window_, nullptr, FALSE);
+            // Wheel input can keep WM_PAINT waiting. Present this position
+            // immediately without parsing every terminal's pending output.
+            UpdateWindow(window_);
+        }
+        return 0;
     }
     case WM_KEYDOWN: case WM_SYSKEYDOWN: {
         const bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0, shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0, alt = (GetKeyState(VK_MENU) & 0x8000) != 0;

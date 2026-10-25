@@ -10,6 +10,8 @@ void TerminalDisplay::resized(uint64_t now) {
     changed(now); resizeUntil_ = now + 100;
 }
 bool TerminalDisplay::update(TerminalModel& model, size_t scroll, uint64_t now, bool queued, bool force) {
+    scroll = std::min(scroll, model.historySize());
+    const bool scrollChanged = scroll != scroll_;
     const bool completedSync = synchronizing_ && !model.synchronizedOutput();
     if (model.synchronizedOutput()) {
         if (!synchronizing_) { synchronizing_ = true; syncSince_ = now; }
@@ -19,12 +21,13 @@ bool TerminalDisplay::update(TerminalModel& model, size_t scroll, uint64_t now, 
         force = true;
     }
     synchronizing_ = false;
-    if (!dirty_ && !force) return false;
+    if (!dirty_ && !force && !scrollChanged) return false;
     // Let bursts settle, but continue to show progress during unbounded output.
-    if (!force && !completedSync && now - firstChange_ < 120 &&
+    // User scrolling bypasses batching, while the sync guard above still holds.
+    if (!force && !completedSync && !scrollChanged && now - firstChange_ < 120 &&
         (queued || now < resizeUntil_ || now - lastChange_ < 32)) return false;
 
-    columns_ = model.columns(); scroll_ = std::min(scroll, model.historySize());
+    columns_ = model.columns(); scroll_ = scroll;
     cells_.resize(static_cast<size_t>(model.rows()));
     for (int y = 0; y < model.rows(); ++y) {
         cells_[y] = model.row(y, scroll_); cells_[y].resize(static_cast<size_t>(columns_));
