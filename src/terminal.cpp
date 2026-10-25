@@ -26,7 +26,7 @@ void Terminal::create(HWND parent, HINSTANCE instance) {
     liveTerminals.push_back(this);
     WNDCLASSW cls{}; cls.lpfnWndProc = procedure; cls.hInstance = instance; cls.lpszClassName = L"PoppyTerminal"; cls.hCursor = LoadCursorW(nullptr, IDC_IBEAM); RegisterClassW(&cls);
     window_ = CreateWindowExW(0, cls.lpszClassName, L"AI terminal", WS_CHILD | WS_VISIBLE | WS_TABSTOP, 0, 0, 0, 0, parent, nullptr, instance, this);
-    model_.reply = [this](std::string response) { send(std::move(response)); };
+    model_.reply = [this](std::string response) { send(std::move(response), false); };
     setDpi(GetDpiForWindow(parent));
 }
 void Terminal::setDpi(UINT dpi) {
@@ -43,8 +43,10 @@ bool Terminal::start() {
     std::error_code directoryError;
     if (directory_.empty() || !fs::is_directory(directory_, directoryError)) { error_ = L"Project folder is missing. Restore the folder before starting a shell."; return false; }
     if (starting) starting();
-    error_.clear(); model_ = TerminalModel(model_.columns(), model_.rows()); model_.reply = [this](std::string s) { send(std::move(s)); };
+    error_.clear(); model_ = TerminalModel(model_.columns(), model_.rows()); model_.reply = [this](std::string s) { send(std::move(s), false); };
     scroll_ = 0; anchor_ = caret_ = -1;
+    endedNotified_ = false;
+    display_ = TerminalDisplay{}; display_.update(model_, scroll_, GetTickCount64(), false, true);
     HANDLE read = nullptr, write = nullptr;
     if (!CreatePipe(&read, &write, nullptr, 0)) { error_ = winError(); return false; }
     Handle childInput(read); input_.reset(write);
@@ -144,43 +146,75 @@ void Terminal::stop() {
     if (reader_.joinable()) { CancelSynchronousIo(reader_.native_handle()); reader_.join(); }
     input_.reset(); output_.reset(); process_.reset(); job_.reset(); started_ = false;
     { std::lock_guard<std::mutex> lock(mutex_); received_.clear(); writes_.clear(); writeBytes_ = 0; notified_ = resizePending_ = false; }
+    display_.update(model_, scroll_, GetTickCount64(), false, true);
 }
-void Terminal::send(std::string text) {
+void Terminal::send(std::string text, bool userInput) {
     if (!running() || text.empty()) return;
     { std::lock_guard<std::mutex> lock(mutex_); if (writeBytes_ + text.size() > 1024 * 1024) { MessageBeep(MB_ICONWARNING); return; } writeBytes_ += text.size(); writes_.push_back(std::move(text)); }
-    condition_.notify_all(); scroll_ = 0; anchor_ = caret_ = -1; InvalidateRect(window_, nullptr, FALSE);
+    condition_.notify_all();
+    if (userInput) {
+        if (scroll_) display_.changed(GetTickCount64());
+        scroll_ = 0; anchor_ = caret_ = -1; InvalidateRect(window_, nullptr, FALSE);
+        pump();
+    }
 }
-void Terminal::receive() {
+bool Terminal::receive() {
     std::string text;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         const size_t count = std::min<size_t>(received_.size(), 8192);
         text.assign(received_.data(), count); received_.erase(0, count);
-        // Keep notifications latched until the next tick, even if the queue is
-        // temporarily empty. This gives paints and input time during a flood.
-        notified_ = count != 0;
     }
+    if (text.empty()) return false;
     condition_.notify_all();
-    if (text.empty()) { if (started_ && !running() && ended) ended(); if (IsWindowVisible(window_)) InvalidateRect(window_, nullptr, FALSE); return; }
     model_.feed(text); scroll_ = std::min(scroll_, model_.historySize());
-    if (!running() && ended) ended();
-    if (IsWindowVisible(window_)) { imePosition(); InvalidateRect(window_, nullptr, FALSE); }
+    display_.changed(GetTickCount64());
+    return true;
 }
 void Terminal::pump() {
     static LONGLONG cycleStart = 0, spent = 0;
     LARGE_INTEGER now{}, frequency{}; QueryPerformanceCounter(&now); QueryPerformanceFrequency(&frequency);
     if (now.QuadPart - cycleStart >= frequency.QuadPart / 60) { cycleStart = now.QuadPart; spent = 0; }
     HWND root = nullptr;
-    for (size_t visited = 0; visited < liveTerminals.size() && spent < frequency.QuadPart / 200; ++visited) {
+    // Take another round when time remains: one 8 KiB chunk per timer tick made
+    // replaying a long conversation unnecessarily slow, even on an idle UI.
+    size_t idle = 0;
+    while (idle < liveTerminals.size() && spent < frequency.QuadPart / 200) {
         if (nextTerminal >= liveTerminals.size()) nextTerminal = 0;
         auto terminal = liveTerminals[nextTerminal++];
-        if (!terminal->window_) continue;
+        if (!terminal->window_) { ++idle; continue; }
         root = GetAncestor(terminal->window_, GA_ROOT);
         LARGE_INTEGER begin{}, end{}; QueryPerformanceCounter(&begin);
-        terminal->receive(); QueryPerformanceCounter(&end); spent += end.QuadPart - begin.QuadPart;
+        const bool received = terminal->receive();
+        QueryPerformanceCounter(&end); spent += end.QuadPart - begin.QuadPart;
+        if (received) idle = 0; else ++idle;
     }
     bool pending = false;
-    for (const auto terminal : liveTerminals) { std::lock_guard<std::mutex> lock(terminal->mutex_); pending |= !terminal->received_.empty() || terminal->notified_; if (terminal->window_) root = GetAncestor(terminal->window_, GA_ROOT); }
+    for (const auto terminal : liveTerminals) {
+        if (!terminal->window_) continue;
+        root = GetAncestor(terminal->window_, GA_ROOT);
+        bool queued = false;
+        { std::lock_guard<std::mutex> lock(terminal->mutex_); queued = !terminal->received_.empty(); }
+        const bool finished = terminal->started_ && !terminal->running();
+        if (finished && !terminal->endedNotified_) {
+            terminal->endedNotified_ = true;
+            terminal->display_.changed(GetTickCount64());
+            if (terminal->ended) terminal->ended();
+        }
+        const int oldColumns = terminal->display_.columns(), oldRows = terminal->display_.rows();
+        if (terminal->display_.update(terminal->model_, terminal->scroll_, GetTickCount64(), queued,
+            finished && !queued && terminal->display_.pending())) {
+            if (oldColumns != terminal->display_.columns() || oldRows != terminal->display_.rows())
+                terminal->anchor_ = terminal->caret_ = -1;
+            terminal->imePosition();
+            if (IsWindowVisible(terminal->window_)) InvalidateRect(terminal->window_, nullptr, FALSE);
+        }
+        // Keep the reader notification latched throughout a burst, including
+        // the quiet period and sync timeout after the receive queue runs dry.
+        std::lock_guard<std::mutex> lock(terminal->mutex_);
+        terminal->notified_ = !terminal->received_.empty() || terminal->display_.pending();
+        pending |= terminal->notified_;
+    }
     if (root) { if (pending) SetTimer(root, 77, 16, nullptr); else KillTimer(root, 77); }
 }
 void Terminal::resize() {
@@ -191,15 +225,18 @@ void Terminal::resize() {
     const int rows = std::clamp((static_cast<int>(rect.bottom) - header_ - 8) / cellHeight_, 1, 200);
     if (columns == model_.columns() && rows == model_.rows()) return;
     model_.resize(columns, rows); scroll_ = 0; anchor_ = caret_ = -1;
+    display_.resized(GetTickCount64());
     if (console_) {
         { std::lock_guard<std::mutex> lock(mutex_); requestedColumns_ = columns; requestedRows_ = rows; resizePending_ = true; }
         condition_.notify_all();
     }
+    else display_.update(model_, scroll_, GetTickCount64(), false, true);
     InvalidateRect(window_, nullptr, FALSE);
+    if (console_) pump();
 }
 void Terminal::imePosition() {
     const auto context = ImmGetContext(window_); if (!context) return;
-    COMPOSITIONFORM form{}; form.dwStyle = CFS_POINT; form.ptCurrentPos = {6 + model_.cursorX() * cellWidth_, header_ + 4 + model_.cursorY() * cellHeight_};
+    COMPOSITIONFORM form{}; form.dwStyle = CFS_POINT; form.ptCurrentPos = {6 + display_.cursorX() * cellWidth_, header_ + 4 + display_.cursorY() * cellHeight_};
     ImmSetCompositionWindow(context, &form);
     CANDIDATEFORM candidate{}; candidate.dwStyle = CFS_CANDIDATEPOS; candidate.ptCurrentPos = {form.ptCurrentPos.x, form.ptCurrentPos.y + cellHeight_}; ImmSetCandidateWindow(context, &candidate);
     ImmReleaseContext(window_, context);
@@ -216,19 +253,20 @@ void Terminal::paste() {
     send(std::move(input));
 }
 int Terminal::point(int x, int y) const {
-    return std::clamp((y - header_ - 4) / cellHeight_, 0, model_.rows() - 1) * model_.columns() + std::clamp((x - 6) / cellWidth_, 0, model_.columns() - 1);
+    const int columns = std::max(1, display_.columns()), rows = std::max(1, display_.rows());
+    return std::clamp((y - header_ - 4) / cellHeight_, 0, rows - 1) * columns + std::clamp((x - 6) / cellWidth_, 0, columns - 1);
 }
 void Terminal::copy() {
-    if (anchor_ < 0 || caret_ < 0) return;
+    if (anchor_ < 0 || caret_ < 0 || !display_.columns()) return;
     const int begin = std::min(anchor_, caret_), end = std::max(anchor_, caret_); std::string result;
-    for (int y = begin / model_.columns(); y <= end / model_.columns(); ++y) {
-        const auto& line = model_.row(y, scroll_); std::string part;
-        const int first = y == begin / model_.columns() ? begin % model_.columns() : 0;
-        const int last = y == end / model_.columns() ? end % model_.columns() + 1 : model_.columns();
+    for (int y = begin / display_.columns(); y <= end / display_.columns() && y < display_.rows(); ++y) {
+        const auto& line = display_.row(y); std::string part;
+        const int first = y == begin / display_.columns() ? begin % display_.columns() : 0;
+        const int last = y == end / display_.columns() ? end % display_.columns() + 1 : display_.columns();
         for (int x = first; x < last && x < static_cast<int>(line.size()); ++x) if (!line[x].continuation) appendUtf8(part, line[x].ch);
         while (!part.empty() && part.back() == ' ') part.pop_back();
         result += part;
-        if (y != end / model_.columns()) result += "\r\n";
+        if (y != end / display_.columns()) result += "\r\n";
     }
     copyText(window_, wide(result));
 }
@@ -245,20 +283,19 @@ void Terminal::paint() {
         dc.label(text, error_.empty() ? L"Click to start PowerShell, then run your AI CLI.\nThe shell starts only when needed." : error_ + L"\nClick to retry.", muted, DT_LEFT | DT_TOP | DT_WORDBREAK);
     } else {
         RECT clip{6, header_ + 4, rect.right - 6, rect.bottom};
-        dc.fill({0, header_, 6, rect.bottom}, background); dc.fill({6, header_, rect.right, header_ + 4}, background);
+        dc.fill({0, header_, rect.right, rect.bottom}, background);
         const int begin = std::min(anchor_, caret_), end = std::max(anchor_, caret_);
         std::vector<Cell> visible;
-        for (int y = 0; y < model_.rows(); ++y) {
-            visible = model_.row(y, scroll_); visible.resize(model_.columns());
-            if (begin >= 0) for (int x = 0; x < model_.columns(); ++x) { const int index = y * model_.columns() + x; if (index >= begin && index <= end) visible[x].bg = rgb(50,70,94); }
+        for (int y = 0; y < display_.rows(); ++y) {
+            visible = display_.row(y);
+            if (begin >= 0) for (int x = 0; x < display_.columns(); ++x) { const int index = y * display_.columns() + x; if (index >= begin && index <= end) visible[x].bg = rgb(50,70,94); }
             const int sy = header_ + 4 + y * cellHeight_;
-            dc.cells(6, sy, cellWidth_, cellHeight_, visible, model_.columns(), clip);
-            dc.fill({6 + model_.columns() * cellWidth_, sy, rect.right, sy + cellHeight_}, background);
+            dc.cells(6, sy, cellWidth_, cellHeight_, visible, display_.columns(), clip);
         }
-        dc.fill({0, header_ + 4 + model_.rows() * cellHeight_, rect.right, rect.bottom}, background);
-        if (!scroll_ && running() && model_.cursorVisible() && GetFocus() == window_) {
-            const int x = 6 + model_.cursorX() * cellWidth_, y = header_ + 4 + model_.cursorY() * cellHeight_;
-            dc.fill({x, y + cellHeight_ - 2, x + cellWidth_, y + cellHeight_}, accent);
+        if (running() && display_.cursorVisible() && GetFocus() == window_) {
+            const int x = 6 + display_.cursorX() * cellWidth_, y = header_ + 4 + display_.cursorY() * cellHeight_;
+            if (x + cellWidth_ <= clip.right && y + cellHeight_ <= clip.bottom)
+                dc.fill({x, y + cellHeight_ - 2, x + cellWidth_, y + cellHeight_}, accent);
         }
         if (!running()) dc.label({12, 0, rect.right - 12, header_}, L"SESSION ENDED  ·  Click header to restart", accent, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
     }
@@ -290,7 +327,7 @@ LRESULT Terminal::handle(UINT m, WPARAM a, LPARAM b) {
     case WM_MOUSEWHEEL: {
         const int delta = GET_WHEEL_DELTA_WPARAM(a) / WHEEL_DELTA * 3;
         scroll_ = static_cast<size_t>(std::clamp<long long>(static_cast<long long>(scroll_) + delta, 0, static_cast<long long>(model_.historySize())));
-        anchor_ = caret_ = -1; InvalidateRect(window_, nullptr, FALSE); return 0;
+        anchor_ = caret_ = -1; display_.changed(GetTickCount64()); pump(); return 0;
     }
     case WM_KEYDOWN: case WM_SYSKEYDOWN: {
         const bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0, shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0, alt = (GetKeyState(VK_MENU) & 0x8000) != 0;

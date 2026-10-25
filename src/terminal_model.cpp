@@ -24,6 +24,7 @@ Cell TerminalModel::blank() const { return {U' ', inverse_ ? bg_ : fg_, inverse_
 void TerminalModel::reset() {
     fg_ = foreground; bg_ = background; inverse_ = bold_ = alternate_ = false;
     cursorVisible_ = autoWrap_ = true; bracketedPaste_ = applicationCursor_ = origin_ = false;
+    synchronizedOutput_ = false;
     top_ = 0; bottom_ = rows_ - 1;
     normal_ = {}; alternateScreen_ = {};
     normal_.cells.assign(rows_, std::vector<Cell>(columns_));
@@ -129,6 +130,11 @@ void TerminalModel::sgr(const std::vector<int>& a) {
     }
 }
 void TerminalModel::csi(char command) {
+    // DECRQM uses an intermediate '$'. Queries must not alter delayed wrapping.
+    if (command == 'p' && sequence_ == "?2026$") {
+        if (reply) reply(synchronizedOutput_ ? "\x1b[?2026;1$y" : "\x1b[?2026;2$y");
+        return;
+    }
     const bool priv = !sequence_.empty() && sequence_[0] == '?';
     const bool secondary = !sequence_.empty() && sequence_[0] == '>';
     std::vector<int> args(1, 0);
@@ -140,7 +146,9 @@ void TerminalModel::csi(char command) {
     auto arg = [&](size_t i, int fallback) { return i < args.size() && args[i] ? args[i] : fallback; };
     auto& s = active();
     const int n = arg(0, 1), minY = origin_ ? top_ : 0, maxY = origin_ ? bottom_ : rows_ - 1;
-    if (command != 'm') s.wrap = false;
+    const bool synchronizationOnly = priv && (command == 'h' || command == 'l') &&
+        std::all_of(args.begin(), args.end(), [](int mode) { return mode == 2026; });
+    if (command != 'm' && !synchronizationOnly) s.wrap = false;
     switch (command) {
     case 'A': s.y = std::max(minY, s.y - n); break;
     case 'B': case 'e': s.y = std::min(maxY, s.y + n); break;
@@ -179,6 +187,7 @@ void TerminalModel::csi(char command) {
             else if (mode == 7) autoWrap_ = on;
             else if (mode == 25) cursorVisible_ = on;
             else if (mode == 2004) bracketedPaste_ = on;
+            else if (mode == 2026) synchronizedOutput_ = on;
             else if (mode == 1049 || mode == 47 || mode == 1047) {
                 if (on != alternate_) {
                     alternate_ = on; top_ = 0; bottom_ = rows_ - 1;
