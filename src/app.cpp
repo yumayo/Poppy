@@ -34,8 +34,8 @@ struct Node {
     bool expandRequested = false;
 };
 struct DirectoryResult { std::vector<Entry> entries; std::wstring error; bool truncated = false; };
-struct FileResult { std::shared_ptr<Document> document; std::wstring error; };
-struct Tab { fs::path path; bool diff = false; Viewer::State fileView, diffView; bool pinned = false; };
+struct FileResult { std::shared_ptr<EditBuffer> buffer; std::shared_ptr<Document> document; std::wstring error; };
+struct Tab { fs::path path; bool diff = false; Viewer::State fileView, diffView; bool pinned = false; std::shared_ptr<EditBuffer> buffer; };
 struct TabDrop { size_t position; RECT marker; };
 struct TabDrag {
     size_t index;
@@ -83,11 +83,32 @@ std::shared_ptr<FileResult> readDocument(const fs::path& path) {
         if (!count) break;
         offset += count;
     }
-    bytes.resize(offset); auto document = std::make_shared<Document>(); std::string error;
-    if (!decodeText(std::move(bytes), document->text, document->encoding, error)) { result->error = wide(error); return result; }
+    bytes.resize(offset); auto buffer = std::make_shared<EditBuffer>(); auto document = std::shared_ptr<Document>(buffer, &buffer->document); std::string error;
+    if (!decodeText(bytes, document->text, document->encoding, error)) { result->error = wide(error); return result; }
     if (static_cast<size_t>(std::count(document->text.begin(), document->text.end(), '\n')) >= maxLines) { result->error = L"This file exceeds the 1,000,000-line preview limit."; return result; }
     document->language = path.filename() == L"CMakeLists.txt" ? Language::Config : languageFor(utf8(path.extension().native()));
-    indexDocument(*document); result->document = std::move(document); return result;
+    indexDocument(*document); buffer->initialize(std::move(bytes)); result->buffer = std::move(buffer); result->document = std::move(document); return result;
+}
+// Keep writers out while comparing the snapshot and replacing the directory entry.
+// A failed write leaves the original file intact; existing files are never truncated.
+std::wstring writeDocument(const fs::path& path, const std::string& baseline, const std::string& bytes) {
+    Handle original(CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr));
+    if (!original) return winError();
+    LARGE_INTEGER size{}; if (!GetFileSizeEx(original.value, &size)) return winError();
+    if (size.QuadPart != static_cast<LONGLONG>(baseline.size())) return L"The file changed outside Poppy. Your edits have been kept. Reconcile the external changes before saving.";
+    std::string current(baseline.size(), 0); size_t offset = 0;
+    while (offset < current.size()) { DWORD count = 0; if (!ReadFile(original.value, current.data() + offset, static_cast<DWORD>(current.size() - offset), &count, nullptr)) return winError(); if (!count) break; offset += count; }
+    if (offset != baseline.size() || current != baseline) return L"The file changed outside Poppy. Your edits have been kept. Reconcile the external changes before saving.";
+    auto temporary = path; temporary += L".poppy-" + wide(newSessionId()) + L".tmp";
+    Handle output(CreateFileW(temporary.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr));
+    if (!output) return winError();
+    std::wstring error; offset = 0;
+    while (offset < bytes.size()) { DWORD count = 0; if (!WriteFile(output.value, bytes.data() + offset, static_cast<DWORD>(bytes.size() - offset), &count, nullptr) || !count) { error = winError(); break; } offset += count; }
+    if (error.empty() && !FlushFileBuffers(output.value)) error = winError();
+    output.reset();
+    if (error.empty() && !ReplaceFileW(path.c_str(), temporary.c_str(), nullptr, 0, nullptr, nullptr)) error = winError();
+    if (!error.empty()) DeleteFileW(temporary.c_str());
+    return error;
 }
 std::wstring trimmed(std::string text) { while (!text.empty() && (text.back() == '\r' || text.back() == '\n')) text.pop_back(); return wide(text); }
 std::shared_ptr<GitResult> readGit(const fs::path& directory, const std::atomic<bool>* cancelled) {
@@ -164,6 +185,8 @@ private:
     wchar_t stateFor(const fs::path& path) const;
     void openFile(const fs::path& path, bool diff = false);
     void saveTab();
+    bool saveFile(size_t index, bool wait = false);
+    bool confirmTab(size_t index);
     void selectTab(size_t index);
     void closeTab(size_t index);
     void toggleTabPin(size_t index);
@@ -272,6 +295,8 @@ void ProjectRuntime::Impl::create() {
         SendMessageW(tooltips_, TTM_ADDTOOLW, 0, reinterpret_cast<LPARAM>(&tip));
     }
     viewer_.create(window_, instance_); terminal_.create(window_, instance_);
+    viewer_.changed = [this] { saveTab(); updateTabs(false); if (owner_ && owner_->changed) owner_->changed(); };
+    viewer_.save = [this] { saveFile(activeTab_); };
     terminal_.changed = [this] { if (owner_ && owner_->changed) owner_->changed(); };
     quickOpen_.create(window_, instance_);
     quickOpen_.opened = [this](const fs::path& path) { openFile(path); SetFocus(viewer_.window()); };
@@ -308,7 +333,7 @@ void ProjectRuntime::Impl::layout(bool revealTab) {
     std::vector<int> tabWidths;
     tabWidths.reserve(tabs_.size());
     for (const auto& tab : tabs_) {
-        const auto title = tab.path.filename().native() + (tab.diff ? L" (diff)" : L"");
+        const auto title = tab.path.filename().native() + (tab.buffer && tab.buffer->dirty() ? L" *" : L"") + (tab.diff ? L" (diff)" : L"");
         tabWidths.push_back(renderer_.textWidth(title) + MulDiv(12, dpi_, 96) + MulDiv(28, dpi_, 96));
     }
     const auto wrapTabs = [&](int available) {
@@ -411,7 +436,7 @@ void ProjectRuntime::Impl::paint() {
             const bool active = i == activeTab_;
             dc.fill(rect, active ? panel : background);
             if (active) dc.fill({rect.left, rect.top, rect.right, rect.top + scaled(2)}, accent);
-            const auto title = tabs_[i].path.filename().native() + (tabs_[i].diff ? L" (diff)" : L"");
+            const auto title = tabs_[i].path.filename().native() + (tabs_[i].buffer && tabs_[i].buffer->dirty() ? L" *" : L"") + (tabs_[i].diff ? L" (diff)" : L"");
             dc.label({rect.left + scaled(12), rect.top, rect.right - scaled(28), rect.bottom}, title, active ? foreground : muted);
             if (tabs_[i].pinned) {
                 const float x = static_cast<float>(rect.right - scaled(16)), y = static_cast<float>((rect.top + rect.bottom) / 2);
@@ -552,7 +577,7 @@ void ProjectRuntime::Impl::openFolder(fs::path path) {
     auto saved = std::move(initialState_);
     restoreProject(saved.value_or(ProjectSession{}));
     if (!saved) expandedPaths_[pathKey(root_)] = root_;
-    viewer_.message(L"Select a file on the left.\n\nFiles are read only. Your AI CLI can edit them from the terminal.");
+    viewer_.message(L"Select a file on the left.\n\nEdit here and save with Ctrl+S, or use your AI CLI in the terminal.");
     updateGitFiles();
     rootItem_ = insert(0, {root_, true, false});
     if (expandedPaths_.count(pathKey(root_))) requestDirectory(rootItem_);
@@ -612,7 +637,7 @@ void ProjectRuntime::Impl::restoreProject(const ProjectSession& state) {
         const auto duplicate = std::find_if(tabs_.begin(), tabs_.end(), [&](const Tab& tab) { return pathKey(tab.path) == pathKey(path); });
         if (duplicate != tabs_.end()) continue;
         if (i <= state.activeTab) activeTab_ = tabs_.size();
-        tabs_.push_back({path, saved.diff, saved.fileView, saved.diffView, saved.pinned});
+        tabs_.push_back({path, saved.diff, saved.fileView, saved.diffView, saved.pinned, {}});
     }
 }
 void ProjectRuntime::Impl::forgetExpanded(const fs::path& path) {
@@ -788,7 +813,38 @@ void ProjectRuntime::Impl::saveTab() {
     if (!tabs_.empty() && viewer_.hasDocument()) {
         auto& tab = tabs_[activeTab_];
         (tab.diff ? tab.diffView : tab.fileView) = viewer_.state();
+        if (!tab.diff && viewer_.buffer()) tab.buffer = viewer_.buffer();
     }
+}
+bool ProjectRuntime::Impl::saveFile(size_t index, bool wait) {
+    saveTab(); if (index >= tabs_.size()) return true;
+    const auto buffer = tabs_[index].buffer; const auto path = tabs_[index].path;
+    if (!buffer) return true;
+    if (wait && buffer->saving) { worker_->drain(); worker_->dispatch(); }
+    if (!buffer->dirty()) return true;
+    if (buffer->saving) return false;
+    const auto bytes = buffer->encoded(), text = buffer->document.text, baseline = buffer->baseline;
+    buffer->saving = true;
+    worker_->submit(L"save:" + pathKey(path), [this, path, buffer, bytes, text, baseline] {
+        const auto error = writeDocument(path, baseline, bytes);
+        worker_->complete([this, path, buffer, bytes, text, error] {
+            buffer->saving = false;
+            if (error.empty()) { buffer->saved(bytes, text); status(L"Saved " + path.filename().native()); refreshGit(); }
+            else { status(L"Save failed: " + path.filename().native()); MessageBoxW(window_, (path.native() + L"\n\n" + error).c_str(), L"Poppy — Save", MB_OK | MB_ICONWARNING); }
+            updateTabs(false); InvalidateRect(viewer_.window(), nullptr, FALSE);
+        });
+    });
+    if (wait) { worker_->drain(); worker_->dispatch(); return !buffer->dirty(); }
+    return true;
+}
+bool ProjectRuntime::Impl::confirmTab(size_t index) {
+    saveTab(); if (index >= tabs_.size()) return true;
+    const auto buffer = tabs_[index].buffer;
+    if (!buffer) return true;
+    if (buffer->saving) { worker_->drain(); worker_->dispatch(); }
+    if (!buffer->dirty()) return true;
+    const auto answer = MessageBoxW(window_, (L"Save changes to " + tabs_[index].path.filename().native() + L"?").c_str(), L"Poppy", MB_YESNOCANCEL | MB_ICONQUESTION);
+    return answer == IDNO || (answer == IDYES && saveFile(index, true));
 }
 void ProjectRuntime::Impl::openFile(const fs::path& path, bool diff) {
     endTabDrag();
@@ -808,7 +864,7 @@ void ProjectRuntime::Impl::selectTab(size_t index) {
 }
 void ProjectRuntime::Impl::closeTab(size_t index) {
     endTabDrag();
-    if (index >= tabs_.size() || tabs_[index].pinned) return;
+    if (index >= tabs_.size() || tabs_[index].pinned || !confirmTab(index)) return;
     saveTab(); const bool active = index == activeTab_;
     tabs_.erase(tabs_.begin() + static_cast<std::ptrdiff_t>(index));
     if (index < activeTab_) --activeTab_;
@@ -817,7 +873,7 @@ void ProjectRuntime::Impl::closeTab(size_t index) {
     if (active) {
         ++serial_;
         if (!tabs_.empty()) loadTab();
-        else { viewer_.message(L"Select a file on the left.\n\nFiles are read only. Your AI CLI can edit them from the terminal."); status(L"Ready"); }
+        else { viewer_.message(L"Select a file on the left.\n\nEdit here and save with Ctrl+S, or use your AI CLI in the terminal."); status(L"Ready"); }
     }
     SetFocus(viewer_.window());
 }
@@ -869,6 +925,10 @@ void ProjectRuntime::Impl::loadTab(bool preserve) {
     const auto& tab = tabs_[activeTab_]; const auto path = tab.path;
     const auto state = tab.diff ? tab.diffView : tab.fileView;
     const auto serial = ++serial_, generation = generation_;
+    if (!tab.diff && tab.buffer && (tab.buffer->dirty() || tab.buffer->saving)) {
+        viewer_.edit(tab.buffer, path, preserve); if (!preserve) viewer_.restore(state);
+        status(L"Unsaved changes kept  ·  Ctrl+S: save"); return;
+    }
     // Retain only tab metadata and view positions; reload the active document.
     if (!preserve) viewer_.message(tab.diff ? L"Loading Git diff…" : L"Loading…", path);
     status((tab.diff ? L"Git diff: " : L"Loading ") + path.filename().native());
@@ -877,9 +937,11 @@ void ProjectRuntime::Impl::loadTab(bool preserve) {
             auto result = readDocument(path);
             worker_->complete([this, result, path, serial, generation, preserve, state] {
                 if (generation != generation_ || serial != serial_) return;
+                if (viewer_.buffer() && (viewer_.buffer()->dirty() || viewer_.buffer()->saving)) return;
                 if (result->document) {
-                    viewer_.show(result->document, path, preserve); if (!preserve) viewer_.restore(state);
-                    status(std::to_wstring(result->document->lines.size()) + L" lines  ·  read only  ·  F6: diff");
+                    tabs_[activeTab_].buffer = result->buffer;
+                    viewer_.edit(result->buffer, path, preserve); if (!preserve) viewer_.restore(state);
+                    status(std::to_wstring(result->document->lines.size()) + L" lines  ·  Ctrl+S: save  ·  F6: diff");
                 } else { viewer_.message(result->error, path); status(L"Preview unavailable"); }
             });
         });
@@ -1106,7 +1168,7 @@ bool ProjectRuntime::Impl::key(const MSG& message) {
         if (key && message.wParam == VK_F5 && GetFocus() != terminal_.window()) { refresh(); return true; }
         if (key && message.wParam == VK_F6 && GetFocus() != terminal_.window()) { showDiff(); return true; }
         if (key && message.wParam == VK_F7 && GetFocus() != terminal_.window()) { viewer_.toggleDiffLayout(); return true; }
-        if (key && message.wParam == VK_TAB && GetFocus() != terminal_.window()) {
+        if (key && message.wParam == VK_TAB && GetFocus() != terminal_.window() && GetFocus() != viewer_.window()) {
             const HWND files = activeSidebar_ == Sidebar::Explorer ? (IsWindowVisible(tree_) ? tree_ : explorerButton_) : (IsWindowVisible(gitTree_) ? gitTree_ : gitButton_);
             SetFocus(GetFocus() == files ? viewer_.window() : terminalVisible_ ? terminal_.window() : files); return true;
         }
@@ -1130,6 +1192,7 @@ void ProjectRuntime::shutdown() {
     if (impl_->worker_) impl_->worker_->stop();
     impl_->terminal_.stop();
 }
+bool ProjectRuntime::canClose() { impl_->saveTab(); for (size_t i = 0; i < impl_->tabs_.size(); ++i) if (!impl_->confirmTab(i)) return false; return true; }
 void ProjectRuntime::revalidate() { PostMessageW(window(), WM_APP+13, 0, 0); }
 void ProjectRuntime::initialize(const fs::path& path, const ProjectSession& state, bool saved) { if (saved) impl_->initialState_ = state; impl_->openFolder(path); }
 void ProjectRuntime::activate(bool active) {
@@ -1158,8 +1221,8 @@ AiSummary ProjectRuntime::summary() const { return impl_->terminal_.summary(); }
 std::wstring ProjectRuntime::description() const { return impl_->terminal_.description(); }
 bool ProjectRuntime::apply(const AiEvent& event) { return impl_->terminal_.apply(event); }
 void ProjectRuntime::focusAttention() { impl_->terminalVisible_ = true; impl_->layout(false); impl_->terminal_.focusAttention(); }
-size_t ProjectRuntime::documentBytes() const { return impl_->viewer_.documentBytes(); }
-void ProjectRuntime::releaseDocument() { impl_->saveTab(); ++impl_->serial_; impl_->waitingForGit_ = false; impl_->viewer_.message(L"Loading…"); }
+size_t ProjectRuntime::documentBytes() const { if (std::any_of(impl_->tabs_.begin(), impl_->tabs_.end(), [](const Tab& tab) { return tab.buffer && (tab.buffer->dirty() || tab.buffer->saving); })) return 0; size_t bytes = impl_->viewer_.documentBytes(); for (const auto& tab : impl_->tabs_) if (tab.buffer && tab.buffer != impl_->viewer_.buffer()) bytes += tab.buffer->document.text.capacity() + tab.buffer->baseline.capacity(); return bytes; }
+void ProjectRuntime::releaseDocument() { impl_->saveTab(); if (std::any_of(impl_->tabs_.begin(), impl_->tabs_.end(), [](const Tab& tab) { return tab.buffer && (tab.buffer->dirty() || tab.buffer->saving); })) return; for (auto& tab : impl_->tabs_) tab.buffer.reset(); ++impl_->serial_; impl_->waitingForGit_ = false; impl_->viewer_.message(L"Loading…"); }
 HWND ProjectRuntime::window() const { return impl_->window_; }
 bool ProjectRuntime::ready() const { return !impl_->root_.empty(); }
 

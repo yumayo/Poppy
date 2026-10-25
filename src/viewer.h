@@ -2,6 +2,7 @@
 #include "scrollbars.h"
 #include "diff.h"
 #include "session.h"
+#include "edit_buffer.h"
 #include <memory>
 
 namespace poppy {
@@ -11,6 +12,9 @@ public:
     void create(HWND parent, HINSTANCE instance);
     void setDpi(UINT dpi);
     void show(std::shared_ptr<const Document> document, const fs::path& path, bool preserve = false);
+    void edit(std::shared_ptr<EditBuffer> buffer, const fs::path& path, bool preserve = false);
+    std::shared_ptr<EditBuffer> buffer() const { return edit_; }
+    std::function<void()> changed, save, focused;
     void showDiff(std::shared_ptr<const DiffDocument> document, const fs::path& path, bool preserve = false);
     void toggleDiffLayout();
     void setDiffLayout(bool inlineView);
@@ -29,6 +33,11 @@ private:
     void scroll(int vertical, int horizontal);
     size_t position(int x, int y) const;
     void copy();
+    void replace(std::string text);
+    void edited();
+    void moveCaret(WPARAM key, bool shift, bool ctrl);
+    void caretPosition(bool reveal = false);
+    POINT caretPoint() const;
     RECT layoutButton(bool inlineView) const;
     int visibleRows() const;
     bool splitDiff() const { return diff_ && !inlineView_; }
@@ -43,6 +52,8 @@ private:
     size_t anchor_ = 0, caret_ = 0;
     bool selecting_ = false, after_ = false, inlineView_ = false;
     std::shared_ptr<const Document> document_;
+    std::shared_ptr<EditBuffer> edit_;
+    wchar_t highSurrogate_ = 0;
     std::shared_ptr<const DiffDocument> diff_;
     fs::path path_;
     std::wstring message_ = L"Open a folder to start\n\nSelect a file on the left. Run your AI CLI in the terminal below.";

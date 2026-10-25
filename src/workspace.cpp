@@ -225,7 +225,7 @@ void Workspace::saveApp(){
 }
 void Workspace::saveAll(){for(auto& project:projects_)save(project);saveApp();storageWorker_->drain();storageWorker_->dispatch();}
 void Workspace::close(size_t index){
-    if(index>=projects_.size())return;
+    if(index>=projects_.size() || !projects_[index].runtime->canClose())return;
     save(projects_[index]);projects_.erase(projects_.begin()+static_cast<std::ptrdiff_t>(index));
     if(index<active_)--active_;
     if(!projects_.empty())select(std::min(active_,projects_.size()-1));else{active_=0;layout();}
@@ -312,9 +312,9 @@ case WM_CONTEXTMENU:{POINT point{GET_X_LPARAM(b),GET_Y_LPARAM(b)};auto local=poi
 case WM_SETCURSOR:{POINT point{};GetCursorPos(&point);ScreenToClient(window_,&point);if(point.x>=px(session_.projectListWidth)&&point.x<px(session_.projectListWidth)+px(5)){SetCursor(LoadCursorW(nullptr,IDC_SIZEWE));return TRUE;}break;}
 case WM_NOTIFY:{const auto header=reinterpret_cast<NMHDR*>(b);if(header->hwndFrom==tooltips_&&header->code==TTN_GETDISPINFOW&&header->idFrom>0&&header->idFrom<=projects_.size()){const auto& project=projects_[header->idFrom-1];tipText_=project.path.native()+project.runtime->description();reinterpret_cast<NMTTDISPINFOW*>(b)->lpszText=tipText_.data();}return 0;}
 case WM_COPYDATA:{const auto data=reinterpret_cast<COPYDATASTRUCT*>(b);if(data->dwData!=0x50505901||data->cbData<sizeof(wchar_t)||data->cbData>65536||data->cbData%sizeof(wchar_t)||!data->lpData)return FALSE;const auto text=static_cast<const wchar_t*>(data->lpData);if(text[data->cbData/sizeof(wchar_t)-1])return FALSE;open(fs::path(text));return TRUE;}
-case WM_QUERYENDSESSION:if(!closing_)saveAll();return TRUE;
+case WM_QUERYENDSESSION:if(!closing_){for(auto& project:projects_)if(!project.runtime->canClose())return FALSE;saveAll();}return TRUE;
 case WM_ENDSESSION:if(a&&!closing_){closing_=true;saveAll();for(auto& project:projects_)project.runtime->shutdown();DestroyWindow(window_);}return 0;
-case WM_CLOSE:if(closing_)return 0;closing_=true;saveAll();for(auto& project:projects_)project.runtime->shutdown();if(!storageError_.empty()){MessageBoxW(window_,(L"Some state could not be saved.\n\n"+storageError_).c_str(),L"Poppy",MB_OK|MB_ICONWARNING);}closing_=true;DestroyWindow(window_);return 0;
+case WM_CLOSE:if(closing_)return 0;for(auto& project:projects_)if(!project.runtime->canClose())return 0;closing_=true;saveAll();for(auto& project:projects_)project.runtime->shutdown();if(!storageError_.empty()){MessageBoxW(window_,(L"Some state could not be saved.\n\n"+storageError_).c_str(),L"Poppy",MB_OK|MB_ICONWARNING);}closing_=true;DestroyWindow(window_);return 0;
 case WM_DESTROY:KillTimer(window_,1);hooks_.stop();projects_.clear();storageWorker_->submit(L"release-storage",[this]{storage_.reset();});storageWorker_->drain();storageWorker_->stop();PostQuitMessage(0);return 0;
 }return DefWindowProcW(window_,m,a,b);}
 }
