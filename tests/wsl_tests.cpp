@@ -1,11 +1,40 @@
 #include "resource.h"
 #include "wsl_protocol.h"
+#include "command_line.h"
 #include <iostream>
 #include <stdexcept>
+#ifdef _WIN32
+#include <windows.h>
+#include <shellapi.h>
+#endif
 
 namespace {
 void check(bool value, const char* message) { if (!value) throw std::runtime_error(message); }
 template<class F> void rejects(F operation) { try { operation(); } catch (const std::exception&) { return; } throw std::runtime_error("Invalid input was accepted"); }
+void commandLines() {
+    using poppy::processCommandLine;
+    const std::vector<std::wstring> list{L"C:\\Windows\\System32\\wsl.exe", L"--list", L"--quiet"};
+    check(processCommandLine(list) == L"C:\\Windows\\System32\\wsl.exe --list --quiet", "WSL list options must not be quoted or they become a Linux shell command");
+    const std::vector<std::wstring> connect{L"wsl.exe", L"--distribution", L"Ubuntu", L"--user", L"user", L"--exec", L"/bin/sh", L"-c", L"printf '%s' \"$HOME\"\n"};
+    check(processCommandLine(connect).rfind(L"wsl.exe --distribution Ubuntu --user user --exec /bin/sh -c ", 0) == 0, "WSL helper launch options must remain visible to wsl.exe");
+    const std::vector<std::wstring> terminal{L"wsl.exe", L"--distribution", L"Ubuntu", L"--exec", L"/home/user/helper", L"--terminal", L"/home/user/日本語 ' $ project", L"token", L"/bin/bash", L"-l"};
+    check(processCommandLine(terminal).rfind(L"wsl.exe --distribution Ubuntu --exec /home/user/helper --terminal ", 0) == 0, "WSL terminal launch lost its options");
+    check(poppy::quoteArg(L"") == L"\"\"", "Empty arguments must be retained");
+    check(poppy::quoteArg(L"C:\\path with spaces\\") == L"\"C:\\path with spaces\\\\\"", "A trailing backslash consumed its closing quote");
+    check(poppy::quoteArg(L"a\"b") == L"\"a\\\"b\"", "An embedded quote was not escaped");
+#ifdef _WIN32
+    const auto checkArguments = [](const std::vector<std::wstring>& args) {
+        const auto line = poppy::processCommandLine(args); int count = 0;
+        auto decoded = CommandLineToArgvW(line.c_str(), &count);
+        if (!decoded) throw std::runtime_error("Windows could not decode the command line");
+        bool same = count == static_cast<int>(args.size());
+        for (int i = 0; same && i < count; ++i) same = args[static_cast<size_t>(i)] == decoded[i];
+        LocalFree(decoded); check(same, "Windows argument decoding changed a path, script or empty argument");
+    };
+    checkArguments(list); checkArguments(connect); checkArguments(terminal);
+    checkArguments({L"C:\\Program Files\\Poppy\\Poppy.exe", L"", L"C:\\space path\\", L"/tmp/back\\slash", L"/tmp/a\"b", L"/tmp/a;b&$(pwd)'", L"line1\nline2"});
+#endif
+}
 void resources() {
     using poppy::ResourceId;
     const auto root = ResourceId::wsl("Ubuntu", "/home/user/日本語 ' $ project");
@@ -60,4 +89,4 @@ void protocol() {
     check(sha256(std::string(1000000,'a')) == "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0", "SHA-256 long vector failed");
 }
 }
-int main() { try { resources(); protocol(); std::cout << "WSL resource and protocol tests passed\n"; } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; } }
+int main() { try { commandLines(); resources(); protocol(); std::cout << "WSL command line, resource and protocol tests passed\n"; } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; } }

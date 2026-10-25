@@ -54,14 +54,6 @@ std::wstring winError(DWORD error) {
     while (!result.empty() && (result.back() == L'\r' || result.back() == L'\n')) result.pop_back();
     return result;
 }
-std::wstring quoteArg(std::wstring_view arg) {
-    std::wstring result = L"\""; size_t slashes = 0;
-    for (wchar_t c : arg) {
-        if (c == L'\\') ++slashes;
-        else { result.append(slashes * (c == L'"' ? 2 : 1), L'\\'); slashes = 0; if (c == L'"') result += L'\\'; result += c; }
-    }
-    result.append(slashes * 2, L'\\'); result += L'"'; return result;
-}
 std::wstring pathKey(const fs::path& path) {
     auto result = path.lexically_normal().make_preferred().native();
     std::transform(result.begin(), result.end(), result.begin(), [](wchar_t c) { return static_cast<wchar_t>(std::towlower(c)); });
@@ -109,7 +101,7 @@ ProcessResult runProcess(const std::vector<std::wstring>& args, const fs::path& 
     if (!UpdateProcThreadAttribute(attributes, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, inherited, sizeof(inherited), nullptr, nullptr)) { result.error = winError(); DeleteProcThreadAttributeList(attributes); return result; }
     STARTUPINFOEXW si{}; si.StartupInfo.cb = sizeof(si); si.lpAttributeList = attributes;
     si.StartupInfo.dwFlags = STARTF_USESTDHANDLES; si.StartupInfo.hStdInput = input.value; si.StartupInfo.hStdOutput = si.StartupInfo.hStdError = childOutput.value;
-    std::wstring command; for (const auto& arg : args) { if (!command.empty()) command += L' '; command += quoteArg(arg); }
+    auto command = processCommandLine(args);
     PROCESS_INFORMATION pi{};
     Handle job(CreateJobObjectW(nullptr, nullptr));
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{}; limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;

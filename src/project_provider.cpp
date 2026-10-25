@@ -63,7 +63,7 @@ std::wstring wslExecutable() { wchar_t system[MAX_PATH]{}; if (!GetSystemDirecto
 fs::path windowsProcessDirectory() { wchar_t system[MAX_PATH]{}; if (!GetSystemDirectoryW(system, MAX_PATH)) throw std::runtime_error("Cannot locate Windows system directory"); return system; }
 std::vector<std::string> installedWslDistributions() {
     const auto result = runProcess({wslExecutable(), L"--list", L"--quiet"}, windowsProcessDirectory(), 10000);
-    if (result.code) throw std::runtime_error("Cannot list WSL distributions. Install WSL and a distribution, then retry. " + utf8(result.error));
+    if (result.code) throw std::runtime_error("Cannot list WSL distributions (exit code " + std::to_string(result.code) + ").\n\n" + utf8(result.error));
     auto distributions = parseWslDistributions(result.output); if (distributions.empty()) throw std::runtime_error("No WSL distributions are registered. Install a distribution and retry."); return distributions;
 }
 }
