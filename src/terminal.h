@@ -1,5 +1,6 @@
 #pragma once
 #include "render.h"
+#include "terminal_display.h"
 
 namespace poppy {
 class Terminal {
@@ -8,7 +9,7 @@ public:
     void create(HWND parent, HINSTANCE instance);
     void setDpi(UINT dpi);
     void setDirectory(const fs::path& directory);
-    void receive();
+    bool receive();
     static void pump();
     void trackContainer(const std::string& id);
     void setCommand(std::vector<std::wstring> command) { command_ = std::move(command); }
@@ -23,7 +24,7 @@ private:
     static LRESULT CALLBACK procedure(HWND, UINT, WPARAM, LPARAM);
     LRESULT handle(UINT, WPARAM, LPARAM);
     bool start();
-    void send(std::string text);
+    void send(std::string text, bool userInput = true);
     void paste();
     void copy();
     void paint();
@@ -36,6 +37,7 @@ private:
     fs::path directory_;
     std::vector<std::pair<std::wstring, std::wstring>> environment_;
     TerminalModel model_;
+    TerminalDisplay display_;
     HPCON console_ = nullptr;
     Handle input_, output_, process_, job_;
     Handle stopRequest_, launching_, cleaned_, unconfirmed_;
@@ -47,7 +49,7 @@ private:
     std::string received_;
     std::deque<std::string> writes_;
     size_t writeBytes_ = 0;
-    bool notified_ = false, started_ = false;
+    bool notified_ = false, started_ = false, endedNotified_ = false;
     bool resizePending_ = false;
     int requestedColumns_ = 80, requestedRows_ = 24;
     std::wstring error_;

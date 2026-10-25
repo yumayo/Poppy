@@ -30,6 +30,8 @@ public:
     bool bracketedPaste() const { return bracketedPaste_; }
     bool applicationCursor() const { return applicationCursor_; }
     bool alternate() const { return alternate_; }
+    bool synchronizedOutput() const { return synchronizedOutput_; }
+    void endSynchronizedOutput() { synchronizedOutput_ = false; }
     std::function<void(std::string)> reply;
 private:
     struct Screen { std::vector<std::vector<Cell>> cells; int x = 0, y = 0, savedX = 0, savedY = 0; bool wrap = false; };
@@ -54,6 +56,7 @@ private:
     Color fg_ = foreground, bg_ = background;
     bool inverse_ = false, bold_ = false, alternate_ = false, cursorVisible_ = true;
     bool bracketedPaste_ = false, applicationCursor_ = false, autoWrap_ = true, origin_ = false;
+    bool synchronizedOutput_ = false;
     Parse parse_ = Parse::Text;
     std::string sequence_, utf8_;
 };

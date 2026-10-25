@@ -1,4 +1,5 @@
 #include "terminal_model.h"
+#include "terminal_display.h"
 #include "text.h"
 #include <cstdlib>
 #include <iostream>
@@ -7,7 +8,13 @@
 using namespace poppy;
 namespace {
 void check(bool condition, const char* message) { if (!condition) throw std::runtime_error(message); }
-std::string line(const TerminalModel& terminal, int y, size_t scroll = 0) {
+template<class Terminal> std::string line(const Terminal& terminal, int y) {
+    std::string result;
+    for (const auto& cell : terminal.row(y)) if (!cell.continuation) appendUtf8(result, cell.ch);
+    while (!result.empty() && result.back() == ' ') result.pop_back();
+    return result;
+}
+std::string line(const TerminalModel& terminal, int y, size_t scroll) {
     std::string result;
     for (const auto& cell : terminal.row(y, scroll)) if (!cell.continuation) appendUtf8(result, cell.ch);
     while (!result.empty() && result.back() == ' ') result.pop_back();
@@ -102,8 +109,73 @@ void terminalTests() {
     check(bounded.historySize() <= 1000, "history line budget enforced across resizes");
     check(sizeof(Cell) <= 16, "cell memory budget");
 }
+void terminalDisplayTests() {
+    TerminalModel query(4, 2); std::string response;
+    query.reply = [&](std::string bytes) { response += bytes; };
+    query.feed("abcd\x1b[?2026$"); query.feed("p");
+    check(response == "\x1b[?2026;2$y", "synchronized output query reports supported and reset");
+    response.clear(); query.feed("\x1b[?2026"); query.feed("h\x1b[?2026$p");
+    check(query.synchronizedOutput() && response == "\x1b[?2026;1$y", "split begin marker and active mode query");
+    query.feed("\x1b[?2026lE");
+    check(!query.synchronizedOutput() && line(query, 0) == "abcd" && line(query, 1) == "E", "sync controls and queries preserve delayed wrapping");
+    query.feed("\x1b[?2026h\x1b" "c"); check(!query.synchronizedOutput(), "terminal reset releases synchronized output");
+
+    TerminalModel model(12, 3); TerminalDisplay display;
+    model.feed("old"); display.update(model, 0, 0, false, true);
+    model.feed("\x1b[?2026h\x1b[H\x1b[2J\x1b[31m途中\x1b[?25l"); display.changed(10);
+    check(!display.update(model, 0, 10) && display.pending(), "begin marker defers presentation");
+    check(!display.update(model, 0, 500) && line(display, 0) == "old" && display.cursorX() == 3 && display.cursorVisible(), "incidental paints retain committed text and cursor");
+    model.feed("\x1b[H\x1b[2J完成\x1b[?25h\x1b[?2026"); display.changed(501);
+    check(!display.update(model, 0, 501) && line(display, 0) == "old", "split end marker does not expose intermediate text");
+    model.feed("l"); display.changed(502);
+    check(display.update(model, 0, 502) && line(display, 0) == "完成" && display.cursorX() == 4 && !display.pending(), "completed frame is presented with its cursor");
+    check(display.row(0)[0].fg == model.row(0)[0].fg && display.row(0)[1].continuation, "committed frame retains colors and wide cells");
+
+    // Simulate resume output split into the same 8 KiB chunks used by the UI.
+    std::string replay = "\x1b[?2026h";
+    for (int i = 0; i < 4000; ++i) replay += "history entry\r\n";
+    replay += "\x1b[H\x1b[2Jready\x1b[?2026l";
+    uint64_t tick = 600;
+    for (size_t offset = 0; offset < replay.size(); offset += 8192) {
+        model.feed(std::string_view(replay).substr(offset, 8192)); display.changed(tick);
+        const bool last = offset + 8192 >= replay.size();
+        check(display.update(model, 0, tick, !last) == last, "replayed history is only presented after its end marker");
+        check(line(display, 0) == (last ? "ready" : "完成"), "resume does not flash replayed history");
+        ++tick;
+    }
+
+    model.feed("\x1b[?2026h\rtimeout"); display.changed(1000);
+    check(!display.update(model, 0, 1000), "incomplete synchronized output waits");
+    model.feed("\x1b[?2026h"); display.changed(1900);
+    check(!display.update(model, 0, 1999), "repeated begin marker does not restart the timeout");
+    check(display.update(model, 0, 2000) && !model.synchronizedOutput() && !display.pending(), "missing end marker is released after one second without more output");
+    model.feed("\x1b[?2026h\rended"); display.changed(2010); display.update(model, 0, 2010);
+    check(display.update(model, 0, 2011, false, true) && !model.synchronizedOutput() && line(display, 0).substr(0, 5) == "ended", "process exit forces the final frame without waiting for a marker");
+
+    TerminalModel burst(16, 2); TerminalDisplay batched;
+    batched.update(burst, 0, 0, false, true);
+    burst.feed("first"); batched.changed(0);
+    check(!batched.update(burst, 0, 16) && line(batched, 0).empty(), "ordinary output waits briefly for adjacent chunks");
+    check(!batched.update(burst, 0, 32, true), "queued bytes defer a partial burst");
+    check(batched.update(burst, 0, 32) && line(batched, 0) == "first", "quiet output is presented promptly");
+    for (uint64_t now = 100; now < 220; now += 10) {
+        burst.feed("\rprogress"); batched.changed(now);
+        check(!batched.update(burst, 0, now, true), "continuous output is coalesced within the delay bound");
+    }
+    check(batched.update(burst, 0, 220, true) && line(batched, 0) == "progress", "continuous output still presents progress within 120 ms");
+    burst.resize(8, 3); batched.resized(300);
+    check(!batched.update(burst, 0, 350) && batched.columns() == 16 && batched.rows() == 2, "resize paints retain a coherent previous frame");
+    check(batched.update(burst, 0, 400) && batched.columns() == 8 && batched.rows() == 3, "resize settles even if the application emits no more output");
+    for (uint64_t now = 500; now < 620; now += 10) {
+        burst.resize(now % 20 ? 9 : 8, 3); batched.resized(now);
+        check(!batched.update(burst, 0, now), "consecutive resizes are coalesced");
+    }
+    check(batched.update(burst, 0, 620), "continuous resizing cannot defer presentation forever");
+    burst.feed("\r\na\r\nb\r\nc"); batched.changed(700);
+    check(batched.update(burst, 1, 732) && !batched.cursorVisible() && line(batched, 0) == line(burst, 0, 1), "scrollback is captured with its cursor hidden");
+}
 }
 int main() {
-    try { textTests(); terminalTests(); std::cout << "Text and terminal core tests passed.\n"; return EXIT_SUCCESS; }
+    try { textTests(); terminalTests(); terminalDisplayTests(); std::cout << "Text and terminal core tests passed.\n"; return EXIT_SUCCESS; }
     catch (const std::exception& error) { std::cerr << error.what() << '\n'; return EXIT_FAILURE; }
 }
