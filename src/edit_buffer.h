@@ -8,6 +8,7 @@ class EditBuffer {
 public:
     Document document;
     std::string baseline;
+    std::string fileVersion;
     bool bom = false;
     bool saving = false;
     uint64_t revision = 0;

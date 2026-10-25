@@ -5,6 +5,7 @@ RUN apt-get update \
         binutils-mingw-w64-x86-64 \
         cmake \
         g++ \
+        git \
         g++-mingw-w64-x86-64-posix \
         ninja-build \
     && rm -rf /var/lib/apt/lists/*

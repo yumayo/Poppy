@@ -6,6 +6,7 @@
 #include "activity_button.h"
 #include "quick_open.h"
 #include "file_name.h"
+#include "project_provider.h"
 #include <commctrl.h>
 #include <dwmapi.h>
 #include <shobjidl.h>
@@ -27,16 +28,17 @@ constexpr UINT_PTR tabDragTimerId = 2;
 constexpr size_t maxEntries = 10000, maxTreeNodes = 50000, maxLines = 1000000;
 constexpr int explorerCommand = 2, gitCommand = 3;
 enum class Sidebar { Explorer, Git };
-struct Entry { fs::path path; bool directory = false, reparse = false; };
+using Entry = ProviderEntry;
 struct Node {
-    fs::path path; uint64_t id;
+    ResourceId path; uint64_t id;
     bool directory, loaded = false, loading = false, reparse = false;
     // Keep expansion intent while loading, even when an empty item cannot expand.
     bool expandRequested = false;
+    bool unsupported = false; std::wstring label;
 };
-struct DirectoryResult { std::vector<Entry> entries; std::wstring error; bool truncated = false; };
+using DirectoryResult = ProviderListing;
 struct FileResult { std::shared_ptr<EditBuffer> buffer; std::shared_ptr<Document> document; std::wstring error; };
-struct Tab { fs::path path; bool diff = false; Viewer::State fileView, diffView; bool pinned = false; std::shared_ptr<EditBuffer> buffer; int group = 0; bool displayed = false; };
+struct Tab { ResourceId path; bool diff = false; Viewer::State fileView, diffView; bool pinned = false; std::shared_ptr<EditBuffer> buffer; int group = 0; bool displayed = false; };
 struct TabDrop { size_t position; RECT marker; int group = 0; };
 struct EditorGroup { RECT tabs{}, body{}; std::vector<size_t> indices, starts; size_t firstRow = 0, rows = 0; bool overflow() const { return starts.size() > rows; } };
 struct TabDrag {
@@ -45,98 +47,54 @@ struct TabDrag {
     bool active = false;
     std::optional<TabDrop> target;
 };
-struct GitEntry { fs::path path; wchar_t state; };
-struct GitResult { fs::path root; std::wstring branch, error; std::map<std::wstring, wchar_t> states; std::vector<GitEntry> entries; size_t changed = 0, untracked = 0; bool truncated = false; };
+struct GitEntry { ResourceId path; wchar_t state; };
+struct GitResult { ResourceId root; std::wstring branch, error; std::map<std::wstring, wchar_t> states; std::vector<GitEntry> entries; size_t changed = 0, untracked = 0; bool truncated = false, unsupportedNames = false; };
 
 COLORREF stateColor(wchar_t state) {
     return state == L'U' || state == L'D' ? RGB(231,112,118) : state == L'?' || state == L'A' ? accent : RGB(224,192,128);
 }
 
-std::shared_ptr<DirectoryResult> listDirectory(const fs::path& path) {
-    auto result = std::make_shared<DirectoryResult>(); std::error_code error;
-    fs::directory_iterator iterator(path, fs::directory_options::skip_permission_denied, error), end;
-    if (error) { result->error = wide(error.message()); return result; }
-    for (; iterator != end; iterator.increment(error)) {
-        if (error) { result->error = wide(error.message()); break; }
-        const auto& entry = *iterator;
-        if (entry.path().filename() == L".git") continue;
-        if (result->entries.size() == maxEntries) { result->truncated = true; break; }
-        const DWORD attributes = GetFileAttributesW(entry.path().c_str());
-        if (attributes == INVALID_FILE_ATTRIBUTES) continue;
-        result->entries.push_back({entry.path(), (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0, (attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0});
-    }
-    std::sort(result->entries.begin(), result->entries.end(), [](const Entry& a, const Entry& b) {
-        if (a.directory != b.directory) return a.directory;
-        return CompareStringOrdinal(a.path.filename().c_str(), -1, b.path.filename().c_str(), -1, TRUE) == CSTR_LESS_THAN;
-    });
-    return result;
-}
-std::shared_ptr<FileResult> readDocument(const fs::path& path) {
+std::shared_ptr<FileResult> readDocument(ProjectProvider& provider, const ResourceId& path) {
     auto result = std::make_shared<FileResult>();
-    Handle file(CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN, nullptr));
-    if (!file) { result->error = winError(); return result; }
-    LARGE_INTEGER size{};
-    if (!GetFileSizeEx(file.value, &size)) { result->error = winError(); return result; }
-    if (size.QuadPart < 0 || size.QuadPart > static_cast<LONGLONG>(maxFileBytes)) { result->error = L"This file exceeds the 16 MiB preview limit.\nOpen a smaller file to keep Poppy responsive."; return result; }
-    std::string bytes(static_cast<size_t>(size.QuadPart), '\0'); size_t offset = 0;
-    while (offset < bytes.size()) {
-        DWORD count = 0;
-        if (!ReadFile(file.value, bytes.data() + offset, static_cast<DWORD>(bytes.size() - offset), &count, nullptr)) { result->error = winError(); return result; }
-        if (!count) break;
-        offset += count;
-    }
-    bytes.resize(offset); auto buffer = std::make_shared<EditBuffer>(); auto document = std::shared_ptr<Document>(buffer, &buffer->document); std::string error;
+    auto file = provider.readFile(path);
+    if (!file.error.empty()) { result->error = file.error; return result; }
+    auto bytes = std::move(file.bytes); auto buffer = std::make_shared<EditBuffer>(); auto document = std::shared_ptr<Document>(buffer, &buffer->document); std::string error;
     if (!decodeText(bytes, document->text, document->encoding, error)) { result->error = wide(error); return result; }
     if (static_cast<size_t>(std::count(document->text.begin(), document->text.end(), '\n')) >= maxLines) { result->error = L"This file exceeds the 1,000,000-line preview limit."; return result; }
     document->language = path.filename() == L"CMakeLists.txt" ? Language::Config : languageFor(utf8(path.extension().native()));
-    indexDocument(*document); buffer->initialize(std::move(bytes)); result->buffer = std::move(buffer); result->document = std::move(document); return result;
-}
-// Keep writers out while comparing the snapshot and replacing the directory entry.
-// A failed write leaves the original file intact; existing files are never truncated.
-std::wstring writeDocument(const fs::path& path, const std::string& baseline, const std::string& bytes) {
-    Handle original(CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr));
-    if (!original) return winError();
-    LARGE_INTEGER size{}; if (!GetFileSizeEx(original.value, &size)) return winError();
-    if (size.QuadPart != static_cast<LONGLONG>(baseline.size())) return L"The file changed outside Poppy. Your edits have been kept. Reconcile the external changes before saving.";
-    std::string current(baseline.size(), 0); size_t offset = 0;
-    while (offset < current.size()) { DWORD count = 0; if (!ReadFile(original.value, current.data() + offset, static_cast<DWORD>(current.size() - offset), &count, nullptr)) return winError(); if (!count) break; offset += count; }
-    if (offset != baseline.size() || current != baseline) return L"The file changed outside Poppy. Your edits have been kept. Reconcile the external changes before saving.";
-    auto temporary = path; temporary += L".poppy-" + wide(newSessionId()) + L".tmp";
-    Handle output(CreateFileW(temporary.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr));
-    if (!output) return winError();
-    std::wstring error; offset = 0;
-    while (offset < bytes.size()) { DWORD count = 0; if (!WriteFile(output.value, bytes.data() + offset, static_cast<DWORD>(bytes.size() - offset), &count, nullptr) || !count) { error = winError(); break; } offset += count; }
-    if (error.empty() && !FlushFileBuffers(output.value)) error = winError();
-    output.reset();
-    if (error.empty() && !ReplaceFileW(path.c_str(), temporary.c_str(), nullptr, 0, nullptr, nullptr)) error = winError();
-    if (!error.empty()) DeleteFileW(temporary.c_str());
-    return error;
+    indexDocument(*document); buffer->initialize(std::move(bytes)); buffer->fileVersion = std::move(file.version); result->buffer = std::move(buffer); result->document = std::move(document); return result;
 }
 std::wstring trimmed(std::string text) { while (!text.empty() && (text.back() == '\r' || text.back() == '\n')) text.pop_back(); return wide(text); }
-std::shared_ptr<GitResult> readGit(const fs::path& directory, const std::atomic<bool>* cancelled) {
+std::shared_ptr<GitResult> readGit(ProjectProvider& provider, const ResourceId& directory, const std::atomic<bool>* cancelled) {
     auto result = std::make_shared<GitResult>();
-    auto root = runProcess({L"git.exe", L"--no-optional-locks", L"rev-parse", L"--show-toplevel"}, directory, 5000, cancelled);
-    if (root.code) { if (root.code != 128) result->error = root.error; return result; }
-    result->root = fs::path(trimmed(root.output));
-    auto branch = runProcess({L"git.exe", L"--no-optional-locks", L"symbolic-ref", L"--short", L"-q", L"HEAD"}, result->root, 5000, cancelled);
+    auto root = provider.git({L"git.exe", L"--no-optional-locks", L"rev-parse", L"--show-toplevel"}, directory, cancelled);
+    if (root.code) { if (root.code != 128 || root.output.find("not a git repository") == std::string::npos) result->error = root.error; return result; }
+    if (directory.wsl() && !validUtf8(root.output)) { result->error = L"The Git repository root is not a UTF-8 path."; return result; }
+    result->root = directory.at(utf8(trimmed(root.output)));
+    auto branch = provider.git({L"git.exe", L"--no-optional-locks", L"symbolic-ref", L"--short", L"-q", L"HEAD"}, result->root, cancelled);
     if (branch.code == 0) result->branch = trimmed(branch.output);
     else {
-        auto head = runProcess({L"git.exe", L"--no-optional-locks", L"rev-parse", L"--short", L"HEAD"}, result->root, 5000, cancelled);
+        auto head = provider.git({L"git.exe", L"--no-optional-locks", L"rev-parse", L"--short", L"HEAD"}, result->root, cancelled);
         result->branch = head.code == 0 ? trimmed(head.output) + L" (detached)" : L"HEAD";
     }
-    auto status = runProcess({L"git.exe", L"--no-optional-locks", L"-c", L"core.fsmonitor=false", L"status", L"--porcelain=v1", L"-z", L"--untracked-files=all"}, result->root, 5000, cancelled);
+    auto status = provider.git({L"git.exe", L"--no-optional-locks", L"-c", L"core.fsmonitor=false", L"status", L"--porcelain=v1", L"-z", L"--untracked-files=all"}, result->root, cancelled);
     if (status.code) { result->error = status.error; return result; }
     for (size_t p = 0; p < status.output.size();) {
         const size_t end = status.output.find('\0', p); if (end == std::string::npos) break;
         const auto item = std::string_view(status.output).substr(p, end - p); p = end + 1;
         if (item.size() < 4) continue;
         const char x = item[0], y = item[1];
+        if (directory.wsl() && !validUtf8(item.substr(3))) {
+            result->unsupportedNames = true;
+            if (x == 'R' || y == 'R' || x == 'C' || y == 'C') { const auto sourceEnd = status.output.find('\0', p); p = sourceEnd == status.output.npos ? status.output.size() : sourceEnd + 1; }
+            continue;
+        }
         const wchar_t state = x == '?' ? L'?' : x == 'U' || y == 'U' || (x == 'A' && y == 'A') || (x == 'D' && y == 'D') ? L'U' : y != ' ' ? y : x;
         if (state == L'?') ++result->untracked; else ++result->changed;
-        fs::path path = (result->root / fs::u8path(item.substr(3))).lexically_normal();
+        ResourceId path = (result->root / item.substr(3)).lexically_normal();
         if (result->entries.size() < maxTreeNodes) result->entries.push_back({path, state});
         else result->truncated = true;
-        auto mark = [&](fs::path current) {
+        auto mark = [&](ResourceId current) {
             for (;;) {
                 const auto key = pathKey(current); auto found = result->states.find(key);
                 if (found != result->states.end()) { if (state == L'U') found->second = state; }
@@ -150,7 +108,9 @@ std::shared_ptr<GitResult> readGit(const fs::path& directory, const std::atomic<
         if (x == 'R' || y == 'R' || x == 'C' || y == 'C') {
             const size_t sourceEnd = status.output.find('\0', p);
             if (sourceEnd == std::string::npos) break;
-            mark(result->root / fs::u8path(status.output.substr(p, sourceEnd - p))); p = sourceEnd + 1;
+            const auto source = std::string_view(status.output).substr(p, sourceEnd - p);
+            if (!directory.wsl() || validUtf8(source)) mark(result->root / source); else result->unsupportedNames = true;
+            p = sourceEnd + 1;
         }
     }
     return result;
@@ -174,10 +134,10 @@ private:
     void updateGitFiles();
     void openGitFile(TreeItem item);
     void chooseFolder();
-    void openFolder(fs::path path);
+    void openFolder(ResourceId path);
     ProjectSession saveSession();
     void restoreProject(const ProjectSession& state);
-    void forgetExpanded(const fs::path& path);
+    void forgetExpanded(const ResourceId& path);
     void requestDirectory(TreeItem item);
     void applyDirectory(TreeItem item, Node* node, const DirectoryResult& result);
     TreeItem insert(TreeItem parent, const Entry& entry);
@@ -185,9 +145,9 @@ private:
     void clearChildren(TreeItem parent);
     void updateLabel(TreeItem item);
     void renameFile(TreeItem item, const std::wstring& name);
-    wchar_t stateFor(const fs::path& path) const;
-    void openFile(const fs::path& path, bool diff = false);
-    void openWithDefaultApp(fs::path path);
+    wchar_t stateFor(const ResourceId& path) const;
+    void openFile(const ResourceId& path, bool diff = false);
+    void openWithDefaultApp(ResourceId path);
     void saveTab();
     bool saveFile(size_t index, bool wait = false);
     bool confirmTab(size_t index);
@@ -205,7 +165,7 @@ private:
     void updateTabDrag(POINT point);
     void scrollTabDrag();
     void endTabDrag(bool drop = false);
-    fs::path selectedPath() const { return tabs_.empty() ? fs::path{} : tabs_[activeTab_].path; }
+    ResourceId selectedPath() const { return tabs_.empty() ? ResourceId{} : tabs_[activeTab_].path; }
     void showDiff();
     void refresh(bool force = true);
     void refreshGit();
@@ -251,9 +211,9 @@ private:
     std::string pendingGitSelection_;
     int restoreExplorerTop_ = 0, restoreExplorerLeft_ = 0, restoreGitTop_ = 0, restoreGitLeft_ = 0;
     bool restoredScroll_ = false;
-    fs::path root_;
-    std::map<std::wstring, fs::path> expandedPaths_;
-    fs::path pendingTreeSelection_;
+    ResourceId root_;
+    std::map<std::wstring, ResourceId> expandedPaths_;
+    ResourceId pendingTreeSelection_;
     bool waitingForGit_[2]{};
     std::vector<Tab> tabs_;
     std::vector<RECT> tabRects_;
@@ -265,7 +225,13 @@ private:
     uint64_t generation_ = 0, serial_[2]{}, nextId_ = 1;
     std::map<uint64_t, TreeItem> nodes_;
     std::shared_ptr<GitResult> git_;
+    std::shared_ptr<ProjectProvider> provider_;
+    bool connecting_ = false, connected_ = false, active_ = false;
+    uint64_t providerRevision_ = 0;
+    void connectRemote();
     std::wstring status_ = L"Ready  ·  Ctrl+O: open folder";
+    std::wstring tabTip_, connectionError_;
+    std::string wslUid_;
     Handle watchDirectory_, watchEvent_;
     OVERLAPPED watchOperation_{};
     alignas(DWORD) std::array<BYTE, 64 * 1024> watchBuffer_{};
@@ -287,10 +253,10 @@ void ProjectRuntime::Impl::create() {
         else { forgetExpanded(n->path); n->expandRequested = false; clearChildren(item); n->loaded = false; }
     };
     explorer_.removed = [this](uintptr_t data) { const auto n = reinterpret_cast<Node*>(data); if (n) { nodes_.erase(n->id); delete n; } };
-    explorer_.canRename = [this](TreeItem item) { return item != rootItem_ && node(item) && !renamePending_; };
+    explorer_.canRename = [this](TreeItem item) { return item != rootItem_ && node(item) && !node(item)->unsupported && !renamePending_ && (!root_.wsl() || (connected_ && provider_->state() == ConnectionState::Ready)); };
     explorer_.renameRequested = [this](TreeItem item) { if (const auto n = node(item); n && item != rootItem_ && !renamePending_) explorer_.rename(item, n->path.filename().native()); };
     explorer_.renameCommitted = [this](TreeItem item, const std::wstring& name) { renameFile(item, name); };
-    explorer_.canOpenWithDefaultApp = [this](TreeItem item) { const auto n = node(item); return n && !n->directory; };
+    explorer_.canOpenWithDefaultApp = [this](TreeItem item) { const auto n = node(item); return n && !n->directory && !n->unsupported && !root_.wsl(); };
     explorer_.openWithDefaultAppRequested = [this](TreeItem item) { if (const auto n = node(item); n && !n->directory) openWithDefaultApp(n->path); };
     changes_.activated = [this](TreeItem item) { openGitFile(item); };
     changes_.expanded = [this](TreeItem item, bool value) {
@@ -323,7 +289,7 @@ void ProjectRuntime::Impl::create() {
     dropPreview_.create(window_, instance_);
     terminal_.changed = [this] { if (owner_ && owner_->changed) owner_->changed(); };
     quickOpen_.create(window_, instance_);
-    quickOpen_.opened = [this](const fs::path& path) { openFile(path); SetFocus(viewer().window()); };
+    quickOpen_.opened = [this](const ResourceId& path) { openFile(path); SetFocus(viewer().window()); };
     // Each underlying pane must clip the palette when repainting beneath it.
     for (const auto pane : {tree_, gitTree_, viewers_[0].window(), viewers_[1].window(), terminal_.container(), explorerButton_, gitButton_})
         SetWindowLongPtrW(pane, GWL_STYLE, GetWindowLongPtrW(pane, GWL_STYLE) | WS_CLIPSIBLINGS);
@@ -457,7 +423,7 @@ void ProjectRuntime::Impl::paint() {
         }
         dc.fill({sidebarRect_.left, top + gitHeader_ - 1, sidebarRect_.right, top + gitHeader_}, border);
         if (!repository || git_->entries.empty()) {
-            const std::wstring message = root_.empty() ? L"Open a folder to view Git changes." : !git_ ? L"Loading Git changes…" : !git_->error.empty() ? L"Git unavailable.\nCheck Git for Windows and press F5 to retry." : git_->root.empty() ? L"This folder is not in a Git repository." : L"No pending changes.";
+            const std::wstring message = root_.empty() ? L"Open a folder to view Git changes." : !git_ ? L"Loading Git changes…" : !git_->error.empty() ? L"Git unavailable.\n" + git_->error.substr(0, 2048) + L"\nPress F5 to retry." : git_->root.empty() ? L"This folder is not in a Git repository." : L"No pending changes.";
             dc.label({left, top + gitHeader_ + scaled(16), edge, sidebarRect_.bottom - scaled(12)}, message, muted, DT_LEFT | DT_TOP | DT_WORDBREAK);
         }
     } else if (root_.empty()) {
@@ -569,7 +535,9 @@ void ProjectRuntime::Impl::openGitFile(TreeItem item) {
     const auto entry = git_->entries[node.entry];
     openFile(entry.path, entry.state != L'?');
 }
-void ProjectRuntime::Impl::openWithDefaultApp(fs::path path) {
+void ProjectRuntime::Impl::openWithDefaultApp(ResourceId resource) {
+    if (resource.wsl()) { status(L"Open this file from the WSL terminal with the application you want to use."); return; }
+    const auto path = resource.local();
     const auto directory = path.parent_path();
     SHELLEXECUTEINFOW execute{}; execute.cbSize = sizeof(execute);
     execute.fMask = SEE_MASK_FLAG_NO_UI | SEE_MASK_NOASYNC;
@@ -581,6 +549,7 @@ void ProjectRuntime::Impl::openWithDefaultApp(fs::path path) {
 }
 void ProjectRuntime::Impl::status(std::wstring message) { status_ = std::move(message); RECT r{}; GetClientRect(window_, &r); r.top = r.bottom - footer_; InvalidateRect(window_, &r, FALSE); }
 void ProjectRuntime::Impl::chooseFolder() {
+    if (owner_ && owner_->chooseProject) { owner_->chooseProject(); return; }
     IFileOpenDialog* dialog = nullptr;
     if (FAILED(CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&dialog)))) return;
     DWORD options = 0; dialog->GetOptions(&options); dialog->SetOptions(options | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST); dialog->SetTitle(L"Open workspace folder");
@@ -594,49 +563,55 @@ void ProjectRuntime::Impl::chooseFolder() {
 }
 Node* ProjectRuntime::Impl::node(TreeItem item) const { const auto value = explorer_.item(item); return value ? reinterpret_cast<Node*>(value->data) : nullptr; }
 void ProjectRuntime::Impl::clearChildren(TreeItem parent) { explorer_.clearChildren(parent); }
-wchar_t ProjectRuntime::Impl::stateFor(const fs::path& path) const {
+wchar_t ProjectRuntime::Impl::stateFor(const ResourceId& path) const {
     if (!git_) return 0;
     const auto direct = git_->states.find(pathKey(path));
     return direct != git_->states.end() ? direct->second : 0;
 }
 void ProjectRuntime::Impl::updateLabel(TreeItem item) {
     const auto n = node(item); if (!n) return;
-    std::wstring text = n->path.filename().empty() ? n->path.native() : n->path.filename().native();
+    std::wstring text = n->unsupported ? n->label + L"  [unsupported encoding]" : n->path.filename().empty() ? n->path.native() : n->path.filename().native();
     if (n->directory && n->reparse) text += L"  [link]";
     const auto state = stateFor(n->path);
     explorer_.label(item, std::move(text), state ? stateColor(state) : foreground);
 }
 void ProjectRuntime::Impl::renameFile(TreeItem item, const std::wstring& name) {
-    const auto n = node(item); if (!n || item == rootItem_ || renamePending_) return;
-    std::wstring error;
-    if (!validFileName(name, error)) { MessageBoxW(window_, error.c_str(), L"Poppy — Rename", MB_OK | MB_ICONWARNING); return; }
+    const auto n = node(item); if (!n || n->unsupported || item == rootItem_ || renamePending_) return;
+    if (root_.wsl() && (!connected_ || provider_->state() != ConnectionState::Ready)) { status(L"Reconnect WSL before renaming."); return; }
+    std::wstring error = L"Enter a valid Linux filename (no /, NUL, . or ..; at most 255 UTF-8 bytes).";
+    if (!(root_.wsl() ? validPosixName(utf8(name)) : validFileName(name, error))) { MessageBoxW(window_, error.c_str(), L"Poppy — Rename", MB_OK | MB_ICONWARNING); return; }
     const auto source = n->path, destination = source.parent_path() / name;
     if (source.native() == destination.native()) return;
     saveTab(); endTabDrag(); renamePending_ = true; status(L"Renaming " + source.filename().native() + L"…");
     const auto generation = generation_;
-    worker_->submit(L"rename", [this, source, destination, generation] {
+    struct RenamedBuffer { ResourceId path; std::shared_ptr<EditBuffer> buffer; std::string baseline, version; };
+    std::vector<RenamedBuffer> buffers;
+    if (root_.wsl()) for (const auto& tab : tabs_) if (tab.buffer && source.contains(tab.path)) buffers.push_back({relocateResource(tab.path, source, destination), tab.buffer, tab.buffer->baseline, {}});
+    worker_->submit(L"rename", [this, source, destination, generation, buffers = std::move(buffers)]() mutable {
         // Deliberately omit MOVEFILE_REPLACE_EXISTING: collisions must never overwrite.
-        const auto error = MoveFileExW(source.c_str(), destination.c_str(), MOVEFILE_WRITE_THROUGH) ? std::wstring{} : winError();
-        worker_->complete([this, source, destination, generation, error] {
+        const auto error = provider_->renameResource(source, destination);
+        if (error.empty()) for (auto& item : buffers) { const auto file = provider_->readFile(item.path); if (file.error.empty() && file.bytes == item.baseline) item.version = file.version; }
+        worker_->complete([this, source, destination, generation, error, buffers = std::move(buffers)] {
             renamePending_ = false; if (generation != generation_) return;
             if (!error.empty()) { status(L"Rename failed"); MessageBoxW(window_, (source.native() + L"\n\n" + error).c_str(), L"Poppy — Rename", MB_OK | MB_ICONWARNING); return; }
+            for (const auto& item : buffers) if (!item.version.empty() && item.buffer->baseline == item.baseline) item.buffer->fileVersion = item.version;
             saveTab(); ++generation_; ++serial_[0]; ++serial_[1];
-            std::map<std::wstring, fs::path> expanded;
-            for (const auto& pair : expandedPaths_) { auto path = relocatePath(pair.second, source, destination); expanded[pathKey(path)] = std::move(path); }
+            std::map<std::wstring, ResourceId> expanded;
+            for (const auto& pair : expandedPaths_) { auto path = relocateResource(pair.second, source, destination); expanded[pathKey(path)] = std::move(path); }
             expandedPaths_ = std::move(expanded); pendingTreeSelection_ = destination;
             {
                 Tree::Batch batch(explorer_);
                 for (const auto& pair : nodes_) if (auto current = node(pair.second)) {
-                    current->path = relocatePath(current->path, source, destination); current->loading = false; updateLabel(pair.second);
+                    current->path = relocateResource(current->path, source, destination); current->loading = false; updateLabel(pair.second);
                 }
                 for (const auto& pair : nodes_) if (const auto current = node(pair.second); current && current->directory) explorer_.sort(pair.second, [](uintptr_t a, uintptr_t b) {
                     const auto x = reinterpret_cast<Node*>(a), y = reinterpret_cast<Node*>(b);
                     if (x->directory != y->directory) return x->directory;
-                    return CompareStringOrdinal(x->path.filename().c_str(), -1, y->path.filename().c_str(), -1, TRUE) == CSTR_LESS_THAN;
+                    return CompareStringOrdinal(x->path.filename().native().c_str(), -1, y->path.filename().native().c_str(), -1, x->path.wsl() ? FALSE : TRUE) == CSTR_LESS_THAN;
                 });
             }
             for (auto& tab : tabs_) {
-                const auto path = relocatePath(tab.path, source, destination);
+                const auto path = relocateResource(tab.path, source, destination);
                 if (path == tab.path) continue;
                 tab.path = path;
                 if (tab.buffer) { tab.buffer->document.language = path.filename() == L"CMakeLists.txt" ? Language::Config : languageFor(utf8(path.extension().native())); indexDocument(tab.buffer->document); }
@@ -650,30 +625,63 @@ void ProjectRuntime::Impl::renameFile(TreeItem item, const std::wstring& name) {
 }
 TreeItem ProjectRuntime::Impl::insert(TreeItem parent, const Entry& entry) {
     if (nodes_.size() >= maxTreeNodes) return 0;
-    auto n = std::make_unique<Node>(); n->path = entry.path; n->id = nextId_++; n->directory = entry.directory; n->reparse = entry.reparse;
+    auto n = std::make_unique<Node>(); n->path = entry.path; n->id = nextId_++; n->directory = entry.directory; n->reparse = entry.reparse; n->unsupported = entry.unsupported; n->label = entry.label;
     const auto item = explorer_.insert(parent, L"", n->directory && !n->reparse, reinterpret_cast<uintptr_t>(n.get()));
     if (item) { nodes_[n->id] = item; n.release(); updateLabel(item); }
     return item;
 }
-void ProjectRuntime::Impl::openFolder(fs::path path) {
+void ProjectRuntime::Impl::openFolder(ResourceId path) {
     quickOpen_.close();
     endTabDrag();
-    root_ = std::move(path);
+    root_ = std::move(path); provider_ = createProjectProvider(root_); connected_ = !root_.wsl();
+    terminal_.setProvider(provider_); quickOpen_.setProvider(provider_);
     auto saved = std::move(initialState_);
     restoreProject(saved.value_or(ProjectSession{}));
     if (!saved) expandedPaths_[pathKey(root_)] = root_;
     viewer().message(L"Select a file on the left.\n\nEdit here and save with Ctrl+S, or use your AI CLI in the terminal.");
     updateGitFiles();
-    rootItem_ = insert(0, {root_, true, false});
+    rootItem_ = insert(0, {root_, true, false, false, {}});
     if (expandedPaths_.count(pathKey(root_))) requestDirectory(rootItem_);
     if (pathKey(pendingTreeSelection_) == pathKey(root_)) { explorer_.select(rootItem_, false); pendingTreeSelection_.clear(); }
-    terminal_.setDirectory(root_); watch(); quickOpen_.setRoot(root_); refreshGit();
+    terminal_.setDirectory(root_); watch(); if (connected_) quickOpen_.setRoot(root_); refreshGit();
     SetWindowTextW(window_, (L"Poppy — " + root_.native()).c_str()); status(L"F5: refresh  ·  F6: diff  ·  Ctrl+`: terminal"); InvalidateRect(window_, nullptr, FALSE);
+    if (root_.wsl() && active_) connectRemote();
     if (!tabs_.empty()) { if (activeTab_ < tabs_.size()) { focusedGroup_ = tabs_[activeTab_].group; for (auto& tab : tabs_) if (tab.group == focusedGroup_) tab.displayed = false; tabs_[activeTab_].displayed = true; } normalizeGroups(); layout(false); loadTab(false, 0); loadTab(false, 1); }
+}
+void ProjectRuntime::Impl::connectRemote() {
+    if (connecting_ || !provider_ || !root_.wsl()) return;
+    connecting_ = true; connected_ = false; connectionError_.clear();
+    status(L"Connecting to WSL · " + wide(root_.location().distro) + L"…");
+    if (owner_ && owner_->changed) owner_->changed();
+    const auto root = root_; const auto generation = ++generation_;
+    worker_->submit(L"connect-wsl", [this, root, generation, expectedUid = wslUid_] {
+        ResourceId resolved; std::wstring error;
+        try { provider_->reconnect(); provider_->expectIdentity(expectedUid); resolved = provider_->connect(root); }
+        catch (const std::exception& failure) { error = wide(failure.what()); }
+        worker_->complete([this, resolved, generation, error] {
+            if (generation_ != generation) return;
+            connecting_ = false; connectionError_ = error;
+            if (!error.empty()) { status(L"WSL unavailable. " + error + L"  ·  F5: reconnect"); if (!viewer().hasDocument()) viewer().message(error + L"\n\nPress F5 to reconnect."); }
+            else {
+                const auto previous = root_; root_ = resolved; connected_ = true; wslUid_ = provider_->identity(); providerRevision_ = provider_->revision();
+                std::map<std::wstring, ResourceId> expanded;
+                for (const auto& item : expandedPaths_) { auto path = relocateResource(item.second, previous, root_); expanded[pathKey(path)] = std::move(path); }
+                expandedPaths_ = std::move(expanded); expandedPaths_[pathKey(root_)] = root_;
+                pendingTreeSelection_ = relocateResource(pendingTreeSelection_, previous, root_);
+                for (auto& tab : tabs_) tab.path = relocateResource(tab.path, previous, root_);
+                for (const auto& pair : nodes_) if (auto n = node(pair.second)) { n->path = relocateResource(n->path, previous, root_); n->loading = false; updateLabel(pair.second); }
+                terminal_.relocate(previous, root_); terminal_.setDirectory(root_); quickOpen_.setRoot(root_);
+                fileDirty_ = true; requestDirectory(rootItem_); refresh(false); status(L"WSL connected · " + wide(root_.location().distro));
+                if (owner_ && owner_->resolved) owner_->resolved(root_);
+            }
+            layout(false); if (owner_ && owner_->changed) owner_->changed();
+        });
+    });
 }
 ProjectSession ProjectRuntime::Impl::saveSession() {
     saveTab();
     ProjectSession state;
+    state.wslUid = wslUid_;
     state.sidebar = sidebar_; state.terminalHeight = terminalHeight_; state.terminalVisible = terminalVisible_;
     state.gitSidebar = activeSidebar_ == Sidebar::Git; state.activeTab = activeTab_;
     state.diffInline = viewer().diffInline(); state.gitTree = gitTreeView_; state.firstTabRow = editorGroups_[0].firstRow; state.rightTabRow = editorGroups_[1].firstRow; state.editorRatio = editorRatio_;
@@ -696,6 +704,7 @@ ProjectSession ProjectRuntime::Impl::saveSession() {
     return state;
 }
 void ProjectRuntime::Impl::restoreProject(const ProjectSession& state) {
+    wslUid_ = state.wslUid;
     focusedPane_ = state.focusedPane;
     editorGroups_[0].firstRow = state.firstTabRow; editorGroups_[1].firstRow = state.rightTabRow; editorRatio_ = state.editorRatio;
     restoreExplorerTop_ = state.explorerTop; restoreExplorerLeft_ = state.explorerLeft;
@@ -707,17 +716,15 @@ void ProjectRuntime::Impl::restoreProject(const ProjectSession& state) {
     sidebar_ = state.sidebar; terminalHeight_ = state.terminalHeight; terminalVisible_ = state.terminalVisible;
     activeSidebar_ = state.gitSidebar ? Sidebar::Git : Sidebar::Explorer;
     explorerActivity_.select(!state.gitSidebar); gitActivity_.select(state.gitSidebar);
-    const auto rootKey = pathKey(root_);
     for (const auto& path : state.expanded) {
-        auto directory = fs::u8path(path).lexically_normal().make_preferred();
+        auto directory = root_.at(path).lexically_normal().make_preferred();
         const auto key = pathKey(directory);
-        if (key == rootKey || (key.size() > rootKey.size() && key.compare(0, rootKey.size(), rootKey) == 0 &&
-            (rootKey.back() == L'\\' || key[rootKey.size()] == L'\\'))) expandedPaths_[key] = std::move(directory);
+        if (root_.contains(directory)) expandedPaths_[key] = std::move(directory);
     }
-    pendingTreeSelection_ = fs::u8path(state.selected);
+    pendingTreeSelection_ = root_.at(state.selected);
     for (size_t i = 0; i < state.tabs.size(); ++i) {
         const auto& saved = state.tabs[i];
-        const auto path = fs::u8path(saved.path);
+        const auto path = root_.at(saved.path);
         if (!path.is_absolute()) continue;
         const auto duplicate = std::find_if(tabs_.begin(), tabs_.end(), [&](const Tab& tab) { return pathKey(tab.path) == pathKey(path); });
         if (duplicate != tabs_.end()) continue;
@@ -725,23 +732,20 @@ void ProjectRuntime::Impl::restoreProject(const ProjectSession& state) {
         tabs_.push_back({path, saved.diff, saved.fileView, saved.diffView, saved.pinned, {}, saved.group, saved.displayed});
     }
 }
-void ProjectRuntime::Impl::forgetExpanded(const fs::path& path) {
-    const auto key = pathKey(path);
+void ProjectRuntime::Impl::forgetExpanded(const ResourceId& path) {
     for (auto iterator = expandedPaths_.begin(); iterator != expandedPaths_.end();) {
-        const auto& candidate = iterator->first;
-        if (candidate == key || (candidate.size() > key.size() && candidate.compare(0, key.size(), key) == 0 &&
-            (key.back() == L'\\' || candidate[key.size()] == L'\\'))) iterator = expandedPaths_.erase(iterator);
+        if (path.contains(iterator->second)) iterator = expandedPaths_.erase(iterator);
         else ++iterator;
     }
 }
 void ProjectRuntime::Impl::requestDirectory(TreeItem item) {
-    const auto n = node(item); if (!n || !n->directory || n->reparse) return;
+    const auto n = node(item); if (!n || !n->directory || n->reparse || (root_.wsl() && !connected_)) return;
     n->expandRequested = true;
     expandedPaths_[pathKey(n->path)] = n->path;
     if (n->loading) return;
     n->loading = true; const auto path = n->path; const auto id = n->id, generation = generation_;
     worker_->submit(L"dir:" + std::to_wstring(id), [this, path, id, generation] {
-        auto result = listDirectory(path);
+        auto result = std::make_shared<DirectoryResult>(provider_->listDirectory(path));
         worker_->complete([this, result, id, generation] {
             if (generation != generation_) return;
             const auto found = nodes_.find(id); if (found == nodes_.end()) return;
@@ -759,13 +763,13 @@ void ProjectRuntime::Impl::requestDirectory(TreeItem item) {
 void ProjectRuntime::Impl::applyDirectory(TreeItem item, Node*, const DirectoryResult& result) {
     if (!result.error.empty()) { status(L"Folder: " + result.error); return; }
     std::map<std::wstring, TreeItem> existing;
-    for (auto child = explorer_.child(item); child; child = explorer_.next(child)) if (const auto n = node(child)) existing[pathKey(n->path)] = child;
+    for (auto child = explorer_.child(item); child; child = explorer_.next(child)) if (const auto n = node(child)) existing[n->unsupported ? L"unsupported:" + n->label : pathKey(n->path)] = child;
     Tree::Batch batch(explorer_);
     for (const auto& entry : result.entries) {
-        const auto found = existing.find(pathKey(entry.path));
+        const auto found = existing.find(entry.unsupported ? L"unsupported:" + entry.label : pathKey(entry.path));
         if (found != existing.end()) {
             auto n = node(found->second);
-            if (n && n->directory == entry.directory && n->reparse == entry.reparse) { existing.erase(found); continue; }
+            if (n && n->directory == entry.directory && n->reparse == entry.reparse && n->unsupported == entry.unsupported) { existing.erase(found); continue; }
             if (n) forgetExpanded(n->path);
             explorer_.erase(found->second); existing.erase(found);
         }
@@ -775,7 +779,7 @@ void ProjectRuntime::Impl::applyDirectory(TreeItem item, Node*, const DirectoryR
     explorer_.sort(item, [](uintptr_t a, uintptr_t b) {
         const auto x = reinterpret_cast<Node*>(a), y = reinterpret_cast<Node*>(b);
         if (x->directory != y->directory) return x->directory;
-        return CompareStringOrdinal(x->path.filename().c_str(), -1, y->path.filename().c_str(), -1, TRUE) == CSTR_LESS_THAN;
+        return CompareStringOrdinal(x->path.filename().native().c_str(), -1, y->path.filename().native().c_str(), -1, x->path.wsl() ? FALSE : TRUE) == CSTR_LESS_THAN;
     });
     for (auto child = explorer_.child(item); child; child = explorer_.next(child)) {
         const auto n = node(child); if (!n) continue;
@@ -917,13 +921,15 @@ bool ProjectRuntime::Impl::saveFile(size_t index, bool wait) {
     if (wait && buffer->saving) { worker_->drain(); worker_->dispatch(); }
     if (!buffer->dirty()) return true;
     if (buffer->saving) return false;
+    if (root_.wsl() && (!connected_ || provider_->state() != ConnectionState::Ready)) { status(L"Reconnect WSL before saving. Your edits have been kept."); return false; }
     const auto bytes = buffer->encoded(), text = buffer->document.text, baseline = buffer->baseline;
     buffer->saving = true;
-    worker_->submit(L"save:" + pathKey(path), [this, path, buffer, bytes, text, baseline] {
-        const auto error = writeDocument(path, baseline, bytes);
-        worker_->complete([this, path, buffer, bytes, text, error] {
+    worker_->submit(L"save:" + pathKey(path), [this, path, buffer, bytes, text, baseline, version = buffer->fileVersion] {
+        const auto result = provider_->saveFile(path, bytes, version, baseline);
+        const auto error = result.error;
+        worker_->complete([this, path, buffer, bytes, text, error, version = result.version] {
             buffer->saving = false;
-            if (error.empty()) { buffer->saved(bytes, text); status(L"Saved " + path.filename().native()); refreshGit(); }
+            if (error.empty()) { buffer->saved(bytes, text); buffer->fileVersion = version; status(L"Saved " + path.filename().native()); refreshGit(); }
             else { status(L"Save failed: " + path.filename().native()); MessageBoxW(window_, (path.native() + L"\n\n" + error).c_str(), L"Poppy — Save", MB_OK | MB_ICONWARNING); }
             updateTabs(false); for (auto& view : viewers_) InvalidateRect(view.window(), nullptr, FALSE);
         });
@@ -940,7 +946,8 @@ bool ProjectRuntime::Impl::confirmTab(size_t index) {
     const auto answer = MessageBoxW(window_, (L"Save changes to " + tabs_[index].path.filename().native() + L"?").c_str(), L"Poppy", MB_YESNOCANCEL | MB_ICONQUESTION);
     return answer == IDNO || (answer == IDYES && saveFile(index, true));
 }
-void ProjectRuntime::Impl::openFile(const fs::path& path, bool diff) {
+void ProjectRuntime::Impl::openFile(const ResourceId& path, bool diff) {
+    if (path.empty()) { status(L"This filename cannot be represented as UTF-8 and cannot be opened or renamed."); return; }
     endTabDrag();
     const auto key = pathKey(path);
     const auto found = std::find_if(tabs_.begin(), tabs_.end(), [&](const Tab& tab) { return pathKey(tab.path) == key; });
@@ -1031,12 +1038,13 @@ void ProjectRuntime::Impl::loadTab(bool preserve, int group) {
         viewers_[group].edit(tab.buffer, path, preserve); if (!preserve) viewers_[group].restore(state);
         status(L"Unsaved changes kept  ·  Ctrl+S: save"); return;
     }
+    if (root_.wsl() && !connected_) { if (!viewers_[group].hasDocument()) viewers_[group].message(connecting_ ? L"Connecting to WSL…" : L"WSL disconnected. Press F5 to reconnect.", path); return; }
     // Retain only tab metadata and view positions; reload the active document.
     if (!preserve) viewers_[group].message(tab.diff ? L"Loading Git diff…" : L"Loading…", path);
     status((tab.diff ? L"Git diff: " : L"Loading ") + path.filename().native());
     if (!tab.diff) {
         worker_->submit(L"file:" + std::to_wstring(group), [this, group, path, serial, generation, preserve, state] {
-            auto result = readDocument(path);
+            auto result = readDocument(*provider_, path);
             worker_->complete([this, group, result, path, serial, generation, preserve, state] {
                 if (generation != generation_ || serial != serial_[group]) return;
                 if (viewers_[group].buffer() && (viewers_[group].buffer()->dirty() || viewers_[group].buffer()->saving)) return;
@@ -1050,7 +1058,7 @@ void ProjectRuntime::Impl::loadTab(bool preserve, int group) {
         return;
     }
     if (!git_) { waitingForGit_[group] = true; viewers_[group].message(L"Loading Git repository…", path); return; }
-    if (git_->root.empty() || !git_->error.empty()) { viewers_[group].message(L"Git repository unavailable. Refresh after installing Git for Windows.", path); return; }
+    if (git_->root.empty() || !git_->error.empty()) { viewers_[group].message(L"Git repository unavailable. Check Git in the project environment and press F5.", path); return; }
     const auto root = git_->root;
     gitWorker_->submit(L"diff:" + std::to_wstring(group), [this, group, serial, generation, path, root, preserve, state] {
         const auto relative = path.lexically_relative(root).native();
@@ -1059,7 +1067,7 @@ void ProjectRuntime::Impl::loadTab(bool preserve, int group) {
                 L"--no-ext-diff", L"--no-textconv", L"--color=never",
                 L"--output-indicator-old=-", L"--output-indicator-new=+", L"--output-indicator-context= ",
                 staged ? L"--cached" : L"--ours", L"--", relative};
-            return runProcess(args, root, 5000, gitWorker_->cancellation());
+            return provider_->git(args, root, gitWorker_->cancellation());
         };
         auto result = readDiff(false);
         bool staged = false;
@@ -1081,14 +1089,14 @@ void ProjectRuntime::Impl::loadTab(bool preserve, int group) {
 void ProjectRuntime::Impl::showDiff() {
     if (tabs_.empty()) { status(L"Select a file to view its Git diff."); return; }
     auto& tab = tabs_[activeTab_];
-    if (!tab.diff && (!git_ || git_->root.empty() || !git_->error.empty())) { status(L"Git repository unavailable. Refresh after installing Git for Windows."); return; }
+    if (!tab.diff && (!git_ || git_->root.empty() || !git_->error.empty())) { status(L"Git repository unavailable. Check Git in the project environment and press F5."); return; }
     saveTab(); tab.diff = !tab.diff; layout(); loadTab();
 }
 void ProjectRuntime::Impl::refreshGit() {
-    if (root_.empty()) return;
+    if (root_.empty() || (root_.wsl() && !connected_)) return;
     const auto generation = generation_; const auto root = root_;
     gitWorker_->submit(L"git", [this, root, generation] {
-        auto result = readGit(root, gitWorker_->cancellation());
+        auto result = readGit(*provider_, root, gitWorker_->cancellation());
         gitWorker_->complete([this, generation, result] {
             if (generation != generation_) return;
             git_ = result;
@@ -1096,6 +1104,7 @@ void ProjectRuntime::Impl::refreshGit() {
             updateGitFiles();
             for (int group = 0; group < 2; ++group) if (waitingForGit_[group]) loadTab(false, group);
             if (!result->error.empty()) status(L"Git: " + result->error);
+            else if (result->unsupportedNames) status(L"Some Git filenames are not UTF-8 and cannot be opened.");
             else if (result->truncated) status(L"Git display limited to 50,000 files and badge paths.");
             InvalidateRect(window_, nullptr, FALSE);
         });
@@ -1103,6 +1112,7 @@ void ProjectRuntime::Impl::refreshGit() {
 }
 void ProjectRuntime::Impl::refresh(bool force) {
     if (root_.empty()) return;
+    if (root_.wsl() && (!connected_ || provider_->state() != ConnectionState::Ready)) { if (force) connectRemote(); return; }
     if (force || filesDirty_) quickOpen_.refresh();
     filesDirty_ = false;
     for (const auto& pair : nodes_) { const auto n = node(pair.second); if (n && n->expandRequested) requestDirectory(pair.second); }
@@ -1114,7 +1124,8 @@ void ProjectRuntime::Impl::refresh(bool force) {
     fileDirty_ = false;
 }
 void ProjectRuntime::Impl::watch() {
-    watchDirectory_.reset(CreateFileW(root_.c_str(), FILE_LIST_DIRECTORY, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OVERLAPPED, nullptr));
+    if (root_.wsl()) return;
+    watchDirectory_.reset(CreateFileW(root_.local().c_str(), FILE_LIST_DIRECTORY, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OVERLAPPED, nullptr));
     watchEvent_.reset(CreateEventW(nullptr, TRUE, FALSE, nullptr));
     if (!watchDirectory_ || !watchEvent_) { status(L"Folder watching unavailable; use F5 to refresh."); stopWatch(); return; }
     watchOperation_ = {}; watchOperation_.hEvent = watchEvent_.value; armWatch();
@@ -1127,6 +1138,14 @@ void ProjectRuntime::Impl::armWatch() {
 }
 void ProjectRuntime::Impl::pollWatch() {
     const auto now = GetTickCount64();
+    if (root_.wsl() && provider_) {
+        const auto revision = provider_->revision();
+        if (revision != providerRevision_) {
+            providerRevision_ = revision;
+            if (connected_ && provider_->state() != ConnectionState::Ready) { connected_ = false; ++generation_; ++serial_[0]; ++serial_[1]; status(L"WSL disconnected. Your edits have been kept. Use F5 to reconnect."); if (owner_ && owner_->changed) owner_->changed(); }
+            else if (connected_) { if (!dirty_) dirtySince_ = now; dirty_ = fileDirty_ = filesDirty_ = true; lastEvent_ = now; }
+        }
+    }
     if (watchPending_ && WaitForSingleObject(watchEvent_.value, 0) == WAIT_OBJECT_0) {
         DWORD bytes = 0; const bool ok = GetOverlappedResult(watchDirectory_.value, &watchOperation_, &bytes, FALSE) != FALSE;
         bool relevant = !ok || !bytes;
@@ -1174,7 +1193,7 @@ LRESULT ProjectRuntime::Impl::handle(UINT m, WPARAM a, LPARAM b) {
     case WM_TIMER: if (a == timerId) pollWatch(); else if (a == tabDragTimerId) scrollTabDrag(); return 0;
     case WM_APP + 14: loadTab(false, 0); loadTab(false, 1); return 0;
     case WM_APP + 13: if (!root_.empty()) { if (!watchDirectory_) watch(); refresh(); } return 0;
-    case WM_APP + 12: if (!root_.empty() && IsWindowVisible(window_)) { refreshGit(); if (!tabs_.empty()) { saveTab(); loadTab(true, 0); loadTab(true, 1); } } return 0;
+    case WM_APP + 12: if (!root_.empty() && IsWindowVisible(window_)) { if (root_.wsl()) { if (connected_) { fileDirty_ = filesDirty_ = true; refresh(false); } } else { refreshGit(); if (!tabs_.empty()) { saveTab(); loadTab(true, 0); loadTab(true, 1); } } } return 0;
     case WM_LBUTTONDOWN: {
         quickOpen_.close();
         const int x = MulDiv(GET_X_LPARAM(b), 96, dpi_), y = GET_Y_LPARAM(b);
@@ -1244,7 +1263,7 @@ LRESULT ProjectRuntime::Impl::handle(UINT m, WPARAM a, LPARAM b) {
         const auto header = reinterpret_cast<NMHDR*>(b);
         if (header->hwndFrom == tooltips_ && header->code == TTN_GETDISPINFOW && header->idFrom >= 100 && header->idFrom - 100 < tabTools_) {
             const size_t index = visibleTabs_[header->idFrom - 100];
-            if (index < tabs_.size()) reinterpret_cast<NMTTDISPINFOW*>(b)->lpszText = const_cast<wchar_t*>(tabs_[index].path.c_str());
+            if (index < tabs_.size()) { tabTip_ = tabs_[index].path.native(); reinterpret_cast<NMTTDISPINFOW*>(b)->lpszText = tabTip_.data(); }
             return 0;
         }
         return 0;
@@ -1300,8 +1319,10 @@ void ProjectRuntime::shutdown() {
 }
 bool ProjectRuntime::canClose() { if (impl_->renamePending_) { impl_->worker_->drain(); impl_->worker_->dispatch(); } impl_->saveTab(); for (size_t i = 0; i < impl_->tabs_.size(); ++i) if (!impl_->confirmTab(i)) return false; return true; }
 void ProjectRuntime::revalidate() { PostMessageW(window(), WM_APP+13, 0, 0); }
-void ProjectRuntime::initialize(const fs::path& path, const ProjectSession& state, bool saved) { if (saved) impl_->initialState_ = state; impl_->openFolder(path); }
+void ProjectRuntime::initialize(const ResourceId& path, const ProjectSession& state, bool saved) { if (saved) impl_->initialState_ = state; impl_->openFolder(path); }
 void ProjectRuntime::activate(bool active) {
+    impl_->active_ = active;
+    if (active && impl_->root_.wsl() && !impl_->connected_ && impl_->provider_ && impl_->provider_->state() == ConnectionState::Disconnected) impl_->connectRemote();
     if (!active) {
         impl_->saveTab(); impl_->lastFocus_ = GetFocus();
         if (impl_->lastFocus_ == impl_->terminal_.window()) impl_->focusedPane_ = "terminal";
@@ -1324,7 +1345,7 @@ void ProjectRuntime::poll() { if (ready()) impl_->pollWatch(); if (IsWindowVisib
 bool ProjectRuntime::key(const MSG& message) { return impl_->key(message); }
 ProjectSession ProjectRuntime::snapshot() { return impl_->saveSession(); }
 AiSummary ProjectRuntime::summary() const { return impl_->terminal_.summary(); }
-std::wstring ProjectRuntime::description() const { return impl_->terminal_.description(); }
+std::wstring ProjectRuntime::description() const { return (impl_->root_.wsl() ? L"\n" + (impl_->connectionError_.empty() ? impl_->provider_->error() : impl_->connectionError_) : L"") + impl_->terminal_.description(); }
 bool ProjectRuntime::apply(const AiEvent& event) { return impl_->terminal_.apply(event); }
 void ProjectRuntime::focusAttention() { impl_->terminalVisible_ = true; impl_->layout(false); impl_->terminal_.focusAttention(); }
 size_t ProjectRuntime::documentBytes() const {
@@ -1340,5 +1361,10 @@ void ProjectRuntime::releaseDocument() {
 }
 HWND ProjectRuntime::window() const { return impl_->window_; }
 bool ProjectRuntime::ready() const { return !impl_->root_.empty(); }
+bool ProjectRuntime::hasUnsaved() const { return impl_->renamePending_ || std::any_of(impl_->tabs_.begin(), impl_->tabs_.end(), [](const Tab& tab) { return tab.buffer && (tab.buffer->dirty() || tab.buffer->saving); }); }
+std::wstring ProjectRuntime::connectionDescription() const {
+    if (!impl_->root_.wsl()) return {};
+    return impl_->connecting_ ? L"Connecting" : impl_->connected_ && impl_->provider_->state() == ConnectionState::Ready ? L"Connected" : impl_->connectionError_.empty() && impl_->provider_->error().empty() ? L"Disconnected" : L"Unavailable";
+}
 
 }

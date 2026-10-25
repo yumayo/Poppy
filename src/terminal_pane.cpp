@@ -21,7 +21,8 @@ void TerminalPane::add(SavedTerminal configuration) {
     if (configuration.directory.empty()) configuration.directory = directory_.u8string();
     auto session = std::make_unique<TerminalSession>(); session->configuration = std::move(configuration);
     session->terminal = std::make_unique<Terminal>(); session->terminal->create(window_,instance_);
-    session->terminal->setDpi(dpi_); session->terminal->setDirectory(fs::u8path(session->configuration.directory));
+    session->terminal->setDpi(dpi_); session->terminal->setDirectory(directory_.wsl() ? windowsProcessDirectory() : fs::u8path(session->configuration.directory));
+    if (directory_.wsl()) session->terminal->setDisplayDirectory(wide(session->configuration.directory) + L" · WSL · " + wide(directory_.location().distro));
     auto ptr = session.get();
     session->terminal->focused = [this, ptr] {
         const auto found = std::find_if(sessions_.begin(), sessions_.end(), [ptr](const auto& s) { return s.get() == ptr; });
@@ -29,12 +30,21 @@ void TerminalPane::add(SavedTerminal configuration) {
     };
     session->terminal->starting = [this,ptr] {
         ptr->ai = {}; ptr->notificationId = newSessionId();
-        ptr->terminal->trackContainer(ptr->notificationId);
+        if (directory_.wsl()) {
+            ptr->wslToken = newSessionId();
+            ptr->terminal->setCommand(provider_->terminalCommand(directory_.at(ptr->configuration.directory), ptr->wslToken, ptr->wslTool));
+        } else ptr->terminal->trackContainer(ptr->notificationId);
         if (hooks_ && !hooks_->url().empty()) {
             hooks_->add(ptr->notificationId);
             ptr->terminal->setEnvironment({{L"POPPY_EVENTS_URL",wide(hooks_->url())},{L"POPPY_SESSION_ID",wide(ptr->notificationId)}});
         } else ptr->terminal->setEnvironment({{L"POPPY_EVENTS_URL", L""}, {L"POPPY_SESSION_ID", L""}});
         if (changed) changed();
+    };
+    session->terminal->stopping = [this, ptr] {
+        if (!ptr->wslToken.empty()) {
+            const auto token = std::exchange(ptr->wslToken, {}); const bool running = ptr->terminal->running();
+            if (provider_ && !provider_->stopTerminal(token) && running) MessageBoxW(GetAncestor(window_, GA_ROOT), L"Could not confirm that this WSL terminal's child processes have exited. Check the processes in this distribution.", L"Poppy — WSL cleanup unconfirmed", MB_OK | MB_ICONWARNING);
+        }
     };
     session->terminal->ended = [this,ptr] {
         const bool registered = !ptr->notificationId.empty();
@@ -46,11 +56,20 @@ void TerminalPane::add(SavedTerminal configuration) {
     sessions_.push_back(std::move(session)); select(sessions_.size()-1);
 }
 void TerminalPane::setDpi(UINT dpi) { dpi_=dpi; renderer_.setDpi(dpi); header_=MulDiv(32,dpi,96); for(auto& s:sessions_) s->terminal->setDpi(dpi); layout(); }
-void TerminalPane::setDirectory(const fs::path& directory) { directory_=directory; for(auto& s:sessions_) if(s->configuration.directory.empty()) {s->configuration.directory=directory.u8string();s->terminal->setDirectory(directory);} }
-void TerminalPane::relocate(const fs::path& source, const fs::path& destination) {
+void TerminalPane::setDirectory(const ResourceId& directory) {
+    directory_ = directory;
     for (auto& session : sessions_) {
-        const auto path = relocatePath(fs::u8path(session->configuration.directory), source, destination);
-        session->configuration.directory = path.u8string(); session->terminal->setDirectory(path);
+        if (session->configuration.directory.empty()) session->configuration.directory = directory.u8string();
+        session->terminal->setDirectory(directory.wsl() ? windowsProcessDirectory() : fs::u8path(session->configuration.directory));
+        if (directory.wsl()) session->terminal->setDisplayDirectory(wide(session->configuration.directory) + L" · WSL · " + wide(directory.location().distro));
+    }
+}
+void TerminalPane::relocate(const ResourceId& source, const ResourceId& destination) {
+    directory_ = relocateResource(directory_, source, destination);
+    for (auto& session : sessions_) {
+        const auto path = relocateResource(directory_.at(session->configuration.directory), source, destination);
+        session->configuration.directory = path.u8string(); session->terminal->setDirectory(path.wsl() ? windowsProcessDirectory() : path.local());
+        if (path.wsl()) session->terminal->setDisplayDirectory(path.native() + L" · WSL · " + wide(path.location().distro));
     }
 }
 void TerminalPane::restore(const ProjectSession& state) {
@@ -226,6 +245,12 @@ void TerminalPane::menu(size_t index,POINT point){
     }
 }
 void TerminalPane::addAi(const std::wstring& tool) {
+    if (directory_.wsl()) {
+        if (!provider_ || provider_->state() != ConnectionState::Ready) { MessageBoxW(GetAncestor(window_, GA_ROOT), L"Reconnect the WSL project before starting an AI CLI.", L"Poppy", MB_OK | MB_ICONINFORMATION); return; }
+        const int group = active().configuration.group;
+        add({"", utf8(tool == L"codex" ? L"Codex" : L"Claude"), directory_.u8string(), group});
+        active().wslTool = tool; active().terminal->launch(); SetFocus(window()); return;
+    }
     const DWORD length = GetEnvironmentVariableW(L"POPPY_AI_CONTAINER_DIR", nullptr, 0);
     if (!length) { MessageBoxW(GetAncestor(window_, GA_ROOT), L"Set POPPY_AI_CONTAINER_DIR to the Windows path of your ai-container checkout, then restart Poppy. See ai/README.md.", L"Poppy", MB_OK | MB_ICONINFORMATION); return; }
     std::wstring repository(length, 0); const auto count = GetEnvironmentVariableW(L"POPPY_AI_CONTAINER_DIR", repository.data(), length); if (!count || count >= length) return; repository.resize(count);
@@ -236,11 +261,11 @@ void TerminalPane::addAi(const std::wstring& tool) {
     const int group = active().configuration.group;
     add({"", utf8(tool == L"codex" ? L"Codex" : L"Claude"), directory_.u8string(), group});
     wchar_t system[MAX_PATH]{}; GetSystemDirectoryW(system, MAX_PATH);
-    active().terminal->setCommand({std::wstring(system) + L"\\WindowsPowerShell\\v1.0\\powershell.exe", L"-NoLogo", L"-NoProfile", L"-ExecutionPolicy", L"Bypass", L"-File", script.native(), L"-Repository", repository, L"-Workspace", directory_.native(), L"-Tool", tool});
+    active().terminal->setCommand({std::wstring(system) + L"\\WindowsPowerShell\\v1.0\\powershell.exe", L"-NoLogo", L"-NoProfile", L"-ExecutionPolicy", L"Bypass", L"-File", script.native(), L"-Repository", repository, L"-Workspace", directory_.local().native(), L"-Tool", tool});
     active().terminal->launch(); SetFocus(window());
 }
 void TerminalPane::addMenu(POINT point) {
-    HMENU menu = CreatePopupMenu(); AppendMenuW(menu, MF_STRING, 1, L"New shell"); AppendMenuW(menu, MF_STRING, 2, L"New Codex (ai-container)"); AppendMenuW(menu, MF_STRING, 3, L"New Claude Code (ai-container)");
+    HMENU menu = CreatePopupMenu(); AppendMenuW(menu, MF_STRING, 1, L"New shell"); AppendMenuW(menu, MF_STRING, 2, directory_.wsl() ? L"New Codex (WSL)" : L"New Codex (ai-container)"); AppendMenuW(menu, MF_STRING, 3, directory_.wsl() ? L"New Claude Code (WSL)" : L"New Claude Code (ai-container)");
     const auto command = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, point.x, point.y, 0, window_, nullptr); DestroyMenu(menu);
     if (command == 1) { const int group = active().configuration.group; add({"", "Shell", directory_.u8string(), group}); SetFocus(window()); }
     else if (command == 2 || command == 3) addAi(command == 2 ? L"codex" : L"claude");

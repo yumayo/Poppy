@@ -20,18 +20,18 @@ void Viewer::setDpi(UINT dpi) {
     header_ = MulDiv(34, dpi, 96); gutter_ = MulDiv(70, dpi, 96);
     scrollbars(); caretPosition(); InvalidateRect(window_, nullptr, FALSE);
 }
-void Viewer::show(std::shared_ptr<const Document> d, const fs::path& path, bool preserve) {
+void Viewer::show(std::shared_ptr<const Document> d, const ResourceId& path, bool preserve) {
     edit_.reset(); highSurrogate_ = 0;
     diff_.reset(); document_ = std::move(d); path_ = path; message_.clear();
     if (!preserve) { top_ = left_ = 0; anchor_ = caret_ = 0; after_ = false; }
     else { anchor_ = std::min(anchor_, document_->text.size()); caret_ = std::min(caret_, document_->text.size()); }
     scrollbars(); caretPosition(); InvalidateRect(window_, nullptr, FALSE);
 }
-void Viewer::edit(std::shared_ptr<EditBuffer> buffer, const fs::path& path, bool preserve) {
+void Viewer::edit(std::shared_ptr<EditBuffer> buffer, const ResourceId& path, bool preserve) {
     show(std::shared_ptr<const Document>(buffer, &buffer->document), path, preserve);
     edit_ = std::move(buffer); caretPosition();
 }
-void Viewer::showDiff(std::shared_ptr<const DiffDocument> d, const fs::path& path, bool preserve) {
+void Viewer::showDiff(std::shared_ptr<const DiffDocument> d, const ResourceId& path, bool preserve) {
     edit_.reset(); highSurrogate_ = 0;
     // Share the patch snapshot; both panes only keep references to its lines.
     document_ = std::shared_ptr<const Document>(d, &d->patch); diff_ = std::move(d); path_ = path; message_.clear();
@@ -39,7 +39,7 @@ void Viewer::showDiff(std::shared_ptr<const DiffDocument> d, const fs::path& pat
     else { anchor_ = std::min(anchor_, document_->text.size()); caret_ = std::min(caret_, document_->text.size()); }
     scrollbars(); caretPosition(); InvalidateRect(window_, nullptr, FALSE);
 }
-void Viewer::message(const std::wstring& text, const fs::path& path) {
+void Viewer::message(const std::wstring& text, const ResourceId& path) {
     edit_.reset(); highSurrogate_ = 0;
     diff_.reset(); document_.reset(); path_ = path; message_ = text; top_ = left_ = 0; anchor_ = caret_ = 0; after_ = false;
     scrollbars(); caretPosition(); InvalidateRect(window_, nullptr, FALSE);

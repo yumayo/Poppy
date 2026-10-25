@@ -77,3 +77,9 @@ PoppyのHTTP通知形式は `running` / `waiting` / `interrupted` / `completed` 
 - `poppy_folder_tests`: Windows上で保持済みプロジェクトの切り替えと複数端末を検証。
 
 Linux側のテストとWindows向けコンパイルを実施しています。Windows上のGUI・ConPTY・実CLI hook、およびこのPowerShellアダプターによる起動・停止の実動作は未検証です。
+
+## WSLプロジェクトからの直接起動
+
+WSLプロジェクトの「＋」の右クリックでは、同じディストリビューション・ユーザー・Linuxのcwdで、WSLにインストールしたCodex・Claude Codeを直接起動します。`POPPY_AI_CONTAINER_DIR`は使いません。既存のhook導入スクリプトをWSL側のCLI設定へ導入し、WSLから到達できるWindowsの通知先を設定してください。通知IDとURLは既存の`WSLENV`を保って引き継ぎます。
+
+Windows用のai-containerランチャーにWSLのLinuxパスを渡す接続は未実装です。Windowsプロジェクトのai-container起動は従来の手順を利用できます。ファイル接続と通知の到達性は別に検証してください。[WSL対応](../../docs/wsl-support.md)に利用範囲と制約をまとめています。

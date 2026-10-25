@@ -12,7 +12,7 @@ C++17 / Win32 / Direct2D / DirectWrite / ConPTYで実装し、ブラウザー、
 
 ## ビルド
 
-生成するアプリはWindows 10 version 1809以降のx64環境が対象です。Git表示には、別途Git for WindowsをPATHに追加してください。AI CLIも利用するものを別途インストールします。
+生成するアプリはWindows 10 version 1809以降のx64環境が対象です。WindowsプロジェクトのGit表示には、別途Git for WindowsをPATHに追加してください。WSLプロジェクトは選んだディストリビューションのGitを使います。AI CLIも利用する環境へ別途インストールします。
 
 状態の保存にはSQLite3を使います。SQLite3はC++標準ライブラリには含まれません。`third_party/` はGit管理対象外のため、ビルド前に [SQLite公式サイト](https://sqlite.org/download.html) の `sqlite-amalgamation-*.zip` から、同じリリースの `sqlite3.c` と `sqlite3.h` を `third_party/sqlite/` に配置してください。SQLite 3.54.1でビルドと保存テストを確認しています。CMakeで静的リンクするため、配布先にSQLiteのDLLを追加する必要はありません。
 
@@ -100,6 +100,8 @@ ctest --test-dir out --output-on-failure
 ## 複数プロジェクトとAI状態
 
 「Open folder」「＋ Open folder」「Ctrl+O」は、現在のプロジェクトを残して追加します。左端の一覧をクリックして切り替えます。一覧の境界はドラッグで調整でき、右クリックまたは中クリックで対象プロジェクトを閉じます。フォルダーやworktree自体は削除しません。同名フォルダーには識別できる親パスを補助表示します。
+
+「Open WSL folder…」では、ディストリビューションとLinuxパスを指定してWSLのプロジェクトを開けます。ファイル表示・編集・保存・名前変更・検索・Git・ターミナルに対応し、Windowsのプロジェクトと同時に利用できます。配布時は`wsl/poppy-wsl-helper`をPoppy.exeの隣に置いてください。接続・保存の制約と検証範囲は [WSL対応](docs/wsl-support.md) を参照してください。
 
 ターミナル領域の「＋」でシェルを追加し、タブで切り替えます。ターミナルタブの右クリックで名前変更・終了、「＋」の右クリックでCodex・Claude Codeをai-containerで起動できます。設定手順は [ai-container連携](integration/ai/README.md)、所有関係と検証範囲は [実装メモ](docs/multi-project.md) を参照してください。再起動後は構成だけを復元し、以前のAIコマンドを自動実行しません。
 

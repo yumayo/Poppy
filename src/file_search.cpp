@@ -50,6 +50,10 @@ int scorePath(std::u32string_view path, std::u32string_view query) {
 int fileSearchScore(std::string_view relative, std::string_view query) {
     return scorePath(normalized(relative), normalized(query));
 }
+void addIndexedFile(FileIndex& index, std::string relative) {
+    auto name = normalized(relative);
+    index.files.push_back({std::move(relative), std::move(name)});
+}
 FileIndex indexFiles(const std::filesystem::path& root, const std::function<bool()>& cancelled) {
     namespace fs = std::filesystem;
     FileIndex result;
@@ -90,7 +94,7 @@ FileSearchResult searchFiles(const FileIndex& index, std::string_view query,
         const auto count = std::min(resultLimit, index.files.size());
         for (size_t i = 0; i < count; ++i) {
             if (cancelled && cancelled()) return {};
-            result.matches.push_back({std::filesystem::u8path(index.files[i].relative), 0});
+            result.matches.push_back({std::filesystem::u8path(index.files[i].relative), 0, index.files[i].relative});
         }
         result.resultsLimited = index.files.size() > count;
         return result;
@@ -112,7 +116,7 @@ FileSearchResult searchFiles(const FileIndex& index, std::string_view query,
         std::push_heap(best.begin(), best.end(), before);
     }
     std::sort_heap(best.begin(), best.end(), before);
-    for (const auto& match : best) result.matches.push_back({std::filesystem::u8path(index.files[match.index].relative), match.score});
+    for (const auto& match : best) result.matches.push_back({std::filesystem::u8path(index.files[match.index].relative), match.score, index.files[match.index].relative});
     return result;
 }
 }

@@ -1,4 +1,5 @@
 #include "storage.h"
+#include "resource.h"
 #include <sqlite3.h>
 #include <chrono>
 #include <iostream>
@@ -32,6 +33,7 @@ bool same(const poppy::ViewState& a, const poppy::ViewState& b) {
     return a.top == b.top && a.left == b.left && a.anchor == b.anchor && a.caret == b.caret && a.after == b.after;
 }
 bool same(const poppy::ProjectSession& a, const poppy::ProjectSession& b) {
+    if (a.wslUid != b.wslUid) return false;
     if (a.sidebar != b.sidebar || a.terminalHeight != b.terminalHeight || a.terminalVisible != b.terminalVisible ||
         a.gitSidebar != b.gitSidebar || a.diffInline != b.diffInline || a.gitTree != b.gitTree || a.activeTab != b.activeTab || a.expanded != b.expanded || a.selected != b.selected || a.tabs.size() != b.tabs.size() || a.explorerTop != b.explorerTop || a.explorerLeft != b.explorerLeft ||
         a.gitTop != b.gitTop || a.gitLeft != b.gitLeft || a.firstTabRow != b.firstTabRow || a.rightTabRow != b.rightTabRow || a.editorRatio != b.editorRatio || a.terminalRatio != b.terminalRatio || a.gitSelected != b.gitSelected ||
@@ -226,19 +228,44 @@ void schemaAndRegistry() {
     {
         poppy::Storage storage(fixture.directory);
         const auto projectDb = storage.projectDirectory("c:\\future", "c:\\future") / "storage.sql";
-        execute(projectDb, "PRAGMA user_version=7");
+        execute(projectDb, "PRAGMA user_version=8");
         rejects([&] { storage.loadProject("c:\\future", "c:\\future"); }, "A newer project schema was overwritten");
         storage.projectDirectory("c:\\invalid", "c:\\invalid");
         execute(appDb, R"(UPDATE projects SET directory='../../escape' WHERE path_key='c:\invalid')");
         rejects([&] { storage.projectDirectory("c:\\invalid", "c:\\invalid"); }, "An invalid registry path escaped the project directory");
     }
-    execute(appDb, "PRAGMA user_version=3");
+    execute(appDb, "PRAGMA user_version=4");
     rejects([&] { poppy::Storage storage(fixture.directory); }, "A newer app schema was overwritten");
+}
+void wslRoundTripAndMigration() {
+    Fixture fixture;
+    const auto windows = std::string("C:\\project");
+    fs::path oldDirectory;
+    {
+        poppy::Storage storage(fixture.directory); poppy::ProjectSession local; local.sidebar = 301;
+        storage.saveProject("c:\\project", windows, local); oldDirectory = storage.projectDirectory("c:\\project",windows);
+        execute(oldDirectory/"storage.sql","DROP TABLE connection; PRAGMA user_version=6;");
+    }
+    execute(fixture.directory/"storage.sql","ALTER TABLE projects DROP COLUMN kind; ALTER TABLE projects DROP COLUMN distro; ALTER TABLE projects DROP COLUMN user; ALTER TABLE projects DROP COLUMN remote_root; PRAGMA user_version=2;");
+    {
+        poppy::Storage storage(fixture.directory);
+        check(storage.projectDirectory("c:\\project",windows) == oldDirectory && storage.loadProject("c:\\project",windows)->sidebar == 301,"WSL migration changed an existing Windows project");
+        const auto first = poppy::ResourceId::wsl("Ubuntu","/home/user/project"), second = poppy::ResourceId::wsl("Debian","/home/user/project"), anotherUser = poppy::ResourceId::wsl("Ubuntu","/home/user/project","other");
+        poppy::ProjectSession state; state.wslUid = "1000"; state.tabs = {{"/home/user/project/A.cpp",false,{},{}},{"/home/user/project/a.cpp",false,{},{}}}; state.tabs[0].displayed = true; state.tabs[1].group = 1; state.tabs[1].displayed = true; state.editorRatio = 425;
+        state.expanded = {first.u8string(), first.u8string()+"/src"}; state.terminals = {{"left","Linux",first.u8string(),0,true},{"right","Linux",first.u8string()+"/src",1,true}}; state.activeTerminal = "left";
+        storage.saveProject(first.key(),first.serialized(),state); storage.saveProject(second.key(),second.serialized(),{}); storage.saveProject(anotherUser.key(),anotherUser.serialized(),{});
+        const auto directory = storage.projectDirectory(first.key(),first.serialized());
+        check(directory.filename().string().rfind("wsl-ubuntu-",0) == 0 && directory != oldDirectory && directory != storage.projectDirectory(second.key(),second.serialized()) && directory != storage.projectDirectory(anotherUser.key(),anotherUser.serialized()),"WSL storage authorities collided");
+        check(same(*storage.loadProject(first.key(),first.serialized()),state),"WSL UID, case-sensitive tabs, split or POSIX cwd was lost");
+        poppy::AppSession app; app.openProjects = {windows,first.serialized(),second.serialized()}; app.openProjectKeys = {"c:\\project",first.key(),second.key()}; app.lastProject = first.serialized(); storage.saveApp(app);
+        const auto loaded = storage.loadApp(); check(loaded.openProjects == app.openProjects && loaded.openProjectKeys == app.openProjectKeys && loaded.lastProject == app.lastProject,"Mixed Windows/WSL workspace was not restored");
+        auto invalid = state; invalid.terminals.push_back(invalid.terminals[0]); rejects([&] { storage.saveProject(first.key(),first.serialized(),invalid); },"Invalid WSL transaction was accepted"); check(same(*storage.loadProject(first.key(),first.serialized()),state),"Failed WSL save overwrote previous state");
+    }
 }
 }
 int main() {
     try {
-        roundTripAndIsolation(); atomicSave(); migrateProjectLayout(); migrateGitLayout(); migratePinnedTabs(); migrateWorkspaceAndTerminals(); migrateSplitLayout(); schemaAndRegistry();
+        roundTripAndIsolation(); atomicSave(); migrateProjectLayout(); migrateGitLayout(); migratePinnedTabs(); migrateWorkspaceAndTerminals(); migrateSplitLayout(); schemaAndRegistry(); wslRoundTripAndMigration();
         std::cout << "Storage tests passed\n";
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
 }

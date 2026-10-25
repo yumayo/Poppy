@@ -169,7 +169,7 @@ Poppyは、アプリ全体の状態とプロジェクトごとの状態を別々
 
 ## 保存形式のバージョンと上限
 
-現在の形式は全体のデータベースが `PRAGMA user_version = 2`、プロジェクトのデータベースが `PRAGMA user_version = 5` です。未初期化のデータベースではテーブルを作成してバージョンを設定します。それぞれの対応バージョンより `user_version` が大きい場合は、そのデータベースの読み込み・保存を拒否し、形式を上書きしません。
+現在の形式は全体のデータベースが `PRAGMA user_version = 3`、プロジェクトのデータベースが `PRAGMA user_version = 7` です。未初期化のデータベースではテーブルを作成してバージョンを設定します。それぞれの対応バージョンより `user_version` が大きい場合は、そのデータベースの読み込み・保存を拒否し、形式を上書きしません。
 
 プロジェクトの旧形式（バージョン1）はトランザクション内で自動移行します。選択中の差分タブの形式を `session.diff_inline` に引き継ぎます。選択中のタブが通常表示の場合は先頭の差分タブの形式を使い、差分タブがなければSplit表示を使います。タブごとの `file_inline` と `diff_inline` は削除します。旧Split表示の行位置は元のパッチなしでは変換できないため、その差分の縦スクロール位置だけを先頭に戻します。その他のタブ状態とプロジェクト設定は引き継ぎます。
 
@@ -210,3 +210,13 @@ version 5からの移行では既存のタブ・ターミナルを保ち、以�
 | terminal_groups | terminal_id PRIMARY KEY, pane, displayed | ターミナルの所属と選択 |
 
 既存のactive_tabとactive_terminalは入力先を表します。左右で各1タブを同時表示し、空のグループは統合します。分割状態も同じSQLiteトランザクションで保存し、未保存のEditor本文はDBに書き込みません。
+
+## WSL接続（全体DB version 3 / プロジェクトDB version 7）
+
+Windowsプロジェクトの識別キーと既存の保存先名は維持します。WSLの識別キーは、接続種別、登録ディストリビューション、要求ユーザー、POSIXパスを長さ付きのタプルにします。Linuxパスのケース・Unicode・バックスラッシュは保持し、Windowsパス用の正規化を適用しません。WSLの保存先名は `wsl-<distro>-<readable-root>-<hash>` です。ユーザーを含む完全なキーからハッシュを求め、衝突時は既存のレジストリで別名を割り当てます。
+
+全体DBの `projects` に `kind INTEGER NOT NULL DEFAULT 0`、`distro TEXT NOT NULL DEFAULT ''`、`user TEXT NOT NULL DEFAULT ''`、`remote_root TEXT NOT NULL DEFAULT ''` を追加します。`kind=0` はWindows、`kind=1` はWSLです。`path`、`open_projects.path`、`app.last_project` はWSLの場合 `poppy-wsl:<distroのhex>:<userのhex>:<rootのhex>` を保持します。これは保存用の識別表現で、画面にはLinuxパスとディストリビューション名を表示します。
+
+プロジェクトDBには `connection(id INTEGER PRIMARY KEY CHECK(id=1), kind INTEGER NOT NULL, distro TEXT NOT NULL, user TEXT NOT NULL, remote_root TEXT NOT NULL, uid TEXT NOT NULL)` を追加します。前回接続したUIDを照合し、既定ユーザーが変わった場合に同じ権限の接続として再開しません。タブ・展開・選択・ターミナルのcwdは生のPOSIXパスを保持し、左右分割はversion 6のモデルを再利用します。
+
+移行は同一DBのトランザクション内で実行します。接続中フラグ、要求ID、PID、未保存本文、AIの実行状態は保存しません。非選択のWSLプロジェクトは構成だけを復元し、ユーザーが選択してから接続します。接続処理と配布物は [WSL対応](docs/wsl-support.md) を参照してください。

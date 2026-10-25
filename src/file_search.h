@@ -6,7 +6,7 @@
 #include <vector>
 
 namespace poppy {
-struct FileMatch { std::filesystem::path relative; int score; };
+struct FileMatch { std::filesystem::path relative; int score; std::string exactRelative; };
 struct IndexedFile { std::string relative; std::u32string normalized; };
 struct FileIndex {
     std::vector<IndexedFile> files;
@@ -22,6 +22,7 @@ struct FileSearchResult {
 int fileSearchScore(std::string_view relative, std::string_view query);
 // Collect every regular file once, excluding .git and links/junctions.
 FileIndex indexFiles(const std::filesystem::path& root, const std::function<bool()>& cancelled = {});
+void addIndexedFile(FileIndex& index, std::string relative);
 // Filter an immutable snapshot without filesystem access. Paths are normalized
 // while indexing; queries only retain the best results in a bounded heap.
 FileSearchResult searchFiles(const FileIndex& index, std::string_view query,
