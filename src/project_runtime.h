@@ -15,6 +15,7 @@ public:
     void initialize(const fs::path& path, const ProjectSession& state, bool saved);
     void activate(bool active);
     void shutdown();
+    bool canClose();
     void revalidate();
     void setDpi(UINT dpi);
     void poll();

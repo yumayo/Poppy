@@ -1,6 +1,7 @@
 #include "viewer.h"
 #include <algorithm>
 #include <array>
+#include <imm.h>
 
 namespace poppy {
 namespace {
@@ -20,12 +21,18 @@ void Viewer::setDpi(UINT dpi) {
     scrollbars(); InvalidateRect(window_, nullptr, FALSE);
 }
 void Viewer::show(std::shared_ptr<const Document> d, const fs::path& path, bool preserve) {
+    edit_.reset(); highSurrogate_ = 0;
     diff_.reset(); document_ = std::move(d); path_ = path; message_.clear();
     if (!preserve) { top_ = left_ = 0; anchor_ = caret_ = 0; after_ = false; }
     else { anchor_ = std::min(anchor_, document_->text.size()); caret_ = std::min(caret_, document_->text.size()); }
     scrollbars(); InvalidateRect(window_, nullptr, FALSE);
 }
+void Viewer::edit(std::shared_ptr<EditBuffer> buffer, const fs::path& path, bool preserve) {
+    show(std::shared_ptr<const Document>(buffer, &buffer->document), path, preserve);
+    edit_ = std::move(buffer); caretPosition();
+}
 void Viewer::showDiff(std::shared_ptr<const DiffDocument> d, const fs::path& path, bool preserve) {
+    edit_.reset(); highSurrogate_ = 0;
     // Share the patch snapshot; both panes only keep references to its lines.
     document_ = std::shared_ptr<const Document>(d, &d->patch); diff_ = std::move(d); path_ = path; message_.clear();
     if (!preserve) { top_ = left_ = 0; anchor_ = caret_ = 0; after_ = false; }
@@ -33,6 +40,7 @@ void Viewer::showDiff(std::shared_ptr<const DiffDocument> d, const fs::path& pat
     scrollbars(); InvalidateRect(window_, nullptr, FALSE);
 }
 void Viewer::message(const std::wstring& text, const fs::path& path) {
+    edit_.reset(); highSurrogate_ = 0;
     diff_.reset(); document_.reset(); path_ = path; message_ = text; top_ = left_ = 0; anchor_ = caret_ = 0; after_ = false;
     scrollbars(); InvalidateRect(window_, nullptr, FALSE);
 }
@@ -78,7 +86,7 @@ void Viewer::scrollbars() {
         SCROLLINFO horizontal{sizeof(horizontal), SIF_RANGE | SIF_PAGE | SIF_POS, 0, cols - 1, static_cast<UINT>(pageCols), left_, 0}; SetScrollInfo(window_, SB_HORZ, &horizontal, FALSE);
     }
 }
-void Viewer::scroll(int vertical, int horizontal) { top_ += vertical; left_ += horizontal; scrollbars(); InvalidateRect(window_, nullptr, FALSE); }
+void Viewer::scroll(int vertical, int horizontal) { top_ += vertical; left_ += horizontal; scrollbars(); caretPosition(); InvalidateRect(window_, nullptr, FALSE); }
 size_t Viewer::position(int x, int y) const {
     if (!document_ || !rowCount()) return 0;
     size_t row = std::min(rowCount() - 1, static_cast<size_t>(std::max(0, (y - contentTop()) / cellHeight_ + top_)));
@@ -122,6 +130,58 @@ void Viewer::copy() {
     if (diff_) copyText(window_, wide(diff_->selectedText(after_, start, end, inlineView_)));
     else copyText(window_, wide(std::string_view(document_->text).substr(start, end - start)));
 }
+POINT Viewer::caretPoint() const {
+    if (!edit_) return {gutter_, contentTop()};
+    const auto& d = edit_->document;
+    const size_t row = static_cast<size_t>(std::upper_bound(d.lines.begin(), d.lines.end(), caret_) - d.lines.begin() - 1);
+    const auto line = d.line(row); int col = 0;
+    for (size_t p = 0; p < line.size() && d.lines[row] + p < caret_;) { const auto c = decodeUtf8(line, p); col += c == '\t' ? 4 - col % 4 : std::max(1, cellWidth(c)); }
+    return {gutter_ + (col - left_) * cellWidth_, contentTop() + (static_cast<int>(row) - top_) * cellHeight_};
+}
+void Viewer::caretPosition(bool reveal) {
+    if (!edit_) { if (GetFocus() == window_) HideCaret(window_); return; }
+    auto point = caretPoint();
+    if (reveal) {
+        const auto r = Scrollbars::contentRect(window_);
+        if (point.y < contentTop()) top_ -= (contentTop() - point.y + cellHeight_ - 1) / cellHeight_;
+        else if (point.y + cellHeight_ > r.bottom) top_ += (point.y + cellHeight_ - r.bottom + cellHeight_ - 1) / cellHeight_;
+        if (point.x < gutter_) left_ -= (gutter_ - point.x + cellWidth_ - 1) / cellWidth_;
+        else if (point.x + cellWidth_ > r.right) left_ += (point.x + cellWidth_ - r.right + cellWidth_ - 1) / cellWidth_;
+        scrollbars(); point = caretPoint();
+    }
+    if (GetFocus() == window_) {
+        SetCaretPos(point.x, point.y);
+        const auto context = ImmGetContext(window_);
+        if (context) { COMPOSITIONFORM form{}; form.dwStyle = CFS_POINT; form.ptCurrentPos = point; ImmSetCompositionWindow(context, &form); CANDIDATEFORM candidate{}; candidate.dwStyle = CFS_CANDIDATEPOS; candidate.ptCurrentPos = {point.x, point.y + cellHeight_}; ImmSetCandidateWindow(context, &candidate); ImmReleaseContext(window_, context); }
+    }
+}
+void Viewer::edited() { scrollbars(); caretPosition(true); InvalidateRect(window_, nullptr, FALSE); if (changed) changed(); }
+void Viewer::replace(std::string text) {
+    if (!edit_) return;
+    std::string normalized; const auto newline = edit_->newline();
+    for (size_t p = 0; p < text.size(); ++p) {
+        if (text[p] == '\r' || text[p] == '\n') { if (text[p] == '\r' && p + 1 < text.size() && text[p + 1] == '\n') ++p; normalized += newline; }
+        else normalized += text[p];
+    }
+    const size_t begin = std::min(anchor_, caret_), end = std::max(anchor_, caret_), length = normalized.size();
+    if (edit_->replace(begin, end, std::move(normalized))) { anchor_ = caret_ = begin + length; edited(); }
+    else MessageBeep(MB_ICONWARNING);
+}
+void Viewer::moveCaret(WPARAM key, bool shift, bool ctrl) {
+    const auto& d = edit_->document;
+    const size_t row = static_cast<size_t>(std::upper_bound(d.lines.begin(), d.lines.end(), caret_) - d.lines.begin() - 1);
+    size_t next = caret_;
+    if (key == VK_LEFT) next = !shift && anchor_ != caret_ ? std::min(anchor_, caret_) : edit_->previous(caret_);
+    else if (key == VK_RIGHT) next = !shift && anchor_ != caret_ ? std::max(anchor_, caret_) : edit_->next(caret_);
+    else if (key == VK_HOME) next = ctrl ? 0 : d.lines[row];
+    else if (key == VK_END) next = ctrl ? d.text.size() : d.lines[row] + d.line(row).size();
+    else {
+        const int delta = key == VK_UP ? -1 : key == VK_DOWN ? 1 : key == VK_PRIOR ? -visibleRows() : visibleRows();
+        const auto target = static_cast<size_t>(std::clamp<int>(static_cast<int>(row) + delta, 0, static_cast<int>(d.lines.size()) - 1));
+        const auto point = caretPoint(); next = position(point.x, contentTop() + (static_cast<int>(target) - top_) * cellHeight_);
+    }
+    caret_ = next; if (!shift) anchor_ = caret_; caretPosition(true); InvalidateRect(window_, nullptr, FALSE);
+}
 void Viewer::paint() {
     Renderer::Paint paint(renderer_, window_); if (!paint) return;
     auto& dc = renderer_; dc.font(Renderer::Font::Ui);
@@ -137,7 +197,7 @@ void Viewer::paint() {
             dc.fill(button, inlineView == inlineView_ ? rgb(50, 70, 94) : background);
             dc.label(button, inlineView ? L"Inline" : L"Split", inlineView == inlineView_ ? foreground : muted, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
         }
-    } else dc.label(tag, document_ ? wide(document_->encoding) + L"  ·  READ ONLY" : L"READ ONLY", muted, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+    } else dc.label(tag, document_ ? wide(document_->encoding) + (edit_ ? edit_->dirty() ? L"  ·  Modified" : L"  ·  Ctrl+S" : L"  ·  READ ONLY") : L"", muted, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
     dc.fill({0, header_ - 1, r.right, header_}, border);
     if (!document_) {
         dc.fill({0, header_, r.right, r.bottom}, background);
@@ -225,7 +285,9 @@ LRESULT Viewer::handle(UINT m, WPARAM a, LPARAM b) {
     switch (m) {
     case WM_PAINT: paint(); return 0;
     case WM_ERASEBKGND: return 1;
-    case WM_SIZE: scrollbars(); return 0;
+    case WM_SIZE: scrollbars(); caretPosition(); return 0;
+    case WM_SETFOCUS: CreateCaret(window_, nullptr, 2, cellHeight_); ShowCaret(window_); caretPosition(); if (focused) focused(); return 0;
+    case WM_KILLFOCUS: highSurrogate_ = 0; DestroyCaret(); return 0;
     case WM_SETCURSOR:
         if (diff_ && LOWORD(b) == HTCLIENT) {
             POINT point{}; GetCursorPos(&point); ScreenToClient(window_, &point);
@@ -252,9 +314,9 @@ LRESULT Viewer::handle(UINT m, WPARAM a, LPARAM b) {
         const bool extend = (GetKeyState(VK_SHIFT) & 0x8000) && (!splitDiff() || after == after_);
         after_ = after;
         if (!extend) anchor_ = position(GET_X_LPARAM(b), GET_Y_LPARAM(b));
-        caret_ = position(GET_X_LPARAM(b), GET_Y_LPARAM(b)); selecting_ = true; SetCapture(window_); InvalidateRect(window_, nullptr, FALSE); return 0;
+        caret_ = position(GET_X_LPARAM(b), GET_Y_LPARAM(b)); selecting_ = true; SetCapture(window_); caretPosition(); InvalidateRect(window_, nullptr, FALSE); return 0;
     }
-    case WM_MOUSEMOVE: if (selecting_) { caret_ = position(GET_X_LPARAM(b), GET_Y_LPARAM(b)); InvalidateRect(window_, nullptr, FALSE); } return 0;
+    case WM_MOUSEMOVE: if (selecting_) { caret_ = position(GET_X_LPARAM(b), GET_Y_LPARAM(b)); caretPosition(); InvalidateRect(window_, nullptr, FALSE); } return 0;
     case WM_LBUTTONUP: if (selecting_) { selecting_ = false; ReleaseCapture(); } return 0;
     case WM_CAPTURECHANGED: selecting_ = false; return 0;
     case WM_MOUSEWHEEL: scroll(-GET_WHEEL_DELTA_WPARAM(a) / WHEEL_DELTA * 3, 0); return 0;
@@ -268,9 +330,22 @@ LRESULT Viewer::handle(UINT m, WPARAM a, LPARAM b) {
         case SB_TOP: pos = 0; break; case SB_BOTTOM: pos = info.nMax; break;
         default: break;
         }
-        scrollbars(); InvalidateRect(window_, nullptr, FALSE); return 0;
+        scrollbars(); caretPosition(); InvalidateRect(window_, nullptr, FALSE); return 0;
     }
     case WM_KEYDOWN:
+        if (edit_) {
+            const bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0, shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+            if (ctrl && a == 'S') { if (save) save(); return 0; }
+            if (ctrl && a == 'X') { copy(); replace(""); return 0; }
+            if ((ctrl && a == 'V') || (shift && a == VK_INSERT)) { replace(utf8(clipboardText(window_))); return 0; }
+            if (ctrl && (a == 'Z' || a == 'Y')) { if (a == 'Y' || shift) edit_->redo(anchor_, caret_); else edit_->undo(anchor_, caret_); edited(); return 0; }
+            if (a == VK_DELETE || a == VK_BACK) {
+                if (anchor_ == caret_) { if (a == VK_BACK) anchor_ = edit_->previous(caret_); else caret_ = edit_->next(caret_); }
+                replace(""); return 0;
+            }
+            if (a == VK_TAB) { replace("\t"); return 0; }
+            if (a == VK_LEFT || a == VK_RIGHT || a == VK_UP || a == VK_DOWN || a == VK_HOME || a == VK_END || a == VK_PRIOR || a == VK_NEXT) { moveCaret(a, shift, ctrl); return 0; }
+        }
         if ((GetKeyState(VK_CONTROL) & 0x8000) && a == 'C') { copy(); return 0; }
         if ((GetKeyState(VK_CONTROL) & 0x8000) && a == 'A' && document_) { anchor_ = 0; caret_ = document_->text.size(); InvalidateRect(window_, nullptr, FALSE); return 0; }
         if (a == VK_UP) scroll(-1, 0); else if (a == VK_DOWN) scroll(1, 0);
@@ -279,14 +354,35 @@ LRESULT Viewer::handle(UINT m, WPARAM a, LPARAM b) {
         else if (a == VK_HOME) { top_ = left_ = 0; scroll(0, 0); }
         else if (a == VK_END && document_) { top_ = static_cast<int>(rowCount()); scroll(0, 0); }
         return 0;
+    case WM_CHAR:
+        if (edit_ && !(GetKeyState(VK_CONTROL) & 0x8000) && (a >= 32 || a == '\r')) {
+            const wchar_t c = static_cast<wchar_t>(a);
+            if (c >= 0xd800 && c <= 0xdbff) { highSurrogate_ = c; return 0; }
+            std::wstring text; if (highSurrogate_) { text += highSurrogate_; highSurrogate_ = 0; } text += c;
+            replace(utf8(text));
+        }
+        return 0;
+    case WM_IME_STARTCOMPOSITION: caretPosition(); break;
+    case WM_IME_COMPOSITION:
+        if (edit_ && (b & GCS_RESULTSTR)) {
+            const auto context = ImmGetContext(window_); const LONG bytes = context ? ImmGetCompositionStringW(context, GCS_RESULTSTR, nullptr, 0) : 0;
+            if (bytes > 0) { std::wstring text(static_cast<size_t>(bytes) / sizeof(wchar_t), 0); ImmGetCompositionStringW(context, GCS_RESULTSTR, text.data(), bytes); replace(utf8(text)); }
+            if (context) ImmReleaseContext(window_, context);
+            return 0;
+        }
+        break;
     case WM_CONTEXTMENU: {
         HMENU menu = CreatePopupMenu(); AppendMenuW(menu, MF_STRING | (anchor_ == caret_ ? MF_GRAYED : 0), 1, L"Copy\tCtrl+C"); AppendMenuW(menu, MF_STRING, 2, L"Select all\tCtrl+A");
+        if (edit_) { AppendMenuW(menu, MF_STRING, 3, L"Cut\tCtrl+X"); AppendMenuW(menu, MF_STRING, 4, L"Paste\tCtrl+V"); AppendMenuW(menu, MF_STRING, 5, L"Undo\tCtrl+Z"); AppendMenuW(menu, MF_STRING, 6, L"Redo\tCtrl+Y"); AppendMenuW(menu, MF_STRING, 7, L"Save\tCtrl+S"); }
         POINT p{GET_X_LPARAM(b), GET_Y_LPARAM(b)}; if (p.x == -1) { p = {gutter_, header_}; ClientToScreen(window_, &p); }
         const UINT command = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, p.x, p.y, 0, window_, nullptr); DestroyMenu(menu);
-        if (command == 1) copy(); else if (command == 2 && document_) { anchor_ = 0; caret_ = document_->text.size(); InvalidateRect(window_, nullptr, FALSE); } return 0;
+        if (command == 1) copy(); else if (command == 2 && document_) { anchor_ = 0; caret_ = document_->text.size(); InvalidateRect(window_, nullptr, FALSE); }
+        else if (edit_) { if (command == 3) { copy(); replace(""); } else if (command == 4) replace(utf8(clipboardText(window_))); else if (command == 5) { edit_->undo(anchor_, caret_); edited(); } else if (command == 6) { edit_->redo(anchor_, caret_); edited(); } else if (command == 7 && save) save(); }
+        return 0;
     }
     default: return DefWindowProcW(window_, m, a, b);
     }
+    return DefWindowProcW(window_, m, a, b);
 }
 }
 
