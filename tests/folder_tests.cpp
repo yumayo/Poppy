@@ -961,6 +961,35 @@ void multiProjectTests(const fs::path& executable) {
         check(childProcesses(restored.process.dwProcessId).empty(), "Restoring terminal configuration automatically started a process");
     }
 }
+void terminalBackspaceTests(const fs::path& executable) {
+    Fixture fixture;
+    writeFile(fixture.root / L"test.txt");
+    Application app(executable, fixture.root);
+    app.tree();
+    const auto pane = FindWindowExW(app.window, nullptr, L"PoppyTerminalPane", nullptr);
+    const auto shell = FindWindowExW(pane, nullptr, L"PoppyTerminal", nullptr);
+    check(shell != nullptr, "Project has no shell for Backspace tests");
+    click(shell, 10, 10);
+    const auto type = [&](const std::wstring& text) { for (const auto ch : text) send(shell, WM_CHAR, ch); };
+    const auto waitText = [&](const fs::path& path, const std::string& expected, const char* message) {
+        waitFor([&] {
+            std::ifstream file(path, std::ios::binary);
+            std::string text;
+            return file && std::getline(file, text, '\0') && text == expected;
+        }, message);
+    };
+    type(L"Set-Content -NoNewline -Encoding Ascii ready.txt ready\r");
+    waitText(fixture.root / L"ready.txt", "ready", "PowerShell did not become ready for Backspace tests");
+
+    // WM_CHAR carries BS for Backspace and DEL for Ctrl+Backspace.
+    // Check the resulting PowerShell input after it passes through ConPTY.
+    type(L"'hello world\b' | Set-Content -NoNewline -Encoding Ascii backspace.txt\r");
+    waitText(fixture.root / L"backspace.txt", "hello worl", "Backspace did not delete exactly one character");
+    type(L"'hello world\b\b\b\b\b\b\b' | Set-Content -NoNewline -Encoding Ascii repeated.txt\r");
+    waitText(fixture.root / L"repeated.txt", "hell", "Repeated Backspace did not delete one character at a time across a word boundary");
+    type(L"'hello world\x7f' | Set-Content -NoNewline -Encoding Ascii word.txt\r");
+    waitText(fixture.root / L"word.txt", "hello ", "Ctrl+Backspace did not delete the preceding word");
+}
 void sessionTests(const fs::path& executable) {
     Fixture fixture;
     const auto directory = fixture.root / L"nested 日本語";
@@ -1034,11 +1063,11 @@ int wmain(int argc, wchar_t** argv) {
         check(argc == 2, "Pass the path to Poppy.exe");
         SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         for (const auto test : {folderTests, sidebarTests, treeInteractionTests, tabTests, pinnedTabTests,
-                tabDragTests, wrappingTabDragTests, wrappingTabTests, renameTests, splitPaneTests, quickOpenTests, gitSidebarTests, sessionTests, multiProjectTests}) {
+                tabDragTests, wrappingTabDragTests, wrappingTabTests, renameTests, splitPaneTests, quickOpenTests, gitSidebarTests, sessionTests, multiProjectTests, terminalBackspaceTests}) {
             Fixture appData; AppDataEnvironment environment(appData.root);
             test(fs::absolute(argv[1]));
         }
-        std::cout << "Folder, sidebar, Git layouts, tab, quick open and session tests passed.\n"; return 0;
+        std::cout << "Folder, sidebar, Git layouts, tab, quick open, session and terminal input tests passed.\n"; return 0;
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n'; return 1;
     }

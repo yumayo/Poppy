@@ -411,7 +411,12 @@ LRESULT Terminal::handle(UINT m, WPARAM a, LPARAM b) {
         // Handle Ctrl+C's character here so copying cannot also send ETX after
         // clearing the selection. A plain click is not a selection.
         if (a == 3 && !(GetKeyState(VK_MENU) & 0x8000) && hasSelection()) { copy(); return 0; }
-        const wchar_t c = static_cast<wchar_t>(a); if (c >= 0xd800 && c <= 0xdbff) { highSurrogate_ = c; return 0; }
+        // Windows emits BS for Backspace and DEL for Ctrl+Backspace;
+        // ConPTY expects DEL for Backspace and BS for Ctrl+Backspace.
+        wchar_t c = static_cast<wchar_t>(a);
+        if (c == L'\b') c = L'\x7f';
+        else if (c == L'\x7f') c = L'\b';
+        if (c >= 0xd800 && c <= 0xdbff) { highSurrogate_ = c; return 0; }
         std::wstring text; if (highSurrogate_) { text += highSurrogate_; highSurrogate_ = 0; } text += c;
         send((m == WM_SYSCHAR ? "\x1b" : "") + utf8(text)); return 0;
     }
