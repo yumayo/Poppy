@@ -8,6 +8,8 @@ namespace poppy {
 // paints caused by focus, exposure or resizing while output is incomplete.
 class TerminalDisplay {
 public:
+    // Keep echo responsive briefly after typing, including delayed replies.
+    void input(uint64_t now) { inputUntil_ = now + 250; }
     void changed(uint64_t now);
     void resized(uint64_t now);
     bool update(TerminalModel& model, size_t scroll, uint64_t now, bool queued = false, bool force = false);
@@ -26,6 +28,6 @@ private:
     int columns_ = 0, cursorX_ = 0, cursorY_ = 0;
     size_t scroll_ = 0;
     bool cursorVisible_ = false, dirty_ = false, synchronizing_ = false;
-    uint64_t firstChange_ = 0, lastChange_ = 0, resizeUntil_ = 0, syncSince_ = 0;
+    uint64_t firstChange_ = 0, lastChange_ = 0, resizeUntil_ = 0, syncSince_ = 0, inputUntil_ = 0;
 };
 }

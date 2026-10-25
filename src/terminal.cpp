@@ -8,10 +8,12 @@ namespace poppy {
 namespace {
 std::vector<Terminal*> liveTerminals;
 size_t nextTerminal = 0;
+HWND pumpTimerRoot = nullptr;
 }
 Terminal::~Terminal() {
     stop();
     liveTerminals.erase(std::remove(liveTerminals.begin(), liveTerminals.end(), this), liveTerminals.end());
+    if (liveTerminals.empty() && pumpTimerRoot) { KillTimer(pumpTimerRoot, 77); pumpTimerRoot = nullptr; }
 }
 void Terminal::trackContainer(const std::string& id) {
     const auto prefix = L"Local\\Poppy." + wide(id);
@@ -155,7 +157,12 @@ void Terminal::send(std::string text, bool userInput) {
     { std::lock_guard<std::mutex> lock(mutex_); if (writeBytes_ + text.size() > 1024 * 1024) { MessageBeep(MB_ICONWARNING); return; } writeBytes_ += text.size(); writes_.push_back(std::move(text)); }
     condition_.notify_all();
     if (userInput) {
-        scroll_ = 0; anchor_ = caret_ = -1; InvalidateRect(window_, nullptr, FALSE);
+        display_.input(GetTickCount64());
+        const bool selected = hasSelection();
+        scroll_ = 0; anchor_ = caret_ = -1;
+        // Echo will invalidate the new frame. Avoid painting the old screen on
+        // every key before ConPTY has even processed it.
+        if (selected) InvalidateRect(window_, nullptr, FALSE);
         pump();
     }
 }
@@ -209,7 +216,11 @@ void Terminal::pump() {
                 terminal->anchor_ = terminal->caret_ = -1;
             terminal->scrollbars();
             terminal->imePosition();
-            if (IsWindowVisible(terminal->window_)) InvalidateRect(terminal->window_, nullptr, FALSE);
+            if (IsWindowVisible(terminal->window_)) {
+                InvalidateRect(terminal->window_, nullptr, FALSE);
+                // Key repeat can keep WM_PAINT behind input in the queue.
+                UpdateWindow(terminal->window_);
+            }
         }
         // Keep the reader notification latched throughout a burst, including
         // the quiet period and sync timeout after the receive queue runs dry.
@@ -217,7 +228,10 @@ void Terminal::pump() {
         terminal->notified_ = !terminal->received_.empty() || terminal->display_.pending();
         pending |= terminal->notified_;
     }
-    if (root) { if (pending) SetTimer(root, 77, 16, nullptr); else KillTimer(root, 77); }
+    if (pumpTimerRoot && (!pending || pumpTimerRoot != root)) { KillTimer(pumpTimerRoot, 77); pumpTimerRoot = nullptr; }
+    // Keep the cadence when more input arrives; resetting an existing timer
+    // would postpone the next echo frame on every keystroke.
+    if (root && pending && !pumpTimerRoot && SetTimer(root, 77, 16, nullptr)) pumpTimerRoot = root;
 }
 void Terminal::resize() {
     if (!window_) return;
