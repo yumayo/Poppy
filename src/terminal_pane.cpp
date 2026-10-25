@@ -47,6 +47,12 @@ void TerminalPane::add(SavedTerminal configuration) {
 }
 void TerminalPane::setDpi(UINT dpi) { dpi_=dpi; renderer_.setDpi(dpi); header_=MulDiv(32,dpi,96); for(auto& s:sessions_) s->terminal->setDpi(dpi); layout(); }
 void TerminalPane::setDirectory(const fs::path& directory) { directory_=directory; for(auto& s:sessions_) if(s->configuration.directory.empty()) {s->configuration.directory=directory.u8string();s->terminal->setDirectory(directory);} }
+void TerminalPane::relocate(const fs::path& source, const fs::path& destination) {
+    for (auto& session : sessions_) {
+        const auto path = relocatePath(fs::u8path(session->configuration.directory), source, destination);
+        session->configuration.directory = path.u8string(); session->terminal->setDirectory(path);
+    }
+}
 void TerminalPane::restore(const ProjectSession& state) {
     endDrag(); ratio_ = state.terminalRatio; stop(); for(auto& s:sessions_) DestroyWindow(s->terminal->window()); sessions_.clear();
     for(const auto& saved:state.terminals) add(saved);

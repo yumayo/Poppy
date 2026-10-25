@@ -9,6 +9,15 @@
 #include <system_error>
 
 namespace poppy {
+fs::path relocatePath(const fs::path& path, const fs::path& source, const fs::path& destination) {
+    const auto normalized = path.lexically_normal().make_preferred();
+    const auto from = source.lexically_normal().make_preferred();
+    const auto key = pathKey(normalized), prefix = pathKey(from);
+    if (key == prefix) return destination;
+    if (key.size() > prefix.size() && key.compare(0, prefix.size(), prefix) == 0 && key[prefix.size()] == L'\\')
+        return fs::path(destination.native() + normalized.native().substr(from.native().size()));
+    return path;
+}
 unsigned __stdcall NativeThread::entry(void* argument) {
     std::unique_ptr<std::function<void()>> task(static_cast<std::function<void()>*>(argument));
     (*task)();

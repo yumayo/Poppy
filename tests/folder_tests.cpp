@@ -514,6 +514,37 @@ void wrappingTabTests(const fs::path& executable) {
     checkRows(5);
     clickTab(app, 0); waitLines(viewer, 100); clickTab(app, 4); waitLines(viewer, 104);
 }
+void renameTests(const fs::path& executable) {
+    Fixture fixture; writeLines(fixture.root/L"a.txt",120); writeLines(fixture.root/L"b.txt",240);
+    {
+        Application app(executable,fixture.root);const auto tree=app.tree();
+        const auto viewer=FindWindowExW(app.window,nullptr,L"PoppyViewer",nullptr);
+        waitFor([&]{return send(tree,treeGetCount)==3;},"Rename fixture did not load");
+        const auto first=nextItem(tree,TreeRelation::Child,nextItem(tree,TreeRelation::Root));
+        send(tree,treeSelect,first);waitLines(viewer,120);
+        send(viewer,WM_CHAR,'\r');waitLines(viewer,121);
+        send(tree,WM_KEYDOWN,VK_F2);const auto edit=FindWindowExW(tree,nullptr,L"EDIT",nullptr);
+        check(edit!=nullptr,"F2 did not open a filename editor");
+        check(SetWindowTextW(edit,L"修正.py"),"Could not enter a Unicode filename");
+        send(edit,WM_KEYDOWN,VK_RETURN);
+        waitFor([&]{return fs::exists(fixture.root/L"修正.py")&&!fs::exists(fixture.root/L"a.txt");},"Rename did not move the file");
+        waitLines(viewer,121);send(viewer,WM_KEYDOWN,VK_BACK);waitLines(viewer,120);
+        check(visibleTabCount(app)==1,"Rename duplicated or closed the open tab");
+        send(tree,WM_KEYDOWN,VK_F2);const auto cancel=FindWindowExW(tree,nullptr,L"EDIT",nullptr);
+        check(cancel!=nullptr,"Second rename editor was missing");SetWindowTextW(cancel,L"cancelled.txt");send(cancel,WM_KEYDOWN,VK_ESCAPE);
+        check(!fs::exists(fixture.root/L"cancelled.txt")&&fs::exists(fixture.root/L"修正.py"),"Escape committed a rename");
+        send(tree,WM_KEYDOWN,VK_F2);const auto collision=FindWindowExW(tree,nullptr,L"EDIT",nullptr);SetWindowTextW(collision,L"b.txt");send(collision,WM_KEYDOWN,VK_RETURN);
+        HWND dialog=nullptr; std::pair<DWORD,HWND*> dialogContext{app.process.dwProcessId,&dialog};
+        waitFor([&]{EnumWindows([](HWND window,LPARAM data)->BOOL{auto& context=*reinterpret_cast<std::pair<DWORD,HWND*>*>(data);DWORD pid=0;GetWindowThreadProcessId(window,&pid);wchar_t name[32]{};GetClassNameW(window,name,32);if(pid==context.first&&std::wstring(name)==L"#32770"){*context.second=window;return FALSE;}return TRUE;},reinterpret_cast<LPARAM>(&dialogContext));return dialog!=nullptr;},"Filename collision did not report an error");
+        send(dialog,WM_COMMAND,IDOK);
+        check(fs::exists(fixture.root/L"修正.py")&&fs::exists(fixture.root/L"b.txt"),"A filename collision overwrote a file");
+    }
+    {
+        Application app(executable,fixture.root);app.tree();
+        const auto viewer=FindWindowExW(app.window,nullptr,L"PoppyViewer",nullptr);waitLines(viewer,120);
+        check(visibleTabCount(app)==1,"Restart lost the renamed tab");
+    }
+}
 void splitPaneTests(const fs::path& executable) {
     Fixture fixture; writeLines(fixture.root / L"a.txt", 120); writeLines(fixture.root / L"b.txt", 240);
     LONG divider = 0;
@@ -1003,7 +1034,7 @@ int wmain(int argc, wchar_t** argv) {
         check(argc == 2, "Pass the path to Poppy.exe");
         SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         for (const auto test : {folderTests, sidebarTests, treeInteractionTests, tabTests, pinnedTabTests,
-                tabDragTests, wrappingTabDragTests, wrappingTabTests, splitPaneTests, quickOpenTests, gitSidebarTests, sessionTests, multiProjectTests}) {
+                tabDragTests, wrappingTabDragTests, wrappingTabTests, renameTests, splitPaneTests, quickOpenTests, gitSidebarTests, sessionTests, multiProjectTests}) {
             Fixture appData; AppDataEnvironment environment(appData.root);
             test(fs::absolute(argv[1]));
         }
