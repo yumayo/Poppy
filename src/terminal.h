@@ -1,5 +1,5 @@
 #pragma once
-#include "render.h"
+#include "scrollbars.h"
 #include "terminal_display.h"
 
 namespace poppy {
@@ -30,10 +30,13 @@ private:
     bool hasSelection() const { return anchor_ >= 0 && caret_ >= 0 && anchor_ != caret_; }
     void paint();
     void resize();
+    void scrollbars();
+    void scroll(int offset);
     void imePosition();
     int point(int x, int y) const;
     HWND window_ = nullptr;
     Renderer renderer_;
+    Scrollbars scrollbars_;
     int cellWidth_ = 8, cellHeight_ = 20, header_ = 30;
     fs::path directory_;
     std::vector<std::pair<std::wstring, std::wstring>> environment_;
