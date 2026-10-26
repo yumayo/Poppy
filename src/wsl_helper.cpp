@@ -385,7 +385,7 @@ void Server::execute(const std::shared_ptr<Request>& r) {
                         struct stat refs{};
                         if (!lstat((gitDirectory+"/refs").c_str(),&refs) && S_ISDIR(refs.st_mode)) watch(gitDirectory+"/refs");
                         if (!lstat((gitDirectory+"/refs/heads").c_str(),&refs) && S_ISDIR(refs.st_mode)) watch(gitDirectory+"/refs/heads");
-                        continue;
+                        if (op == "indexFiles") continue;
                     }
                     struct stat info{}; if (fstatat(dirfd(dir.get()), name.c_str(), &info, AT_SYMLINK_NOFOLLOW)) continue;
                     const bool link = S_ISLNK(info.st_mode); bool isDirectory = S_ISDIR(info.st_mode);
