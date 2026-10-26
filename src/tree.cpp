@@ -188,7 +188,7 @@ void Tree::paint() {
         if (actionVisible(row.item)) {
             renderer_.fill(action, hotItem_ == row.item ? RGB(50, 70, 94) : background);
             RECT icon = action; InflateRect(&icon, -MulDiv(3, dpi_, 96), -MulDiv(3, dpi_, 96));
-            renderer_.icon(Renderer::Icon::OpenAllChanges, icon, accent);
+            renderer_.icon(actionIcon ? actionIcon(row.item) : Renderer::Icon::OpenAllChanges, icon, accent);
         }
     }
     scrollbars_.paint(window_, renderer_, panel);

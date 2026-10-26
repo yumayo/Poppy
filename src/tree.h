@@ -43,6 +43,7 @@ public:
     std::function<void(TreeItem, bool)> expanded;
     std::function<void(uintptr_t)> removed;
     std::function<std::wstring(TreeItem)> actionLabel;
+    std::function<Renderer::Icon(TreeItem)> actionIcon;
     std::function<void(TreeItem)> actionClicked;
     bool hoverActionsOnly = false;
 private:

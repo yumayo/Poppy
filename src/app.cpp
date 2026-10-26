@@ -64,7 +64,7 @@ struct TabDrag {
     bool active = false;
     std::optional<TabDrop> target;
 };
-struct GitEntry { ResourceId path; wchar_t state; bool staged = false, changed = false; char index = ' ', worktree = ' '; };
+struct GitEntry { ResourceId path; wchar_t state; bool staged = false, changed = false; char index = ' ', worktree = ' '; std::string previousPath; };
 struct GitResult { ResourceId root; std::wstring branch, error; std::map<std::wstring, wchar_t> states; std::vector<GitEntry> entries; size_t changed = 0, untracked = 0; bool truncated = false, unsupportedNames = false; };
 struct SourceNode { std::wstring path; size_t entry = noGitChange; bool directory = false, staged = false, group = false; };
 enum class HistoryKind { Branch, Commit, Directory, File, More, Message };
@@ -110,11 +110,11 @@ std::shared_ptr<GitResult> readGit(ProjectProvider& provider, const ResourceId& 
     if (status.code) { result->error = status.error; return result; }
     for (const auto& entry : parseGitStatus(status.output)) {
         const char x = entry.index, y = entry.worktree;
-        if (directory.wsl() && !validUtf8(entry.path)) { result->unsupportedNames = true; continue; }
+        if (directory.wsl() && (!validUtf8(entry.path) || !validUtf8(entry.previousPath))) { result->unsupportedNames = true; continue; }
         const wchar_t state = x == '?' ? L'?' : x == 'U' || y == 'U' || (x == 'A' && y == 'A') || (x == 'D' && y == 'D') ? L'U' : y != ' ' ? y : x;
         if (state == L'?') ++result->untracked; else ++result->changed;
         ResourceId path = (result->root / std::string_view(entry.path)).lexically_normal();
-        if (result->entries.size() < maxTreeNodes) result->entries.push_back({path, state, entry.staged(), entry.changed(), x, y});
+        if (result->entries.size() < maxTreeNodes) result->entries.push_back({path, state, entry.staged(), entry.changed(), x, y, entry.previousPath});
         else result->truncated = true;
         auto mark = [&](ResourceId current) {
             for (;;) {
@@ -149,6 +149,7 @@ private:
     void setGitView(bool tree);
     void updateGitFiles();
     void openGitFile(TreeItem item);
+    void stageGitFile(TreeItem item);
     void openGitDiff(const ResourceId& path, GitDiffKind kind, std::string revision = {}, bool allChanges = false);
     void refreshBranches();
     void requestHistory(TreeItem item, bool more = false);
@@ -212,6 +213,7 @@ private:
     bool terminalVisible_ = true;
     bool updatingGitFiles_ = false;
     bool renamePending_ = false;
+    bool gitStagePending_ = false;
     bool gitTreeView_ = true;
     std::vector<SourceNode> gitChangeNodes_;
     uint64_t branchRequest_ = 0;
@@ -294,14 +296,24 @@ void ProjectRuntime::Impl::create() {
     explorer_.canOpenWithDefaultApp = [this](TreeItem item) { const auto n = node(item); return n && !n->directory && !n->unsupported && !root_.wsl(); };
     explorer_.openWithDefaultAppRequested = [this](TreeItem item) { if (const auto n = node(item); n && !n->directory) openWithDefaultApp(n->path); };
     changes_.activated = [this](TreeItem item) { openGitFile(item); };
+    changes_.hoverActionsOnly = true;
     changes_.actionLabel = [this](TreeItem item) {
         const auto n = changes_.item(item);
-        return n && n->data < gitChangeNodes_.size() && gitChangeNodes_[n->data].group && changes_.child(item) ? L"Open All Changes" : L"";
+        if (!n || n->data >= gitChangeNodes_.size()) return L"";
+        const auto& node = gitChangeNodes_[n->data];
+        if (node.group) return changes_.child(item) ? L"Open All Changes" : L"";
+        return node.directory ? L"" : node.staged ? L"Unstage Changes" : L"Stage Changes";
+    };
+    changes_.actionIcon = [this](TreeItem item) {
+        const auto n = changes_.item(item);
+        if (!n || n->data >= gitChangeNodes_.size() || gitChangeNodes_[n->data].group) return Renderer::Icon::OpenAllChanges;
+        return gitChangeNodes_[n->data].staged ? Renderer::Icon::UnstageChanges : Renderer::Icon::StageChanges;
     };
     changes_.actionClicked = [this](TreeItem item) {
         const auto n = changes_.item(item);
-        if (n && n->data < gitChangeNodes_.size() && gitChangeNodes_[n->data].group && git_)
-            openGitDiff(git_->root, gitChangeNodes_[n->data].staged ? GitDiffKind::Staged : GitDiffKind::Changes, {}, true);
+        if (!n || n->data >= gitChangeNodes_.size() || !git_) return;
+        if (gitChangeNodes_[n->data].group) openGitDiff(git_->root, gitChangeNodes_[n->data].staged ? GitDiffKind::Staged : GitDiffKind::Changes, {}, true);
+        else stageGitFile(item);
     };
     changes_.expanded = [this](TreeItem item, bool value) {
         if (updatingGitFiles_) return;
@@ -603,6 +615,31 @@ void ProjectRuntime::Impl::openGitFile(TreeItem item) {
     const auto entry = git_->entries[node.entry];
     if (entry.state == L'?') { openFile(entry.path); return; }
     openGitDiff(entry.path, node.staged ? GitDiffKind::Staged : GitDiffKind::Changes);
+}
+void ProjectRuntime::Impl::stageGitFile(TreeItem item) {
+    if (updatingGitFiles_ || gitStagePending_ || renamePending_ || !git_ || git_->root.empty() || !git_->error.empty()) return;
+    if (root_.wsl() && (!connected_ || provider_->state() != ConnectionState::Ready)) { status(L"Reconnect WSL before staging changes."); return; }
+    const auto value = changes_.item(item);
+    if (!value || value->data >= gitChangeNodes_.size()) return;
+    const auto& node = gitChangeNodes_[value->data];
+    if (node.directory || node.entry >= git_->entries.size()) return;
+    const auto& entry = git_->entries[node.entry];
+    const bool stage = !node.staged;
+    const auto args = gitArguments(gitStageArguments({entry.path.lexically_relative(git_->root).generic_u8string(), entry.previousPath, entry.index, entry.worktree}, stage));
+    const auto root = git_->root; const auto provider = provider_; const auto generation = generation_;
+    const auto name = entry.path.filename().native();
+    gitStagePending_ = true;
+    status((stage ? L"Staging " : L"Unstaging ") + name + L"…");
+    gitWorker_->submit(L"git-stage", [this, args, root, provider, generation, name, stage] {
+        const auto result = provider->git(args, root, gitWorker_->cancellation());
+        gitWorker_->complete([this, generation, name, stage, code = result.code, error = result.error] {
+            gitStagePending_ = false;
+            if (generation != generation_) return;
+            if (code) { refreshGit(); status((stage ? L"Stage failed: " : L"Unstage failed: ") + error); return; }
+            refresh(false);
+            status((stage ? L"Staged " : L"Unstaged ") + name);
+        });
+    });
 }
 HistoryNode* ProjectRuntime::Impl::historyNode(TreeItem item) const {
     const auto value = branches_.item(item); return value ? reinterpret_cast<HistoryNode*>(value->data) : nullptr;

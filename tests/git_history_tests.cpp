@@ -5,6 +5,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <iterator>
 #include <set>
 #include <stdexcept>
 #ifndef _WIN32
@@ -83,8 +84,56 @@ struct Repository {
         fs::create_directories((path / name).parent_path());
         std::ofstream file(path / name, std::ios::binary); file << text; file.close(); check(!file.fail(), "Cannot write Git fixture");
     }
+    std::string readFile(const std::string& name) const {
+        std::ifstream file(path / name, std::ios::binary);
+        check(file.is_open(), "Cannot read Git fixture");
+        return {std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>()};
+    }
     std::string hash() const { auto result = git({"rev-parse", "HEAD"}); result.pop_back(); return result; }
 };
+void repositoryStaging() {
+    Repository repo;
+    repo.git({"init", "--quiet", "--template=", "--initial-branch=main"});
+    repo.git({"config", "user.name", "Poppy Test"}); repo.git({"config", "user.email", "poppy@example.invalid"});
+    repo.git({"config", "core.autocrlf", "false"}); repo.git({"config", "commit.gpgsign", "false"});
+    const std::string file = "src/日本語 [1].txt", other = "src/日本語 1.txt", renamed = "src/renamed [2].txt";
+    const auto entry = [&](const std::string& path) {
+        const auto entries = parseGitStatus(repo.git({"status", "--porcelain=v1", "-z", "--untracked-files=all"}));
+        const auto found = std::find_if(entries.begin(), entries.end(), [&](const GitStatusEntry& value) { return value.path == path; });
+        check(found != entries.end(), "A changed file disappeared from Git status");
+        return *found;
+    };
+    repo.write(file, "initial\n"); repo.write(other, "other\n");
+    repo.git(gitStageArguments(entry(file), true));
+    check(entry(file).staged() && !entry(file).changed() && !entry(other).staged(), "Staging an untracked literal path also staged another file");
+    repo.git(gitStageArguments(entry(file), false));
+    check(!entry(file).staged() && entry(file).changed() && repo.readFile(file) == "initial\n", "Unstaging before the first commit lost the new file");
+    repo.git({"add", "."}); repo.git({"commit", "-qm", "initial"});
+
+    repo.write(file, "staged\n"); repo.write(other, "unrelated\n");
+    repo.git(gitStageArguments(entry(file), true));
+    repo.write(file, "working\n");
+    check(entry(file).staged() && entry(file).changed(), "The staging fixture was not partially staged");
+    repo.git(gitStageArguments(entry(file), false));
+    check(!entry(file).staged() && entry(file).changed() && repo.readFile(file) == "working\n" && !entry(other).staged(), "Unstaging a partially staged file changed working files or another index entry");
+    repo.git(gitStageArguments(entry(file), true));
+    const auto patch = repo.git(gitDiffArguments(GitDiffKind::Staged, {}, {}));
+    check(entry(file).staged() && !entry(file).changed() && patch.find("+working") != patch.npos && patch.find("unrelated") == patch.npos,
+        "Staging did not include the entire selected file or included unrelated changes");
+    fs::remove(repo.path / file);
+    repo.git(gitStageArguments(entry(file), true));
+    check(entry(file).index == 'D' && !entry(file).changed(), "Staging a deletion did not remove its index entry");
+    repo.git(gitStageArguments(entry(file), false));
+    check(!entry(file).staged() && entry(file).worktree == 'D' && !fs::exists(repo.path / file), "Unstaging a deletion restored or lost the working tree deletion");
+
+    repo.write(file, "initial\n"); repo.git({"mv", "--", file, renamed});
+    const auto rename = entry(renamed);
+    check(rename.index == 'R' && rename.previousPath == file, "The staging fixture was not a rename");
+    repo.git(gitStageArguments(rename, false));
+    repo.git({"diff", "--cached", "--exit-code"});
+    check(!entry(file).staged() && entry(file).worktree == 'D' && entry(renamed).index == '?' &&
+        !fs::exists(repo.path / file) && repo.readFile(renamed) == "initial\n", "Unstaging a rename left its source staged or changed working files");
+}
 void repositoryHistory() {
     Repository repo;
     repo.git({"init", "--quiet", "--template=", "--initial-branch=main"});
@@ -141,7 +190,7 @@ int main() {
     try {
         statusGroups(); records(); patchLists();
 #ifndef _WIN32
-        repositoryHistory();
+        repositoryStaging(); repositoryHistory();
 #endif
         std::cout << "Git history tests passed.\n"; return 0;
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
