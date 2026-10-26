@@ -531,6 +531,7 @@ void ProjectRuntime::Impl::selectSidebar(Sidebar sidebar) {
     explorerActivity_.select(sidebar == Sidebar::Explorer); gitActivity_.select(sidebar == Sidebar::Git); branchActivity_.select(sidebar == Sidebar::Branch);
     searchActivity_.select(sidebar == Sidebar::Search); searchPane_.active(sidebar == Sidebar::Search && active_);
     if (sidebar == Sidebar::Search) { searchPane_.focus(); return; }
+    if (sidebar == Sidebar::Git) refreshGit();
     if (sidebar == Sidebar::Branch) refreshBranches();
     SetFocus(sidebar == Sidebar::Explorer ? (IsWindowVisible(tree_) ? tree_ : explorerButton_) : sidebar == Sidebar::Git ? (IsWindowVisible(gitTree_) ? gitTree_ : gitButton_) : (IsWindowVisible(branchTree_) ? branchTree_ : branchButton_));
 }
@@ -547,6 +548,7 @@ void ProjectRuntime::Impl::setGitView(bool tree) {
     if (IsWindowVisible(gitTree_)) SetFocus(gitTree_);
 }
 void ProjectRuntime::Impl::updateGitFiles() {
+    gitActivity_.setBadgeCount(git_ && git_->error.empty() && !git_->root.empty() ? git_->changed + git_->untracked : 0);
     std::wstring selected = wide(pendingGitSelection_);
     const int oldTop = changes_.top(), oldLeft = changes_.left();
     if (const auto node = changes_.item(changes_.selection()); node && node->data < gitChangeNodes_.size()) selected = gitChangeNodes_[node->data].path;

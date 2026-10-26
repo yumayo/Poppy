@@ -3,11 +3,19 @@
 
 namespace poppy {
 void ActivityButton::create(HWND parent, HINSTANCE instance, const wchar_t* title, int id, bool git, bool branch, bool search) {
-    git_ = git; branch_ = branch; search_ = search; dpi_ = GetDpiForWindow(parent);
+    git_ = git; branch_ = branch; search_ = search; title_ = title; dpi_ = GetDpiForWindow(parent); renderer_.setDpi(dpi_);
     WNDCLASSW cls{}; cls.lpfnWndProc = procedure; cls.hInstance = instance; cls.lpszClassName = activityButtonClassName;
     cls.hCursor = LoadCursorW(nullptr, IDC_ARROW); RegisterClassW(&cls);
     window_ = CreateWindowExW(0, activityButtonClassName, title, WS_CHILD | WS_VISIBLE | WS_TABSTOP,
         0, 0, 0, 0, parent, reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), instance, this);
+}
+void ActivityButton::setBadgeCount(size_t count) {
+    if (badgeCount_ == count) return;
+    badgeCount_ = count;
+    // Keep the count available to accessibility clients as well as the paint.
+    const auto title = title_ + (count ? L" (" + std::to_wstring(count) + L")" : L"");
+    SetWindowTextW(window_, title.c_str());
+    InvalidateRect(window_, nullptr, FALSE);
 }
 bool ActivityButton::contains(LPARAM point) const {
     RECT rect{}; GetClientRect(window_, &rect);
@@ -28,6 +36,15 @@ void ActivityButton::paint() {
     const int size = MulDiv(24, dpi_, 96), x = (rect.right - size) / 2, y = (rect.bottom - size) / 2;
     renderer_.icon(search_ ? Renderer::Icon::Search : branch_ ? Renderer::Icon::Branch : git_ ? Renderer::Icon::SourceControl : Renderer::Icon::Explorer,
         {x, y, x + size, y + size}, color);
+    if (badgeCount_) {
+        const auto text = std::to_wstring(badgeCount_);
+        const int height = MulDiv(20, dpi_, 96), padding = MulDiv(4, dpi_, 96);
+        const int width = std::max(height, renderer_.textWidth(text) + 2 * padding);
+        const RECT badge{std::max(padding, static_cast<int>(rect.right) - padding - width), rect.bottom - padding - height,
+            rect.right - padding, rect.bottom - padding};
+        renderer_.fillRounded(badge, enabled ? accent : muted, height / 2.0f);
+        renderer_.label(badge, text, background, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    }
     if (selected_) renderer_.fill({0, MulDiv(8, dpi_, 96), MulDiv(3, dpi_, 96), rect.bottom - MulDiv(8, dpi_, 96)}, accent);
     if (enabled && GetFocus() == window_) { RECT focus = rect; InflateRect(&focus, -4, -4); renderer_.outline(focus, muted); }
 }

@@ -238,6 +238,10 @@ void Renderer::fill(const RECT& rect, COLORREF value) {
     if (empty(rect)) return;
     color(value); target_->FillRectangle(rectangle(rect), brush_.get());
 }
+void Renderer::fillRounded(const RECT& rect, COLORREF value, float radius) {
+    if (empty(rect)) return;
+    color(value); target_->FillRoundedRectangle(D2D1::RoundedRect(rectangle(rect), radius, radius), brush_.get());
+}
 int Renderer::textWidth(const std::wstring& text) const {
     auto* format = font_ == Font::Code ? codeFont_.get() : uiFont_.get();
     if (!format || text.empty()) return 0;
