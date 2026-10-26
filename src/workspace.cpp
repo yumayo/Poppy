@@ -37,6 +37,7 @@ private:
     static LRESULT CALLBACK procedure(HWND,UINT,WPARAM,LPARAM);
     LRESULT handle(UINT,WPARAM,LPARAM);
     void create();
+    void showInitialWindow();
     void layout();
     void paint();
     void choose();
@@ -72,8 +73,10 @@ private:
     size_t active_ = 0, tools_ = 0;
     uint64_t nextId_ = 1;
     UINT dpi_ = 96;
+    int initialShow_ = SW_SHOWNORMAL;
     int scroll_ = 0, wheel_ = 0;
     bool listingWsl_ = false;
+    bool initialShowPending_ = true;
     bool dragging_ = false, restoring_ = true, appDirty_ = false, closing_ = false;
     ULONGLONG appChanged_ = 0;
     std::wstring tipText_, storageError_;
@@ -81,12 +84,11 @@ private:
 };
 OpenProject* Workspace::find(uint64_t id) { const auto found=std::find_if(projects_.begin(),projects_.end(),[&](const OpenProject& project){return project.id==id;});return found==projects_.end()?nullptr:&*found; }
 int Workspace::run(HINSTANCE instance,int show,fs::path initial) {
-    initializeRendering();instance_=instance;initial_=std::move(initial);
+    initializeRendering();instance_=instance;initial_=std::move(initial);initialShow_=show;
     INITCOMMONCONTROLSEX common{sizeof(common),ICC_WIN95_CLASSES};InitCommonControlsEx(&common);
     WNDCLASSW cls{};cls.lpfnWndProc=procedure;cls.hInstance=instance;cls.lpszClassName=L"PoppyMain";cls.hCursor=LoadCursorW(nullptr,IDC_ARROW);cls.hIcon=LoadIconW(nullptr,IDI_APPLICATION);RegisterClassW(&cls);
     window_=CreateWindowExW(0,cls.lpszClassName,L"Poppy",WS_OVERLAPPEDWINDOW|WS_CLIPCHILDREN,CW_USEDEFAULT,CW_USEDEFAULT,1380,820,nullptr,nullptr,instance,this);
     if(!window_)return 1;
-    ShowWindow(window_,show);UpdateWindow(window_);
     MSG message{};
     while(GetMessageW(&message,nullptr,0,0)>0) {
         const bool key=message.message==WM_KEYDOWN;
@@ -119,7 +121,6 @@ void Workspace::create(){
                     rect.left=std::clamp(rect.left,monitor.rcWork.left,monitor.rcWork.right-width);rect.top=std::clamp(rect.top,monitor.rcWork.top,monitor.rcWork.bottom-height);
                     SetWindowPos(window_,nullptr,rect.left,rect.top,width,height,SWP_NOZORDER|SWP_NOACTIVATE);
                 }
-                if(session_.maximized)ShowWindow(window_,SW_MAXIMIZE);
             }
             const auto paths=session_.openProjects;
             if (!initial_.empty()) open(initial_, false);
@@ -134,10 +135,20 @@ void Workspace::create(){
             if(!session_.lastProject.empty())for(size_t i=0;i<projects_.size();++i)if(pathKey(projects_[i].path)==pathKey(ResourceId::parse(session_.lastProject))){active_=i;break;}
             if(!initial_.empty())open(initial_);
             else if(!projects_.empty())select(active_);
-            layout();if(!error.empty())report(error);
+            layout();showInitialWindow();if(!error.empty())report(error);
         });
     });
     SetTimer(window_,1,80,nullptr);
+}
+void Workspace::showInitialWindow(){
+    // Keep the window hidden until its placement and active project's layout
+    // have been restored. File loading and WSL connections continue separately.
+    if(!initialShowPending_||restoring_||(!projects_.empty()&&!projects_[active_].runtime->ready()))return;
+    initialShowPending_=false;
+    int show=initialShow_;
+    if(session_.positioned&&session_.maximized&&(show==SW_SHOWNORMAL||show==SW_SHOWDEFAULT||show==SW_SHOW))show=SW_SHOWMAXIMIZED;
+    layout();ShowWindow(window_,show);UpdateWindow(window_);
+    if(!storageError_.empty())report(utf8(storageError_));
 }
 void Workspace::choose(){
     HMENU menu = CreatePopupMenu(); AppendMenuW(menu, MF_STRING, 1, L"Open Windows folder…"); AppendMenuW(menu, MF_STRING | (listingWsl_ ? MF_GRAYED : 0), 2, L"Open WSL folder…");
@@ -222,7 +233,7 @@ void Workspace::open(ResourceId path,bool shouldSelect){
             project->runtime->initialize(path,state.value_or(ProjectSession{}),state.has_value());
             project->dirty=true;project->changedAt=GetTickCount64();
             if(project==&projects_[active_]){layout();project->runtime->activate(true);}
-            updateTools();InvalidateRect(window_,nullptr,FALSE);if(!failure.empty())report(failure);
+            updateTools();InvalidateRect(window_,nullptr,FALSE);showInitialWindow();if(!failure.empty())report(failure);
         });
     });
     appDirty_=true;appChanged_=GetTickCount64();
@@ -261,7 +272,7 @@ void Workspace::save(OpenProject& project){
     });project.dirty=false;
 }
 void Workspace::saveApp(){
-    if(restoring_)return;
+    if(restoring_||initialShowPending_)return;
     session_.openProjects.clear(); session_.openProjectKeys.clear();
     for(const auto& project:projects_) { session_.openProjects.push_back(project.path.serialized()); session_.openProjectKeys.push_back(utf8(pathKey(project.path))); }
     session_.lastProject=projects_.empty()?std::string{}:projects_[active_].path.serialized();
@@ -345,7 +356,7 @@ void Workspace::paint(){
     renderer_.fill({0,client.bottom-px(44),width,client.bottom},panel);renderer_.label({px(12),client.bottom-px(44),width-px(8),client.bottom},L"+  Open folder",accent);
     if(projects_.empty())renderer_.label({width+px(30),px(40),client.right-px(30),client.bottom},restoring_?L"Restoring projects…":L"Open a folder with Ctrl+O.",muted,DT_LEFT|DT_TOP|DT_WORDBREAK);
 }
-void Workspace::report(std::string error){storageError_=wide(error);if(!closing_)MessageBoxW(window_,(L"Could not read or save state.\n\n"+storageError_).c_str(),L"Poppy",MB_OK|MB_ICONWARNING);}
+void Workspace::report(std::string error){storageError_=wide(error);if(!closing_&&!initialShowPending_)MessageBoxW(window_,(L"Could not read or save state.\n\n"+storageError_).c_str(),L"Poppy",MB_OK|MB_ICONWARNING);}
 LRESULT CALLBACK Workspace::procedure(HWND w,UINT m,WPARAM a,LPARAM b){auto self=reinterpret_cast<Workspace*>(GetWindowLongPtrW(w,GWLP_USERDATA));if(m==WM_NCCREATE){self=static_cast<Workspace*>(reinterpret_cast<CREATESTRUCTW*>(b)->lpCreateParams);self->window_=w;SetWindowLongPtrW(w,GWLP_USERDATA,reinterpret_cast<LONG_PTR>(self));}return self?self->handle(m,a,b):DefWindowProcW(w,m,a,b);}
 LRESULT Workspace::handle(UINT m,WPARAM a,LPARAM b){switch(m){
 case WM_CREATE:create();return 0;case WM_PAINT:paint();return 0;case WM_ERASEBKGND:return 1;case WM_SIZE:layout();if(!restoring_){appDirty_=true;appChanged_=GetTickCount64();}return 0;
