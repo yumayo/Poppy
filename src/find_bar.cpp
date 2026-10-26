@@ -14,11 +14,11 @@ void FindBar::setDpi(UINT dpi) { dpi_ = dpi; renderer_.setDpi(dpi); caretChanged
 void FindBar::layout(int top, int width, int height) {
     MoveWindow(window_, 0, top, width, height, TRUE); caretChanged();
 }
-void FindBar::show(const std::optional<std::wstring>& seed) {
+void FindBar::show(const std::optional<std::wstring>& seed, bool focus) {
     visible_ = true;
     if (seed) { query_.clear(); caret_ = anchor_ = inputFirst_ = 0; replace(*seed); }
     anchor_ = 0; caret_ = query_.size();
-    ShowWindow(window_, SW_SHOW); SetFocus(window_); caretChanged();
+    ShowWindow(window_, SW_SHOW); if (focus) SetFocus(window_); caretChanged();
 }
 void FindBar::close(bool restoreFocus) {
     if (!visible_) return;
@@ -37,17 +37,17 @@ void FindBar::close(bool restoreFocus) {
 void FindBar::status(std::wstring text) {
     if (status_ == text) return;
     status_ = std::move(text);
-    SetWindowTextW(window_, (L"Find in file: " + status_).c_str());
+    SetWindowTextW(window_, ((compact_ ? L"Search project: " : L"Find in file: ") + status_).c_str());
     InvalidateRect(window_, nullptr, FALSE);
 }
 RECT FindBar::button(int index) const {
     RECT rect{}; GetClientRect(window_, &rect);
     const int right = static_cast<int>(rect.right) - px(4 + (3 - index) * 26);
-    return {right - px(26), px(3), right, rect.bottom - px(3)};
+    return {right - px(26), px(compact_ ? 35 : 3), right, rect.bottom - px(3)};
 }
 RECT FindBar::input() const {
     RECT rect{}; GetClientRect(window_, &rect);
-    return {px(8), px(4), std::max<LONG>(px(8), button(0).left - px(100)), rect.bottom - px(4)};
+    return {px(8), px(4), std::max<LONG>(px(8), compact_ ? rect.right - px(8) : button(0).left - px(100)), compact_ ? px(30) : rect.bottom - px(4)};
 }
 size_t FindBar::previous(size_t position) const {
     if (!position) return 0;
@@ -104,11 +104,11 @@ void FindBar::paint() {
         const int right = origin + renderer_.textWidth(query_.substr(inputFirst_, end - inputFirst_));
         renderer_.fill({left, box.top + 1, std::min<LONG>(right, box.right - px(4)), box.bottom - 1}, RGB(57, 75, 89));
     }
-    renderer_.label({origin, box.top, box.right - px(4), box.bottom}, query_.empty() ? L"Find in file" : query_.substr(inputFirst_),
+    renderer_.label({origin, box.top, box.right - px(4), box.bottom}, query_.empty() ? compact_ ? L"Search project" : L"Find in file" : query_.substr(inputFirst_),
         query_.empty() ? muted : foreground, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
     if (GetFocus() == window_ && !composing_ && caretX_ < box.right)
         renderer_.fill({caretX_, box.top + px(4), caretX_ + std::max(1, px(1)), box.bottom - px(4)}, foreground);
-    renderer_.label({box.right + px(4), 0, button(0).left - px(4), rect.bottom}, status_, muted, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+    renderer_.label({compact_ ? px(8) : box.right + px(4), compact_ ? px(32) : 0, button(0).left - px(4), rect.bottom}, status_, muted, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
     for (int i = 0; i < 4; ++i) {
         const auto area = button(i);
         if (i == 0 && matchCase_) renderer_.fill(area, RGB(50, 70, 94));
@@ -149,8 +149,9 @@ LRESULT FindBar::handle(UINT message, WPARAM a, LPARAM b) {
         }
         if ((ctrl && a == 'V') || (shift && a == VK_INSERT)) { replace(clipboardText(window_)); return 0; }
         switch (a) {
-        case VK_ESCAPE: close(); return 0;
-        case VK_RETURN: case VK_F3: if (navigate) navigate(shift); return 0;
+        case VK_ESCAPE: if (escaped) escaped(); else close(); return 0;
+        case VK_RETURN: if (accepted) accepted(); else if (navigate) navigate(shift); return 0;
+        case VK_F3: if (navigate) navigate(shift); return 0;
         case VK_UP: if (navigate) navigate(true); return 0;
         case VK_DOWN: if (navigate) navigate(false); return 0;
         case VK_TAB: SetFocus(GetParent(window_)); return 0;
@@ -182,7 +183,7 @@ LRESULT FindBar::handle(UINT message, WPARAM a, LPARAM b) {
             const auto area = button(i);
             if (!PtInRect(&area, point)) continue;
             if (i == 0) { matchCase_ = !matchCase_; if (changed) changed(); InvalidateRect(window_, nullptr, FALSE); }
-            else if (i == 3) close();
+            else if (i == 3) { if (escaped) escaped(); else close(); }
             else if (navigate) navigate(i == 1);
             return 0;
         }

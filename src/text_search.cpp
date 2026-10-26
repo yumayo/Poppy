@@ -31,6 +31,14 @@ std::optional<TextMatch> LiteralPattern::next(std::string_view text, TextSearchC
     }
     return {};
 }
+bool LiteralPattern::consume(unsigned char ch, size_t& matched) const {
+    if (empty()) return false;
+    const auto value = static_cast<char>(fold(ch));
+    while (matched && value != query_[matched]) matched = prefix_[matched - 1];
+    if (value == query_[matched]) ++matched;
+    if (matched != query_.size()) return false;
+    matched = 0; return true;
+}
 void TextSearch::query(std::string text, bool matchCase) {
     pattern_.assign(std::move(text), matchCase);
     start(0);

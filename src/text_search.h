@@ -15,6 +15,7 @@ class LiteralPattern {
 public:
     void assign(std::string query, bool matchCase = false);
     bool empty() const { return query_.empty(); }
+    bool consume(unsigned char ch, size_t& matched) const;
     std::optional<TextMatch> next(std::string_view text, TextSearchCursor& cursor, size_t byteBudget, bool overlapping = false) const;
 private:
     unsigned char fold(unsigned char ch) const;

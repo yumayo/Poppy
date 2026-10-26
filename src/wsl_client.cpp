@@ -1,5 +1,6 @@
 #include "project_provider.h"
 #include "wsl_protocol.h"
+#include "content_search_protocol.h"
 #include "wsl_bootstrap.h"
 #include "text.h"
 #include <algorithm>
@@ -18,12 +19,14 @@ struct Pending {
     bool done = false, body = false, last = false;
     uint64_t size = 0;
     size_t entryBytes = 0;
+    std::function<void(const Message&)> receive;
 };
 class Connection {
 public:
     explicit Connection(ProjectLocation location) : location_(std::move(location)) {}
     ~Connection() { stop(); }
-    Response call(Message message, const std::string* bytes = nullptr, const std::function<bool()>& cancelled = {}, DWORD timeout = 10000);
+    Response call(Message message, const std::string* bytes = nullptr, const std::function<bool()>& cancelled = {}, DWORD timeout = 10000,
+        std::function<void(const Message&)> receive = {});
     void ensure();
     void reconnect();
     ConnectionState state() const { return state_.load(); }
@@ -150,7 +153,7 @@ void Connection::ensure() {
         if (field(hello.metadata, "protocolVersion") != std::to_string(protocolVersion) || field(hello.metadata, "helperVersion") != helperVersion || field(hello.metadata, "architecture") != "x86_64") throw std::runtime_error("Unsupported WSL helper protocol, version or architecture");
         number(hello.metadata, "uid");
         const auto capabilities = ',' + field(hello.metadata, "capabilities") + ',';
-        for (const auto& capability : {"list", "read", "save", "rename", "index", "git", "inotify", "terminal"}) if (capabilities.find(',' + std::string(capability) + ',') == capabilities.npos) throw std::runtime_error("The WSL helper is missing a required capability");
+        for (const auto& capability : {"list", "read", "save", "rename", "index", "git", "inotify", "terminal", "search"}) if (capabilities.find(',' + std::string(capability) + ',') == capabilities.npos) throw std::runtime_error("The WSL helper is missing a required capability");
         const auto homePath = field(hello.metadata, "home");
         { std::lock_guard<std::mutex> stateLock(mutex_); shell_ = field(hello.metadata, "shell"); uid_ = field(hello.metadata, "uid"); helperPath_ = field(hello.metadata, "executable"); }
         if (homePath.empty() || homePath[0] != '/' || shell_.empty() || shell_[0] != '/' || helperPath_.empty() || helperPath_[0] != '/' || homePath.find('\0') != homePath.npos || shell_.find('\0') != shell_.npos || helperPath_.find('\0') != helperPath_.npos) throw std::runtime_error("Invalid WSL handshake paths");
@@ -158,13 +161,14 @@ void Connection::ensure() {
     } catch (const std::exception& error) { fail(wide(error.what())); throw; }
 }
 void Connection::received(Frame frame) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::unique_lock<std::mutex> lock(mutex_);
     if (frame.kind == 1) {
         auto message = decodeMessage(frame.payload);
         if (field(message, "event") == "rescanRequired") { ++revision_; return; }
         const auto found = pending_.find(number(message, "id")); if (found == pending_.end()) throw std::runtime_error("Unexpected WSL response ID"); auto& pending = *found->second;
         if (pending.done || field(message, "projectId") != pending.project || field(message, "generation") != pending.generation) throw std::runtime_error("WSL response authority/generation mismatch");
         if (field(message, "entry") == "1") {
+            if (pending.receive) { const auto receive = pending.receive; lock.unlock(); receive(message); return; }
             pending.entryBytes += frame.payload.size(); responseBytes_ += frame.payload.size(); if (pending.response.entries.size() >= 200000 || responseBytes_ > 64 * 1024 * 1024) throw std::runtime_error("WSL listing exceeds the receive limit"); pending.response.entries.push_back(std::move(message));
         } else {
             if (field(message, "body") == "1") { if (pending.body) throw std::runtime_error("Duplicate WSL file header"); pending.body = true; pending.size = number(message, "size"); if (pending.size > maxFileBytes) throw std::runtime_error("WSL file exceeds the 16 MiB receive limit"); }
@@ -177,23 +181,26 @@ void Connection::received(Frame frame) {
         pending.response.bytes += chunk.bytes; responseBytes_ += chunk.bytes.size(); if (responseBytes_ > 64 * 1024 * 1024) throw std::runtime_error("WSL responses exceed the connection receive limit"); if (chunk.last) { if (pending.response.bytes.size() != pending.size) throw std::runtime_error("Truncated WSL body"); pending.last = true; }
     }
 }
-Response Connection::call(Message message, const std::string* bytes, const std::function<bool()>& cancelled, DWORD timeout) {
+Response Connection::call(Message message, const std::string* bytes, const std::function<bool()>& cancelled, DWORD timeout,
+    std::function<void(const Message&)> receive) {
     const auto id = nextId_++; message["id"] = std::to_string(id); auto pending = std::make_shared<Pending>(); pending->project = field(message, "projectId"); pending->generation = field(message, "generation");
+    pending->receive = std::move(receive);
     const auto deadline = GetTickCount64() + timeout;
     { std::lock_guard<std::mutex> lock(mutex_); if (pending_.size() >= 128) throw std::runtime_error("WSL request limit reached"); pending_[id] = pending; }
     try {
         { std::lock_guard<std::mutex> lock(uploadMutex_); send({1, encodeMessage(message)}); if (bytes) { size_t offset = 0; do { const auto now = GetTickCount64(); if (now >= deadline) { fail(L"WSL upload timed out. Verify the file before retrying."); throw std::runtime_error("WSL upload timed out"); } const size_t count = std::min(maxChunk, bytes->size() - offset); send(dataFrame(id, offset, offset + count == bytes->size(), std::string_view(*bytes).substr(offset, count)), static_cast<DWORD>(deadline - now)); offset += count; } while (offset < bytes->size()); } }
-        bool cancelling = false; ULONGLONG cancelledAt = 0;
+        bool cancelling = false, searchTimedOut = false; ULONGLONG cancelledAt = 0;
         std::unique_lock<std::mutex> lock(mutex_);
         while (!pending->done && !stopping_) {
             condition_.wait_for(lock, std::chrono::milliseconds(30));
-            if (!cancelling && cancelled && cancelled()) { cancelling = true; cancelledAt = GetTickCount64(); lock.unlock(); send({1, encodeMessage({{"op", "cancel"}, {"id", std::to_string(nextId_++)}, {"target", std::to_string(id)}})}); lock.lock(); }
-            if (GetTickCount64() > deadline || (cancelling && GetTickCount64() - cancelledAt > 2000)) { lock.unlock(); fail(L"WSL operation timed out. Reconnect and verify the file before retrying a save or rename."); lock.lock(); break; }
+            searchTimedOut = pending->receive && GetTickCount64() > deadline;
+            if (!cancelling && ((cancelled && cancelled()) || searchTimedOut)) { cancelling = true; cancelledAt = GetTickCount64(); lock.unlock(); send({1, encodeMessage({{"op", "cancel"}, {"id", std::to_string(nextId_++)}, {"target", std::to_string(id)}})}); lock.lock(); }
+            if ((!pending->receive && GetTickCount64() > deadline) || (cancelling && GetTickCount64() - cancelledAt > 2000)) { lock.unlock(); fail(L"WSL operation timed out. Reconnect and verify the file before retrying a save or rename."); lock.lock(); break; }
         }
         if (!pending->done) throw std::runtime_error("WSL connection closed; operation outcome may be unknown");
         responseBytes_ -= pending->entryBytes + pending->response.bytes.size(); auto response = std::move(pending->response); pending_.erase(id); lock.unlock();
         const auto error = field(response.metadata, "error"); if (!error.empty()) throw std::runtime_error(error);
-        if (cancelling) throw std::runtime_error("WSL request cancelled");
+        if (cancelling) throw std::runtime_error(searchTimedOut ? "WSL content search timed out; narrow the search and retry." : "WSL request cancelled");
         return response;
     } catch (...) { std::lock_guard<std::mutex> lock(mutex_); const auto found = pending_.find(id); if (found != pending_.end()) { responseBytes_ -= found->second->entryBytes + found->second->response.bytes.size(); pending_.erase(found); } throw; }
 }
@@ -228,6 +235,28 @@ public:
         FileIndex index;
         try { const auto response = call("indexFiles", root, {}, nullptr, cancelled, 60000); for (const auto& entry : response.entries) { const auto relative = root.at(field(entry, "path")).lexically_relative(root).u8string(); addIndexedFile(index, relative); } if (field(response.metadata, "truncated") == "1") index.error = "WSL file list reached its 200,000-file or 50,000-directory limit."; std::sort(index.files.begin(), index.files.end(), [](const IndexedFile& a, const IndexedFile& b) { return a.relative < b.relative; }); } catch (const std::exception& error) { index.error = error.what(); } return index;
     }
+    ContentSearchSummary searchContent(const ResourceId& root, const ContentSearchOptions& options,
+        const ContentPublish& publish, const std::function<bool()>& cancelled) override {
+        struct Delivery { ContentPublish publish; std::atomic<bool> full{false}; size_t count = 0, bytes = 0; };
+        auto delivery = std::make_shared<Delivery>(); delivery->publish = publish;
+        auto message = contentSearchMessage(options); std::string exclusions;
+        for (const auto& relative : options.excluded) {
+            if (!validSearchRelative(relative) || exclusions.size() + relative.size() + 1 > 4 * 1024 * 1024) throw std::runtime_error("Invalid or oversized dirty-buffer exclusions");
+            exclusions += relative; exclusions += '\0';
+        }
+        message["size"] = std::to_string(exclusions.size());
+        try {
+            const auto response = call("searchContent", root, std::move(message), &exclusions,
+                [cancelled, delivery] { return delivery->full.load() || (cancelled && cancelled()); }, 600000,
+                [delivery](const Message& entry) {
+                    if (delivery->full) return;
+                    auto match = contentMatchFromMessage(entry); delivery->bytes += contentMatchBytes(match);
+                    if (++delivery->count > contentResultLimit || delivery->bytes > contentResultBytes) throw std::runtime_error("WSL search exceeded its result budget");
+                    if (delivery->publish && !delivery->publish({std::move(match)})) delivery->full = true;
+                });
+            return contentSummaryFromMessage(response.metadata);
+        } catch (...) { if (delivery->full) { ContentSearchSummary summary; summary.limited = true; return summary; } throw; }
+    }
     ProcessResult git(const std::vector<std::wstring>& args, const ResourceId& directory, const std::atomic<bool>* cancelled) override {
         try { Message extra{{"argc", std::to_string(args.size() - 1)}}; for (size_t i = 1; i < args.size(); ++i) extra["arg" + std::to_string(i - 1)] = utf8(args[i]); auto response = call("git", directory, std::move(extra), nullptr, [cancelled] { return cancelled && *cancelled; }, 20000); ProcessResult result; result.code = static_cast<DWORD>(number(response.metadata, "exitCode")); result.output = std::move(response.bytes); if (result.code) result.error = result.code == 127 ? L"Git is not installed in this WSL distribution. Install Git there and press F5." : validUtf8(result.output) ? wide(result.output) : L"Linux Git failed"; return result; } catch (const std::exception& error) { return {1, {}, wide(error.what())}; }
     }
@@ -240,9 +269,10 @@ public:
     std::vector<std::wstring> terminalCommand(const ResourceId& path, const std::string& token, const std::wstring& tool) const override { if (state() != ConnectionState::Ready) throw std::runtime_error("Reconnect the WSL project before starting a terminal"); return connection_->terminal(path, token, tool); }
     bool stopTerminal(const std::string& token) const override { return connection_->stopTerminal(token); }
 private:
-    Response call(const std::string& op, const ResourceId& path, Message extra = {}, const std::string* bytes = nullptr, const std::function<bool()>& cancelled = {}, DWORD timeout = 10000) {
+    Response call(const std::string& op, const ResourceId& path, Message extra = {}, const std::string* bytes = nullptr, const std::function<bool()>& cancelled = {}, DWORD timeout = 10000,
+        std::function<void(const Message&)> receive = {}) {
         if (connection_->state() != ConnectionState::Ready || (op != "connect" && projectState_ != ConnectionState::Ready)) throw std::runtime_error("WSL is disconnected. Use Reconnect or F5 to retry. " + utf8(connection_->error()));
-        extra.insert({{"op", op}, {"path", path.u8string()}, {"projectId", project_}, {"generation", std::to_string(generation_.load())}}); return connection_->call(std::move(extra), bytes, cancelled, timeout);
+        extra.insert({{"op", op}, {"path", path.u8string()}, {"projectId", project_}, {"generation", std::to_string(generation_.load())}}); return connection_->call(std::move(extra), bytes, cancelled, timeout, std::move(receive));
     }
     std::shared_ptr<Connection> connection_;
     std::string project_;

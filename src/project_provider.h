@@ -2,6 +2,7 @@
 #include "win.h"
 #include "resource.h"
 #include "file_search.h"
+#include "content_search.h"
 #include <memory>
 
 namespace poppy {
@@ -22,6 +23,8 @@ public:
     virtual ProviderSave saveFile(const ResourceId& path, const std::string& bytes, const std::string& version, const std::string& baseline) = 0;
     virtual std::wstring renameResource(const ResourceId& source, const ResourceId& destination) = 0;
     virtual FileIndex indexFiles(const ResourceId& root, const std::function<bool()>& cancelled) = 0;
+    virtual ContentSearchSummary searchContent(const ResourceId& root, const ContentSearchOptions& options,
+        const ContentPublish& publish, const std::function<bool()>& cancelled) = 0;
     virtual ProcessResult git(const std::vector<std::wstring>& args, const ResourceId& directory, const std::atomic<bool>* cancelled) = 0;
     virtual ConnectionState state() const { return ConnectionState::Ready; }
     virtual std::wstring error() const { return {}; }

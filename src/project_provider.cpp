@@ -55,6 +55,8 @@ public:
     }
     std::wstring renameResource(const ResourceId& source, const ResourceId& destination) override { return MoveFileExW(source.local().c_str(), destination.local().c_str(), MOVEFILE_WRITE_THROUGH) ? std::wstring{} : winError(); }
     FileIndex indexFiles(const ResourceId& root, const std::function<bool()>& cancelled) override { return poppy::indexFiles(root.local(), cancelled); }
+    ContentSearchSummary searchContent(const ResourceId& root, const ContentSearchOptions& options,
+        const ContentPublish& publish, const std::function<bool()>& cancelled) override { return searchContents(root.local(), options, publish, cancelled); }
     ProcessResult git(const std::vector<std::wstring>& args, const ResourceId& directory, const std::atomic<bool>* cancelled) override { return runProcess(args, directory.local(), 5000, cancelled); }
 };
 }

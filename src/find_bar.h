@@ -8,7 +8,8 @@ public:
     void create(HWND parent, HINSTANCE instance);
     void setDpi(UINT dpi);
     void layout(int top, int width, int height);
-    void show(const std::optional<std::wstring>& seed = {});
+    void show(const std::optional<std::wstring>& seed = {}, bool focus = true);
+    void projectSearch() { compact_ = true; }
     void close(bool restoreFocus = true);
     bool visible() const { return visible_; }
     HWND window() const { return window_; }
@@ -16,6 +17,7 @@ public:
     bool matchCase() const { return matchCase_; }
     void status(std::wstring text);
     std::function<void()> changed, closed, focused;
+    std::function<void()> accepted, escaped;
     std::function<void(bool)> navigate;
 private:
     static LRESULT CALLBACK procedure(HWND, UINT, WPARAM, LPARAM);
@@ -36,6 +38,6 @@ private:
     size_t caret_ = 0, anchor_ = 0, inputFirst_ = 0;
     int caretX_ = 0;
     wchar_t highSurrogate_ = 0;
-    bool visible_ = false, composing_ = false, matchCase_ = false;
+    bool visible_ = false, composing_ = false, matchCase_ = false, compact_ = false;
 };
 }

@@ -2,8 +2,8 @@
 #include <algorithm>
 
 namespace poppy {
-void ActivityButton::create(HWND parent, HINSTANCE instance, const wchar_t* title, int id, bool git, bool branch) {
-    git_ = git; branch_ = branch; dpi_ = GetDpiForWindow(parent);
+void ActivityButton::create(HWND parent, HINSTANCE instance, const wchar_t* title, int id, bool git, bool branch, bool search) {
+    git_ = git; branch_ = branch; search_ = search; dpi_ = GetDpiForWindow(parent);
     WNDCLASSW cls{}; cls.lpfnWndProc = procedure; cls.hInstance = instance; cls.lpszClassName = activityButtonClassName;
     cls.hCursor = LoadCursorW(nullptr, IDC_ARROW); RegisterClassW(&cls);
     window_ = CreateWindowExW(0, activityButtonClassName, title, WS_CHILD | WS_VISIBLE | WS_TABSTOP,
@@ -26,7 +26,7 @@ void ActivityButton::paint() {
     renderer_.fill(rect, selected_ || (mousePressed_ && hover_) || keyPressed_ ? panel : hover_ && enabled ? RGB(34, 39, 47) : background);
     const COLORREF color = !enabled ? border : selected_ ? foreground : muted;
     const int size = MulDiv(24, dpi_, 96), x = (rect.right - size) / 2, y = (rect.bottom - size) / 2;
-    renderer_.icon(branch_ ? Renderer::Icon::Branch : git_ ? Renderer::Icon::SourceControl : Renderer::Icon::Explorer,
+    renderer_.icon(search_ ? Renderer::Icon::Search : branch_ ? Renderer::Icon::Branch : git_ ? Renderer::Icon::SourceControl : Renderer::Icon::Explorer,
         {x, y, x + size, y + size}, color);
     if (selected_) renderer_.fill({0, MulDiv(8, dpi_, 96), MulDiv(3, dpi_, 96), rect.bottom - MulDiv(8, dpi_, 96)}, accent);
     if (enabled && GetFocus() == window_) { RECT focus = rect; InflateRect(&focus, -4, -4); renderer_.outline(focus, muted); }

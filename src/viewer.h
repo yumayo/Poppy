@@ -29,6 +29,7 @@ public:
     void find();
     void findNext(bool backwards = false);
     bool findKey(const MSG& message);
+    bool selectSearch(size_t begin, size_t end, const std::string& query, bool matchCase);
     HWND window() const { return window_; }
 private:
     static LRESULT CALLBACK procedure(HWND, UINT, WPARAM, LPARAM);
@@ -46,6 +47,7 @@ private:
     void requestFind(bool navigate = false, bool backwards = false, bool reveal = true);
     void searchSlice();
     void revealMatch();
+    void revealRange(TextMatch match);
     POINT caretPoint() const;
     RECT layoutButton(bool inlineView) const;
     int visibleRows() const;

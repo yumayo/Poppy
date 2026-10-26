@@ -275,6 +275,8 @@ void documentFind() {
     check(viewer.state().anchor == 0 && viewer.state().caret == 0 && status() == L"Find in file: 2 matches", "A stale search selected text in a new document");
     query(L"needle");
     check(viewer.state().anchor == 4 && viewer.state().caret == 10, "Read-only document search failed");
+    check(viewer.selectSearch(4, 10, "NEEDLE", false) && !viewer.selectSearch(4, 10, "NEEDLE", true) && !viewer.selectSearch(4, 11, "needle", false),
+        "Project search navigation failed to validate stale offsets or case options");
     auto diff = std::make_shared<DiffDocument>();
     diff->patch.text = "diff --git a/needle b/needle\n--- a/needle\n+++ b/needle\n@@ -1 +1 @@\n-old needle\n+new needle\n";
     indexDiff(*diff); viewer.showDiff(diff, L"diff.txt"); wait();

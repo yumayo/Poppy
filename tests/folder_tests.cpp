@@ -823,6 +823,40 @@ void quickOpenTests(const fs::path& executable) {
     click(app.window, px(12), px(22));
     check(!IsWindowVisible(palette), "Clicking outside quick open did not close it");
 }
+void fullSearchTests(const fs::path& executable) {
+    Fixture fixture; fs::create_directory(fixture.root / L"ignored");
+    {
+        std::ofstream file(fixture.root / L"file.txt");
+        for (int line = 0; line < 300; ++line) file << (line == 220 ? "unique-needle" : "plain text") << '\n';
+        std::ofstream ignore(fixture.root / L".gitignore"); ignore << "ignored/\n";
+        std::ofstream hidden(fixture.root / L"ignored" / L"hidden.txt"); hidden << "unique-needle\n";
+    }
+    Application app(executable, fixture.root); app.tree();
+    const auto button = FindWindowExW(app.window, nullptr, activityButtonClassName, L"Search");
+    const auto pane = FindWindowExW(app.window, nullptr, L"PoppySearchPane", nullptr);
+    const auto viewer = FindWindowExW(app.window, nullptr, L"PoppyViewer", nullptr);
+    check(button && pane && !IsWindowVisible(pane), "Search sidebar should start hidden");
+    send(button, BM_CLICK);
+    const auto input = FindWindowExW(pane, nullptr, L"PoppyFindBar", nullptr);
+    check(IsWindowVisible(pane) && input, "Search activity did not open its input");
+    const auto type = [&](const std::wstring& query) { for (const auto ch : query) send(input, WM_CHAR, ch); };
+    const auto finished = [&](size_t count) {
+        waitFor([&] { wchar_t text[1024]{}; GetWindowTextW(pane, text, 1024); const std::wstring title = text;
+            return title.find(L"Search project: " + std::to_wstring(count) + L" matches") == 0 && title.find(L"Searching") == title.npos;
+        }, "Project search did not publish its expected results");
+    };
+    type(L"unique-needle"); finished(1);
+    send(input, WM_KEYDOWN, VK_RETURN); waitLines(viewer, 300);
+    check(scrollInfo(viewer).nPos > 150, "Search result did not reveal the matching line");
+    // Replacing the selected match in the live buffer must exclude the old
+    // disk contents, without saving the file or allocating a text snapshot.
+    send(viewer, WM_CHAR, '!'); finished(0);
+    send(button, BM_CLICK); type(L"!"); finished(1);
+    send(input, WM_KEYDOWN, VK_RETURN); waitLines(viewer, 300);
+    send(viewer, WM_CHAR, '\r'); waitLines(viewer, 301); finished(0);
+    check(PostMessageW(input, WM_KEYDOWN, VK_F5, 0) != FALSE, "Could not refresh project search");
+    finished(0);
+}
 void gitSidebarTests(const fs::path& executable) {
     wchar_t git[MAX_PATH]{};
     const auto length = SearchPathW(nullptr, L"git.exe", nullptr, MAX_PATH, git, nullptr);
@@ -1137,7 +1171,7 @@ int wmain(int argc, wchar_t** argv) {
         check(argc == 2, "Pass the path to Poppy.exe");
         SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         for (const auto test : {folderTests, sidebarTests, treeInteractionTests, tabTests, pinnedTabTests,
-                tabDragTests, wrappingTabDragTests, wrappingTabTests, renameTests, splitPaneTests, quickOpenTests, gitSidebarTests, branchSidebarTests, sessionTests, multiProjectTests, terminalBackspaceTests}) {
+                tabDragTests, wrappingTabDragTests, wrappingTabTests, renameTests, splitPaneTests, quickOpenTests, fullSearchTests, gitSidebarTests, branchSidebarTests, sessionTests, multiProjectTests, terminalBackspaceTests}) {
             Fixture appData; AppDataEnvironment environment(appData.root);
             test(fs::absolute(argv[1]));
         }
