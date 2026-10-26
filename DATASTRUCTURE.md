@@ -92,8 +92,8 @@ Poppyは、アプリ全体の状態とプロジェクトごとの状態を別々
 | `git_sidebar` | `INTEGER` | SOURCE CONTROLなら `1`、BRANCHなら `2`、エクスプローラーなら `0` | `0` |
 | `active_tab` | `INTEGER` | 選択中のタブの、0から始まる順序 | `0` |
 | `selected_path` | `TEXT` | エクスプローラーで選択していたファイルまたはフォルダーの絶対パス | 空文字列 |
-| `diff_inline` | `INTEGER` | プロジェクト共通の差分表示形式。Inline表示なら `1`、Split表示なら `0` | `0` |
-| `git_tree` | `INTEGER` | Git変更一覧の表示形式。Tree表示なら `1`、List表示なら `0` | `0` |
+| `diff_inline` | `INTEGER` | プロジェクト共通の差分表示形式。Inline表示なら `1`、Split表示なら `0` | `1` |
+| `git_tree` | `INTEGER` | Git変更一覧の表示形式。Tree表示なら `1`、List表示なら `0` | `1` |
 
 「初回の値」はアプリ側の初期値です。新規作成時のSQLには `DEFAULT` 制約を設定していません。旧形式から移行したデータベースの `diff_inline` と `git_tree` には `DEFAULT 0` を設定します。表示時には現在のDPIとウィンドウサイズに合わせてペインの寸法を調整します。差分表示形式はファイルを切り替えても共通で使い、すべてのタブを閉じても保持します。Git一覧の表示形式はプロジェクトごとに保持し、フォルダーの折りたたみ状態は `git_collapsed` に保存します。
 
