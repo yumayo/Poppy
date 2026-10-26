@@ -16,7 +16,7 @@ public:
         if (error) { result.error = wide(error.message()); return result; }
         for (; iterator != end; iterator.increment(error)) {
             if (error) { result.error = wide(error.message()); break; }
-            const auto& entry = *iterator; if (entry.path().filename() == L".git") continue;
+            const auto& entry = *iterator;
             if (result.entries.size() == 10000) { result.truncated = true; break; }
             const DWORD attributes = GetFileAttributesW(entry.path().c_str()); if (attributes == INVALID_FILE_ATTRIBUTES) continue;
             result.entries.push_back({entry.path(), (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0, (attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0, false, {}});
