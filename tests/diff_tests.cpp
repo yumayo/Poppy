@@ -1,4 +1,5 @@
 #include "diff.h"
+#include "diff_layout.h"
 #include <cstdlib>
 #include <iostream>
 #include <stdexcept>
@@ -127,8 +128,63 @@ void viewPositions() {
           diff.mapRow(100, false, false, true) == 4 && parse("").mapRow(100, false, true, false) == 0,
         "Restoring positions after a diff shrinks must stay within the document");
 }
+void wrapping() {
+    const auto diff = parse("@@ -1,3 +1,3 @@\n abcdefghij\n-abcdefghijkl\n+x\n tail\n");
+    const auto original = diff.patch.text;
+    DiffLayout layout; layout.build(diff, false, 4);
+    check(layout.rows() == 7, "Split diff height must use the taller replacement side");
+    check(layout.row(4).row == 1 && layout.row(4).continuation == 1 && layout.row(6).row == 2,
+        "Wrapped replacements must keep the following context aligned");
+    const auto before = layout.textRow(diff, 4, false), padding = layout.textRow(diff, 4, true);
+    check(before.begin == 4 && before.end == 8 && before.column == 4,
+        "Diff continuations must use source bytes without patch prefixes");
+    check(padding.begin == 1 && padding.end == 1, "A shorter split side must have empty padding without repeating its text");
+    check(layout.rowForOffset(diff, 1, 8, false) == 5 && layout.rowForOffset(diff, 1, 1, true) == 3,
+        "Split search and scroll positions must use each side's own wrap boundaries");
+    layout.build(diff, true, 4);
+    check(layout.rows() == 8 && layout.row(6).row == 2 && layout.textRow(diff, 6, true).end == 1,
+        "Inline diff must wrap removals and additions independently");
+    check(layout.rowForOffset(diff, 1, 4, false) == 4 && layout.rowForOffset(diff, 2, 0, true) == 6,
+        "Inline positions must preserve the source side and continuation");
+    check(diff.patch.text == original && diff.selectedText(false, diff.offset(diff.rows[1].before) + 2,
+        diff.offset(diff.rows[1].before) + 10) == "cdefghij", "Wrapping must not insert newlines into copied source text");
+
+    const auto unicode = parse(u8"@@ -1 +1 @@\r\n-a\t日本😀z\r\n+abc\tい\r\n");
+    layout.build(unicode, false, 4);
+    check(layout.rows() == 3, "Tabs and Unicode must use source display widths");
+    const auto text = layout.textRow(unicode, 1, false);
+    check(text.begin == 2 && text.end == 8 && text.column == 4, "Wrapping split UTF-8 or changed tab stops");
+    const auto last = layout.textRow(unicode, 2, false);
+    check(last.begin == 8 && last.end == 13 && last.column == 8, "Emoji continuation byte boundaries are wrong");
+    for (int columns : {1, 2, 3, 4, 7, 80}) for (bool inlineView : {false, true}) {
+        layout.build(unicode, inlineView, columns);
+        for (size_t i = 0; i < layout.rows(); ++i) {
+            const auto row = layout.row(i); const auto change = unicode.displayRow(row.row, inlineView);
+            for (bool after : {false, true}) {
+                const auto source = after ? change.after : change.before;
+                const auto segment = layout.textRow(unicode, i, after);
+                if (!source.number || segment.begin == segment.end) continue;
+                check(layout.rowForOffset(unicode, row.row, segment.begin, after) == i, "Unicode diff positions failed to round-trip");
+                check((static_cast<unsigned char>(unicode.line(source)[segment.begin]) & 0xc0) != 0x80, "Diff row starts inside a UTF-8 character");
+            }
+        }
+    }
+    const auto added = parse("@@ -0,0 +1,2 @@\n+abcdefgh\n+\n");
+    layout.build(added, false, 3);
+    check(layout.rows() == 4 && layout.textRow(added, 1, false).end == 0 && layout.row(3).row == 1,
+        "Unpaired additions or empty source lines lost their alignment");
+    auto headings = parse("diff --git a/long-file b/long-file\n@@ -1 +1 @@\n-abcdefgh\n+x\n");
+    indexDiff(headings, true); layout.build(headings, false, 4);
+    check(layout.rows() == 3 && headings.displayRow(layout.row(0).row, false).heading && layout.row(1).row == 1,
+        "File headings must remain separate from wrapped source rows");
+    layout.build(parse(""), true, 4); check(layout.rows() == 0, "An empty diff retained wrapped rows");
+    const auto longLine = parse("@@ -1 +1 @@\n-" + std::string(maxLineColumns + 100, 'x') + "\n+x\n");
+    layout.build(longLine, false, 1);
+    check(layout.rows() == maxLineColumns && layout.textRow(longLine, maxLineColumns - 1, false).end == maxLineColumns,
+        "Diff wrapping must retain the source display length limit");
+}
 }
 int main() {
-    try { alignment(); additionsAndDeletions(); inlineLayout(); edgeCases(); viewPositions(); std::cout << "Diff tests passed.\n"; return EXIT_SUCCESS; }
+    try { alignment(); additionsAndDeletions(); inlineLayout(); edgeCases(); viewPositions(); wrapping(); std::cout << "Diff tests passed.\n"; return EXIT_SUCCESS; }
     catch (const std::exception& error) { std::cerr << error.what() << '\n'; return EXIT_FAILURE; }
 }

@@ -1,6 +1,7 @@
 #pragma once
 #include "scrollbars.h"
 #include "diff.h"
+#include "diff_layout.h"
 #include "session.h"
 #include "edit_buffer.h"
 #include "find_bar.h"
@@ -40,6 +41,7 @@ private:
     void paint();
     void scrollbars();
     void scroll(int vertical, int horizontal);
+    void restoreTop(const State& state);
     size_t position(int x, int y, bool* trailing = nullptr) const;
     void copy();
     void replace(std::string text);
@@ -55,10 +57,11 @@ private:
     RECT layoutButton(bool inlineView) const;
     int visibleRows() const;
     bool splitDiff() const { return diff_ && !inlineView_; }
-    bool wrapping() const { return document_ && !diff_ && wordWrap_; }
+    bool wrapping() const { return document_ && wordWrap_; }
+    size_t diffRow(size_t visualRow) const { return wrapping() ? diffLayout_.row(visualRow).row : visualRow; }
     int textGutter() const { return diff_ && inlineView_ ? 2 * gutter_ : gutter_; }
     int contentTop() const { return header_ + (diff_ ? header_ : 0) + (findBar_.visible() ? header_ : 0); }
-    size_t rowCount() const { return diff_ ? diff_->rowCount(inlineView_) : wrapping() ? textLayout_.rows() : document_->lines.size(); }
+    size_t rowCount() const { return diff_ ? wrapping() ? diffLayout_.rows() : diff_->rowCount(inlineView_) : wrapping() ? textLayout_.rows() : document_->lines.size(); }
     HWND window_ = nullptr;
     Renderer renderer_;
     FindBar findBar_;
@@ -71,6 +74,7 @@ private:
     bool selecting_ = false, after_ = false, inlineView_ = true;
     bool wordWrap_ = true, layoutDirty_ = true, caretTrailing_ = false;
     TextLayout textLayout_;
+    DiffLayout diffLayout_;
     static constexpr UINT_PTR caretTimer = 0x5056;
     static constexpr UINT_PTR findTimer = 0x5057;
     bool caretVisible_ = false;

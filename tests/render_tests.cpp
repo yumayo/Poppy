@@ -285,6 +285,71 @@ void editorWrapping() {
     viewer.show(std::make_shared<Document>(buffer->document), L"read-only.txt");
     check(viewer.selectSearch(1500, 1506, "needle", true) && viewer.state().wrapOffset > 0, "Read-only text did not wrap or reveal a continuation match");
 }
+void diffWrapping() {
+    Viewer viewer;
+    const HWND parent = CreateWindowExW(0, L"STATIC", L"Diff wrapping test", WS_POPUP | WS_CLIPCHILDREN,
+        0, 0, 700, 360, nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
+    check(parent != nullptr, "Could not create the diff wrapping window");
+    struct WindowOwner { HWND value; ~WindowOwner() { DestroyWindow(value); } } owner{parent};
+    viewer.create(parent, GetModuleHandleW(nullptr)); viewer.setDpi(96);
+    const HWND window = viewer.window(); MoveWindow(window, 0, 0, 700, 360, FALSE);
+    Renderer metrics; metrics.setDpi(96);
+    const int cell = metrics.cellWidth(), height = metrics.textHeight() + 3;
+    auto diff = std::make_shared<DiffDocument>();
+    diff->patch.text = "diff --git a/file b/file\n@@ -1,32 +1,32 @@\n-" + std::string(2000, 'r') + "\n+short\n";
+    for (int i = 0; i < 31; ++i) diff->patch.text += " context\n";
+    indexDiff(*diff, true); viewer.showDiff(diff, L"wrapped.diff");
+    const auto original = diff->patch.text;
+    const size_t before = diff->offset(diff->rows[1].before), after = diff->offset(diff->rows[1].after);
+    const auto info = [&] { SCROLLINFO value{sizeof(value), SIF_ALL, 0, 0, 0, 0, 0}; GetScrollInfo(window, SB_VERT, &value); return value; };
+    const int columns = (Scrollbars::contentRect(window).right - 140 - 2) / cell;
+    check(viewer.wordWrap() && !(GetWindowLongPtrW(window, GWL_STYLE) & WS_HSCROLL), "Inline diffs did not inherit word wrapping");
+    const auto point = [&](int column, int row) { return MAKELPARAM(140 + column * cell, 68 + row * height + height / 2); };
+    SendMessageW(window, WM_LBUTTONDOWN, MK_LBUTTON, point(3, 2));
+    SendMessageW(window, WM_MOUSEMOVE, MK_LBUTTON, point(5, 3));
+    SendMessageW(window, WM_LBUTTONUP, 0, point(5, 3));
+    check(viewer.state().anchor == before + columns + 3 && viewer.state().caret == before + columns * 2 + 5,
+        "Inline diff selection did not map wrapped rows to source bytes");
+    check(diff->selectedText(false, viewer.state().anchor, viewer.state().caret, true) == std::string(columns + 2, 'r'),
+        "Copying a diff continuation inserted a soft-wrap newline");
+    for (int i = 0; i < 10; ++i) SendMessageW(window, WM_VSCROLL, SB_LINEDOWN, 0);
+    const auto saved = viewer.state(); const int top = info().nPos;
+    check(saved.top == 1 && saved.wrapOffset > 0, "Inline scrolling did not retain a source continuation");
+    viewer.showDiff(diff, L"wrapped.diff", true);
+    check(viewer.state().wrapOffset == saved.wrapOffset && info().nPos == top, "Refreshing a diff lost its wrapped position");
+    viewer.setDiffLayout(false);
+    DiffLayout layout;
+    layout.build(*diff, false, ((Scrollbars::contentRect(window).right - 1) / 2 - 70 - 2) / cell);
+    const auto expected = layout.textRow(*diff, layout.rowForOffset(*diff, 1, saved.wrapOffset, false), false);
+    check(viewer.state().wrapOffset == expected.begin && viewer.state().anchor == saved.anchor && viewer.state().caret == saved.caret,
+        "Changing diff layouts lost the top source position or selection");
+    // The top source row extends beyond the right side. Clicking that padding
+    // maps to the right line's end while the viewport retains the longer side.
+    const int right = Scrollbars::contentRect(window).right / 2 + 1;
+    SendMessageW(window, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(right + 70, 68 + height / 2));
+    SendMessageW(window, WM_LBUTTONUP, 0, MAKELPARAM(right + 70, 68 + height / 2));
+    const auto padded = viewer.state(); const int splitTop = info().nPos;
+    check(padded.after && padded.caret == after + 5 && padded.wrapOffset > 0, "Split padding did not map to the shorter side's end");
+    viewer.restore({}); viewer.restore(padded);
+    check(info().nPos == splitTop && viewer.state().wrapOffset == padded.wrapOffset && viewer.state().after,
+        "Restoring split padding used the selected shorter side's row count");
+    MoveWindow(window, 0, 0, 420, 360, FALSE);
+    layout.build(*diff, false, ((Scrollbars::contentRect(window).right - 1) / 2 - 70 - 2) / cell);
+    const auto resized = layout.textRow(*diff, layout.rowForOffset(*diff, 1, padded.wrapOffset, false), false);
+    check(viewer.state().wrapOffset == resized.begin && viewer.state().caret == padded.caret, "Resizing a split diff lost its source position");
+    viewer.setDiffLayout(true); SendMessageW(window, WM_PAINT, 0, 0);
+    check(viewer.state().top == 1 && viewer.state().wrapOffset > 0, "Inline layout restored the shorter selected side instead of the top source");
+    for (bool inlineView : {false, true}) {
+        viewer.setDiffLayout(inlineView); viewer.setWordWrap(false);
+        check(GetWindowLongPtrW(window, GWL_STYLE) & WS_HSCROLL, "Disabling wrapping did not restore diff horizontal scrolling");
+        viewer.setWordWrap(true); SendMessageW(window, WM_PAINT, 0, 0);
+        check(!(GetWindowLongPtrW(window, GWL_STYLE) & WS_HSCROLL), "Enabling wrapping left a diff horizontal scrollbar");
+    }
+    viewer.setDpi(144); SendMessageW(window, WM_PAINT, 0, 0);
+    check(diff->patch.text == original && viewer.state().caret == padded.caret, "Diff wrapping changed the patch or selection");
+    viewer.showDiff(std::make_shared<DiffDocument>(), L"empty.diff"); SendMessageW(window, WM_PAINT, 0, 0);
+    check(info().nMax == 0, "An empty diff retained wrapped rows");
+}
 void documentFind() {
     Viewer viewer;
     const HWND parent = CreateWindowExW(0, L"STATIC", L"Document search test", WS_POPUP | WS_CLIPCHILDREN,
@@ -350,6 +415,27 @@ void documentFind() {
     check(!(GetWindowLongPtrW(input, GWL_STYLE) & WS_VISIBLE) && GetFocus() == window, "Escape did not close search and restore editor focus");
     SendMessageW(window, WM_KEYDOWN, VK_F3, 0); wait();
     check(!viewer.state().after, "F3 with a closed search bar did not advance and wrap");
+    auto longDiff = std::make_shared<DiffDocument>();
+    longDiff->patch.text = "@@ -1 +1 @@\n-" + std::string(2000, 'x') + "needle\n+" + std::string(1000, 'y') + "needle\n";
+    indexDiff(*longDiff);
+    for (bool inlineView : {true, false}) {
+        viewer.setDiffLayout(inlineView); viewer.showDiff(longDiff, L"long.diff"); wait();
+        query(L"needle");
+        check(status() == L"Find in file: 1 / 2" && !viewer.state().after, "Wrapped diff search selected the wrong removal");
+        Renderer metrics; metrics.setDpi(96); DiffLayout layout;
+        const int width = inlineView ? Scrollbars::contentRect(window).right : (Scrollbars::contentRect(window).right - 1) / 2;
+        layout.build(*longDiff, inlineView, (width - (inlineView ? 140 : 70) - 2) / metrics.cellWidth());
+        const auto visible = [&] {
+            const auto match = longDiff->inlineRowForText(viewer.state().anchor, viewer.state().caret);
+            check(match.has_value(), "Wrapped search selected hidden diff metadata");
+            const auto change = longDiff->displayRow(*match, true); const auto source = viewer.state().after ? change.after : change.before;
+            const auto row = layout.rowForOffset(*longDiff, longDiff->rowForLine(source, viewer.state().after, inlineView), viewer.state().anchor - longDiff->offset(source), viewer.state().after);
+            SCROLLINFO info{sizeof(info), SIF_ALL, 0, 0, 0, 0, 0}; GetScrollInfo(window, SB_VERT, &info);
+            check(row >= static_cast<size_t>(info.nPos) && row < static_cast<size_t>(info.nPos) + info.nPage, "Search did not reveal the matched diff continuation");
+        };
+        visible(); SendMessageW(input, WM_KEYDOWN, VK_RETURN, 0); wait();
+        check(viewer.state().after && status() == L"Find in file: 2 / 2", "Wrapped diff search selected the wrong addition"); visible();
+    }
 }
 struct ScrollbarWindow {
     Scrollbars bars;
@@ -623,7 +709,7 @@ int main() {
     int result = 0;
     try {
         initializeRendering();
-        cellPositions(); colorsAndClipping(); smoothIcons(); windowTargets(); editorCaret(); editorWrapping(); documentFind(); continuousViewerScrolling(); themedScrollbars(); quickOpenStability();
+        cellPositions(); colorsAndClipping(); smoothIcons(); windowTargets(); editorCaret(); editorWrapping(); diffWrapping(); documentFind(); continuousViewerScrolling(); themedScrollbars(); quickOpenStability();
         std::cout << "Direct2D rendering tests passed\n";
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; result = 1; }
     if (SUCCEEDED(com)) CoUninitialize();

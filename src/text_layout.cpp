@@ -18,39 +18,51 @@ WrappedRow nextRow(std::string_view line, WrappedRow row, int columns) {
     return row;
 }
 }
+size_t wrappedLineRows(std::string_view line, int columns) {
+    WrappedRow row; size_t count = 0;
+    do {
+        row = nextRow(line, row, std::max(1, columns)); ++count;
+    } while (row.end < line.size() && row.endColumn < static_cast<int>(maxLineColumns));
+    return count;
+}
+WrappedRow wrappedLineRow(std::string_view line, int columns, size_t continuation) {
+    WrappedRow row;
+    for (size_t i = 0;; ++i) {
+        row = nextRow(line, row, std::max(1, columns));
+        if (i == continuation) return row;
+        if (row.end == line.size() || row.endColumn >= static_cast<int>(maxLineColumns)) {
+            // A shorter split-diff side has blank padding after its last row.
+            row.begin = row.end; row.column = row.endColumn; return row;
+        }
+    }
+}
+size_t wrappedLineRowForOffset(std::string_view line, int columns, size_t byte, bool trailing) {
+    WrappedRow row;
+    for (size_t i = 0;; ++i) {
+        row = nextRow(line, row, std::max(1, columns));
+        if (byte < row.end || (trailing && byte == row.end && row.end != row.begin) ||
+            row.end == line.size() || row.endColumn >= static_cast<int>(maxLineColumns)) return i;
+    }
+}
 void TextLayout::build(const Document& document, int columns) {
     columns_ = std::max(1, columns);
     starts_.clear(); starts_.reserve(document.lines.size() + 1); starts_.push_back(0);
     for (size_t lineNumber = 0; lineNumber < document.lines.size(); ++lineNumber) {
-        const auto line = document.line(lineNumber);
-        WrappedRow row; uint32_t count = 0;
-        do {
-            row = nextRow(line, row, columns_); ++count;
-        } while (row.end < line.size() && row.endColumn < static_cast<int>(maxLineColumns));
-        starts_.push_back(starts_.back() + count);
+        starts_.push_back(starts_.back() + static_cast<uint32_t>(wrappedLineRows(document.line(lineNumber), columns_)));
     }
 }
 WrappedRow TextLayout::row(const Document& document, size_t visualRow) const {
     if (!rows()) return {};
     visualRow = std::min(visualRow, rows() - 1);
     const size_t lineNumber = static_cast<size_t>(std::upper_bound(starts_.begin(), starts_.end(), visualRow) - starts_.begin() - 1);
-    const auto line = document.line(lineNumber);
-    WrappedRow row; row.line = lineNumber;
-    for (size_t i = starts_[lineNumber];; ++i) {
-        row = nextRow(line, row, columns_);
-        if (i == visualRow) return row;
-    }
+    auto row = wrappedLineRow(document.line(lineNumber), columns_, visualRow - starts_[lineNumber]);
+    row.line = lineNumber; return row;
 }
 size_t TextLayout::rowForOffset(const Document& document, size_t offset, bool trailing) const {
     if (!rows()) return 0;
     offset = std::min(offset, document.text.size());
     const size_t lineNumber = static_cast<size_t>(std::upper_bound(document.lines.begin(), document.lines.end(), offset) - document.lines.begin() - 1);
-    const auto line = document.line(lineNumber);
     const size_t byte = offset - document.lines[lineNumber];
-    WrappedRow row;
-    for (size_t i = starts_[lineNumber];; ++i) {
-        row = nextRow(line, row, columns_);
-        if (byte < row.end || (trailing && byte == row.end && row.end != row.begin) || i + 1 == starts_[lineNumber + 1]) return i;
-    }
+    return starts_[lineNumber] + wrappedLineRowForOffset(document.line(lineNumber), columns_, byte, trailing);
 }
 }
