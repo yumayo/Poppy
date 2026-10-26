@@ -92,7 +92,7 @@ void roundTripAndIsolation() {
         check(same(*storage.loadProject(a, a), state) && same(*storage.loadProject(b, b), empty), "One project overwrote another");
         storage.saveProject(key, path, empty);
         check(same(*storage.loadProject(key, path), empty), "Closed tabs or collapsed directories were retained");
-        empty.diffInline = true; empty.gitTree = true;
+        empty.diffInline = false; empty.gitTree = false;
         storage.saveProject(key, path, empty);
         check(same(*storage.loadProject(key, path), empty), "A project's layout was lost when no files were open");
     }
@@ -105,7 +105,7 @@ void atomicSave() {
     storage.saveProject(key, key, original);
     execute(storage.projectDirectory(key, key) / "storage.sql",
         "CREATE TRIGGER reject_tab BEFORE INSERT ON tabs WHEN NEW.path='reject' BEGIN SELECT RAISE(ABORT,'test write failure'); END;");
-    auto changed = original; changed.sidebar = 500; changed.diffInline = true; changed.gitTree = true; changed.tabs[0].path = "reject"; changed.tabs[0].pinned = true; changed.expanded.clear();
+    auto changed = original; changed.sidebar = 500; changed.diffInline = false; changed.gitTree = false; changed.tabs[0].path = "reject"; changed.tabs[0].pinned = true; changed.expanded.clear();
     rejects([&] { storage.saveProject(key, key, changed); }, "A failed SQLite write reported success");
     check(same(*storage.loadProject(key, key), original), "A failed save partially overwrote the previous session");
     changed.tabs.resize(10001);
@@ -155,7 +155,7 @@ void migrateGitLayout() {
     poppy::Storage storage(fixture.directory);
     const std::string key = "c:\\git-layout";
     poppy::ProjectSession original;
-    original.sidebar = 321; original.gitSidebar = true; original.diffInline = true;
+    original.sidebar = 321; original.gitSidebar = true; original.diffInline = true; original.gitTree = false;
     original.tabs.push_back({key + "\\modified.cpp", true, {}, {12, 3, 4, 5, true}});
     original.expanded = {key}; original.selected = key;
     storage.saveProject(key, key, original);

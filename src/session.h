@@ -30,7 +30,7 @@ struct SavedTerminal {
 struct ProjectSession {
     std::string wslUid;
     int sidebar = 245, terminalHeight = 260;
-    bool terminalVisible = true, gitSidebar = false, diffInline = false, gitTree = false;
+    bool terminalVisible = true, gitSidebar = false, diffInline = true, gitTree = true;
     bool branchSidebar = false;
     size_t activeTab = 0;
     std::vector<SavedTab> tabs;

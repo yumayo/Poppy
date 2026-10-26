@@ -208,7 +208,7 @@ private:
     bool terminalVisible_ = true;
     bool updatingGitFiles_ = false;
     bool renamePending_ = false;
-    bool gitTreeView_ = false;
+    bool gitTreeView_ = true;
     std::vector<SourceNode> gitChangeNodes_;
     uint64_t branchRequest_ = 0;
     bool branchesLoading_ = false, branchesLoaded_ = false;

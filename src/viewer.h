@@ -50,7 +50,7 @@ private:
     int cellWidth_ = 8, cellHeight_ = 20, header_ = 34, gutter_ = 66;
     int top_ = 0, left_ = 0;
     size_t anchor_ = 0, caret_ = 0;
-    bool selecting_ = false, after_ = false, inlineView_ = false;
+    bool selecting_ = false, after_ = false, inlineView_ = true;
     static constexpr UINT_PTR caretTimer = 0x5056;
     bool caretVisible_ = false;
     std::shared_ptr<const Document> document_;

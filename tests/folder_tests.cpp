@@ -853,14 +853,14 @@ void gitSidebarTests(const fs::path& executable) {
         Application app(executable, fixture.root); app.tree();
         const auto changes = GetDlgItem(app.window, 4), viewer = FindWindowExW(app.window, nullptr, L"PoppyViewer", nullptr);
         send(GetDlgItem(app.window, 3), BM_CLICK);
-        waitFor([&] { return IsWindowVisible(changes) && send(changes, treeGetCount) == 5; }, "Git List did not load all untracked files");
+        waitFor([&] { return IsWindowVisible(changes) && send(changes, treeGetCount) == 8; }, "Default Git Tree did not load all untracked files");
         const auto px = [dpi = GetDpiForWindow(app.window)](int value) { return MulDiv(value, dpi, 96); };
         const auto view = [&](bool tree) {
             const auto rect = bounds(app.window, changes);
             click(app.window, rect.left + (rect.right - rect.left) * (tree ? 1 : 3) / 4, rect.top - px(14));
             check(send(changes, treeGetCount) == (tree ? 8 : 5), "Git layout toggle did not rebuild the hierarchy");
         };
-        view(true);
+        view(false); view(true);
         auto group = nextItem(changes, TreeRelation::Next, nextItem(changes, TreeRelation::Root));
         auto docs = nextItem(changes, TreeRelation::Child, group), src = nextItem(changes, TreeRelation::Next, docs);
         check(expanded(changes, docs) && expanded(changes, src), "Git folders did not start expanded");
