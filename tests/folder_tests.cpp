@@ -942,7 +942,7 @@ void branchSidebarTests(const fs::path& executable) {
         const auto rect = bounds(app.window, changes);
         const int height = static_cast<int>(send(changes, treeGetRowHeight));
         const int row = static_cast<int>(send(changes, treeGetRow, working));
-        click(changes, rect.right - rect.left - MulDiv(60, GetDpiForWindow(app.window), 96), row * height + height / 2);
+        click(changes, rect.right - rect.left - MulDiv(18, GetDpiForWindow(app.window), 96), row * height + height / 2);
         waitLines(viewer, 4);
         send(GetDlgItem(app.window, 5), BM_CLICK);
         waitFor([&] { return IsWindowVisible(branches) && children(branches, nextItem(branches, TreeRelation::Root)) == 51; }, "Branch did not load 50 commits and a load-more row");

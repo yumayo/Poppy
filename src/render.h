@@ -27,6 +27,7 @@ void initializeRendering();
 class Renderer {
 public:
     enum class Font { Ui, Code };
+    enum class Icon { Explorer, SourceControl, Branch, OpenAllChanges };
     // Keeps both the Win32 paint validation and the Direct2D drawing balanced,
     // including empty windows and failed render-target creation.
     class Paint {
@@ -61,6 +62,7 @@ public:
     void line(float x1, float y1, float x2, float y2, COLORREF color, float width);
     void ellipse(const RECT& rect, COLORREF color, float width);
     void outline(const RECT& rect, COLORREF color, float width = 1.0f);
+    void icon(Icon icon, const RECT& rect, COLORREF color);
 private:
     bool prepare(HRESULT result);
     void color(COLORREF value);
