@@ -54,6 +54,7 @@ public:
     HRESULT end();
     void discard();
     void fill(const RECT& rect, COLORREF color);
+    void fillRounded(const RECT& rect, COLORREF color, float radius);
     int textWidth(const std::wstring& text) const;
     void label(const RECT& rect, const std::wstring& text, COLORREF color,
                UINT flags = DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);

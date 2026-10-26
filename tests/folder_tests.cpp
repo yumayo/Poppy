@@ -601,7 +601,7 @@ void sidebarTests(const fs::path& executable) {
     Application app(executable, fixture.root);
     const auto tree = app.tree();
     const auto explorer = FindWindowExW(app.window, nullptr, activityButtonClassName, L"Explorer");
-    const auto git = FindWindowExW(app.window, nullptr, activityButtonClassName, L"Source Control");
+    const auto git = GetDlgItem(app.window, 3);
     const auto viewer = FindWindowExW(app.window, nullptr, L"PoppyViewer", nullptr);
     const auto terminal = FindWindowExW(app.window, nullptr, L"PoppyTerminalPane", nullptr);
     check(explorer && git && viewer && terminal, "Activity buttons or panes are missing");
@@ -933,6 +933,57 @@ void gitSidebarTests(const fs::path& executable) {
         waitFor([&] { return IsWindowVisible(changes) && send(changes, treeGetCount) == 5; }, "Restart lost the Git List layout");
     }
 }
+void gitAutoRefreshTests(const fs::path& executable) {
+    wchar_t git[MAX_PATH]{};
+    const auto length = SearchPathW(nullptr, L"git.exe", nullptr, MAX_PATH, git, nullptr);
+    if (!length || length >= MAX_PATH) { std::cout << "Git auto refresh tests skipped: Git for Windows is not on PATH.\n"; return; }
+    Fixture fixture;
+    const auto runGit = [&](const std::wstring& args) {
+        std::wstring command = L"\"" + std::wstring(git) + L"\" " + args;
+        STARTUPINFOW startup{}; startup.cb = sizeof(startup); PROCESS_INFORMATION process{};
+        check(CreateProcessW(git, command.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, fixture.root.c_str(), &startup, &process) != FALSE, "Cannot start fixture Git");
+        CloseHandle(process.hThread); const auto wait = WaitForSingleObject(process.hProcess, 5000);
+        if (wait != WAIT_OBJECT_0) { TerminateProcess(process.hProcess, 1); WaitForSingleObject(process.hProcess, 1000); }
+        DWORD code = 1; GetExitCodeProcess(process.hProcess, &code); CloseHandle(process.hProcess);
+        check(wait == WAIT_OBJECT_0 && code == 0, "Auto refresh fixture Git command failed");
+    };
+    runGit(L"init --quiet --template=\"\"");
+    runGit(L"config user.name PoppyTest"); runGit(L"config user.email poppy@example.invalid");
+    runGit(L"config commit.gpgsign false"); runGit(L"config core.autocrlf false");
+    runGit(L"config core.excludesFile \"\"");
+    writeLines(fixture.root / L"tracked.txt", 200);
+    runGit(L"add ."); runGit(L"commit -qm initial");
+    Application app(executable, fixture.root); app.tree();
+    const auto changes = GetDlgItem(app.window, 4), button = GetDlgItem(app.window, 3);
+    const auto badge = [&](size_t count) {
+        wchar_t title[128]{}; GetWindowTextW(button, title, 128);
+        return title == (count ? L"Source Control (" + std::to_wstring(count) + L")" : std::wstring(L"Source Control"));
+    };
+    send(button, BM_CLICK);
+    waitFor([&] { return badge(0) && send(changes, treeGetCount) == 2 && !IsWindowVisible(changes); }, "Clean repository did not hide the badge and change list");
+    send(GetDlgItem(app.window, 2), BM_CLICK);
+    writeLines(fixture.root / L"tracked.txt", 210);
+    waitFor([&] { return badge(1) && send(changes, treeGetCount) == 3; }, "External edits did not update the hidden Source Control list and badge");
+    send(button, BM_CLICK);
+    waitFor([&] { return IsWindowVisible(changes); }, "Source Control did not show external edits");
+    runGit(L"add tracked.txt");
+    waitFor([&] { return nextItem(changes, TreeRelation::Child, nextItem(changes, TreeRelation::Root)) != 0; }, "Staging did not automatically update Source Control");
+    writeLines(fixture.root / L"tracked.txt", 220);
+    waitFor([&] { return badge(1) && send(changes, treeGetCount) == 4; }, "A partially staged file was not refreshed or was counted twice");
+    runGit(L"reset --hard -q HEAD");
+    waitFor([&] { return badge(0) && !IsWindowVisible(changes); }, "Reverting changes did not remove the badge");
+    fs::create_directory(fixture.root / L"nested 日本語");
+    writeFile(fixture.root / L"nested 日本語" / L"added.txt");
+    waitFor([&] { return badge(1) && IsWindowVisible(changes) && send(changes, treeGetCount) == 4; }, "Creating an untracked file did not update Source Control");
+    fs::remove(fixture.root / L"tracked.txt");
+    waitFor([&] { return badge(2) && send(changes, treeGetCount) == 5; }, "Deleting a tracked file did not add to the pending file count");
+    writeLines(fixture.root / L"tracked.txt", 200);
+    waitFor([&] { return badge(1) && send(changes, treeGetCount) == 4; }, "Restoring a tracked file did not update the pending file count");
+    fs::rename(fixture.root / L"nested 日本語" / L"added.txt", fixture.root / L"moved.txt");
+    waitFor([&] { return badge(1) && send(changes, treeGetCount) == 3; }, "Renaming an untracked file did not update Source Control");
+    fs::remove(fixture.root / L"moved.txt");
+    waitFor([&] { return badge(0) && !IsWindowVisible(changes); }, "Deleting the last untracked file did not clear Source Control");
+}
 void branchSidebarTests(const fs::path& executable) {
     wchar_t git[MAX_PATH]{};
     const auto length = SearchPathW(nullptr, L"git.exe", nullptr, MAX_PATH, git, nullptr);
@@ -1171,7 +1222,7 @@ int wmain(int argc, wchar_t** argv) {
         check(argc == 2, "Pass the path to Poppy.exe");
         SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         for (const auto test : {folderTests, sidebarTests, treeInteractionTests, tabTests, pinnedTabTests,
-                tabDragTests, wrappingTabDragTests, wrappingTabTests, renameTests, splitPaneTests, quickOpenTests, fullSearchTests, gitSidebarTests, branchSidebarTests, sessionTests, multiProjectTests, terminalBackspaceTests}) {
+                tabDragTests, wrappingTabDragTests, wrappingTabTests, renameTests, splitPaneTests, quickOpenTests, fullSearchTests, gitSidebarTests, gitAutoRefreshTests, branchSidebarTests, sessionTests, multiProjectTests, terminalBackspaceTests}) {
             Fixture appData; AppDataEnvironment environment(appData.root);
             test(fs::absolute(argv[1]));
         }
