@@ -101,7 +101,7 @@ ctest --test-dir out --output-on-failure
 
 「Open folder」「＋ Open folder」「Ctrl+O」は、現在のプロジェクトを残して追加します。左端の一覧をクリックして切り替えます。一覧の境界はドラッグで調整でき、右クリックまたは中クリックで対象プロジェクトを閉じます。フォルダーやworktree自体は削除しません。同名フォルダーには識別できる親パスを補助表示します。
 
-「Open WSL folder…」では、ディストリビューションとLinuxパスを指定してWSLのプロジェクトを開けます。ファイル表示・編集・保存・名前変更・検索・Git・ターミナルに対応し、Windowsのプロジェクトと同時に利用できます。配布時は`wsl/poppy-wsl-helper`をPoppy.exeの隣に置いてください。接続・保存の制約と検証範囲は [WSL対応](docs/wsl-support.md) を参照してください。
+「Open WSL folder…」では、エクスプローラーと同じWindows標準のフォルダー選択で`\\wsl.localhost`配下を辿り、WSLのプロジェクトを開けます。アドレスバーへのパスの貼り付けと、接続ユーザーの指定もできます。ファイル表示・編集・保存・名前変更・検索・Git・ターミナルに対応し、Windowsのプロジェクトと同時に利用できます。配布時は`wsl/poppy-wsl-helper`をPoppy.exeの隣に置いてください。接続・保存の制約と検証範囲は [WSL対応](docs/wsl-support.md) を参照してください。
 
 ターミナル領域の「＋」でシェルを追加し、タブで切り替えます。ターミナルタブの右クリックで名前変更・終了、「＋」の右クリックでCodex・Claude Codeをai-containerで起動できます。設定手順は [ai-container連携](integration/ai/README.md)、所有関係と検証範囲は [実装メモ](docs/multi-project.md) を参照してください。再起動後は構成だけを復元し、以前のAIコマンドを自動実行しません。
 
