@@ -2,8 +2,8 @@
 #include <algorithm>
 
 namespace poppy {
-void ActivityButton::create(HWND parent, HINSTANCE instance, const wchar_t* title, int id, bool git) {
-    git_ = git; dpi_ = GetDpiForWindow(parent);
+void ActivityButton::create(HWND parent, HINSTANCE instance, const wchar_t* title, int id, bool git, bool branch) {
+    git_ = git; branch_ = branch; dpi_ = GetDpiForWindow(parent);
     WNDCLASSW cls{}; cls.lpfnWndProc = procedure; cls.hInstance = instance; cls.lpszClassName = activityButtonClassName;
     cls.hCursor = LoadCursorW(nullptr, IDC_ARROW); RegisterClassW(&cls);
     window_ = CreateWindowExW(0, activityButtonClassName, title, WS_CHILD | WS_VISIBLE | WS_TABSTOP,
@@ -30,7 +30,12 @@ void ActivityButton::paint() {
     auto py = [&](int value) { return y + MulDiv(value, dpi_, 96); };
     const float stroke = static_cast<float>(std::max(1, MulDiv(2, dpi_, 96)));
     auto line = [&](int x1, int y1, int x2, int y2) { renderer_.line(static_cast<float>(px(x1)), static_cast<float>(py(y1)), static_cast<float>(px(x2)), static_cast<float>(py(y2)), color, stroke); };
-    if (git_) {
+    if (branch_) {
+        line(5, 5, 5, 19); line(5, 12, 12, 12); line(12, 12, 18, 6);
+        renderer_.ellipse({px(2), py(1), px(8), py(7)}, color, stroke);
+        renderer_.ellipse({px(15), py(1), px(21), py(7)}, color, stroke);
+        renderer_.ellipse({px(2), py(17), px(8), py(23)}, color, stroke);
+    } else if (git_) {
         line(6, 6, 6, 18); line(18, 6, 18, 9); line(18, 9, 6, 15);
         renderer_.ellipse({px(3), py(1), px(9), py(7)}, color, stroke);
         renderer_.ellipse({px(15), py(1), px(21), py(7)}, color, stroke);

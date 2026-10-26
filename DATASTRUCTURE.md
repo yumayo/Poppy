@@ -89,7 +89,7 @@ Poppyは、アプリ全体の状態とプロジェクトごとの状態を別々
 | `sidebar` | `INTEGER` | サイドバー幅。96 DPIを基準にした論理ピクセル値 | `245` |
 | `terminal_height` | `INTEGER` | ターミナル高さ。同じく96 DPI基準 | `260` |
 | `terminal_visible` | `INTEGER` | ターミナルを表示する場合に `1` | `1` |
-| `git_sidebar` | `INTEGER` | Gitサイドバーなら `1`、エクスプローラーなら `0` | `0` |
+| `git_sidebar` | `INTEGER` | SOURCE CONTROLなら `1`、BRANCHなら `2`、エクスプローラーなら `0` | `0` |
 | `active_tab` | `INTEGER` | 選択中のタブの、0から始まる順序 | `0` |
 | `selected_path` | `TEXT` | エクスプローラーで選択していたファイルまたはフォルダーの絶対パス | 空文字列 |
 | `diff_inline` | `INTEGER` | プロジェクト共通の差分表示形式。Inline表示なら `1`、Split表示なら `0` | `0` |
@@ -136,7 +136,7 @@ Poppyは、アプリ全体の状態とプロジェクトごとの状態を別々
 
 ## 追加のビュー状態（プロジェクト形式5）
 
-`view_state` は `id=1` の1行です。`explorer_top` / `explorer_left`、`git_top` / `git_left` は各ツリーのスクロール位置、`first_tab_row` はタブ領域の表示段、`git_selected` はGitの選択パス、`focused_pane` は `viewer` / `explorer` / `git` / `terminal`、`active_terminal` は選択ターミナルのIDです。数値は `INTEGER NOT NULL`、パス・ペイン・IDは `TEXT NOT NULL` です。
+`view_state` は `id=1` の1行です。`explorer_top` / `explorer_left`、`git_top` / `git_left` は各ツリーのスクロール位置、`first_tab_row` はタブ領域の表示段、`git_selected` はGitの選択パス、`focused_pane` は `viewer` / `explorer` / `git` / `branch` / `terminal`、`active_terminal` は選択ターミナルのIDです。数値は `INTEGER NOT NULL`、パス・ペイン・IDは `TEXT NOT NULL` です。
 
 `terminals` は `position INTEGER PRIMARY KEY`、`terminal_id TEXT NOT NULL UNIQUE`、`name TEXT NOT NULL`、`directory TEXT NOT NULL` を持ちます。`directory` は最初の起動フォルダーであり、シェル内部の現在位置ではありません。`git_collapsed(path TEXT PRIMARY KEY)` はGitツリーの折りたたみパスです。
 
@@ -169,7 +169,7 @@ Poppyは、アプリ全体の状態とプロジェクトごとの状態を別々
 
 ## 保存形式のバージョンと上限
 
-現在の形式は全体のデータベースが `PRAGMA user_version = 3`、プロジェクトのデータベースが `PRAGMA user_version = 7` です。未初期化のデータベースではテーブルを作成してバージョンを設定します。それぞれの対応バージョンより `user_version` が大きい場合は、そのデータベースの読み込み・保存を拒否し、形式を上書きしません。
+現在の形式は全体のデータベースが `PRAGMA user_version = 3`、プロジェクトのデータベースが `PRAGMA user_version = 8` です。未初期化のデータベースではテーブルを作成してバージョンを設定します。それぞれの対応バージョンより `user_version` が大きい場合は、そのデータベースの読み込み・保存を拒否し、形式を上書きしません。
 
 プロジェクトの旧形式（バージョン1）はトランザクション内で自動移行します。選択中の差分タブの形式を `session.diff_inline` に引き継ぎます。選択中のタブが通常表示の場合は先頭の差分タブの形式を使い、差分タブがなければSplit表示を使います。タブごとの `file_inline` と `diff_inline` は削除します。旧Split表示の行位置は元のパッチなしでは変換できないため、その差分の縦スクロール位置だけを先頭に戻します。その他のタブ状態とプロジェクト設定は引き継ぎます。
 
@@ -220,3 +220,9 @@ Windowsプロジェクトの識別キーと既存の保存先名は維持しま�
 プロジェクトDBには `connection(id INTEGER PRIMARY KEY CHECK(id=1), kind INTEGER NOT NULL, distro TEXT NOT NULL, user TEXT NOT NULL, remote_root TEXT NOT NULL, uid TEXT NOT NULL)` を追加します。前回接続したUIDを照合し、既定ユーザーが変わった場合に同じ権限の接続として再開しません。タブ・展開・選択・ターミナルのcwdは生のPOSIXパスを保持し、左右分割はversion 6のモデルを再利用します。
 
 移行は同一DBのトランザクション内で実行します。接続中フラグ、要求ID、PID、未保存本文、AIの実行状態は保存しません。非選択のWSLプロジェクトは構成だけを復元し、ユーザーが選択してから接続します。接続処理と配布物は [WSL対応](docs/wsl-support.md) を参照してください。
+
+## Git比較タブ（プロジェクトDB version 8）
+
+version 7からの移行で`git_comparisons`を追加します。`position INTEGER PRIMARY KEY`は`tabs.position`に対応し、`kind INTEGER NOT NULL`は通常のF6比較（0）、Changes（1）、Staged Changes（2）、コミット（3）を表します。`revision TEXT NOT NULL`はコミットID、`all_changes INTEGER NOT NULL`は全ファイル比較のフラグです。`pane INTEGER NOT NULL`と`displayed INTEGER NOT NULL`で左右の所属と選択を保持します。同じパスを複数の比較対象やコミットで開くことができ、各比較の位置も独立して復元します。旧形式の`tab_groups`は通常タブの互換情報として残し、version 8では位置ごとの比較情報を優先します。
+
+`session.git_sidebar`は0=EXPLORER、1=SOURCE CONTROL、2=BRANCHです。`git_collapsed.path`と`view_state.git_selected`はグループを区別する`staged:`または`changes:`を相対パスの前に付けて保存します。BRANCHのコミット・変更ファイルのツリーは必要時にGitから取得し、保存しません。

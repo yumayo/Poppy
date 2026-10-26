@@ -853,15 +853,16 @@ void gitSidebarTests(const fs::path& executable) {
         Application app(executable, fixture.root); app.tree();
         const auto changes = GetDlgItem(app.window, 4), viewer = FindWindowExW(app.window, nullptr, L"PoppyViewer", nullptr);
         send(GetDlgItem(app.window, 3), BM_CLICK);
-        waitFor([&] { return IsWindowVisible(changes) && send(changes, treeGetCount) == 3; }, "Git List did not load all untracked files");
+        waitFor([&] { return IsWindowVisible(changes) && send(changes, treeGetCount) == 5; }, "Git List did not load all untracked files");
         const auto px = [dpi = GetDpiForWindow(app.window)](int value) { return MulDiv(value, dpi, 96); };
         const auto view = [&](bool tree) {
             const auto rect = bounds(app.window, changes);
             click(app.window, rect.left + (rect.right - rect.left) * (tree ? 1 : 3) / 4, rect.top - px(14));
-            check(send(changes, treeGetCount) == (tree ? 6 : 3), "Git layout toggle did not rebuild the hierarchy");
+            check(send(changes, treeGetCount) == (tree ? 8 : 5), "Git layout toggle did not rebuild the hierarchy");
         };
         view(true);
-        auto docs = nextItem(changes, TreeRelation::Root), src = nextItem(changes, TreeRelation::Next, docs);
+        auto group = nextItem(changes, TreeRelation::Next, nextItem(changes, TreeRelation::Root));
+        auto docs = nextItem(changes, TreeRelation::Child, group), src = nextItem(changes, TreeRelation::Next, docs);
         check(expanded(changes, docs) && expanded(changes, src), "Git folders did not start expanded");
         send(changes, treeSelect, docs);
         check(scrollInfo(viewer).nMax == 0, "Selecting a Git folder opened a file");
@@ -869,11 +870,13 @@ void gitSidebarTests(const fs::path& executable) {
         expand(changes, src, false);
         check(!expanded(changes, src), "A Git folder did not collapse");
         view(false); view(true);
-        docs = nextItem(changes, TreeRelation::Root); src = nextItem(changes, TreeRelation::Next, docs);
+        group = nextItem(changes, TreeRelation::Next, nextItem(changes, TreeRelation::Root));
+        docs = nextItem(changes, TreeRelation::Child, group); src = nextItem(changes, TreeRelation::Next, docs);
         check(!expanded(changes, src), "Changing layouts forgot a collapsed Git folder");
         check(PostMessageW(app.window, WM_KEYDOWN, VK_F5, 0) != FALSE, "Could not refresh Git changes");
-        waitFor([&] { return nextItem(changes, TreeRelation::Root) != docs; }, "Git changes did not refresh");
-        docs = nextItem(changes, TreeRelation::Root); src = nextItem(changes, TreeRelation::Next, docs);
+        waitFor([&] { return nextItem(changes, TreeRelation::Next, nextItem(changes, TreeRelation::Root)) != group; }, "Git changes did not refresh");
+        group = nextItem(changes, TreeRelation::Next, nextItem(changes, TreeRelation::Root));
+        docs = nextItem(changes, TreeRelation::Child, group); src = nextItem(changes, TreeRelation::Next, docs);
         check(!expanded(changes, src), "Refreshing forgot a collapsed Git folder");
         expand(changes, src);
         const auto nested = nextItem(changes, TreeRelation::Child, src), file = nextItem(changes, TreeRelation::Child, nested);
@@ -886,14 +889,85 @@ void gitSidebarTests(const fs::path& executable) {
     {
         Application app(executable, fixture.root); app.tree();
         const auto changes = GetDlgItem(app.window, 4);
-        waitFor([&] { return IsWindowVisible(changes) && send(changes, treeGetCount) == 6; }, "Restart lost the Git Tree layout");
+        waitFor([&] { return IsWindowVisible(changes) && send(changes, treeGetCount) == 8; }, "Restart lost the Git Tree layout");
         const auto rect = bounds(app.window, changes);
         click(app.window, rect.left + (rect.right - rect.left) * 3 / 4, rect.top - MulDiv(14, GetDpiForWindow(app.window), 96));
     }
     {
         Application app(executable, fixture.root); app.tree();
         const auto changes = GetDlgItem(app.window, 4);
-        waitFor([&] { return IsWindowVisible(changes) && send(changes, treeGetCount) == 3; }, "Restart lost the Git List layout");
+        waitFor([&] { return IsWindowVisible(changes) && send(changes, treeGetCount) == 5; }, "Restart lost the Git List layout");
+    }
+}
+void branchSidebarTests(const fs::path& executable) {
+    wchar_t git[MAX_PATH]{};
+    const auto length = SearchPathW(nullptr, L"git.exe", nullptr, MAX_PATH, git, nullptr);
+    if (!length || length >= MAX_PATH) { std::cout << "Branch tests skipped: Git for Windows is not on PATH.\n"; return; }
+    Fixture fixture;
+    const auto runGit = [&](const std::wstring& args) {
+        std::wstring command = L"\"" + std::wstring(git) + L"\" " + args;
+        STARTUPINFOW startup{}; startup.cb = sizeof(startup); PROCESS_INFORMATION process{};
+        check(CreateProcessW(git, command.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, fixture.root.c_str(), &startup, &process) != FALSE, "Cannot start fixture Git");
+        CloseHandle(process.hThread); const auto wait = WaitForSingleObject(process.hProcess, 5000);
+        if (wait != WAIT_OBJECT_0) { TerminateProcess(process.hProcess, 1); WaitForSingleObject(process.hProcess, 1000); }
+        DWORD code = 1; GetExitCodeProcess(process.hProcess, &code); CloseHandle(process.hProcess);
+        check(wait == WAIT_OBJECT_0 && code == 0, "Branch fixture Git command failed");
+    };
+    const auto write = [&](const fs::path& name, const char* text) { std::ofstream file(fixture.root / name, std::ios::binary); file << text; check(!file.fail(), "Cannot write branch fixture"); };
+    const auto children = [](HWND tree, TreeItem parent) {
+        size_t count = 0;
+        for (auto item = nextItem(tree, TreeRelation::Child, parent); item; item = nextItem(tree, TreeRelation::Next, item)) ++count;
+        return count;
+    };
+    runGit(L"init --quiet --template= --initial-branch=main");
+    runGit(L"config user.name PoppyTest"); runGit(L"config user.email poppy@example.invalid");
+    runGit(L"config commit.gpgsign false"); runGit(L"config core.autocrlf false");
+    fs::create_directories(fixture.root / L"src");
+    write(L"src/file.txt", "initial\n"); write(L"deleted.txt", "deleted\n");
+    runGit(L"add ."); runGit(L"commit -qm root");
+    for (int i = 0; i < 50; ++i) runGit(L"commit --allow-empty -qm history");
+    write(L"src/file.txt", "committed\n"); fs::remove(fixture.root / L"deleted.txt");
+    runGit(L"add -A"); runGit(L"commit -qm latest");
+    write(L"src/file.txt", "staged\n"); runGit(L"add .");
+    write(L"src/file.txt", "working\n"); write(L"untracked.txt", "untracked\n");
+    {
+        Application app(executable, fixture.root); app.tree();
+        const auto changes = GetDlgItem(app.window, 4), branches = GetDlgItem(app.window, 6);
+        const auto viewer = FindWindowExW(app.window, nullptr, L"PoppyViewer", nullptr);
+        send(GetDlgItem(app.window, 3), BM_CLICK);
+        waitFor([&] { return IsWindowVisible(changes) && send(changes, treeGetCount) == 5; }, "Source Control did not separate partially staged changes");
+        const auto staged = nextItem(changes, TreeRelation::Root), working = nextItem(changes, TreeRelation::Next, staged);
+        check(children(changes, staged) == 1 && children(changes, working) == 2, "Staged and unstaged groups contain the wrong files");
+        send(changes, treeSelect, staged); send(changes, WM_KEYDOWN, VK_F4); waitLines(viewer, 1);
+        const auto rect = bounds(app.window, changes);
+        const int height = static_cast<int>(send(changes, treeGetRowHeight));
+        const int row = static_cast<int>(send(changes, treeGetRow, working));
+        click(changes, rect.right - rect.left - MulDiv(60, GetDpiForWindow(app.window), 96), row * height + height / 2);
+        waitLines(viewer, 4);
+        send(GetDlgItem(app.window, 5), BM_CLICK);
+        waitFor([&] { return IsWindowVisible(branches) && children(branches, nextItem(branches, TreeRelation::Root)) == 51; }, "Branch did not load 50 commits and a load-more row");
+        check(!IsWindowVisible(changes), "Branch did not hide Source Control");
+        const auto branch = nextItem(branches, TreeRelation::Root), latest = nextItem(branches, TreeRelation::Child, branch);
+        auto more = latest;
+        for (int i = 0; i < 50; ++i) more = nextItem(branches, TreeRelation::Next, more);
+        check(more != 0, "The 51st row is missing");
+        send(branches, treeSelect, more);
+        waitFor([&] { return children(branches, branch) == 52; }, "Clicking the 51st row did not append the remaining commits");
+        auto rootCommit = latest;
+        while (const auto next = nextItem(branches, TreeRelation::Next, rootCommit)) rootCommit = next;
+        send(branches, treeSelect, latest);
+        waitFor([&] { return children(branches, latest) == 2; }, "Opening a commit did not build its changed-file tree");
+        const auto directory = nextItem(branches, TreeRelation::Child, latest), file = nextItem(branches, TreeRelation::Child, directory);
+        check(file != 0, "Commit files are missing their folder hierarchy");
+        send(branches, treeSelect, file); waitLines(viewer, 1);
+        send(branches, treeSelect, latest); send(branches, WM_KEYDOWN, VK_F4); waitLines(viewer, 4);
+        send(branches, treeSelect, rootCommit); send(branches, WM_KEYDOWN, VK_F4); waitLines(viewer, 5);
+    }
+    {
+        Application app(executable, fixture.root); app.tree();
+        const auto branches = GetDlgItem(app.window, 6), viewer = FindWindowExW(app.window, nullptr, L"PoppyViewer", nullptr);
+        waitFor([&] { return IsWindowVisible(branches); }, "Restart did not restore the Branch page");
+        waitLines(viewer, 5);
     }
 }
 std::set<DWORD> childProcesses(DWORD parent) {
@@ -1063,7 +1137,7 @@ int wmain(int argc, wchar_t** argv) {
         check(argc == 2, "Pass the path to Poppy.exe");
         SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         for (const auto test : {folderTests, sidebarTests, treeInteractionTests, tabTests, pinnedTabTests,
-                tabDragTests, wrappingTabDragTests, wrappingTabTests, renameTests, splitPaneTests, quickOpenTests, gitSidebarTests, sessionTests, multiProjectTests, terminalBackspaceTests}) {
+                tabDragTests, wrappingTabDragTests, wrappingTabTests, renameTests, splitPaneTests, quickOpenTests, gitSidebarTests, branchSidebarTests, sessionTests, multiProjectTests, terminalBackspaceTests}) {
             Fixture appData; AppDataEnvironment environment(appData.root);
             test(fs::absolute(argv[1]));
         }

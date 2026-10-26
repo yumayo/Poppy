@@ -3,6 +3,7 @@
 #include "project_runtime.h"
 #include "tree.h"
 #include "git_changes.h"
+#include "git_history.h"
 #include "activity_button.h"
 #include "quick_open.h"
 #include "file_name.h"
@@ -26,8 +27,8 @@ namespace {
 constexpr UINT_PTR timerId = 1;
 constexpr UINT_PTR tabDragTimerId = 2;
 constexpr size_t maxEntries = 10000, maxTreeNodes = 50000, maxLines = 1000000;
-constexpr int explorerCommand = 2, gitCommand = 3;
-enum class Sidebar { Explorer, Git };
+constexpr int explorerCommand = 2, gitCommand = 3, branchCommand = 5;
+enum class Sidebar { Explorer, Git, Branch };
 using Entry = ProviderEntry;
 struct Node {
     ResourceId path; uint64_t id;
@@ -38,7 +39,21 @@ struct Node {
 };
 using DirectoryResult = ProviderListing;
 struct FileResult { std::shared_ptr<EditBuffer> buffer; std::shared_ptr<Document> document; std::wstring error; };
-struct Tab { ResourceId path; bool diff = false; Viewer::State fileView, diffView; bool pinned = false; std::shared_ptr<EditBuffer> buffer; int group = 0; bool displayed = false; };
+struct Tab {
+    ResourceId path; bool diff = false; Viewer::State fileView, diffView; bool pinned = false;
+    std::shared_ptr<EditBuffer> buffer; int group = 0; bool displayed = false;
+    GitDiffKind diffKind = GitDiffKind::Automatic; std::string revision; bool allChanges = false;
+};
+std::wstring tabKey(const Tab& tab) {
+    return pathKey(tab.path) + L"\n" + std::to_wstring(static_cast<int>(tab.diffKind)) + L"\n" + wide(tab.revision) + (tab.allChanges ? L"\nall" : L"");
+}
+std::wstring tabTitle(const Tab& tab) {
+    auto title = tab.allChanges ? L"All Changes" : tab.path.filename().native();
+    if (tab.diffKind == GitDiffKind::Commit) title += L" · " + wide(tab.revision.substr(0, 8));
+    else if (tab.diffKind == GitDiffKind::Staged) title += L" · Staged";
+    else if (tab.diffKind != GitDiffKind::Automatic) title += L" · Changes";
+    return title + (tab.buffer && tab.buffer->dirty() ? L" *" : L"") + (tab.diff ? L" (diff)" : L"");
+}
 struct TabDrop { size_t position; RECT marker; int group = 0; };
 struct EditorGroup { RECT tabs{}, body{}; std::vector<size_t> indices, starts; size_t firstRow = 0, rows = 0; bool overflow() const { return starts.size() > rows; } };
 struct TabDrag {
@@ -47,8 +62,20 @@ struct TabDrag {
     bool active = false;
     std::optional<TabDrop> target;
 };
-struct GitEntry { ResourceId path; wchar_t state; };
+struct GitEntry { ResourceId path; wchar_t state; bool staged = false, changed = false; char index = ' ', worktree = ' '; };
 struct GitResult { ResourceId root; std::wstring branch, error; std::map<std::wstring, wchar_t> states; std::vector<GitEntry> entries; size_t changed = 0, untracked = 0; bool truncated = false, unsupportedNames = false; };
+struct SourceNode { std::wstring path; size_t entry = noGitChange; bool directory = false, staged = false, group = false; };
+enum class HistoryKind { Branch, Commit, Directory, File, More, Message };
+struct HistoryNode {
+    HistoryKind kind; std::string ref, revision; ResourceId path;
+    bool loaded = false, loading = false; size_t count = 0;
+    uint64_t generation = 0;
+};
+std::vector<std::wstring> gitArguments(const std::vector<std::string>& args) {
+    std::vector<std::wstring> result; result.reserve(args.size());
+    for (const auto& arg : args) result.push_back(wide(arg));
+    return result;
+}
 
 COLORREF stateColor(wchar_t state) {
     return state == L'U' || state == L'D' ? RGB(231,112,118) : state == L'?' || state == L'A' ? accent : RGB(224,192,128);
@@ -79,20 +106,13 @@ std::shared_ptr<GitResult> readGit(ProjectProvider& provider, const ResourceId& 
     }
     auto status = provider.git({L"git.exe", L"--no-optional-locks", L"-c", L"core.fsmonitor=false", L"status", L"--porcelain=v1", L"-z", L"--untracked-files=all"}, result->root, cancelled);
     if (status.code) { result->error = status.error; return result; }
-    for (size_t p = 0; p < status.output.size();) {
-        const size_t end = status.output.find('\0', p); if (end == std::string::npos) break;
-        const auto item = std::string_view(status.output).substr(p, end - p); p = end + 1;
-        if (item.size() < 4) continue;
-        const char x = item[0], y = item[1];
-        if (directory.wsl() && !validUtf8(item.substr(3))) {
-            result->unsupportedNames = true;
-            if (x == 'R' || y == 'R' || x == 'C' || y == 'C') { const auto sourceEnd = status.output.find('\0', p); p = sourceEnd == status.output.npos ? status.output.size() : sourceEnd + 1; }
-            continue;
-        }
+    for (const auto& entry : parseGitStatus(status.output)) {
+        const char x = entry.index, y = entry.worktree;
+        if (directory.wsl() && !validUtf8(entry.path)) { result->unsupportedNames = true; continue; }
         const wchar_t state = x == '?' ? L'?' : x == 'U' || y == 'U' || (x == 'A' && y == 'A') || (x == 'D' && y == 'D') ? L'U' : y != ' ' ? y : x;
         if (state == L'?') ++result->untracked; else ++result->changed;
-        ResourceId path = (result->root / item.substr(3)).lexically_normal();
-        if (result->entries.size() < maxTreeNodes) result->entries.push_back({path, state});
+        ResourceId path = (result->root / std::string_view(entry.path)).lexically_normal();
+        if (result->entries.size() < maxTreeNodes) result->entries.push_back({path, state, entry.staged(), entry.changed(), x, y});
         else result->truncated = true;
         auto mark = [&](ResourceId current) {
             for (;;) {
@@ -105,13 +125,7 @@ std::shared_ptr<GitResult> readGit(ProjectProvider& provider, const ResourceId& 
             }
         };
         mark(path);
-        if (x == 'R' || y == 'R' || x == 'C' || y == 'C') {
-            const size_t sourceEnd = status.output.find('\0', p);
-            if (sourceEnd == std::string::npos) break;
-            const auto source = std::string_view(status.output).substr(p, sourceEnd - p);
-            if (!directory.wsl() || validUtf8(source)) mark(result->root / source); else result->unsupportedNames = true;
-            p = sourceEnd + 1;
-        }
+        if (!entry.previousPath.empty()) { if (!directory.wsl() || validUtf8(entry.previousPath)) mark(result->root / std::string_view(entry.previousPath)); else result->unsupportedNames = true; }
     }
     return result;
 }
@@ -133,6 +147,12 @@ private:
     void setGitView(bool tree);
     void updateGitFiles();
     void openGitFile(TreeItem item);
+    void openGitDiff(const ResourceId& path, GitDiffKind kind, std::string revision = {}, bool allChanges = false);
+    void refreshBranches();
+    void requestHistory(TreeItem item, bool more = false);
+    void openHistory(TreeItem item);
+    HistoryNode* historyNode(TreeItem item) const;
+    TreeItem insertHistory(TreeItem parent, std::wstring text, HistoryNode node, bool expandable, COLORREF color = foreground);
     void chooseFolder();
     void openFolder(ResourceId path);
     ProjectSession saveSession();
@@ -175,11 +195,11 @@ private:
     void stopWatch();
     void status(std::wstring message);
     void toggleTerminal();
-    HWND window_ = nullptr, tree_ = nullptr, gitTree_ = nullptr, explorerButton_ = nullptr, gitButton_ = nullptr, tooltips_ = nullptr;
+    HWND window_ = nullptr, tree_ = nullptr, gitTree_ = nullptr, branchTree_ = nullptr, explorerButton_ = nullptr, gitButton_ = nullptr, branchButton_ = nullptr, tooltips_ = nullptr;
     HINSTANCE instance_ = nullptr;
-    Tree explorer_, changes_;
+    Tree explorer_, changes_, branches_;
     Renderer renderer_;
-    ActivityButton explorerActivity_, gitActivity_;
+    ActivityButton explorerActivity_, gitActivity_, branchActivity_;
     UINT dpi_ = 96;
     int sidebar_ = 245, terminalHeight_ = 260, toolbar_ = 44, footer_ = 26, splitter_ = 5;
     int activityWidth_ = 48, sidebarHeader_ = 34, gitHeader_ = 84;
@@ -189,7 +209,10 @@ private:
     bool updatingGitFiles_ = false;
     bool renamePending_ = false;
     bool gitTreeView_ = false;
-    std::vector<GitChangeNode> gitChangeNodes_;
+    std::vector<SourceNode> gitChangeNodes_;
+    uint64_t branchRequest_ = 0;
+    bool branchesLoading_ = false, branchesLoaded_ = false;
+    std::wstring branchError_;
     std::set<std::wstring> collapsedGitPaths_;
     Sidebar activeSidebar_ = Sidebar::Explorer;
     Viewer viewers_[2];
@@ -243,6 +266,12 @@ void ProjectRuntime::Impl::create() {
     gitWorker_ = std::make_unique<Worker>(window_);
     explorer_.create(window_, instance_, L"Files", 1); tree_ = explorer_.window();
     changes_.create(window_, instance_, L"Git changes", 4); gitTree_ = changes_.window();
+    branches_.create(window_, instance_, L"Branches", 6); branchTree_ = branches_.window();
+    branches_.removed = [](uintptr_t data) { delete reinterpret_cast<HistoryNode*>(data); };
+    branches_.expanded = [this](TreeItem item, bool expanded) { if (expanded) requestHistory(item); };
+    branches_.activated = [this](TreeItem item) { openHistory(item); };
+    branches_.actionText = [this](TreeItem item) { const auto n = historyNode(item); return n && n->kind == HistoryKind::Commit ? L"Open All Changes" : L""; };
+    branches_.actionClicked = [this](TreeItem item) { const auto n = historyNode(item); if (n && n->kind == HistoryKind::Commit && git_) openGitDiff(git_->root, GitDiffKind::Commit, n->revision, true); };
     explorer_.activated = [this](TreeItem item) {
         pendingTreeSelection_.clear();
         if (const auto n = node(item); n && !n->directory) openFile(n->path);
@@ -259,6 +288,15 @@ void ProjectRuntime::Impl::create() {
     explorer_.canOpenWithDefaultApp = [this](TreeItem item) { const auto n = node(item); return n && !n->directory && !n->unsupported && !root_.wsl(); };
     explorer_.openWithDefaultAppRequested = [this](TreeItem item) { if (const auto n = node(item); n && !n->directory) openWithDefaultApp(n->path); };
     changes_.activated = [this](TreeItem item) { openGitFile(item); };
+    changes_.actionText = [this](TreeItem item) {
+        const auto n = changes_.item(item);
+        return n && n->data < gitChangeNodes_.size() && gitChangeNodes_[n->data].group && changes_.child(item) ? L"Open All Changes" : L"";
+    };
+    changes_.actionClicked = [this](TreeItem item) {
+        const auto n = changes_.item(item);
+        if (n && n->data < gitChangeNodes_.size() && gitChangeNodes_[n->data].group && git_)
+            openGitDiff(git_->root, gitChangeNodes_[n->data].staged ? GitDiffKind::Staged : GitDiffKind::Changes, {}, true);
+    };
     changes_.expanded = [this](TreeItem item, bool value) {
         if (updatingGitFiles_) return;
         const auto node = changes_.item(item);
@@ -269,13 +307,15 @@ void ProjectRuntime::Impl::create() {
     };
     explorerActivity_.create(window_, instance_, L"Explorer", explorerCommand, false); explorerButton_ = explorerActivity_.window();
     gitActivity_.create(window_, instance_, L"Source Control", gitCommand, true); gitButton_ = gitActivity_.window();
+    branchActivity_.create(window_, instance_, L"Branch", branchCommand, false, true); branchButton_ = branchActivity_.window();
     explorerActivity_.clicked = [this] { selectSidebar(Sidebar::Explorer); };
     gitActivity_.clicked = [this] { selectSidebar(Sidebar::Git); };
+    branchActivity_.clicked = [this] { selectSidebar(Sidebar::Branch); };
     explorerActivity_.select(true);
     tooltips_ = CreateWindowExW(WS_EX_TOPMOST, TOOLTIPS_CLASSW, nullptr, WS_POPUP | TTS_ALWAYSTIP | TTS_NOPREFIX, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, window_, nullptr, instance_, nullptr);
-    for (const auto button : {explorerButton_, gitButton_}) {
+    for (const auto button : {explorerButton_, gitButton_, branchButton_}) {
         TOOLINFOW tip{}; tip.cbSize = sizeof(tip); tip.uFlags = TTF_IDISHWND | TTF_SUBCLASS; tip.hwnd = window_; tip.uId = reinterpret_cast<UINT_PTR>(button);
-        tip.lpszText = const_cast<wchar_t*>(button == explorerButton_ ? L"Explorer (Ctrl+Shift+E)" : L"Source Control (Ctrl+Shift+G)");
+        tip.lpszText = const_cast<wchar_t*>(button == explorerButton_ ? L"Explorer (Ctrl+Shift+E)" : button == gitButton_ ? L"Source Control (Ctrl+Shift+G)" : L"Branch (Ctrl+Shift+B)");
         SendMessageW(tooltips_, TTM_ADDTOOLW, 0, reinterpret_cast<LPARAM>(&tip));
     }
     for (int group = 0; group < 2; ++group) {
@@ -291,15 +331,15 @@ void ProjectRuntime::Impl::create() {
     quickOpen_.create(window_, instance_);
     quickOpen_.opened = [this](const ResourceId& path) { openFile(path); SetFocus(viewer().window()); };
     // Each underlying pane must clip the palette when repainting beneath it.
-    for (const auto pane : {tree_, gitTree_, viewers_[0].window(), viewers_[1].window(), terminal_.container(), explorerButton_, gitButton_})
+    for (const auto pane : {tree_, gitTree_, branchTree_, viewers_[0].window(), viewers_[1].window(), terminal_.container(), explorerButton_, gitButton_, branchButton_})
         SetWindowLongPtrW(pane, GWL_STYLE, GetWindowLongPtrW(pane, GWL_STYLE) | WS_CLIPSIBLINGS);
     const BOOL dark = TRUE; DwmSetWindowAttribute(window_, 20, &dark, sizeof(dark));
     dpi(GetDpiForWindow(window_));
 }
 void ProjectRuntime::Impl::dpi(UINT value) {
     dpi_ = value; renderer_.setDpi(dpi_);
-    explorer_.setDpi(dpi_); changes_.setDpi(dpi_, 28);
-    explorerActivity_.setDpi(dpi_); gitActivity_.setDpi(dpi_);
+    explorer_.setDpi(dpi_); changes_.setDpi(dpi_, 28); branches_.setDpi(dpi_, 28);
+    explorerActivity_.setDpi(dpi_); gitActivity_.setDpi(dpi_); branchActivity_.setDpi(dpi_);
     toolbar_ = MulDiv(44, dpi_, 96); footer_ = MulDiv(26, dpi_, 96); splitter_ = MulDiv(5, dpi_, 96);
     activityWidth_ = MulDiv(48, dpi_, 96); sidebarHeader_ = MulDiv(34, dpi_, 96); gitHeader_ = MulDiv(84, dpi_, 96);
     for (auto& view : viewers_) view.setDpi(dpi_);
@@ -336,7 +376,7 @@ void ProjectRuntime::Impl::layout(bool revealTab) {
             pane.starts.clear(); int x = start, row = -1;
             for (size_t j = 0; j < pane.indices.size(); ++j) {
                 const size_t i = pane.indices[j]; const auto& tab = tabs_[i];
-                const auto title = tab.path.filename().native() + (tab.buffer && tab.buffer->dirty() ? L" *" : L"") + (tab.diff ? L" (diff)" : L"");
+                const auto title = tabTitle(tab);
                 const int width = std::min(std::max(0, available), renderer_.textWidth(title) + MulDiv(40, dpi_, 96));
                 if (!j || tab.pinned != tabs_[pane.indices[j - 1]].pinned || (x > start && x + width > start + available)) { pane.starts.push_back(j); x = start; ++row; }
                 tabRects_[i] = {x, toolbar_ + row * rowHeight, x + width, toolbar_ + (row + 1) * rowHeight}; x += width;
@@ -361,11 +401,13 @@ void ProjectRuntime::Impl::layout(bool revealTab) {
     if (tabDrag_ && tabDrag_->active) tabDrag_->target = tabDropAt(tabDrag_->point);
 
     struct Placement { HWND window; int x, y, width, height, flags; };
-    const std::array<Placement, 7> panes{{
+    const std::array<Placement, 9> panes{{
         {explorerButton_, 0, toolbar_, activityWidth_ - 1, activityWidth_, SWP_SHOWWINDOW},
         {gitButton_, 0, toolbar_ + activityWidth_, activityWidth_ - 1, activityWidth_, SWP_SHOWWINDOW},
+        {branchButton_, 0, toolbar_ + 2 * activityWidth_, activityWidth_ - 1, activityWidth_, SWP_SHOWWINDOW},
         {tree_, activityWidth_, toolbar_ + sidebarHeader_, side, std::max(0, content - sidebarHeader_), showExplorer ? SWP_SHOWWINDOW : SWP_HIDEWINDOW},
         {gitTree_, activityWidth_, gitTop, side, std::max(0, toolbar_ + content - gitTop), showGitFiles ? SWP_SHOWWINDOW : SWP_HIDEWINDOW},
+        {branchTree_, activityWidth_, toolbar_ + sidebarHeader_, side, std::max(0, content - sidebarHeader_), activeSidebar_ == Sidebar::Branch && branches_.child() ? SWP_SHOWWINDOW : SWP_HIDEWINDOW},
         {viewers_[0].window(), editorGroups_[0].body.left, editorGroups_[0].body.top, std::max(0L, editorGroups_[0].body.right - editorGroups_[0].body.left), std::max(0L, editorGroups_[0].body.bottom - editorGroups_[0].body.top), SWP_SHOWWINDOW},
         {viewers_[1].window(), editorGroups_[1].body.left, editorGroups_[1].body.top, std::max(0L, editorGroups_[1].body.right - editorGroups_[1].body.left), std::max(0L, editorGroups_[1].body.bottom - editorGroups_[1].body.top), split ? SWP_SHOWWINDOW : SWP_HIDEWINDOW},
         {terminal_.container(), right, toolbar_ + viewerSize + splitter_, std::max(0, width - right), terminalSize,
@@ -409,7 +451,7 @@ void ProjectRuntime::Impl::paint() {
     dc.fill({activityWidth_ - 1, toolbar_, activityWidth_, r.bottom - footer_}, border);
     dc.fill(sidebarRect_, panel);
     const int left = sidebarRect_.left + scaled(14), edge = sidebarRect_.right - scaled(12), top = toolbar_ + sidebarHeader_;
-    dc.label({left, toolbar_, edge, top}, activeSidebar_ == Sidebar::Explorer ? L"EXPLORER" : L"SOURCE CONTROL", foreground);
+    dc.label({left, toolbar_, edge, top}, activeSidebar_ == Sidebar::Explorer ? L"EXPLORER" : activeSidebar_ == Sidebar::Git ? L"SOURCE CONTROL" : L"BRANCH", foreground);
     dc.fill({sidebarRect_.left, top - 1, sidebarRect_.right, top}, border);
     if (activeSidebar_ == Sidebar::Git) {
         const bool repository = git_ && !git_->root.empty() && git_->error.empty();
@@ -426,6 +468,11 @@ void ProjectRuntime::Impl::paint() {
             const std::wstring message = root_.empty() ? L"Open a folder to view Git changes." : !git_ ? L"Loading Git changes…" : !git_->error.empty() ? L"Git unavailable.\n" + git_->error.substr(0, 2048) + L"\nPress F5 to retry." : git_->root.empty() ? L"This folder is not in a Git repository." : L"No pending changes.";
             dc.label({left, top + gitHeader_ + scaled(16), edge, sidebarRect_.bottom - scaled(12)}, message, muted, DT_LEFT | DT_TOP | DT_WORDBREAK);
         }
+    } else if (activeSidebar_ == Sidebar::Branch && !branches_.child()) {
+        const auto message = root_.empty() ? L"Open a folder to view branches." : !git_ || branchesLoading_ ? L"Loading branches…" :
+            !git_->error.empty() ? L"Git unavailable.\n" + git_->error : git_->root.empty() ? L"This folder is not in a Git repository." :
+            !branchError_.empty() ? branchError_ + L"\nPress F5 to retry." : L"No branches or commits yet.";
+        dc.label({left, top + scaled(16), edge, sidebarRect_.bottom - scaled(12)}, message, muted, DT_LEFT | DT_TOP | DT_WORDBREAK);
     } else if (root_.empty()) {
         dc.label({left, top + scaled(16), edge, sidebarRect_.bottom - scaled(12)}, L"Open a folder with Ctrl+O to browse files.", muted, DT_LEFT | DT_TOP | DT_WORDBREAK);
     }
@@ -436,7 +483,7 @@ void ProjectRuntime::Impl::paint() {
             const bool active = tabs_[i].displayed;
             dc.fill(rect, active ? panel : background);
             if (active) dc.fill({rect.left, rect.top, rect.right, rect.top + scaled(2)}, accent);
-            const auto title = tabs_[i].path.filename().native() + (tabs_[i].buffer && tabs_[i].buffer->dirty() ? L" *" : L"") + (tabs_[i].diff ? L" (diff)" : L"");
+            const auto title = tabTitle(tabs_[i]);
             dc.label({rect.left + scaled(12), rect.top, rect.right - scaled(28), rect.bottom}, title, active ? foreground : muted);
             if (tabs_[i].pinned) {
                 const float x = static_cast<float>(rect.right - scaled(16)), y = static_cast<float>((rect.top + rect.bottom) / 2);
@@ -461,9 +508,12 @@ void ProjectRuntime::Impl::paint() {
     }
 }
 void ProjectRuntime::Impl::selectSidebar(Sidebar sidebar) {
+    // Leave room for the commit subject beside its row action on first use.
+    if (sidebar == Sidebar::Branch && sidebar_ == ProjectSession{}.sidebar) sidebar_ = 420;
     activeSidebar_ = sidebar; layout();
-    explorerActivity_.select(sidebar == Sidebar::Explorer); gitActivity_.select(sidebar == Sidebar::Git);
-    SetFocus(sidebar == Sidebar::Explorer ? (IsWindowVisible(tree_) ? tree_ : explorerButton_) : (IsWindowVisible(gitTree_) ? gitTree_ : gitButton_));
+    explorerActivity_.select(sidebar == Sidebar::Explorer); gitActivity_.select(sidebar == Sidebar::Git); branchActivity_.select(sidebar == Sidebar::Branch);
+    if (sidebar == Sidebar::Branch) refreshBranches();
+    SetFocus(sidebar == Sidebar::Explorer ? (IsWindowVisible(tree_) ? tree_ : explorerButton_) : sidebar == Sidebar::Git ? (IsWindowVisible(gitTree_) ? gitTree_ : gitButton_) : (IsWindowVisible(branchTree_) ? branchTree_ : branchButton_));
 }
 RECT ProjectRuntime::Impl::gitViewButton(bool tree) const {
     const int padding = MulDiv(12, dpi_, 96), top = toolbar_ + sidebarHeader_;
@@ -480,45 +530,42 @@ void ProjectRuntime::Impl::setGitView(bool tree) {
 void ProjectRuntime::Impl::updateGitFiles() {
     std::wstring selected = wide(pendingGitSelection_);
     const int oldTop = changes_.top(), oldLeft = changes_.left();
-    if (const auto node = changes_.item(changes_.selection()); node && node->data < gitChangeNodes_.size())
-        selected = gitChangeNodes_[node->data].path;
+    if (const auto node = changes_.item(changes_.selection()); node && node->data < gitChangeNodes_.size()) selected = gitChangeNodes_[node->data].path;
     updatingGitFiles_ = true;
     {
-        Tree::Batch batch(changes_);
-        changes_.clear();
-        gitChangeNodes_.clear();
+        Tree::Batch batch(changes_); changes_.clear(); gitChangeNodes_.clear();
         TreeItem selection = 0;
-        if (git_ && git_->error.empty()) {
-            std::vector<std::wstring> paths; paths.reserve(git_->entries.size());
-            for (const auto& entry : git_->entries) paths.push_back(entry.path.lexically_relative(git_->root).generic_wstring());
-            gitChangeNodes_ = buildGitChanges(paths, gitTreeView_);
-            std::vector<TreeItem> items; items.reserve(gitChangeNodes_.size());
-            TreeItem active = 0;
-            const auto activePath = pathKey(selectedPath());
-            for (size_t i = 0; i < gitChangeNodes_.size(); ++i) {
-                const auto& node = gitChangeNodes_[i];
-                const auto parent = node.parent == noGitChange ? 0 : items[node.parent];
-                const auto offset = node.parent == noGitChange ? 0 : gitChangeNodes_[node.parent].path.size() + 1;
-                auto text = node.path.substr(offset);
-                COLORREF color = foreground;
-                if (!node.directory()) {
-                    const auto& entry = git_->entries[node.entry];
-                    if (!gitTreeView_) text = entry.path.lexically_relative(root_).native();
-                    color = stateColor(entry.state);
-                }
-                const auto item = changes_.insert(parent, std::move(text), node.directory(), i, color);
+        if (git_ && git_->error.empty()) for (const bool staged : {true, false}) {
+            const std::wstring prefix = staged ? L"staged:" : L"changes:";
+            std::vector<std::wstring> paths; std::vector<size_t> entries;
+            for (size_t i = 0; i < git_->entries.size(); ++i) {
+                const auto& entry = git_->entries[i];
+                if (staged ? !entry.staged : !entry.changed) continue;
+                paths.push_back(entry.path.lexically_relative(git_->root).generic_wstring()); entries.push_back(i);
+            }
+            const size_t groupIndex = gitChangeNodes_.size();
+            gitChangeNodes_.push_back({prefix, noGitChange, true, staged, true});
+            const auto group = changes_.insert(0, (staged ? L"Staged Changes" : L"Changes") + (L" (" + std::to_wstring(entries.size()) + L")"), true, groupIndex);
+            const auto nodes = buildGitChanges(paths, gitTreeView_);
+            std::vector<TreeItem> items; items.reserve(nodes.size());
+            for (const auto& node : nodes) {
+                const auto parent = node.parent == noGitChange ? group : items[node.parent];
+                const auto offset = node.parent == noGitChange ? 0 : nodes[node.parent].path.size() + 1;
+                const auto index = gitChangeNodes_.size();
+                const auto entryIndex = node.directory() ? noGitChange : entries[node.entry];
+                gitChangeNodes_.push_back({prefix + node.path, entryIndex, node.directory(), staged, false});
+                const auto state = node.directory() ? wchar_t{} : staged ? static_cast<wchar_t>(git_->entries[entryIndex].index) : git_->entries[entryIndex].state;
+                const auto item = changes_.insert(parent, node.path.substr(offset), node.directory(), index, node.directory() ? foreground : stateColor(state));
                 items.push_back(item);
-                if (node.directory()) changes_.expand(item, !collapsedGitPaths_.count(node.path));
-                if (node.path == selected) selection = item;
-                if (!node.directory() && pathKey(git_->entries[node.entry].path) == activePath) active = item;
+                if (node.directory()) changes_.expand(item, !collapsedGitPaths_.count(prefix + node.path));
+                if (prefix + node.path == selected || (!staged && node.path == selected)) selection = item;
             }
-            if (!selection) selection = active;
-            // Restore a visible ancestor when the selected file is folded away.
-            for (auto item = selection; item;) {
-                const auto node = changes_.item(item);
-                item = node ? node->parent : 0;
-                if (const auto parent = changes_.item(item); parent && !parent->expanded) selection = item;
-            }
+            changes_.expand(group, !collapsedGitPaths_.count(prefix));
+            if (selected == prefix) selection = group;
+        }
+        for (auto item = selection; item;) {
+            const auto node = changes_.item(item); item = node ? node->parent : 0;
+            if (const auto parent = changes_.item(item); parent && !parent->expanded) selection = item;
         }
         changes_.select(selection, false);
     }
@@ -531,9 +578,142 @@ void ProjectRuntime::Impl::openGitFile(TreeItem item) {
     const auto value = changes_.item(item);
     if (!value || value->data >= gitChangeNodes_.size()) return;
     const auto& node = gitChangeNodes_[value->data];
-    if (node.directory() || node.entry >= git_->entries.size()) return;
+    if (node.directory || node.entry >= git_->entries.size()) return;
     const auto entry = git_->entries[node.entry];
-    openFile(entry.path, entry.state != L'?');
+    if (entry.state == L'?') { openFile(entry.path); return; }
+    openGitDiff(entry.path, node.staged ? GitDiffKind::Staged : GitDiffKind::Changes);
+}
+HistoryNode* ProjectRuntime::Impl::historyNode(TreeItem item) const {
+    const auto value = branches_.item(item); return value ? reinterpret_cast<HistoryNode*>(value->data) : nullptr;
+}
+TreeItem ProjectRuntime::Impl::insertHistory(TreeItem parent, std::wstring text, HistoryNode node, bool expandable, COLORREF color) {
+    auto data = std::make_unique<HistoryNode>(std::move(node));
+    const auto item = branches_.insert(parent, std::move(text), expandable, reinterpret_cast<uintptr_t>(data.get()), color);
+    if (item) data.release();
+    return item;
+}
+void ProjectRuntime::Impl::refreshBranches() {
+    if (!git_ || !git_->error.empty() || git_->root.empty() || (root_.wsl() && !connected_)) return;
+    const auto root = git_->root; const auto generation = generation_, request = ++branchRequest_;
+    branchesLoading_ = true;
+    gitWorker_->submit(L"branches", [this, root, generation, request] {
+        auto result = provider_->git({L"git.exe", L"--no-optional-locks", L"for-each-ref", L"--sort=refname",
+            L"--format=%(refname)%00%(refname:short)%00%(objectname)%00%(HEAD)", L"refs/heads", L"refs/remotes"}, root, gitWorker_->cancellation());
+        auto refs = parseGitBranches(result.output);
+        // Detached HEAD remains browsable even when no branch points to it.
+        if (!result.code && std::none_of(refs.begin(), refs.end(), [](const GitBranch& ref) { return ref.current; })) {
+            auto head = provider_->git({L"git.exe", L"rev-parse", L"--verify", L"HEAD"}, root, gitWorker_->cancellation());
+            if (!head.code) refs.insert(refs.begin(), {"HEAD", "HEAD (detached)", utf8(trimmed(head.output)), true});
+        }
+        const auto error = result.error; const auto code = result.code;
+        gitWorker_->complete([this, generation, request, refs = std::move(refs), error, code] {
+            if (generation != generation_ || request != branchRequest_) return;
+            branchesLoading_ = false; branchError_ = code ? error : L"";
+            if (code) { status(L"Branches: " + error); layout(false); return; }
+            Tree::Batch batch(branches_);
+            std::map<std::string, TreeItem> existing;
+            for (auto item = branches_.child(); item; item = branches_.next(item)) if (const auto n = historyNode(item)) existing[n->ref] = item;
+            for (const auto& ref : refs) {
+                const auto found = existing.find(ref.ref);
+                const auto text = (ref.current ? L"● " : L"") + wide(ref.name);
+                if (found == existing.end()) {
+                    const auto item = insertHistory(0, text, {HistoryKind::Branch, ref.ref, ref.tip, {}}, true, ref.current ? accent : foreground);
+                    if (!branchesLoaded_ && ref.current) branches_.expand(item, true);
+                } else {
+                    const auto item = found->second; auto n = historyNode(item);
+                    branches_.label(item, text, ref.current ? accent : foreground);
+                    if (n->revision != ref.tip || (n->loading && n->generation != generation_)) {
+                        n->revision = ref.tip; n->loaded = n->loading = false; n->count = 0;
+                        branches_.clearChildren(item);
+                        if (branches_.item(item)->expanded) requestHistory(item);
+                    }
+                    existing.erase(found);
+                }
+            }
+            for (const auto& stale : existing) branches_.erase(stale.second);
+            branches_.sort(0, [](uintptr_t a, uintptr_t b) { return reinterpret_cast<HistoryNode*>(a)->ref < reinterpret_cast<HistoryNode*>(b)->ref; });
+            branchesLoaded_ = true; layout(false);
+        });
+    });
+}
+void ProjectRuntime::Impl::requestHistory(TreeItem item, bool more) {
+    auto n = historyNode(item);
+    if (n && n->loading && n->generation != generation_) n->loading = false;
+    if (!n || n->loading || (n->loaded && !more) || !git_ || git_->root.empty()) return;
+    if (n->kind != HistoryKind::Branch && n->kind != HistoryKind::Commit) return;
+    n->loading = true; n->generation = generation_;
+    const auto kind = n->kind; const auto revision = n->revision; const auto count = n->count;
+    const auto root = git_->root; const auto generation = generation_;
+    {
+        Tree::Batch batch(branches_);
+        if (!more) branches_.clearChildren(item);
+        else for (auto child = branches_.child(item); child;) {
+            const auto next = branches_.next(child); const auto value = historyNode(child);
+            if (value && (value->kind == HistoryKind::More || value->kind == HistoryKind::Message)) branches_.erase(child);
+            child = next;
+        }
+        insertHistory(item, L"Loading…", {HistoryKind::Message, {}, {}, {}}, false, muted);
+    }
+    gitWorker_->submit(L"history:" + std::to_wstring(item), [this, item, kind, revision, count, root, generation] {
+        const auto args = kind == HistoryKind::Branch ? gitLogArguments(revision, count) : gitCommitFilesArguments(revision);
+        auto result = provider_->git(gitArguments(args), root, gitWorker_->cancellation());
+        auto commits = kind == HistoryKind::Branch ? parseGitCommits(result.output) : std::vector<GitCommit>{};
+        auto files = kind == HistoryKind::Commit ? parseGitCommitFiles(result.output) : std::vector<GitCommitFile>{};
+        const auto error = result.error; const auto code = result.code;
+        gitWorker_->complete([this, item, kind, revision, count, root, generation, commits = std::move(commits), files = std::move(files), code, error] {
+            if (generation != generation_) return;
+            auto n = historyNode(item); if (!n || n->revision != revision) return;
+            n->loading = false; n->loaded = code == 0;
+            Tree::Batch batch(branches_);
+            for (auto child = branches_.child(item); child;) {
+                const auto next = branches_.next(child); const auto value = historyNode(child);
+                if (value && value->kind == HistoryKind::Message) branches_.erase(child);
+                child = next;
+            }
+            if (code) {
+                insertHistory(item, L"Load failed — click to retry", {HistoryKind::More, {}, revision, {}}, false, muted);
+                status(L"Git history: " + error); return;
+            }
+            if (kind == HistoryKind::Branch) {
+                const size_t length = std::min(commits.size(), gitCommitPageSize);
+                for (size_t i = 0; i < length; ++i) {
+                    const auto& commit = commits[i];
+                    const auto text = wide(commit.shortHash + "  " + commit.subject + "  ·  " + commit.author + "  ·  " + commit.date.substr(0, 10));
+                    insertHistory(item, text, {HistoryKind::Commit, {}, commit.hash, {}}, true);
+                }
+                n->count = count + length;
+                if (commits.size() > gitCommitPageSize) insertHistory(item, L"Load 50 more commits…", {HistoryKind::More, {}, revision, {}}, false, accent);
+                else if (!n->count) insertHistory(item, L"No commits.", {HistoryKind::Message, {}, {}, {}}, false, muted);
+            } else {
+                std::vector<std::wstring> paths; std::vector<GitCommitFile> supported;
+                for (const auto& file : files) {
+                    if (root.wsl() && !validUtf8(file.path)) { status(L"Some commit filenames are not UTF-8 and cannot be opened."); continue; }
+                    if (paths.size() >= maxTreeNodes) { status(L"Commit file tree limited to 50,000 files."); break; }
+                    paths.push_back(wide(file.path)); supported.push_back(file);
+                }
+                const auto nodes = buildGitChanges(paths, true); std::vector<TreeItem> items;
+                for (const auto& value : nodes) {
+                    const auto parent = value.parent == noGitChange ? item : items[value.parent];
+                    const auto offset = value.parent == noGitChange ? 0 : nodes[value.parent].path.size() + 1;
+                    const auto child = insertHistory(parent, value.path.substr(offset),
+                        {value.directory() ? HistoryKind::Directory : HistoryKind::File, {}, revision, root / std::string_view(utf8(value.path))}, value.directory(),
+                        value.directory() ? foreground : stateColor(static_cast<wchar_t>(supported[value.entry].state)));
+                    items.push_back(child); if (value.directory()) branches_.expand(child, true);
+                }
+                if (paths.empty()) insertHistory(item, L"No changed files.", {HistoryKind::Message, {}, {}, {}}, false, muted);
+            }
+        });
+    });
+}
+void ProjectRuntime::Impl::openHistory(TreeItem item) {
+    const auto n = historyNode(item); if (!n) return;
+    if (n->kind == HistoryKind::File) openGitDiff(n->path, GitDiffKind::Commit, n->revision);
+    else if (n->kind == HistoryKind::More) {
+        const auto value = branches_.item(item); if (value) requestHistory(value->parent, true);
+    } else if (n->kind == HistoryKind::Branch || n->kind == HistoryKind::Commit) {
+        if (!branches_.item(item)->expanded) branches_.expand(item, true);
+        else requestHistory(item);
+    }
 }
 void ProjectRuntime::Impl::openWithDefaultApp(ResourceId resource) {
     if (resource.wsl()) { status(L"Open this file from the WSL terminal with the application you want to use."); return; }
@@ -611,6 +791,7 @@ void ProjectRuntime::Impl::renameFile(TreeItem item, const std::wstring& name) {
                 });
             }
             for (auto& tab : tabs_) {
+                if (tab.diffKind == GitDiffKind::Commit) continue;
                 const auto path = relocateResource(tab.path, source, destination);
                 if (path == tab.path) continue;
                 tab.path = path;
@@ -683,9 +864,9 @@ ProjectSession ProjectRuntime::Impl::saveSession() {
     ProjectSession state;
     state.wslUid = wslUid_;
     state.sidebar = sidebar_; state.terminalHeight = terminalHeight_; state.terminalVisible = terminalVisible_;
-    state.gitSidebar = activeSidebar_ == Sidebar::Git; state.activeTab = activeTab_;
+    state.gitSidebar = activeSidebar_ == Sidebar::Git; state.branchSidebar = activeSidebar_ == Sidebar::Branch; state.activeTab = activeTab_;
     state.diffInline = viewer().diffInline(); state.gitTree = gitTreeView_; state.firstTabRow = editorGroups_[0].firstRow; state.rightTabRow = editorGroups_[1].firstRow; state.editorRatio = editorRatio_;
-    for (const auto& tab : tabs_) state.tabs.push_back({tab.path.u8string(), tab.diff, tab.fileView, tab.diffView, tab.pinned, tab.group, tab.displayed});
+    for (const auto& tab : tabs_) state.tabs.push_back({tab.path.u8string(), tab.diff, tab.fileView, tab.diffView, tab.pinned, tab.group, tab.displayed, tab.diffKind, tab.revision, tab.allChanges});
     for (const auto& entry : expandedPaths_) state.expanded.push_back(entry.second.u8string());
     if (!pendingTreeSelection_.empty()) state.selected = pendingTreeSelection_.u8string();
     else if (const auto selected = node(explorer_.selection())) state.selected = selected->path.u8string();
@@ -698,6 +879,7 @@ ProjectSession ProjectRuntime::Impl::saveSession() {
     if (focus == terminal_.window()) focusedPane_ = "terminal";
     else if (focus == tree_) focusedPane_ = "explorer";
     else if (focus == gitTree_) focusedPane_ = "git";
+    else if (focus == branchTree_) focusedPane_ = "branch";
     else if (focus == viewer().window()) focusedPane_ = "viewer";
     state.focusedPane = focusedPane_;
     terminal_.snapshot(state);
@@ -714,8 +896,8 @@ void ProjectRuntime::Impl::restoreProject(const ProjectSession& state) {
     for (auto& view : viewers_) view.setDiffLayout(state.diffInline);
     gitTreeView_ = state.gitTree;
     sidebar_ = state.sidebar; terminalHeight_ = state.terminalHeight; terminalVisible_ = state.terminalVisible;
-    activeSidebar_ = state.gitSidebar ? Sidebar::Git : Sidebar::Explorer;
-    explorerActivity_.select(!state.gitSidebar); gitActivity_.select(state.gitSidebar);
+    activeSidebar_ = state.branchSidebar ? Sidebar::Branch : state.gitSidebar ? Sidebar::Git : Sidebar::Explorer;
+    explorerActivity_.select(activeSidebar_ == Sidebar::Explorer); gitActivity_.select(activeSidebar_ == Sidebar::Git); branchActivity_.select(activeSidebar_ == Sidebar::Branch);
     for (const auto& path : state.expanded) {
         auto directory = root_.at(path).lexically_normal().make_preferred();
         const auto key = pathKey(directory);
@@ -726,10 +908,11 @@ void ProjectRuntime::Impl::restoreProject(const ProjectSession& state) {
         const auto& saved = state.tabs[i];
         const auto path = root_.at(saved.path);
         if (!path.is_absolute()) continue;
-        const auto duplicate = std::find_if(tabs_.begin(), tabs_.end(), [&](const Tab& tab) { return pathKey(tab.path) == pathKey(path); });
+        Tab target{path, saved.diff, saved.fileView, saved.diffView, saved.pinned, {}, saved.group, saved.displayed, saved.diffKind, saved.revision, saved.allChanges};
+        const auto duplicate = std::find_if(tabs_.begin(), tabs_.end(), [&](const Tab& tab) { return tabKey(tab) == tabKey(target); });
         if (duplicate != tabs_.end()) continue;
         if (i <= state.activeTab) activeTab_ = tabs_.size();
-        tabs_.push_back({path, saved.diff, saved.fileView, saved.diffView, saved.pinned, {}, saved.group, saved.displayed});
+        tabs_.push_back(std::move(target));
     }
 }
 void ProjectRuntime::Impl::forgetExpanded(const ResourceId& path) {
@@ -950,13 +1133,25 @@ void ProjectRuntime::Impl::openFile(const ResourceId& path, bool diff) {
     if (path.empty()) { status(L"This filename cannot be represented as UTF-8 and cannot be opened or renamed."); return; }
     endTabDrag();
     const auto key = pathKey(path);
-    const auto found = std::find_if(tabs_.begin(), tabs_.end(), [&](const Tab& tab) { return pathKey(tab.path) == key; });
+    const auto found = std::find_if(tabs_.begin(), tabs_.end(), [&](const Tab& tab) { return tab.diffKind == GitDiffKind::Automatic && pathKey(tab.path) == key; });
     const size_t index = static_cast<size_t>(found - tabs_.begin());
     if (found != tabs_.end() && index == activeTab_ && (!diff || found->diff)) { updateTabs(); return; }
     saveTab();
     if (found == tabs_.end()) { Tab tab; tab.path = path; tab.diff = diff; tab.group = focusedGroup_; tabs_.push_back(std::move(tab)); }
     else if (diff) found->diff = true;
     focusedGroup_ = tabs_[index].group; for (auto& tab : tabs_) if (tab.group == focusedGroup_) tab.displayed = false; tabs_[index].displayed = true; activeTab_ = index; layout(); loadTab();
+}
+void ProjectRuntime::Impl::openGitDiff(const ResourceId& path, GitDiffKind kind, std::string revision, bool allChanges) {
+    if (path.empty()) return;
+    endTabDrag(); saveTab();
+    Tab target; target.path = path; target.diff = true; target.diffKind = kind; target.revision = std::move(revision); target.allChanges = allChanges; target.group = focusedGroup_;
+    const auto key = tabKey(target);
+    const auto found = std::find_if(tabs_.begin(), tabs_.end(), [&](const Tab& tab) { return tabKey(tab) == key; });
+    const size_t index = static_cast<size_t>(found - tabs_.begin());
+    if (found == tabs_.end()) tabs_.push_back(std::move(target));
+    focusedGroup_ = tabs_[index].group;
+    for (auto& tab : tabs_) if (tab.group == focusedGroup_) tab.displayed = false;
+    tabs_[index].displayed = true; activeTab_ = index; layout(); loadTab();
 }
 void ProjectRuntime::Impl::selectTab(size_t index) {
     endTabDrag();
@@ -987,13 +1182,13 @@ void ProjectRuntime::Impl::toggleTabPin(size_t index) {
     endTabDrag();
     if (index >= tabs_.size()) return;
     saveTab();
-    const auto activePath = selectedPath();
+    const auto activeKey = tabKey(tabs_[activeTab_]);
     auto tab = std::move(tabs_[index]);
     tabs_.erase(tabs_.begin() + static_cast<std::ptrdiff_t>(index));
     tab.pinned = !tab.pinned;
     const auto position = std::find_if(tabs_.begin(), tabs_.end(), [&](const Tab& value) { return value.group == tab.group && !value.pinned; });
     tabs_.insert(position, std::move(tab));
-    activeTab_ = static_cast<size_t>(std::find_if(tabs_.begin(), tabs_.end(), [&](const Tab& value) { return value.path == activePath; }) - tabs_.begin());
+    activeTab_ = static_cast<size_t>(std::find_if(tabs_.begin(), tabs_.end(), [&](const Tab& value) { return tabKey(value) == activeKey; }) - tabs_.begin());
     layout();
 }
 void ProjectRuntime::Impl::tabMenu(POINT screen) {
@@ -1009,16 +1204,17 @@ void ProjectRuntime::Impl::tabMenu(POINT screen) {
         if (index >= tabs_.size()) return;
     }
     const auto path = tabs_[index].path;
+    const auto key = tabKey(tabs_[index]);
     const bool pinned = tabs_[index].pinned;
     HMENU menu = CreatePopupMenu();
     if (!menu) return;
     AppendMenuW(menu, MF_STRING, 1, pinned ? L"Unpin tab" : L"Pin tab");
-    AppendMenuW(menu, MF_STRING, 3, L"デフォルトのアプリケーションで開く");
+    if (!tabs_[index].allChanges && tabs_[index].diffKind != GitDiffKind::Commit) AppendMenuW(menu, MF_STRING, 3, L"デフォルトのアプリケーションで開く");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING | (pinned ? MF_GRAYED : 0), 2, L"Close tab");
     const UINT command = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, screen.x, screen.y, 0, window_, nullptr);
     DestroyMenu(menu);
-    const auto found = std::find_if(tabs_.begin(), tabs_.end(), [&](const Tab& tab) { return tab.path == path; });
+    const auto found = std::find_if(tabs_.begin(), tabs_.end(), [&](const Tab& tab) { return tabKey(tab) == key; });
     if (found != tabs_.end()) {
         index = static_cast<size_t>(found - tabs_.begin());
         if (command == 1) toggleTabPin(index);
@@ -1060,35 +1256,59 @@ void ProjectRuntime::Impl::loadTab(bool preserve, int group) {
     if (!git_) { waitingForGit_[group] = true; viewers_[group].message(L"Loading Git repository…", path); return; }
     if (git_->root.empty() || !git_->error.empty()) { viewers_[group].message(L"Git repository unavailable. Check Git in the project environment and press F5.", path); return; }
     const auto root = git_->root;
-    gitWorker_->submit(L"diff:" + std::to_wstring(group), [this, group, serial, generation, path, root, preserve, state] {
-        const auto relative = path.lexically_relative(root).native();
-        auto readDiff = [&](bool staged) {
-            std::vector<std::wstring> args{L"git.exe", L"-c", L"diff.suppressBlankEmpty=false", L"--no-optional-locks", L"diff", L"--patch",
-                L"--no-ext-diff", L"--no-textconv", L"--color=never",
-                L"--output-indicator-old=-", L"--output-indicator-new=+", L"--output-indicator-context= ",
-                staged ? L"--cached" : L"--ours", L"--", relative};
-            return provider_->git(args, root, gitWorker_->cancellation());
-        };
-        auto result = readDiff(false);
-        bool staged = false;
-        if (result.code == 0 && result.output.empty()) { staged = true; result = readDiff(true); }
+    const auto kind = tab.diffKind; const auto revision = tab.revision; const auto allChanges = tab.allChanges;
+    const auto title = tabTitle(tab);
+    gitWorker_->submit(L"diff:" + std::to_wstring(group), [this, group, serial, generation, path, root, preserve, state, kind, revision, allChanges, title] {
+        constexpr size_t maxPatchBytes = 4 * 1024 * 1024;
+        const auto relative = allChanges ? std::string{} : path.lexically_relative(root).generic_u8string();
+        auto readDiff = [&](GitDiffKind scope) { return provider_->git(gitArguments(gitDiffArguments(scope, revision, relative)), root, gitWorker_->cancellation()); };
+        auto scope = kind == GitDiffKind::Automatic ? GitDiffKind::Changes : kind;
+        auto result = readDiff(scope);
+        if (kind == GitDiffKind::Automatic && result.code == 0 && result.output.empty()) { scope = GitDiffKind::Staged; result = readDiff(scope); }
+        std::vector<ResourceId> untracked;
+        if (!result.code && allChanges && kind == GitDiffKind::Changes) {
+            auto status = provider_->git({L"git.exe", L"--no-optional-locks", L"-c", L"core.fsmonitor=false", L"status", L"--porcelain=v1", L"-z", L"--untracked-files=all"}, root, gitWorker_->cancellation());
+            if (status.code) { result.code = status.code; result.error = status.error; }
+            else for (const auto& entry : parseGitStatus(status.output)) if (entry.index == '?' && (!root.wsl() || validUtf8(entry.path))) {
+                untracked.push_back(root / std::string_view(entry.path));
+                if (untracked.size() >= maxTreeNodes) break;
+            }
+        }
+        for (const auto& file : untracked) {
+            if (result.code || *gitWorker_->cancellation()) break;
+            auto read = provider_->readFile(file);
+            if (!read.error.empty()) { result.code = 1; result.error = read.error; break; }
+            std::string text, encoding, error;
+            const auto name = file.lexically_relative(root).generic_u8string();
+            std::string patch;
+            if (!decodeText(read.bytes, text, encoding, error)) patch = "diff --git a/" + name + " b/" + name + "\nBinary file or unsupported text encoding\n";
+            else patch = untrackedPatch(name, text);
+            if (patch.size() > maxPatchBytes || result.output.size() > maxPatchBytes - patch.size()) { result.code = 1; result.error = L"Combined diff exceeds the 4 MiB preview limit."; break; }
+            result.output += patch;
+        }
         auto doc = std::make_shared<DiffDocument>();
         if (result.code == 0 && static_cast<size_t>(std::count(result.output.begin(), result.output.end(), '\n')) >= maxLines) { result.code = 1; result.error = L"Diff exceeds the 1,000,000-line preview limit."; }
-        if (result.code == 0) { doc->patch.text = std::move(result.output); indexDiff(*doc); }
+        if (result.code == 0) { doc->patch.text = std::move(result.output); indexDiff(*doc, allChanges || kind != GitDiffKind::Automatic); }
         const auto error = result.error; const auto code = result.code;
-        gitWorker_->complete([this, group, serial, generation, path, doc, code, error, staged, preserve, state] {
+        gitWorker_->complete([this, group, serial, generation, path, doc, code, error, scope, preserve, state, kind, allChanges, title] {
             if (generation != generation_ || serial != serial_[group]) return;
             if (code) viewers_[group].message(error, path);
-            else if (doc->patch.text.empty()) viewers_[group].message(L"No tracked changes for this file.\nUntracked files can be read in the normal preview.\n\nPress F6 to return to the file.", path);
-            else if (doc->rows.empty()) viewers_[group].message(L"No text changes to display.\n\nPress F6 to return to the file.", path);
-            else { viewers_[group].showDiff(doc, path, preserve); if (!preserve) viewers_[group].restore(state); }
-            status(staged ? L"Staged diff  ·  F6: return to file  ·  F7: split / inline" : L"Working tree diff  ·  F6: return to file  ·  F7: split / inline");
+            else if (doc->patch.text.empty()) viewers_[group].message(L"No changes to display.", path);
+            else if (doc->rows.empty()) viewers_[group].message(L"No text changes to display.", path);
+            else { viewers_[group].showDiff(doc, path, preserve, kind == GitDiffKind::Automatic ? L"" : title); if (!preserve) viewers_[group].restore(state); }
+            status((scope == GitDiffKind::Commit ? L"Commit diff" : scope == GitDiffKind::Staged ? L"Staged diff" : L"Working tree diff") +
+                std::wstring(allChanges ? L" · All changes" : L"") + L" · F7: split / inline");
         });
     });
 }
 void ProjectRuntime::Impl::showDiff() {
     if (tabs_.empty()) { status(L"Select a file to view its Git diff."); return; }
     auto& tab = tabs_[activeTab_];
+    if (tab.diffKind != GitDiffKind::Automatic) {
+        if (!tab.allChanges && tab.diffKind != GitDiffKind::Commit) { const auto path = tab.path; openFile(path); }
+        else status(L"This Git comparison is read only. F7: split / inline.");
+        return;
+    }
     if (!tab.diff && (!git_ || git_->root.empty() || !git_->error.empty())) { status(L"Git repository unavailable. Check Git in the project environment and press F5."); return; }
     saveTab(); tab.diff = !tab.diff; layout(); loadTab();
 }
@@ -1100,8 +1320,12 @@ void ProjectRuntime::Impl::refreshGit() {
         gitWorker_->complete([this, generation, result] {
             if (generation != generation_) return;
             git_ = result;
+            if (result->root.empty() || !result->error.empty()) {
+                branches_.clear(); branchesLoaded_ = branchesLoading_ = false; branchError_.clear(); ++branchRequest_;
+            }
             { Tree::Batch batch(explorer_); for (const auto& pair : nodes_) updateLabel(pair.second); }
             updateGitFiles();
+            if (activeSidebar_ == Sidebar::Branch || branchesLoaded_) refreshBranches();
             for (int group = 0; group < 2; ++group) if (waitingForGit_[group]) loadTab(false, group);
             if (!result->error.empty()) status(L"Git: " + result->error);
             else if (result->unsupportedNames) status(L"Some Git filenames are not UTF-8 and cannot be opened.");
@@ -1117,7 +1341,8 @@ void ProjectRuntime::Impl::refresh(bool force) {
     filesDirty_ = false;
     for (const auto& pair : nodes_) { const auto n = node(pair.second); if (n && n->expandRequested) requestDirectory(pair.second); }
     refreshGit();
-    if (!tabs_.empty() && (force || fileDirty_)) {
+    const bool showingGitChanges = std::any_of(tabs_.begin(), tabs_.end(), [](const Tab& tab) { return tab.displayed && tab.diff && tab.diffKind != GitDiffKind::Commit; });
+    if (!tabs_.empty() && (force || fileDirty_ || showingGitChanges)) {
         if (!IsWindowVisible(window_) && !viewer().hasDocument()) { fileDirty_ = true; return; }
         saveTab(); loadTab(true, 0); loadTab(true, 1);
     }
@@ -1270,7 +1495,7 @@ LRESULT ProjectRuntime::Impl::handle(UINT m, WPARAM a, LPARAM b) {
     }
     case WM_CLOSE: return 0;
     case WM_DESTROY:
-        KillTimer(window_, timerId); stopWatch(); quickOpen_.stop(); if (gitWorker_) gitWorker_->stop(); if (worker_) worker_->stop(); terminal_.stop(); explorer_.clear(); changes_.clear();
+        KillTimer(window_, timerId); stopWatch(); quickOpen_.stop(); if (gitWorker_) gitWorker_->stop(); if (worker_) worker_->stop(); terminal_.stop(); explorer_.clear(); changes_.clear(); branches_.clear();
         return 0;
     default: break;
     }
@@ -1287,6 +1512,7 @@ bool ProjectRuntime::Impl::key(const MSG& message) {
         if (quickOpen_.visible() && key) return false;
         if (key && ctrl && shift && message.wParam == 'E') { selectSidebar(Sidebar::Explorer); return true; }
         if (key && ctrl && shift && message.wParam == 'G') { selectSidebar(Sidebar::Git); return true; }
+        if (key && ctrl && shift && message.wParam == 'B') { selectSidebar(Sidebar::Branch); return true; }
         if (key && ctrl && message.wParam == VK_OEM_3) { toggleTerminal(); return true; }
         if (key && ctrl && message.wParam == VK_TAB && !tabs_.empty()) { selectTab((activeTab_ + (shift ? tabs_.size() - 1 : 1)) % tabs_.size()); SetFocus(viewer().window()); return true; }
         if (key && ctrl && message.wParam == 'W' && GetFocus() != terminal_.window()) { closeTab(activeTab_); return true; }
@@ -1294,7 +1520,7 @@ bool ProjectRuntime::Impl::key(const MSG& message) {
         if (key && message.wParam == VK_F6 && GetFocus() != terminal_.window()) { showDiff(); return true; }
         if (key && message.wParam == VK_F7 && GetFocus() != terminal_.window()) { const bool inlineView = !viewer().diffInline(); for (auto& view : viewers_) view.setDiffLayout(inlineView); return true; }
         if (key && message.wParam == VK_TAB && GetFocus() != terminal_.window() && GetFocus() != viewers_[0].window() && GetFocus() != viewers_[1].window()) {
-            const HWND files = activeSidebar_ == Sidebar::Explorer ? (IsWindowVisible(tree_) ? tree_ : explorerButton_) : (IsWindowVisible(gitTree_) ? gitTree_ : gitButton_);
+            const HWND files = activeSidebar_ == Sidebar::Explorer ? (IsWindowVisible(tree_) ? tree_ : explorerButton_) : activeSidebar_ == Sidebar::Git ? (IsWindowVisible(gitTree_) ? gitTree_ : gitButton_) : (IsWindowVisible(branchTree_) ? branchTree_ : branchButton_);
             SetFocus(GetFocus() == files ? viewer().window() : terminalVisible_ ? terminal_.window() : files); return true;
         }
 
@@ -1328,6 +1554,7 @@ void ProjectRuntime::activate(bool active) {
         if (impl_->lastFocus_ == impl_->terminal_.window()) impl_->focusedPane_ = "terminal";
         else if (impl_->lastFocus_ == impl_->tree_) impl_->focusedPane_ = "explorer";
         else if (impl_->lastFocus_ == impl_->gitTree_) impl_->focusedPane_ = "git";
+        else if (impl_->lastFocus_ == impl_->branchTree_) impl_->focusedPane_ = "branch";
         else if (impl_->lastFocus_ == impl_->viewer().window()) impl_->focusedPane_ = "viewer";
         impl_->quickOpen_.close(false); impl_->endTabDrag(); ShowWindow(window(), SW_HIDE);
     }
@@ -1335,7 +1562,7 @@ void ProjectRuntime::activate(bool active) {
         ShowWindow(window(), SW_SHOWNA); impl_->layout(false);
         HWND focus = impl_->lastFocus_;
         if (!focus || !IsWindow(focus) || !IsWindowVisible(focus)) {
-            focus = impl_->focusedPane_ == "terminal" && impl_->terminalVisible_ ? impl_->terminal_.window() : impl_->focusedPane_ == "explorer" && IsWindowVisible(impl_->tree_) ? impl_->tree_ : impl_->focusedPane_ == "git" && IsWindowVisible(impl_->gitTree_) ? impl_->gitTree_ : impl_->viewer().window();
+            focus = impl_->focusedPane_ == "terminal" && impl_->terminalVisible_ ? impl_->terminal_.window() : impl_->focusedPane_ == "explorer" && IsWindowVisible(impl_->tree_) ? impl_->tree_ : impl_->focusedPane_ == "git" && IsWindowVisible(impl_->gitTree_) ? impl_->gitTree_ : impl_->focusedPane_ == "branch" && IsWindowVisible(impl_->branchTree_) ? impl_->branchTree_ : impl_->viewer().window();
         }
         SetFocus(focus); impl_->terminal_.acknowledge(); PostMessageW(window(), WM_APP+12, 0, 0);
     }

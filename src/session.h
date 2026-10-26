@@ -1,4 +1,5 @@
 #pragma once
+#include "git_history.h"
 #include <cstddef>
 #include <string>
 #include <string_view>
@@ -17,6 +18,9 @@ struct SavedTab {
     bool pinned = false;
     int group = 0;
     bool displayed = false;
+    GitDiffKind diffKind = GitDiffKind::Automatic;
+    std::string revision = {};
+    bool allChanges = false;
 };
 struct SavedTerminal {
     std::string id = "shell-1", name = "Shell", directory;
@@ -27,6 +31,7 @@ struct ProjectSession {
     std::string wslUid;
     int sidebar = 245, terminalHeight = 260;
     bool terminalVisible = true, gitSidebar = false, diffInline = false, gitTree = false;
+    bool branchSidebar = false;
     size_t activeTab = 0;
     std::vector<SavedTab> tabs;
     std::vector<std::string> expanded;
