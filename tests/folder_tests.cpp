@@ -72,7 +72,9 @@ void writeFile(const fs::path& path) {
 }
 void writeLines(const fs::path& path, int lines) {
     std::ofstream file(path);
-    for (int i = 0; i < lines; ++i) file << i << ' ' << std::string(240, 'x') << '\n';
+    // Keep tab/session fixtures on one display row. Long-line wrapping and
+    // horizontal scrolling with wrapping disabled have dedicated viewer tests.
+    for (int i = 0; i < lines; ++i) file << i << " example\n";
     file.close();
     check(!file.fail(), "Could not create a tab test file");
 }
@@ -221,7 +223,7 @@ void tabTests(const fs::path& executable) {
     check(pane.top == empty.top + px(34), "Opening a file did not make room for tabs");
     for (int i = 0; i < 12; ++i) { send(viewer, WM_VSCROLL, SB_LINEDOWN); send(viewer, WM_HSCROLL, SB_LINEDOWN); }
     const auto firstTop = scrollInfo(viewer).nPos, firstLeft = scrollInfo(viewer, SB_HORZ).nPos;
-    check(firstTop > 0 && firstLeft > 0, "The test document did not scroll");
+    check(firstTop > 0 && firstLeft == 0, "The wrapped document did not scroll vertically or scrolled horizontally");
     send(tree, treeSelect, static_cast<WPARAM>(second)); waitLines(viewer, 300);
     const auto firstBounds = tabBounds(app, 0), secondBounds = tabBounds(app, 1);
     check(firstBounds.right - firstBounds.left > secondBounds.right - secondBounds.left,
@@ -343,7 +345,7 @@ void tabDragTests(const fs::path& executable) {
         clickTab(app, 0); waitLines(viewer, 200);
         for (int i = 0; i < 5; ++i) { send(viewer, WM_VSCROLL, SB_LINEDOWN); send(viewer, WM_HSCROLL, SB_LINEDOWN); }
         firstTop = scrollInfo(viewer).nPos; firstLeft = scrollInfo(viewer, SB_HORZ).nPos;
-        check(firstTop > 0 && firstLeft > 0, "The dragged document did not scroll");
+        check(firstTop > 0 && firstLeft == 0, "The wrapped dragged document did not scroll vertically or scrolled horizontally");
         clickTab(app, 1); waitLines(viewer, 300);
         send(viewer, WM_VSCROLL, SB_PAGEDOWN); const auto secondTop = scrollInfo(viewer).nPos;
         dragTab(app, 0, after(2)); waitLines(viewer, 200);

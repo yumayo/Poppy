@@ -5,7 +5,7 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-add_library(poppy_core src/text.cpp src/text_search.cpp src/content_search.cpp src/content_search_protocol.cpp src/edit_buffer.cpp src/file_name.cpp src/diff.cpp src/terminal_model.cpp src/terminal_display.cpp src/tree_model.cpp src/git_changes.cpp src/git_history.cpp src/session.cpp src/file_search.cpp src/ai_status.cpp src/resource.cpp src/wsl_protocol.cpp src/command_line.cpp)
+add_library(poppy_core src/text.cpp src/text_layout.cpp src/text_search.cpp src/content_search.cpp src/content_search_protocol.cpp src/edit_buffer.cpp src/file_name.cpp src/diff.cpp src/terminal_model.cpp src/terminal_display.cpp src/tree_model.cpp src/git_changes.cpp src/git_history.cpp src/session.cpp src/file_search.cpp src/ai_status.cpp src/resource.cpp src/wsl_protocol.cpp src/command_line.cpp)
 target_include_directories(poppy_core PUBLIC src)
 find_package(Threads REQUIRED)
 target_link_libraries(poppy_core PUBLIC Threads::Threads)

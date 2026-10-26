@@ -5,6 +5,7 @@
 #include "edit_buffer.h"
 #include "find_bar.h"
 #include "text_search.h"
+#include "text_layout.h"
 #include <memory>
 
 namespace poppy {
@@ -21,6 +22,8 @@ public:
     void toggleDiffLayout();
     void setDiffLayout(bool inlineView);
     bool diffInline() const { return inlineView_; }
+    void setWordWrap(bool enabled);
+    bool wordWrap() const { return wordWrap_; }
     void message(const std::wstring& text, const ResourceId& path = {});
     State state() const;
     void restore(const State& state);
@@ -37,7 +40,7 @@ private:
     void paint();
     void scrollbars();
     void scroll(int vertical, int horizontal);
-    size_t position(int x, int y) const;
+    size_t position(int x, int y, bool* trailing = nullptr) const;
     void copy();
     void replace(std::string text);
     void edited();
@@ -52,9 +55,10 @@ private:
     RECT layoutButton(bool inlineView) const;
     int visibleRows() const;
     bool splitDiff() const { return diff_ && !inlineView_; }
+    bool wrapping() const { return document_ && !diff_ && wordWrap_; }
     int textGutter() const { return diff_ && inlineView_ ? 2 * gutter_ : gutter_; }
     int contentTop() const { return header_ + (diff_ ? header_ : 0) + (findBar_.visible() ? header_ : 0); }
-    size_t rowCount() const { return diff_ ? diff_->rowCount(inlineView_) : document_->lines.size(); }
+    size_t rowCount() const { return diff_ ? diff_->rowCount(inlineView_) : wrapping() ? textLayout_.rows() : document_->lines.size(); }
     HWND window_ = nullptr;
     Renderer renderer_;
     FindBar findBar_;
@@ -65,6 +69,8 @@ private:
     int top_ = 0, left_ = 0;
     size_t anchor_ = 0, caret_ = 0;
     bool selecting_ = false, after_ = false, inlineView_ = true;
+    bool wordWrap_ = true, layoutDirty_ = true, caretTrailing_ = false;
+    TextLayout textLayout_;
     static constexpr UINT_PTR caretTimer = 0x5056;
     static constexpr UINT_PTR findTimer = 0x5057;
     bool caretVisible_ = false;

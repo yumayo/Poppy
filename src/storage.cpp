@@ -24,6 +24,8 @@ constexpr const char* projectConnection =
     "CREATE TABLE IF NOT EXISTS connection (id INTEGER PRIMARY KEY CHECK(id=1), kind INTEGER NOT NULL, distro TEXT NOT NULL, user TEXT NOT NULL, remote_root TEXT NOT NULL, uid TEXT NOT NULL);";
 constexpr const char* gitComparisons =
     "CREATE TABLE IF NOT EXISTS git_comparisons (position INTEGER PRIMARY KEY, kind INTEGER NOT NULL, revision TEXT NOT NULL, all_changes INTEGER NOT NULL, pane INTEGER NOT NULL, displayed INTEGER NOT NULL);";
+constexpr const char* wrappedViews =
+    "ALTER TABLE tabs ADD COLUMN file_wrap_offset INTEGER NOT NULL DEFAULT 0;";
 constexpr const char* appLocations =
     "ALTER TABLE projects ADD COLUMN kind INTEGER NOT NULL DEFAULT 0;"
     "ALTER TABLE projects ADD COLUMN distro TEXT NOT NULL DEFAULT '';"
@@ -129,7 +131,7 @@ void projectSchema(Database& db) {
         "CREATE TABLE IF NOT EXISTS tabs (position INTEGER PRIMARY KEY, path TEXT NOT NULL, diff INTEGER NOT NULL,"
         " file_top INTEGER NOT NULL, file_left INTEGER NOT NULL, file_anchor INTEGER NOT NULL, file_caret INTEGER NOT NULL, file_after INTEGER NOT NULL,"
         " diff_top INTEGER NOT NULL, diff_left INTEGER NOT NULL, diff_anchor INTEGER NOT NULL, diff_caret INTEGER NOT NULL, diff_after INTEGER NOT NULL, pinned INTEGER NOT NULL);"
-        "CREATE TABLE IF NOT EXISTS expanded (path TEXT PRIMARY KEY);") + projectViews + splitViews + projectConnection + gitComparisons).c_str(), {
+        "CREATE TABLE IF NOT EXISTS expanded (path TEXT PRIMARY KEY);") + projectViews + splitViews + projectConnection + gitComparisons + wrappedViews).c_str(), {
         "ALTER TABLE session ADD COLUMN diff_inline INTEGER NOT NULL DEFAULT 0;"
         "UPDATE session SET diff_inline=COALESCE((SELECT diff_inline FROM tabs WHERE diff<>0"
         " ORDER BY (position=(SELECT active_tab FROM session WHERE id=1)) DESC,position LIMIT 1),0);"
@@ -138,7 +140,7 @@ void projectSchema(Database& db) {
         "ALTER TABLE tabs DROP COLUMN file_inline;"
         "ALTER TABLE tabs DROP COLUMN diff_inline;",
         "ALTER TABLE session ADD COLUMN git_tree INTEGER NOT NULL DEFAULT 0;",
-        "ALTER TABLE tabs ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0;", projectViews, splitViews, projectConnection, gitComparisons});
+        "ALTER TABLE tabs ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0;", projectViews, splitViews, projectConnection, gitComparisons, wrappedViews});
 }
 }
 struct Storage::Impl {
@@ -236,8 +238,11 @@ std::optional<ProjectSession> Storage::loadProject(const std::string& key, const
         state.diffInline = row.number(6) != 0;
         state.gitTree = row.number(7) != 0;
     }
-    Statement tabs(db, "SELECT path,diff,file_top,file_left,file_anchor,file_caret,file_after,diff_top,diff_left,diff_anchor,diff_caret,diff_after,pinned FROM tabs ORDER BY position LIMIT 10000");
-    while (tabs.row()) state.tabs.push_back({tabs.text(0), tabs.number(1) != 0, readView(tabs, 2), readView(tabs, 7), tabs.number(12) != 0});
+    Statement tabs(db, "SELECT path,diff,file_top,file_left,file_anchor,file_caret,file_after,diff_top,diff_left,diff_anchor,diff_caret,diff_after,pinned,file_wrap_offset FROM tabs ORDER BY position LIMIT 10000");
+    while (tabs.row()) {
+        state.tabs.push_back({tabs.text(0), tabs.number(1) != 0, readView(tabs, 2), readView(tabs, 7), tabs.number(12) != 0});
+        state.tabs.back().fileView.wrapOffset = position(tabs.number(13));
+    }
     Statement expanded(db, "SELECT path FROM expanded ORDER BY path LIMIT 50000");
     while (expanded.row()) state.expanded.push_back(expanded.text(0));
     Statement views(db, "SELECT explorer_top,explorer_left,git_top,git_left,first_tab_row,git_selected,focused_pane,active_terminal FROM view_state WHERE id=1");
@@ -284,11 +289,12 @@ void Storage::saveProject(const std::string& key, const std::string& path, const
     session.number(1, state.sidebar); session.number(2, state.terminalHeight); session.number(3, state.terminalVisible);
     session.number(4, state.branchSidebar ? 2 : state.gitSidebar ? 1 : 0); session.number(5, static_cast<sqlite3_int64>(state.activeTab)); session.text(6, state.selected);
     session.number(7, state.diffInline); session.number(8, state.gitTree); session.run();
-    Statement tab(db, "INSERT INTO tabs VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)");
+    Statement tab(db, "INSERT INTO tabs VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)");
     for (size_t i = 0; i < state.tabs.size(); ++i) {
         const auto& value = state.tabs[i];
         tab.number(1, static_cast<sqlite3_int64>(i)); tab.text(2, value.path); tab.number(3, value.diff);
-        bindView(tab, 4, value.fileView); bindView(tab, 9, value.diffView); tab.number(14, value.pinned); tab.run(); tab.reset();
+        bindView(tab, 4, value.fileView); bindView(tab, 9, value.diffView); tab.number(14, value.pinned);
+        tab.number(15, static_cast<sqlite3_int64>(value.fileView.wrapOffset)); tab.run(); tab.reset();
     }
     Statement expanded(db, "INSERT OR IGNORE INTO expanded VALUES(?)");
     for (const auto& value : state.expanded) { expanded.text(1, value); expanded.run(); expanded.reset(); }

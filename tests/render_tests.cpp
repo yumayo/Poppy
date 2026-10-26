@@ -224,6 +224,67 @@ void editorCaret() {
     check(GetGUIThreadInfo(GetCurrentThreadId(), &info) && info.hwndCaret != window,
         "A read-only viewer retained the editor caret");
 }
+void editorWrapping() {
+    Viewer viewer;
+    const HWND parent = CreateWindowExW(0, L"STATIC", L"Editor wrapping test", WS_POPUP | WS_CLIPCHILDREN,
+        0, 0, 640, 360, nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
+    check(parent != nullptr, "Could not create the wrapping test window");
+    struct WindowOwner { HWND value; ~WindowOwner() { DestroyWindow(value); } } owner{parent};
+    viewer.create(parent, GetModuleHandleW(nullptr)); viewer.setDpi(96);
+    const HWND window = viewer.window(); MoveWindow(window, 0, 0, 640, 360, FALSE);
+    auto buffer = std::make_shared<EditBuffer>();
+    buffer->document.text = std::string(2000, 'x');
+    buffer->document.text.replace(1500, 6, "needle");
+    indexDocument(buffer->document); buffer->initialize(buffer->document.text);
+    viewer.edit(buffer, L"wrapped.txt"); SetFocus(window);
+    Renderer metrics; metrics.setDpi(96);
+    const int cell = metrics.cellWidth(), height = metrics.textHeight() + 3;
+    const auto caret = [&] {
+        GUITHREADINFO info{}; info.cbSize = sizeof(info);
+        check(GetGUIThreadInfo(GetCurrentThreadId(), &info) && info.hwndCaret == window, "Wrapped text lost the IME caret");
+        return info.rcCaret;
+    };
+    const int columns = (Scrollbars::contentRect(window).right - 70 - 2) / cell;
+    const auto original = buffer->document.text;
+    check(viewer.wordWrap() && !(GetWindowLongPtrW(window, GWL_STYLE) & WS_HSCROLL), "Wrapping is not enabled by default or left a horizontal scrollbar");
+    SendMessageW(window, WM_KEYDOWN, VK_END, 0);
+    check(viewer.state().caret == static_cast<size_t>(columns) && caret().top == 34, "End did not stop at the end of the first wrapped row");
+    SendMessageW(window, WM_KEYDOWN, VK_DOWN, 0);
+    check(viewer.state().caret == static_cast<size_t>(columns * 2) && caret().top == 34 + height, "Down did not preserve the trailing column on the next wrapped row");
+    SendMessageW(window, WM_KEYDOWN, VK_UP, 0);
+    check(viewer.state().caret == static_cast<size_t>(columns) && caret().top == 34, "Up skipped a wrapped row");
+    SendMessageW(window, WM_KEYDOWN, VK_RIGHT, 0);
+    check(viewer.state().caret == static_cast<size_t>(columns + 1) && caret().left == 70 + cell && caret().top == 34 + height, "Right did not cross a wrapping boundary");
+    SendMessageW(window, WM_KEYDOWN, VK_HOME, 0);
+    check(viewer.state().caret == static_cast<size_t>(columns) && caret().left == 70, "Home did not move to the start of a continuation");
+    const auto point = [&](int column, int row) { return MAKELPARAM(70 + column * cell, 34 + row * height + height / 2); };
+    SendMessageW(window, WM_LBUTTONDOWN, MK_LBUTTON, point(3, 2));
+    SendMessageW(window, WM_MOUSEMOVE, MK_LBUTTON, point(5, 3));
+    SendMessageW(window, WM_LBUTTONUP, 0, point(5, 3));
+    check(viewer.state().anchor == static_cast<size_t>(columns * 2 + 3) && viewer.state().caret == static_cast<size_t>(columns * 3 + 5), "Mouse selection did not follow wrapped rows");
+    SendMessageW(window, WM_CHAR, '!', 0);
+    check(buffer->document.text.size() == original.size() - columns - 1 && buffer->document.text.find('\n') == std::string::npos, "Editing wrapped text inserted a newline or replaced the wrong bytes");
+    size_t anchor = 0, insertion = 0;
+    check(buffer->undo(anchor, insertion) && buffer->document.text == original, "Undo did not restore the wrapped selection");
+    viewer.edit(buffer, L"wrapped.txt");
+    check(viewer.selectSearch(1500, 1506, "needle", true), "Could not navigate to a match deep in a wrapped logical line");
+    check(viewer.state().wrapOffset > 0 && caret().top >= 34 && caret().bottom <= Scrollbars::contentRect(window).bottom, "A match in a continuation was not revealed");
+    const auto saved = viewer.state();
+    MoveWindow(window, 0, 0, 360, 360, FALSE);
+    TextLayout layout; layout.build(buffer->document, (Scrollbars::contentRect(window).right - 70 - 2) / cell);
+    const auto topRow = layout.row(buffer->document, layout.rowForOffset(buffer->document, saved.wrapOffset));
+    check(viewer.state().wrapOffset == topRow.begin && viewer.state().caret == saved.caret, "Resizing lost the top source position or selection");
+    viewer.restore(saved);
+    check(viewer.state().wrapOffset == topRow.begin, "Restoring a wrapped tab used the old viewport width");
+    viewer.setWordWrap(false);
+    check(!viewer.wordWrap() && (GetWindowLongPtrW(window, GWL_STYLE) & WS_HSCROLL), "Disabling wrapping did not restore horizontal scrolling");
+    viewer.setWordWrap(true);
+    check(!(GetWindowLongPtrW(window, GWL_STYLE) & WS_HSCROLL) && viewer.state().caret == saved.caret && buffer->document.text == original && !buffer->dirty(), "Toggling wrapping changed the buffer or selection");
+    viewer.setDpi(144); SendMessageW(window, WM_PAINT, 0, 0);
+    check(!(GetWindowLongPtrW(window, GWL_STYLE) & WS_HSCROLL), "DPI reflow restored horizontal scrolling");
+    viewer.show(std::make_shared<Document>(buffer->document), L"read-only.txt");
+    check(viewer.selectSearch(1500, 1506, "needle", true) && viewer.state().wrapOffset > 0, "Read-only text did not wrap or reveal a continuation match");
+}
 void documentFind() {
     Viewer viewer;
     const HWND parent = CreateWindowExW(0, L"STATIC", L"Document search test", WS_POPUP | WS_CLIPCHILDREN,
@@ -363,6 +424,7 @@ void continuousViewerScrolling() {
     check(parent != nullptr, "Could not create the scrolling test window");
     struct WindowOwner { HWND value; ~WindowOwner() { DestroyWindow(value); } } owner{parent};
     viewer.create(parent, GetModuleHandleW(nullptr)); viewer.setDpi(96);
+    viewer.setWordWrap(false);
     const HWND window = viewer.window();
     check(MoveWindow(window, 0, 0, 640, 360, FALSE) != FALSE, "Could not size the scrolling test viewer");
     auto buffer = std::make_shared<EditBuffer>();
@@ -561,7 +623,7 @@ int main() {
     int result = 0;
     try {
         initializeRendering();
-        cellPositions(); colorsAndClipping(); smoothIcons(); windowTargets(); editorCaret(); documentFind(); continuousViewerScrolling(); themedScrollbars(); quickOpenStability();
+        cellPositions(); colorsAndClipping(); smoothIcons(); windowTargets(); editorCaret(); editorWrapping(); documentFind(); continuousViewerScrolling(); themedScrollbars(); quickOpenStability();
         std::cout << "Direct2D rendering tests passed\n";
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; result = 1; }
     if (SUCCEEDED(com)) CoUninitialize();

@@ -30,7 +30,7 @@ void execute(const fs::path& path, const char* sql) {
     if (result != SQLITE_OK) throw std::runtime_error(error);
 }
 bool same(const poppy::ViewState& a, const poppy::ViewState& b) {
-    return a.top == b.top && a.left == b.left && a.anchor == b.anchor && a.caret == b.caret && a.after == b.after;
+    return a.top == b.top && a.left == b.left && a.anchor == b.anchor && a.caret == b.caret && a.after == b.after && a.wrapOffset == b.wrapOffset;
 }
 bool same(const poppy::ProjectSession& a, const poppy::ProjectSession& b) {
     if (a.wslUid != b.wslUid) return false;
@@ -58,6 +58,7 @@ void roundTripAndIsolation() {
     state.tabs = {{path + "\\日本語's file.cpp", false, {42, 17, 30, 50, false}, {20, 3, 2, 11, true}},
                   {path + "\\deleted.cpp", true, {5, 2, 1, 7, false}, {50, 4, 6, 14, true}}};
     state.tabs[0].pinned = true; state.tabs[0].displayed = true; state.tabs[1].group = 1; state.tabs[1].displayed = true;
+    state.tabs[0].fileView.wrapOffset = 137;
     state.editorRatio = 350; state.terminalRatio = 640; state.rightTabRow = 4; state.terminals[1].group = 1; state.terminals[1].displayed = true;
     state.expanded = {path, path + "\\src", path + "\\src\\日本語"}; state.selected = state.tabs.front().path;
     poppy::AppSession app;
@@ -160,7 +161,7 @@ void migrateGitLayout() {
     original.expanded = {key}; original.selected = key;
     storage.saveProject(key, key, original);
     execute(storage.projectDirectory(key, key) / "storage.sql",
-        "DROP TABLE split_layout; DROP TABLE tab_groups; DROP TABLE terminal_groups; DROP TABLE view_state; DROP TABLE terminals; DROP TABLE git_collapsed; ALTER TABLE session DROP COLUMN git_tree; ALTER TABLE tabs DROP COLUMN pinned; PRAGMA user_version=2;");
+        "DROP TABLE split_layout; DROP TABLE tab_groups; DROP TABLE terminal_groups; DROP TABLE view_state; DROP TABLE terminals; DROP TABLE git_collapsed; ALTER TABLE session DROP COLUMN git_tree; ALTER TABLE tabs DROP COLUMN pinned; ALTER TABLE tabs DROP COLUMN file_wrap_offset; PRAGMA user_version=2;");
     const auto saved = storage.loadProject(key, key);
     original.terminals[0].directory = key;
     check(saved && same(*saved, original), "Migrating version 2 changed existing project state");
@@ -178,7 +179,7 @@ void migratePinnedTabs() {
                      {key + "\\second.cpp", true, {}, {12, 3, 4, 5, true}}};
     storage.saveProject(key, key, original);
     execute(storage.projectDirectory(key, key) / "storage.sql",
-        "DROP TABLE split_layout; DROP TABLE tab_groups; DROP TABLE terminal_groups; DROP TABLE view_state; DROP TABLE terminals; DROP TABLE git_collapsed; ALTER TABLE tabs DROP COLUMN pinned; PRAGMA user_version=3;");
+        "DROP TABLE split_layout; DROP TABLE tab_groups; DROP TABLE terminal_groups; DROP TABLE view_state; DROP TABLE terminals; DROP TABLE git_collapsed; ALTER TABLE tabs DROP COLUMN pinned; ALTER TABLE tabs DROP COLUMN file_wrap_offset; PRAGMA user_version=3;");
     const auto saved = storage.loadProject(key, key);
     original.terminals[0].directory = key;
     check(saved && same(*saved, original), "Migrating version 3 changed existing tabs or pinned them");
@@ -204,7 +205,7 @@ void migrateWorkspaceAndTerminals() {
     poppy::ProjectSession original;
     original.terminalHeight = 333; original.terminalVisible = false;
     storage.saveProject(key, key, original);
-    execute(storage.projectDirectory(key,key)/"storage.sql", "DROP TABLE split_layout; DROP TABLE tab_groups; DROP TABLE terminal_groups; DROP TABLE view_state; DROP TABLE terminals; DROP TABLE git_collapsed; PRAGMA user_version=4;");
+    execute(storage.projectDirectory(key,key)/"storage.sql", "DROP TABLE split_layout; DROP TABLE tab_groups; DROP TABLE terminal_groups; DROP TABLE view_state; DROP TABLE terminals; DROP TABLE git_collapsed; ALTER TABLE tabs DROP COLUMN file_wrap_offset; PRAGMA user_version=4;");
     auto saved = storage.loadProject(key,key);
     check(saved && saved->terminals.size() == 1 && saved->terminals[0].directory == key && saved->terminalHeight == 333 && !saved->terminalVisible, "Version 4 migration did not preserve terminal layout");
     auto changed = *saved; changed.terminals.push_back(changed.terminals.front());
@@ -218,9 +219,21 @@ void migrateSplitLayout() {
     Fixture fixture; poppy::Storage storage(fixture.directory); const std::string key = "c:/split-migration";
     poppy::ProjectSession original; original.tabs = {{key + "/a.txt", false, {}, {}}, {key + "/b.txt", false, {}, {}}};
     storage.saveProject(key, key, original);
-    execute(storage.projectDirectory(key,key)/"storage.sql", "DROP TABLE split_layout; DROP TABLE tab_groups; DROP TABLE terminal_groups; PRAGMA user_version=5;");
+    execute(storage.projectDirectory(key,key)/"storage.sql", "DROP TABLE split_layout; DROP TABLE tab_groups; DROP TABLE terminal_groups; ALTER TABLE tabs DROP COLUMN file_wrap_offset; PRAGMA user_version=5;");
     const auto restored = storage.loadProject(key,key);
     check(restored && same(*restored, original), "Version 5 migration lost the tabs or default layout");
+}
+void migrateWrapping() {
+    Fixture fixture; poppy::Storage storage(fixture.directory);
+    const std::string key = "c:/wrapped-tabs";
+    poppy::ProjectSession state;
+    state.tabs.push_back({key + "/long.txt", false, {12, 0, 30, 50, false}, {}});
+    storage.saveProject(key, key, state);
+    execute(storage.projectDirectory(key, key) / "storage.sql", "ALTER TABLE tabs DROP COLUMN file_wrap_offset; PRAGMA user_version=8;");
+    check(same(*storage.loadProject(key, key), state), "Version 8 migration changed the top logical line or selection");
+    state.tabs[0].fileView.wrapOffset = 243;
+    storage.saveProject(key, key, state);
+    check(same(*storage.loadProject(key, key), state), "A migrated tab lost its wrapped scroll position");
 }
 void schemaAndRegistry() {
     Fixture fixture;
@@ -228,7 +241,7 @@ void schemaAndRegistry() {
     {
         poppy::Storage storage(fixture.directory);
         const auto projectDb = storage.projectDirectory("c:\\future", "c:\\future") / "storage.sql";
-        execute(projectDb, "PRAGMA user_version=9");
+        execute(projectDb, "PRAGMA user_version=10");
         rejects([&] { storage.loadProject("c:\\future", "c:\\future"); }, "A newer project schema was overwritten");
         storage.projectDirectory("c:\\invalid", "c:\\invalid");
         execute(appDb, R"(UPDATE projects SET directory='../../escape' WHERE path_key='c:\invalid')");
@@ -256,7 +269,7 @@ void gitComparisonRoundTrip() {
     // A version 7 project gains comparison metadata without changing tabs.
     state = {}; state.tabs.push_back({key + "/legacy.txt", true, {}, {3, 2, 0, 0, true}});
     storage.saveProject(key, key, state);
-    execute(storage.projectDirectory(key, key) / "storage.sql", "DROP TABLE git_comparisons; PRAGMA user_version=7;");
+    execute(storage.projectDirectory(key, key) / "storage.sql", "DROP TABLE git_comparisons; ALTER TABLE tabs DROP COLUMN file_wrap_offset; PRAGMA user_version=7;");
     check(same(*storage.loadProject(key, key), state), "Version 7 migration changed existing file diff tabs");
 }
 void wslRoundTripAndMigration() {
@@ -266,7 +279,7 @@ void wslRoundTripAndMigration() {
     {
         poppy::Storage storage(fixture.directory); poppy::ProjectSession local; local.sidebar = 301;
         storage.saveProject("c:\\project", windows, local); oldDirectory = storage.projectDirectory("c:\\project",windows);
-        execute(oldDirectory/"storage.sql","DROP TABLE connection; PRAGMA user_version=6;");
+        execute(oldDirectory/"storage.sql","DROP TABLE connection; ALTER TABLE tabs DROP COLUMN file_wrap_offset; PRAGMA user_version=6;");
     }
     execute(fixture.directory/"storage.sql","ALTER TABLE projects DROP COLUMN kind; ALTER TABLE projects DROP COLUMN distro; ALTER TABLE projects DROP COLUMN user; ALTER TABLE projects DROP COLUMN remote_root; PRAGMA user_version=2;");
     {
@@ -287,7 +300,7 @@ void wslRoundTripAndMigration() {
 }
 int main() {
     try {
-        roundTripAndIsolation(); atomicSave(); migrateProjectLayout(); migrateGitLayout(); migratePinnedTabs(); migrateWorkspaceAndTerminals(); migrateSplitLayout(); schemaAndRegistry(); gitComparisonRoundTrip(); wslRoundTripAndMigration();
+        roundTripAndIsolation(); atomicSave(); migrateProjectLayout(); migrateGitLayout(); migratePinnedTabs(); migrateWorkspaceAndTerminals(); migrateSplitLayout(); migrateWrapping(); schemaAndRegistry(); gitComparisonRoundTrip(); wslRoundTripAndMigration();
         std::cout << "Storage tests passed\n";
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
 }
