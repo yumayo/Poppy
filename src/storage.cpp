@@ -22,6 +22,8 @@ constexpr const char* splitViews =
     "CREATE TABLE terminal_groups (terminal_id TEXT PRIMARY KEY, pane INTEGER NOT NULL, displayed INTEGER NOT NULL);";
 constexpr const char* projectConnection =
     "CREATE TABLE IF NOT EXISTS connection (id INTEGER PRIMARY KEY CHECK(id=1), kind INTEGER NOT NULL, distro TEXT NOT NULL, user TEXT NOT NULL, remote_root TEXT NOT NULL, uid TEXT NOT NULL);";
+constexpr const char* gitComparisons =
+    "CREATE TABLE IF NOT EXISTS git_comparisons (position INTEGER PRIMARY KEY, kind INTEGER NOT NULL, revision TEXT NOT NULL, all_changes INTEGER NOT NULL, pane INTEGER NOT NULL, displayed INTEGER NOT NULL);";
 constexpr const char* appLocations =
     "ALTER TABLE projects ADD COLUMN kind INTEGER NOT NULL DEFAULT 0;"
     "ALTER TABLE projects ADD COLUMN distro TEXT NOT NULL DEFAULT '';"
@@ -127,7 +129,7 @@ void projectSchema(Database& db) {
         "CREATE TABLE IF NOT EXISTS tabs (position INTEGER PRIMARY KEY, path TEXT NOT NULL, diff INTEGER NOT NULL,"
         " file_top INTEGER NOT NULL, file_left INTEGER NOT NULL, file_anchor INTEGER NOT NULL, file_caret INTEGER NOT NULL, file_after INTEGER NOT NULL,"
         " diff_top INTEGER NOT NULL, diff_left INTEGER NOT NULL, diff_anchor INTEGER NOT NULL, diff_caret INTEGER NOT NULL, diff_after INTEGER NOT NULL, pinned INTEGER NOT NULL);"
-        "CREATE TABLE IF NOT EXISTS expanded (path TEXT PRIMARY KEY);") + projectViews + splitViews + projectConnection).c_str(), {
+        "CREATE TABLE IF NOT EXISTS expanded (path TEXT PRIMARY KEY);") + projectViews + splitViews + projectConnection + gitComparisons).c_str(), {
         "ALTER TABLE session ADD COLUMN diff_inline INTEGER NOT NULL DEFAULT 0;"
         "UPDATE session SET diff_inline=COALESCE((SELECT diff_inline FROM tabs WHERE diff<>0"
         " ORDER BY (position=(SELECT active_tab FROM session WHERE id=1)) DESC,position LIMIT 1),0);"
@@ -136,7 +138,7 @@ void projectSchema(Database& db) {
         "ALTER TABLE tabs DROP COLUMN file_inline;"
         "ALTER TABLE tabs DROP COLUMN diff_inline;",
         "ALTER TABLE session ADD COLUMN git_tree INTEGER NOT NULL DEFAULT 0;",
-        "ALTER TABLE tabs ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0;", projectViews, splitViews, projectConnection});
+        "ALTER TABLE tabs ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0;", projectViews, splitViews, projectConnection, gitComparisons});
 }
 }
 struct Storage::Impl {
@@ -229,7 +231,7 @@ std::optional<ProjectSession> Storage::loadProject(const std::string& key, const
         Statement row(db, "SELECT sidebar,terminal_height,terminal_visible,git_sidebar,active_tab,selected_path,diff_inline,git_tree FROM session WHERE id=1");
         if (!row.row()) return std::nullopt;
         state.sidebar = bounded(row.number(0), 130, 10000); state.terminalHeight = bounded(row.number(1), 100, 10000);
-        state.terminalVisible = row.number(2) != 0; state.gitSidebar = row.number(3) != 0;
+        state.terminalVisible = row.number(2) != 0; state.gitSidebar = row.number(3) == 1; state.branchSidebar = row.number(3) == 2;
         state.activeTab = static_cast<size_t>(bounded(row.number(4), 0, static_cast<int>(maxSavedTabs - 1))); state.selected = row.text(5);
         state.diffInline = row.number(6) != 0;
         state.gitTree = row.number(7) != 0;
@@ -256,6 +258,15 @@ std::optional<ProjectSession> Storage::loadProject(const std::string& key, const
     if (layout.row()) { state.editorRatio = bounded(layout.number(0), 200, 800); state.terminalRatio = bounded(layout.number(1), 200, 800); state.rightTabRow = position(layout.number(2)); }
     Statement groups(db, "SELECT path,pane,displayed FROM tab_groups");
     while (groups.row()) for (auto& tab : state.tabs) if (tab.path == groups.text(0)) { tab.group = bounded(groups.number(1), 0, 1); tab.displayed = groups.number(2) != 0; break; }
+    Statement comparisons(db, "SELECT position,kind,revision,all_changes,pane,displayed FROM git_comparisons");
+    while (comparisons.row()) {
+        const auto index = comparisons.number(0);
+        if (index < 0 || static_cast<size_t>(index) >= state.tabs.size()) continue;
+        auto& tab = state.tabs[static_cast<size_t>(index)];
+        tab.diffKind = static_cast<GitDiffKind>(bounded(comparisons.number(1), 0, static_cast<int>(GitDiffKind::Commit)));
+        tab.revision = comparisons.text(2); tab.allChanges = comparisons.number(3) != 0;
+        tab.group = bounded(comparisons.number(4), 0, 1); tab.displayed = comparisons.number(5) != 0;
+    }
     Statement terminalGroups(db, "SELECT terminal_id,pane,displayed FROM terminal_groups");
     while (terminalGroups.row()) for (auto& terminal : state.terminals) if (terminal.id == terminalGroups.text(0)) { terminal.group = bounded(terminalGroups.number(1), 0, 1); terminal.displayed = terminalGroups.number(2) != 0; break; }
     snapshot.commit();
@@ -271,7 +282,7 @@ void Storage::saveProject(const std::string& key, const std::string& path, const
     db.exec("DELETE FROM tabs; DELETE FROM expanded;");
     Statement session(db, "INSERT OR REPLACE INTO session VALUES(1,?,?,?,?,?,?,?,?)");
     session.number(1, state.sidebar); session.number(2, state.terminalHeight); session.number(3, state.terminalVisible);
-    session.number(4, state.gitSidebar); session.number(5, static_cast<sqlite3_int64>(state.activeTab)); session.text(6, state.selected);
+    session.number(4, state.branchSidebar ? 2 : state.gitSidebar ? 1 : 0); session.number(5, static_cast<sqlite3_int64>(state.activeTab)); session.text(6, state.selected);
     session.number(7, state.diffInline); session.number(8, state.gitTree); session.run();
     Statement tab(db, "INSERT INTO tabs VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)");
     for (size_t i = 0; i < state.tabs.size(); ++i) {
@@ -296,8 +307,15 @@ void Storage::saveProject(const std::string& key, const std::string& path, const
     db.exec("DELETE FROM tab_groups; DELETE FROM terminal_groups;");
     Statement layout(db, "INSERT OR REPLACE INTO split_layout VALUES(1,?,?,?)");
     layout.number(1, state.editorRatio); layout.number(2, state.terminalRatio); layout.number(3, static_cast<sqlite3_int64>(state.rightTabRow)); layout.run();
-    Statement groups(db, "INSERT INTO tab_groups VALUES(?,?,?)");
+    Statement groups(db, "INSERT OR REPLACE INTO tab_groups VALUES(?,?,?)");
     for (const auto& tab : state.tabs) { groups.text(1, tab.path); groups.number(2, tab.group); groups.number(3, tab.displayed); groups.run(); groups.reset(); }
+    db.exec("DELETE FROM git_comparisons");
+    Statement comparison(db, "INSERT INTO git_comparisons VALUES(?,?,?,?,?,?)");
+    for (size_t i = 0; i < state.tabs.size(); ++i) {
+        const auto& tab = state.tabs[i];
+        comparison.number(1, static_cast<sqlite3_int64>(i)); comparison.number(2, static_cast<int>(tab.diffKind)); comparison.text(3, tab.revision);
+        comparison.number(4, tab.allChanges); comparison.number(5, tab.group); comparison.number(6, tab.displayed); comparison.run(); comparison.reset();
+    }
     Statement terminalGroups(db, "INSERT INTO terminal_groups VALUES(?,?,?)");
     for (const auto& terminal : state.terminals) { terminalGroups.text(1, terminal.id); terminalGroups.number(2, terminal.group); terminalGroups.number(3, terminal.displayed); terminalGroups.run(); terminalGroups.reset(); }
     transaction.commit();

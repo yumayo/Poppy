@@ -42,6 +42,8 @@ public:
     std::function<void(TreeItem)> activated;
     std::function<void(TreeItem, bool)> expanded;
     std::function<void(uintptr_t)> removed;
+    std::function<std::wstring(TreeItem)> actionText;
+    std::function<void(TreeItem)> actionClicked;
 private:
     static LRESULT CALLBACK procedure(HWND, UINT, WPARAM, LPARAM);
     static LRESULT CALLBACK renameProcedure(HWND, UINT, WPARAM, LPARAM, UINT_PTR, DWORD_PTR);
@@ -54,6 +56,7 @@ private:
     void ensureVisible();
     int row(TreeItem id) const;
     TreeItem hit(int y) const;
+    RECT actionBounds(TreeItem id) const;
     void scroll(int vertical, int horizontal = 0);
     void release(const std::vector<std::pair<TreeItem, uintptr_t>>& items);
     int page() const;

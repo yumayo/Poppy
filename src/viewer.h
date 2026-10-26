@@ -15,7 +15,7 @@ public:
     void edit(std::shared_ptr<EditBuffer> buffer, const ResourceId& path, bool preserve = false);
     std::shared_ptr<EditBuffer> buffer() const { return edit_; }
     std::function<void()> changed, save, focused, diffLayoutChanged;
-    void showDiff(std::shared_ptr<const DiffDocument> document, const ResourceId& path, bool preserve = false);
+    void showDiff(std::shared_ptr<const DiffDocument> document, const ResourceId& path, bool preserve = false, std::wstring title = {});
     void toggleDiffLayout();
     void setDiffLayout(bool inlineView);
     bool diffInline() const { return inlineView_; }
@@ -58,6 +58,7 @@ private:
     wchar_t highSurrogate_ = 0;
     std::shared_ptr<const DiffDocument> diff_;
     ResourceId path_;
+    std::wstring title_;
     std::wstring message_ = L"Open a folder to start\n\nSelect a file on the left. Run your AI CLI in the terminal below.";
 };
 }

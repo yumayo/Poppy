@@ -22,7 +22,7 @@ void Viewer::setDpi(UINT dpi) {
 }
 void Viewer::show(std::shared_ptr<const Document> d, const ResourceId& path, bool preserve) {
     edit_.reset(); highSurrogate_ = 0;
-    diff_.reset(); document_ = std::move(d); path_ = path; message_.clear();
+    diff_.reset(); document_ = std::move(d); path_ = path; message_.clear(); title_.clear();
     if (!preserve) { top_ = left_ = 0; anchor_ = caret_ = 0; after_ = false; }
     else { anchor_ = std::min(anchor_, document_->text.size()); caret_ = std::min(caret_, document_->text.size()); }
     scrollbars(); caretPosition(); InvalidateRect(window_, nullptr, FALSE);
@@ -31,17 +31,17 @@ void Viewer::edit(std::shared_ptr<EditBuffer> buffer, const ResourceId& path, bo
     show(std::shared_ptr<const Document>(buffer, &buffer->document), path, preserve);
     edit_ = std::move(buffer); caretPosition();
 }
-void Viewer::showDiff(std::shared_ptr<const DiffDocument> d, const ResourceId& path, bool preserve) {
+void Viewer::showDiff(std::shared_ptr<const DiffDocument> d, const ResourceId& path, bool preserve, std::wstring title) {
     edit_.reset(); highSurrogate_ = 0;
     // Share the patch snapshot; both panes only keep references to its lines.
-    document_ = std::shared_ptr<const Document>(d, &d->patch); diff_ = std::move(d); path_ = path; message_.clear();
+    document_ = std::shared_ptr<const Document>(d, &d->patch); diff_ = std::move(d); path_ = path; message_.clear(); title_ = std::move(title);
     if (!preserve) { top_ = left_ = 0; anchor_ = caret_ = 0; after_ = false; }
     else { anchor_ = std::min(anchor_, document_->text.size()); caret_ = std::min(caret_, document_->text.size()); }
     scrollbars(); caretPosition(); InvalidateRect(window_, nullptr, FALSE);
 }
 void Viewer::message(const std::wstring& text, const ResourceId& path) {
     edit_.reset(); highSurrogate_ = 0;
-    diff_.reset(); document_.reset(); path_ = path; message_ = text; top_ = left_ = 0; anchor_ = caret_ = 0; after_ = false;
+    diff_.reset(); document_.reset(); path_ = path; title_.clear(); message_ = text; top_ = left_ = 0; anchor_ = caret_ = 0; after_ = false;
     scrollbars(); caretPosition(); InvalidateRect(window_, nullptr, FALSE);
 }
 Viewer::State Viewer::state() const {
@@ -206,7 +206,7 @@ void Viewer::paint() {
     RECT header{0, 0, r.right, header_}; dc.fill(header, panel);
     const LONG titleRight = diff_ ? layoutButton(false).left - 14 : r.right - 175;
     RECT title{14, 0, std::max<LONG>(14, titleRight), header_};
-    dc.label(title, path_.empty() ? L"POPPY" : path_.filename().native(), foreground);
+    dc.label(title, !title_.empty() ? title_ : path_.empty() ? L"POPPY" : path_.filename().native(), foreground);
     RECT tag{std::max<LONG>(14, r.right - 175), 0, r.right - 12, header_};
     if (diff_) {
         for (const bool inlineView : {false, true}) {
@@ -253,6 +253,7 @@ void Viewer::paint() {
                     else if (!source.number) rowBackground = panel;
                 }
                 dc.fill({paneLeft, y, paneRight, y + cellHeight_}, rowBackground);
+                if (change.heading) continue;
                 if (row >= rowCount() || (diff_ && !source.number)) continue;
                 if (diff_ && inlineView_) {
                     if (change.before.number) dc.label({0, y, std::min(paneRight, gutter_ - 14), y + cellHeight_}, std::to_wstring(change.before.number), muted, DT_RIGHT | DT_SINGLELINE);
@@ -288,6 +289,20 @@ void Viewer::paint() {
             }
         }
         if (splitDiff()) dc.fill({middle, body, middle + 1, r.bottom}, border);
+        if (diff_) {
+            dc.font(Renderer::Font::Ui);
+            for (int screenRow = 0; screenRow < rows; ++screenRow) {
+                const size_t row = static_cast<size_t>(top_ + screenRow);
+                if (row >= rowCount()) break;
+                const auto change = diff_->displayRow(row, inlineView_);
+                if (!change.heading) continue;
+                const int y = body + screenRow * cellHeight_;
+                dc.fill({0, y, r.right, y + cellHeight_}, panel);
+                auto text = document_->line(change.heading - 1);
+                if (text.substr(0, 11) == "diff --git ") text.remove_prefix(11);
+                dc.label({14, y, r.right - 12, y + cellHeight_}, wide(text), accent);
+            }
+        }
         if (edit_ && caretVisible_ && GetFocus() == window_) {
             const auto point = caretPoint();
             const RECT caret{point.x, point.y, point.x + 2, point.y + cellHeight_};

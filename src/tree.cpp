@@ -76,7 +76,9 @@ void Tree::layout() {
     for (const auto& row : rows) {
         auto found = widths_.find(row.item);
         if (found == widths_.end()) found = widths_.emplace(row.item, renderer_.textWidth(item(row.item)->text)).first;
-        extent = std::max(extent, static_cast<int>(row.depth + 1) * indent_ + found->second + MulDiv(12, dpi_, 96));
+        const auto action = actionText ? actionText(row.item) : L"";
+        const int actionWidth = action.empty() ? 0 : renderer_.textWidth(action) + MulDiv(18, dpi_, 96);
+        extent = std::max(extent, static_cast<int>(row.depth + 1) * indent_ + found->second + MulDiv(12, dpi_, 96) + actionWidth);
     }
     // Each bar can change the space available to the other.
     for (int pass = 0; pass < 3; ++pass) {
@@ -123,6 +125,14 @@ LRESULT CALLBACK Tree::renameProcedure(HWND window, UINT message, WPARAM a, LPAR
     return DefSubclassProc(window, message, a, b);
 }
 void Tree::scroll(int vertical, int horizontal) { top_ += vertical; left_ += horizontal; changed(); }
+RECT Tree::actionBounds(TreeItem id) const {
+    const auto text = actionText ? actionText(id) : L"";
+    if (text.empty()) return {};
+    const auto r = Scrollbars::contentRect(window_);
+    const int y = (row(id) - top_) * rowHeight_, padding = MulDiv(6, dpi_, 96);
+    const int width = renderer_.textWidth(text) + 2 * padding;
+    return {std::max(0L, r.right - width - padding), y + MulDiv(2, dpi_, 96), r.right - padding, y + rowHeight_ - MulDiv(2, dpi_, 96)};
+}
 void Tree::paint() {
     Renderer::Paint paint(renderer_, window_); if (!paint) return;
     const auto r = Scrollbars::contentRect(window_);
@@ -149,8 +159,13 @@ void Tree::paint() {
                 renderer_.line(cx + arrow / 2.0f, cy, cx - arrow / 2.0f, cy + arrow, muted, stroke);
             }
         }
-        renderer_.label({x + indent_ + padding, y, std::max<LONG>(r.right, x + indent_ + widths_[row.item] + padding), y + rowHeight_},
-            node->text, node->color, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        const auto action = actionBounds(row.item);
+        renderer_.label({x + indent_ + padding, y, action.right ? action.left - padding : std::max<LONG>(r.right, x + indent_ + widths_[row.item] + padding), y + rowHeight_},
+            node->text, node->color, DT_LEFT | DT_VCENTER | DT_SINGLELINE | (action.right ? DT_END_ELLIPSIS : 0));
+        if (action.right) {
+            renderer_.fill(action, background);
+            renderer_.label(action, actionText(row.item), accent, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        }
     }
     scrollbars_.paint(window_, renderer_, panel);
 }
@@ -165,6 +180,13 @@ LRESULT Tree::handle(UINT m, WPARAM a, LPARAM b) {
     switch (m) {
     case WM_PAINT: paint(); return 0;
     case WM_ERASEBKGND: return 1;
+    case WM_SETCURSOR:
+        if (LOWORD(b) == HTCLIENT) {
+            POINT point{}; GetCursorPos(&point); ScreenToClient(window_, &point);
+            const auto action = actionBounds(hit(point.y));
+            if (PtInRect(&action, point)) { SetCursor(LoadCursorW(nullptr, IDC_HAND)); return TRUE; }
+        }
+        return DefWindowProcW(window_, m, a, b);
     case WM_SIZE: changed(); return 0;
     case WM_COMMAND: if (LOWORD(a) == 1002 && HIWORD(a) == EN_KILLFOCUS) finishRename(false); return 0;
     case WM_CONTEXTMENU: {
@@ -190,6 +212,8 @@ LRESULT Tree::handle(UINT m, WPARAM a, LPARAM b) {
     case WM_LBUTTONDOWN: {
         SetFocus(window_);
         const auto id = hit(GET_Y_LPARAM(b)); if (!id) return 0;
+        const auto action = actionBounds(id);
+        if (PtInRect(&action, {GET_X_LPARAM(b), GET_Y_LPARAM(b)})) { select(id, false); if (actionClicked) actionClicked(id); return 0; }
         const auto& row = model_.visible()[static_cast<size_t>(this->row(id))];
         const int x = GET_X_LPARAM(b) + left_, edge = static_cast<int>(row.depth) * indent_;
         if (item(id)->expandable && x >= edge && x < edge + indent_) expand(id, !item(id)->expanded);
@@ -198,6 +222,8 @@ LRESULT Tree::handle(UINT m, WPARAM a, LPARAM b) {
     }
     case WM_LBUTTONDBLCLK: {
         const auto id = hit(GET_Y_LPARAM(b));
+        const auto action = actionBounds(id);
+        if (PtInRect(&action, {GET_X_LPARAM(b), GET_Y_LPARAM(b)})) return 0;
         if (id && item(id)->expandable) {
             const auto& row = model_.visible()[static_cast<size_t>(this->row(id))];
             if (GET_X_LPARAM(b) + left_ >= static_cast<int>(row.depth + 1) * indent_) expand(id, !item(id)->expanded);
@@ -231,6 +257,7 @@ LRESULT Tree::handle(UINT m, WPARAM a, LPARAM b) {
         int index = row(id); if (index < 0) index = 0;
         switch (a) {
         case VK_F2: if (id && renameRequested && (!canRename || canRename(id))) renameRequested(id); return 0;
+        case VK_F4: if (id && actionClicked && actionText && !actionText(id).empty()) actionClicked(id); return 0;
         case VK_LEFT: if (node && node->expanded) expand(id, false); else if (node && node->parent) select(node->parent); return 0;
         case VK_RIGHT: if (node && node->expandable) { if (!node->expanded) expand(id, true); else if (child(id)) select(child(id)); } return 0;
         case VK_RETURN: case VK_SPACE: if (node && node->expandable) expand(id, !node->expanded); else select(id); return 0;

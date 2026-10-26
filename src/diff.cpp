@@ -52,6 +52,9 @@ size_t DiffDocument::mapRow(size_t index, bool fromInline, bool toInline, bool a
     index = std::min(index, rowCount(fromInline) - 1);
     if (fromInline == toInline) return index;
     const auto row = displayRow(index, fromInline);
+    if (row.heading) {
+        for (size_t i = 0; i < rowCount(toInline); ++i) if (displayRow(i, toInline).heading == row.heading) return i;
+    }
     if (!(after ? row.after.number : row.before.number)) after = !after;
     return rowForLine(after ? row.after : row.before, after, toInline);
 }
@@ -76,7 +79,7 @@ std::string DiffDocument::selectedText(bool after, size_t start, size_t end, boo
     }
     return result;
 }
-void indexDiff(DiffDocument& d) {
+void indexDiff(DiffDocument& d, bool fileHeadings) {
     d.patch.language = Language::Plain; indexDocument(d.patch);
     d.rows.clear(); d.inlineOrder.clear(); d.maxColumns = 0;
     std::vector<DiffLine> removed, added;
@@ -92,6 +95,18 @@ void indexDiff(DiffDocument& d) {
     uint32_t before = 0, beforeCount = 0, after = 0, afterCount = 0;
     for (size_t row = 0; row < d.patch.lines.size(); ++row) {
         const auto text = d.patch.line(row);
+        if (text.substr(0, 11) == "diff --git ") {
+            flush(); beforeCount = afterCount = 0;
+        }
+        if (fileHeadings && ((!beforeCount && !afterCount) &&
+            (text.substr(0, 11) == "diff --git " || text.substr(0, 7) == "Binary " || text.substr(0, 9) == "old mode " ||
+             text.substr(0, 9) == "new mode " || text.substr(0, 14) == "new file mode " || text.substr(0, 18) == "deleted file mode " ||
+             text.substr(0, 11) == "Empty file " || text.substr(0, 12) == "rename from " || text.substr(0, 10) == "rename to "))) {
+            d.inlineOrder.push_back(static_cast<uint32_t>(d.rows.size() * 2));
+            d.rows.push_back({{}, {}, false, static_cast<uint32_t>(row + 1)});
+            d.maxColumns = std::max(d.maxColumns, static_cast<uint32_t>(std::min(text.size(), maxLineColumns)));
+            continue;
+        }
         if (text.substr(0, 3) == "@@ ") {
             flush();
             if (!hunk(text, before, beforeCount, after, afterCount)) beforeCount = afterCount = 0;

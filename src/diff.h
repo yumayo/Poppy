@@ -4,7 +4,7 @@
 namespace poppy {
 // A zero line number is an empty cell on that side of the comparison.
 struct DiffLine { uint32_t row = 0, number = 0; };
-struct DiffRow { DiffLine before, after; bool changed = false; };
+struct DiffRow { DiffLine before, after; bool changed = false; uint32_t heading = 0; };
 struct DiffDocument {
     Document patch;
     std::vector<DiffRow> rows;
@@ -19,5 +19,5 @@ struct DiffDocument {
     size_t mapRow(size_t index, bool fromInline, bool toInline, bool after) const;
     std::string selectedText(bool after, size_t start, size_t end, bool inlineView = false) const;
 };
-void indexDiff(DiffDocument& document);
+void indexDiff(DiffDocument& document, bool fileHeadings = false);
 }
