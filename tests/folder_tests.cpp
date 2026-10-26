@@ -957,6 +957,29 @@ void gitAutoRefreshTests(const fs::path& executable) {
     runGit(L"add ."); runGit(L"commit -qm initial");
     Application app(executable, fixture.root); app.tree();
     const auto changes = GetDlgItem(app.window, 4), button = GetDlgItem(app.window, 3);
+    const auto group = [&](bool staged) {
+        const auto first = nextItem(changes, TreeRelation::Root);
+        return staged ? first : nextItem(changes, TreeRelation::Next, first);
+    };
+    const auto firstFile = [&](bool staged) {
+        auto item = nextItem(changes, TreeRelation::Child, group(staged));
+        while (item) {
+            const auto child = nextItem(changes, TreeRelation::Child, item);
+            if (!child) break;
+            item = child;
+        }
+        return item;
+    };
+    const auto clickAction = [&](TreeItem item) {
+        check(item != 0, "The Git file action is missing its file");
+        RECT rect{}; GetClientRect(changes, &rect);
+        const int height = static_cast<int>(send(changes, treeGetRowHeight));
+        const int y = static_cast<int>(send(changes, treeGetRow, item)) * height + height / 2;
+        const int x = rect.right - MulDiv(18, GetDpiForWindow(app.window), 96);
+        send(changes, WM_MOUSEMOVE, 0, MAKELPARAM(x, y));
+        click(changes, x, y);
+        send(changes, WM_MOUSELEAVE);
+    };
     const auto badge = [&](size_t count) {
         wchar_t title[128]{}; GetWindowTextW(button, title, 128);
         return title == (count ? L"Source Control (" + std::to_wstring(count) + L")" : std::wstring(L"Source Control"));
@@ -968,10 +991,18 @@ void gitAutoRefreshTests(const fs::path& executable) {
     waitFor([&] { return badge(1) && send(changes, treeGetCount) == 3; }, "External edits did not update the hidden Source Control list and badge");
     send(button, BM_CLICK);
     waitFor([&] { return IsWindowVisible(changes); }, "Source Control did not show external edits");
-    runGit(L"add tracked.txt");
+    clickAction(firstFile(false));
     waitFor([&] { return nextItem(changes, TreeRelation::Child, nextItem(changes, TreeRelation::Root)) != 0; }, "Staging did not automatically update Source Control");
+    clickAction(firstFile(true));
+    waitFor([&] { return badge(1) && !firstFile(true) && firstFile(false) && send(changes, treeGetCount) == 3; }, "The minus icon did not move the file back to Changes");
+    clickAction(firstFile(false));
+    waitFor([&] { return firstFile(true) && !firstFile(false) && send(changes, treeGetCount) == 3; }, "The plus icon did not move the file to Staged Changes");
     writeLines(fixture.root / L"tracked.txt", 220);
     waitFor([&] { return badge(1) && send(changes, treeGetCount) == 4; }, "A partially staged file was not refreshed or was counted twice");
+    clickAction(firstFile(false));
+    waitFor([&] { return badge(1) && firstFile(true) && !firstFile(false) && send(changes, treeGetCount) == 3; }, "Staging a partially staged file did not update both groups");
+    clickAction(firstFile(true));
+    waitFor([&] { return badge(1) && !firstFile(true) && firstFile(false) && send(changes, treeGetCount) == 3; }, "Unstaging did not preserve the changed file and badge");
     runGit(L"reset --hard -q HEAD");
     waitFor([&] { return badge(0) && !IsWindowVisible(changes); }, "Reverting changes did not remove the badge");
     fs::create_directory(fixture.root / L"nested 日本語");
@@ -981,6 +1012,10 @@ void gitAutoRefreshTests(const fs::path& executable) {
     waitFor([&] { return badge(2) && send(changes, treeGetCount) == 5; }, "Deleting a tracked file did not add to the pending file count");
     writeLines(fixture.root / L"tracked.txt", 200);
     waitFor([&] { return badge(1) && send(changes, treeGetCount) == 4; }, "Restoring a tracked file did not update the pending file count");
+    clickAction(firstFile(false));
+    waitFor([&] { return badge(1) && firstFile(true) && !firstFile(false); }, "The plus icon did not stage a nested untracked file");
+    clickAction(firstFile(true));
+    waitFor([&] { return badge(1) && !firstFile(true) && firstFile(false); }, "The minus icon did not preserve a nested untracked file");
     fs::rename(fixture.root / L"nested 日本語" / L"added.txt", fixture.root / L"moved.txt");
     waitFor([&] { return badge(1) && send(changes, treeGetCount) == 3; }, "Renaming an untracked file did not update Source Control");
     fs::remove(fixture.root / L"moved.txt");

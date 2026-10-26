@@ -72,6 +72,14 @@ std::vector<std::string> gitDiffArguments(GitDiffKind kind, const std::string& h
     if (!path.empty()) args.push_back(path);
     return args;
 }
+std::vector<std::string> gitStageArguments(const GitStatusEntry& entry, bool stage) {
+    std::vector<std::string> args{"git.exe", "--literal-pathspecs", "--no-optional-locks"};
+    if (stage) args.insert(args.end(), {"add", "--all"});
+    else args.insert(args.end(), {"reset", "--quiet"});
+    args.insert(args.end(), {"--", entry.path});
+    if ((stage ? entry.worktree : entry.index) == 'R' && !entry.previousPath.empty()) args.push_back(entry.previousPath);
+    return args;
+}
 std::string untrackedPatch(const std::string& path, std::string_view text) {
     std::string patch = "diff --git a/" + path + " b/" + path + "\nnew file mode 100644\n";
     if (text.find('\0') != text.npos) return patch + "Binary file (untracked)\n";

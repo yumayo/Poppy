@@ -103,16 +103,17 @@ void smoothIcons() {
         check(renderer.begin(bitmap.bitmap.get()), "Could not create the icon test target");
         renderer.fill(bitmap.bounds(), RGB(0, 0, 0));
         const int size = MulDiv(24, dpi, 96);
-        const std::vector<Renderer::Icon> icons{Renderer::Icon::Explorer, Renderer::Icon::SourceControl, Renderer::Icon::Branch, Renderer::Icon::OpenAllChanges};
+        const std::vector<Renderer::Icon> icons{Renderer::Icon::Explorer, Renderer::Icon::SourceControl, Renderer::Icon::Branch,
+            Renderer::Icon::OpenAllChanges, Renderer::Icon::StageChanges, Renderer::Icon::UnstageChanges};
         for (size_t i = 0; i < icons.size(); ++i) {
-            const int x = 8 + static_cast<int>(i) * 100;
+            const int x = 8 + static_cast<int>(i) * 64;
             renderer.icon(icons[i], {x, 8, x + size, 8 + size}, RGB(255, 255, 255));
         }
         // Icon transforms must not leak into subsequent panel/cell fills.
         renderer.fill({440, 8, 460, 28}, accent);
         finish(renderer); bitmap.read();
         for (size_t i = 0; i < icons.size(); ++i) {
-            const int first = 8 + static_cast<int>(i) * 100;
+            const int first = 8 + static_cast<int>(i) * 64;
             bool ink = false, blendedEdge = false;
             for (int y = 7; y <= 8 + size; ++y) for (int x = first - 1; x <= first + size; ++x) {
                 const auto pixel = bitmap.pixel(x, y);
