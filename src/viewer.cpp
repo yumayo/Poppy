@@ -209,7 +209,18 @@ void Viewer::searchSlice() {
 }
 void Viewer::revealMatch() {
     if (!search_.current()) { InvalidateRect(window_, nullptr, FALSE); return; }
-    const auto match = *search_.current(); anchor_ = match.begin; caret_ = match.end;
+    revealRange(*search_.current());
+}
+bool Viewer::selectSearch(size_t begin, size_t end, const std::string& query, bool matchCase) {
+    if (!document_ || diff_ || begin >= end || end > document_->text.size()) return false;
+    LiteralPattern pattern; pattern.assign(query, matchCase); TextSearchCursor cursor;
+    const auto text = std::string_view(document_->text).substr(begin, end - begin);
+    const auto match = pattern.next(text, cursor, text.size());
+    if (!match || match->begin != 0 || match->end != text.size()) return false;
+    revealFind_ = false; revealRange({begin, end}); return true;
+}
+void Viewer::revealRange(TextMatch match) {
+    anchor_ = match.begin; caret_ = match.end;
     const size_t patchRow = static_cast<size_t>(std::upper_bound(document_->lines.begin(), document_->lines.end(), match.begin) - document_->lines.begin() - 1);
     auto line = document_->line(patchRow); size_t offset = document_->lines[patchRow], row = patchRow;
     const int origin = textGutter();

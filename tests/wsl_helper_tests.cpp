@@ -1,4 +1,5 @@
 #include "wsl_protocol.h"
+#include "content_search_protocol.h"
 #include "wsl_bootstrap.h"
 #include "text.h"
 #include <algorithm>
@@ -176,6 +177,39 @@ void gitAndCancellation(const std::string& executable) {
     helper.request({{"op","cancel"},{"target",std::to_string(slow)}}); helper.wait(slow,false);
     const auto child = static_cast<pid_t>(std::stol(disk(pidFile))); check(kill(child,0) < 0,"Cancelled Git left a descendant"); helper.eof();
 }
+void contentSearch(const std::string& executable) {
+    Fixture fixture;
+    write(fixture.root/"A.cpp", "needle\r\nNEEDLE\n"); write(fixture.root/"a.cpp", u8"日本🙂 needle\n");
+    const auto unusual = fixture.root / "back\\slash\nquote' $ file.cpp"; write(unusual, "needle");
+    fs::create_directory(fixture.root/"ignored"); write(fixture.root/"ignored"/"no.cpp", "needle");
+    write(fixture.root/".gitignore", "ignored/\n");
+    write(fixture.root/"binary", std::string("needle\0",7));
+    check(!mkfifo((fixture.root/"fifo").c_str(),0600), "Cannot create search FIFO");
+    Helper helper(executable); helper.hello(); helper.call("connect",fixture.root);
+    poppy::ContentSearchOptions options; options.query = "needle";
+    const auto search = [&](std::string exclusions = "") {
+        auto message = contentSearchMessage(options); message["size"] = std::to_string(exclusions.size());
+        return helper.call("searchContent", fixture.root, message, &exclusions);
+    };
+    const auto result = search(); const auto summary = contentSummaryFromMessage(result.metadata);
+    check(summary.matches == 4 && result.entries.size() == 4 && summary.binary == 1 && !summary.errors, "Helper content search omitted files, entered ignored folders, or opened a FIFO");
+    bool exact = false;
+    for (const auto& entry : result.entries) { const auto match = contentMatchFromMessage(entry); if (match.relative == unusual.filename().string()) exact = true; }
+    check(exact, "Helper search changed a backslash/newline filename");
+    std::string exclusions = "A.cpp"; exclusions += '\0'; const auto dirty = search(exclusions);
+    check(contentSummaryFromMessage(dirty.metadata).matches == 2, "Helper searched an excluded dirty buffer");
+    options.resultLimit = 1; const auto limited = search();
+    check(limited.entries.size() == 1 && contentSummaryFromMessage(limited.metadata).limited, "Helper result limit was not reported");
+    // Cancel before the final upload frame: deterministic cancellation without
+    // timing a large filesystem fixture, while ordinary requests stay usable.
+    auto message = contentSearchMessage(options); message["size"] = "0"; message["op"] = "searchContent"; message["path"] = fixture.root.string();
+    const auto pending = helper.request(message);
+    helper.request({{"op","cancel"},{"target",std::to_string(pending)}});
+    check(helper.call("readFile",fixture.root/"A.cpp").bytes == "needle\r\nNEEDLE\n", "Search blocked file/control requests");
+    helper.frame(dataFrame(pending,0,true,{}));
+    check(field(helper.wait(pending, false).metadata, "code") == "cancelled", "Helper did not cancel a queued search");
+    check(helper.call("readFile",unusual).bytes == "needle", "Cancelled search broke the shared connection"); helper.eof();
+}
 void terminals(const std::string& executable) {
     Fixture fixture;
     struct Session { pid_t pid; int master; };
@@ -198,6 +232,6 @@ void terminals(const std::string& executable) {
 }
 int main(int argc,char** argv) {
     signal(SIGPIPE,SIG_IGN);
-    try { check(argc == 2,"Expected helper executable argument"); const std::string executable = argv[1]; installation(executable); files(executable); protocolFailures(executable); gitAndCancellation(executable); terminals(executable); std::cout << "WSL helper integration tests passed\n"; }
+    try { check(argc == 2,"Expected helper executable argument"); const std::string executable = argv[1]; installation(executable); files(executable); protocolFailures(executable); gitAndCancellation(executable); contentSearch(executable); terminals(executable); std::cout << "WSL helper integration tests passed\n"; }
     catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
 }

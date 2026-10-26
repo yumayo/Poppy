@@ -1,4 +1,5 @@
 #include "wsl_protocol.h"
+#include "content_search_protocol.h"
 #include "resource.h"
 #include "text.h"
 #include <algorithm>
@@ -178,7 +179,7 @@ private:
     void body(const Request& request, const std::string& bytes);
     void accept(Frame frame);
     void execute(const std::shared_ptr<Request>& request);
-    void worker();
+    void worker(bool search = false);
     void watch(const std::string& p);
     void events();
     void save(Request& request);
@@ -189,8 +190,10 @@ private:
     std::map<uint64_t, std::shared_ptr<Request>> requests_;
     std::set<pid_t> gitChildren_;
     std::deque<std::shared_ptr<Request>> queue_;
+    std::deque<std::shared_ptr<Request>> searches_;
     std::shared_ptr<Request> upload_;
     std::vector<std::thread> workers_;
+    std::thread searchWorker_;
     std::thread watcher_;
     Fd notify_{inotify_init1(IN_NONBLOCK | IN_CLOEXEC)};
     std::set<std::string> watched_;
@@ -201,9 +204,10 @@ private:
 };
 Server::~Server() {
     stopping_ = true;
-    { std::lock_guard<std::mutex> lock(mutex_); for (auto& item : requests_) item.second->cancelled = true; queue_.clear(); }
+    { std::lock_guard<std::mutex> lock(mutex_); for (auto& item : requests_) item.second->cancelled = true; queue_.clear(); searches_.clear(); }
     condition_.notify_all();
     for (auto& worker : workers_) if (worker.joinable()) worker.join();
+    if (searchWorker_.joinable()) searchWorker_.join();
     if (watcher_.joinable()) watcher_.join();
 }
 void Server::output(Frame frame) {
@@ -232,7 +236,7 @@ void Server::accept(Frame frame) {
         const auto chunk = decodeChunk(frame); std::lock_guard<std::mutex> lock(mutex_);
         if (!upload_ || number(upload_->message, "id") != chunk.id || upload_->bytes.size() != chunk.offset || chunk.bytes.size() > upload_->size - upload_->bytes.size()) throw std::runtime_error("Unexpected file upload chunk");
         upload_->bytes += chunk.bytes;
-        if (chunk.last) { if (upload_->bytes.size() != upload_->size) throw std::runtime_error("Truncated file upload"); upload_->uploaded = true; queue_.push_back(upload_); upload_.reset(); condition_.notify_one(); }
+        if (chunk.last) { if (upload_->bytes.size() != upload_->size) throw std::runtime_error("Truncated file upload"); upload_->uploaded = true; (field(upload_->message, "op") == "searchContent" ? searches_ : queue_).push_back(upload_); upload_.reset(); condition_.notify_all(); }
         return;
     }
     auto m = decodeMessage(frame.payload); const auto op = field(m, "op");
@@ -246,10 +250,10 @@ void Server::accept(Frame frame) {
     number(m, "generation");
     if (requests_.count(id) || requests_.size() >= 128) throw std::runtime_error("WSL request queue is full or ID is reused");
     auto r = std::make_shared<Request>(); r->message = std::move(m); requests_[id] = r;
-    if (op == "saveFile") {
+    if (op == "saveFile" || op == "searchContent") {
         if (upload_) throw std::runtime_error("Concurrent upload is unsupported");
         r->size = number(r->message, "size"); if (r->size > maxFileBytes || uploadBytes_ + r->size > 64 * 1024 * 1024) throw std::runtime_error("Save exceeds the file or upload queue limit"); uploadBytes_ += r->size; upload_ = r;
-    } else { queue_.push_back(r); condition_.notify_one(); }
+    } else { queue_.push_back(r); condition_.notify_all(); }
 }
 void Server::watch(const std::string& p) {
     std::lock_guard<std::mutex> lock(watchMutex_);
@@ -346,7 +350,7 @@ void Server::execute(const std::shared_ptr<Request>& r) {
         if (op == "hello") {
             if (number(r->message, "protocolVersion") != protocolVersion) throw std::runtime_error("WSL protocol version mismatch");
             utsname system{}; if (uname(&system)) failure("Cannot detect architecture");
-            reply(*r, {{"protocolVersion", std::to_string(protocolVersion)}, {"helperVersion", helperVersion}, {"uid", std::to_string(getuid())}, {"home", home()}, {"shell", shell()}, {"executable", real("/proc/self/exe")}, {"architecture", system.machine}, {"capabilities", "list,read,save,rename,index,git,inotify,terminal"}, {"done", "1"}});
+            reply(*r, {{"protocolVersion", std::to_string(protocolVersion)}, {"helperVersion", helperVersion}, {"uid", std::to_string(getuid())}, {"home", home()}, {"shell", shell()}, {"executable", real("/proc/self/exe")}, {"architecture", system.machine}, {"capabilities", "list,read,save,rename,index,git,inotify,terminal,search"}, {"done", "1"}});
         } else if (op == "connect") {
             const auto p = real(path(r->message)); struct stat info{}; if (stat(p.c_str(), &info)) failure("Cannot inspect project"); if (!S_ISDIR(info.st_mode)) throw std::runtime_error("The project path is not a directory"); watch(p); reply(*r, {{"path", p}, {"done", "1"}});
         } else if (op == "stat") {
@@ -405,18 +409,27 @@ void Server::execute(const std::shared_ptr<Request>& r) {
                 if (truncated && entries > 200000) break;
             }
             reply(*r, {{"truncated", truncated ? "1" : "0"}, {"done", "1"}});
+        } else if (op == "searchContent") {
+            const auto options = contentSearchOptions(r->message, r->bytes);
+            const auto summary = searchContents(std::filesystem::u8path(path(r->message)), options, [&](std::vector<ContentMatch> batch) {
+                for (const auto& match : batch) { if (r->cancelled || stopping_) return false; reply(*r, contentMatchMessage(match)); }
+                return true;
+            }, [&] { return r->cancelled.load() || stopping_.load(); });
+            reply(*r, contentSummaryMessage(summary));
         } else if (op == "git") git(*r);
         else throw std::runtime_error("Unsupported WSL operation");
     } catch (const std::exception& error) { if (!stopping_) reply(*r, {{"error", validUtf8(error.what()) ? error.what() : "Linux operation failed"}, {"code", r->cancelled ? "cancelled" : "operationFailed"}, {"done", "1"}}); }
     std::lock_guard<std::mutex> lock(mutex_); uploadBytes_ -= r->size; requests_.erase(number(r->message, "id"));
 }
-void Server::worker() {
-    for (;;) { std::shared_ptr<Request> r; { std::unique_lock<std::mutex> lock(mutex_); condition_.wait(lock, [&] { return stopping_ || !queue_.empty(); }); if (stopping_) return; r = queue_.front(); queue_.pop_front(); } execute(r); }
+void Server::worker(bool search) {
+    auto& queue = search ? searches_ : queue_;
+    for (;;) { std::shared_ptr<Request> r; { std::unique_lock<std::mutex> lock(mutex_); condition_.wait(lock, [&] { return stopping_ || !queue.empty(); }); if (stopping_) return; r = queue.front(); queue.pop_front(); } execute(r); }
 }
 void Server::run() {
     signal(SIGPIPE, SIG_IGN); fcntl(STDOUT_FILENO, F_SETFL, O_NONBLOCK);
     if (prctl(PR_SET_CHILD_SUBREAPER, 1)) failure("Cannot supervise Git descendants");
     for (int i = 0; i < 3; ++i) workers_.emplace_back([this] { worker(); });
+    searchWorker_ = std::thread([this] { worker(true); });
     watcher_ = std::thread([this] { events(); });
     FrameReader reader; char bytes[32768];
     while (!stopping_) { const auto count = ::read(STDIN_FILENO, bytes, sizeof(bytes)); if (count < 0) { if (errno == EINTR) continue; failure("Cannot read protocol input"); } if (!count) { reader.finish(); break; } reader.feed(std::string_view(bytes, static_cast<size_t>(count)), [this](Frame f) { accept(std::move(f)); }); }
