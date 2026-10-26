@@ -7,6 +7,10 @@ struct WrappedRow {
     size_t line = 0, begin = 0, end = 0;
     int column = 0, endColumn = 0;
 };
+// Shared cell/UTF-8 wrapping for document lines and diff source lines.
+size_t wrappedLineRows(std::string_view line, int columns);
+WrappedRow wrappedLineRow(std::string_view line, int columns, size_t continuation);
+size_t wrappedLineRowForOffset(std::string_view line, int columns, size_t byte, bool trailing = false);
 class TextLayout {
 public:
     void build(const Document& document, int columns);
