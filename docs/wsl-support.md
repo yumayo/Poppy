@@ -1,6 +1,8 @@
 # WSLプロジェクト
 
-「＋ Open folder」またはCtrl+Oから「Open WSL folder…」を選び、登録済みディストリビューション、Linuxの絶対パス、必要ならユーザー名を指定します。`~`と`~/project`は選んだユーザーのホームを基準に解決します。Windowsプロジェクトと同時に開けます。
+「＋ Open folder」またはCtrl+Oから「Open WSL folder…」を選ぶと、エクスプローラーと同じWindows標準のフォルダー選択が開きます。初回は`\\wsl.localhost`（古いWindowsでは`\\wsl$`）からディストリビューションとフォルダーを辿って選べます。アドレスバーへ`\\wsl.localhost\Ubuntu\home\user\project`のようなパスを貼り付けることもできます。次回は前回の選択場所を開き、Windows用のフォルダー選択とは履歴を分けて保持します。
+
+「WSL user (optional)」を空欄にすると、そのディストリビューションの既定ユーザーで接続します。別のユーザーで接続する場合はユーザー名を入力してください。フォルダー選択中の参照権限はエクスプローラーと同じです。Windowsプロジェクトと同時に開けます。
 
 `Poppy.exe '\\wsl.localhost\Ubuntu\home\user\project'`のようなコマンドライン指定と、Windowsのフォルダー選択で受けた`\\wsl$\Ubuntu\…`もWSL接続へ変換します。通常のSMB共有はWindowsプロジェクトとして扱います。
 
