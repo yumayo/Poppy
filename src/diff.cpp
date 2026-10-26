@@ -47,6 +47,24 @@ size_t DiffDocument::rowForLine(DiffLine source, bool after, bool inlineView) co
     }
     return 0;
 }
+std::optional<size_t> DiffDocument::inlineRowForText(size_t begin, size_t end) const {
+    if (begin >= end || end > patch.text.size() || patch.lines.empty()) return {};
+    const auto at = std::upper_bound(patch.lines.begin(), patch.lines.end(), begin);
+    const auto patchRow = static_cast<size_t>(at - patch.lines.begin() - 1);
+    // Inline order follows patch order, even when split rows pair replacements.
+    const auto it = std::lower_bound(inlineOrder.begin(), inlineOrder.end(), patchRow, [this](uint32_t entry, size_t row) {
+        const auto& change = rows[entry / 2];
+        const auto source = entry % 2 || !change.before.number ? change.after : change.before;
+        return (change.heading ? change.heading - 1 : source.row) < row;
+    });
+    if (it == inlineOrder.end()) return {};
+    const size_t index = static_cast<size_t>(it - inlineOrder.begin());
+    const auto change = displayRow(index, true);
+    const auto source = change.after.number ? change.after : change.before;
+    if (!source.number || source.row != patchRow) return {};
+    const size_t start = offset(source);
+    return begin >= start && end <= start + line(source).size() ? std::optional<size_t>(index) : std::nullopt;
+}
 size_t DiffDocument::mapRow(size_t index, bool fromInline, bool toInline, bool after) const {
     if (!rowCount(fromInline)) return 0;
     index = std::min(index, rowCount(fromInline) - 1);

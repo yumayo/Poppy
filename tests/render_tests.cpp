@@ -224,6 +224,70 @@ void editorCaret() {
     check(GetGUIThreadInfo(GetCurrentThreadId(), &info) && info.hwndCaret != window,
         "A read-only viewer retained the editor caret");
 }
+void documentFind() {
+    Viewer viewer;
+    const HWND parent = CreateWindowExW(0, L"STATIC", L"Document search test", WS_POPUP | WS_CLIPCHILDREN,
+        0, 0, 640, 360, nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
+    check(parent != nullptr, "Could not create the search test window");
+    struct WindowOwner { HWND value; ~WindowOwner() { DestroyWindow(value); } } owner{parent};
+    viewer.create(parent, GetModuleHandleW(nullptr)); viewer.setDpi(96);
+    const HWND window = viewer.window(); MoveWindow(window, 0, 0, 640, 360, FALSE);
+    auto buffer = std::make_shared<EditBuffer>();
+    buffer->document.text = u8"needle NEEDLE\n日本語🙂\nneedle";
+    indexDocument(buffer->document); buffer->initialize(buffer->document.text);
+    viewer.edit(buffer, L"search.txt"); viewer.find();
+    const HWND input = FindWindowExW(window, nullptr, L"PoppyFindBar", nullptr);
+    check(input != nullptr && GetFocus() == input, "Ctrl+F did not focus its search input");
+    const auto status = [&] { wchar_t title[256]{}; GetWindowTextW(input, title, 256); return std::wstring(title); };
+    const auto wait = [&] {
+        const auto start = GetTickCount64();
+        while (status() == L"Find in file: Searching…") {
+            MSG message{};
+            while (PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE)) { TranslateMessage(&message); DispatchMessageW(&message); }
+            check(GetTickCount64() - start < 5000, "Document search did not finish");
+            MsgWaitForMultipleObjects(0, nullptr, FALSE, 10, QS_ALLINPUT);
+        }
+    };
+    const auto query = [&](const std::wstring& text) {
+        viewer.find();
+        for (const auto ch : text) SendMessageW(input, WM_CHAR, ch, 0);
+        wait();
+    };
+    query(L"needle");
+    check(viewer.state().anchor == 0 && viewer.state().caret == 6 && status() == L"Find in file: 1 / 3", "Initial document match or count failed");
+    SendMessageW(input, WM_KEYDOWN, VK_RETURN, 0); wait();
+    check(viewer.state().anchor == 7 && viewer.state().caret == 13, "Enter did not select the next match");
+    SendMessageW(input, WM_KEYDOWN, VK_UP, 0); wait();
+    check(viewer.state().anchor == 0, "Previous match did not navigate backwards");
+    SendMessageW(input, WM_KEYDOWN, VK_UP, 0); wait();
+    check(viewer.state().caret == buffer->document.text.size(), "Previous match did not wrap");
+    query(L"日本語🙂");
+    check(buffer->document.text.substr(viewer.state().anchor, viewer.state().caret - viewer.state().anchor) == u8"日本語🙂", "IME/surrogate UTF-16 input lost a UTF-8 match");
+    query(L"needle");
+    SetFocus(window); SendMessageW(window, WM_KEYDOWN, VK_END, 0); SendMessageW(window, WM_CHAR, '!', 0);
+    const auto edited = viewer.state(); wait();
+    check(buffer->dirty() && viewer.state().anchor == edited.anchor && viewer.state().caret == edited.caret,
+        "Recounting after an edit moved the insertion point");
+    // A document switch must discard the old scan and preserve the new tab's selection.
+    viewer.find(); SendMessageW(input, WM_CHAR, 'n', 0);
+    auto replacement = std::make_shared<Document>(); replacement->text = "new needle"; indexDocument(*replacement);
+    viewer.show(replacement, L"replacement.txt"); wait();
+    check(viewer.state().anchor == 0 && viewer.state().caret == 0 && status() == L"Find in file: 2 matches", "A stale search selected text in a new document");
+    query(L"needle");
+    check(viewer.state().anchor == 4 && viewer.state().caret == 10, "Read-only document search failed");
+    auto diff = std::make_shared<DiffDocument>();
+    diff->patch.text = "diff --git a/needle b/needle\n--- a/needle\n+++ b/needle\n@@ -1 +1 @@\n-old needle\n+new needle\n";
+    indexDiff(*diff); viewer.showDiff(diff, L"diff.txt"); wait();
+    query(L"needle");
+    check(status() == L"Find in file: 1 / 2" && diff->patch.text.substr(viewer.state().anchor - 4, 4) == "old ",
+        "Diff search included hidden patch headers");
+    viewer.setDiffLayout(false); SendMessageW(input, WM_KEYDOWN, VK_RETURN, 0); wait();
+    check(viewer.state().after && diff->patch.text.substr(viewer.state().anchor - 4, 4) == "new ", "Split diff search selected the wrong side");
+    SendMessageW(input, WM_KEYDOWN, VK_ESCAPE, 0);
+    check(!(GetWindowLongPtrW(input, GWL_STYLE) & WS_VISIBLE) && GetFocus() == window, "Escape did not close search and restore editor focus");
+    SendMessageW(window, WM_KEYDOWN, VK_F3, 0); wait();
+    check(!viewer.state().after, "F3 with a closed search bar did not advance and wrap");
+}
 struct ScrollbarWindow {
     Scrollbars bars;
     HWND window = nullptr;
@@ -495,7 +559,7 @@ int main() {
     int result = 0;
     try {
         initializeRendering();
-        cellPositions(); colorsAndClipping(); smoothIcons(); windowTargets(); editorCaret(); continuousViewerScrolling(); themedScrollbars(); quickOpenStability();
+        cellPositions(); colorsAndClipping(); smoothIcons(); windowTargets(); editorCaret(); documentFind(); continuousViewerScrolling(); themedScrollbars(); quickOpenStability();
         std::cout << "Direct2D rendering tests passed\n";
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; result = 1; }
     if (SUCCEEDED(com)) CoUninitialize();

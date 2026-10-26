@@ -1,5 +1,6 @@
 #pragma once
 #include "text.h"
+#include <optional>
 
 namespace poppy {
 // A zero line number is an empty cell on that side of the comparison.
@@ -16,6 +17,8 @@ struct DiffDocument {
     size_t rowCount(bool inlineView) const { return inlineView ? inlineOrder.size() : rows.size(); }
     DiffRow displayRow(size_t index, bool inlineView) const;
     size_t rowForLine(DiffLine source, bool after, bool inlineView) const;
+    // Maps a visible text range in the patch to an inline row, excluding metadata and +/- prefixes.
+    std::optional<size_t> inlineRowForText(size_t begin, size_t end) const;
     size_t mapRow(size_t index, bool fromInline, bool toInline, bool after) const;
     std::string selectedText(bool after, size_t start, size_t end, bool inlineView = false) const;
 };
