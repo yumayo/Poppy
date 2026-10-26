@@ -3,6 +3,8 @@
 #include "diff.h"
 #include "session.h"
 #include "edit_buffer.h"
+#include "find_bar.h"
+#include "text_search.h"
 #include <memory>
 
 namespace poppy {
@@ -24,6 +26,9 @@ public:
     void restore(const State& state);
     size_t documentBytes() const;
     bool hasDocument() const { return document_ != nullptr; }
+    void find();
+    void findNext(bool backwards = false);
+    bool findKey(const MSG& message);
     HWND window() const { return window_; }
 private:
     static LRESULT CALLBACK procedure(HWND, UINT, WPARAM, LPARAM);
@@ -37,21 +42,29 @@ private:
     void edited();
     void moveCaret(WPARAM key, bool shift, bool ctrl);
     void caretPosition(bool reveal = false);
+    void findLayout();
+    void requestFind(bool navigate = false, bool backwards = false, bool reveal = true);
+    void searchSlice();
+    void revealMatch();
     POINT caretPoint() const;
     RECT layoutButton(bool inlineView) const;
     int visibleRows() const;
     bool splitDiff() const { return diff_ && !inlineView_; }
     int textGutter() const { return diff_ && inlineView_ ? 2 * gutter_ : gutter_; }
-    int contentTop() const { return header_ + (diff_ ? header_ : 0); }
+    int contentTop() const { return header_ + (diff_ ? header_ : 0) + (findBar_.visible() ? header_ : 0); }
     size_t rowCount() const { return diff_ ? diff_->rowCount(inlineView_) : document_->lines.size(); }
     HWND window_ = nullptr;
     Renderer renderer_;
+    FindBar findBar_;
+    TextSearch search_;
+    bool revealFind_ = false;
     Scrollbars scrollbars_;
     int cellWidth_ = 8, cellHeight_ = 20, header_ = 34, gutter_ = 66;
     int top_ = 0, left_ = 0;
     size_t anchor_ = 0, caret_ = 0;
     bool selecting_ = false, after_ = false, inlineView_ = true;
     static constexpr UINT_PTR caretTimer = 0x5056;
+    static constexpr UINT_PTR findTimer = 0x5057;
     bool caretVisible_ = false;
     std::shared_ptr<const Document> document_;
     std::shared_ptr<EditBuffer> edit_;

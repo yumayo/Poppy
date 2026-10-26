@@ -879,7 +879,7 @@ ProjectSession ProjectRuntime::Impl::saveSession() {
     else if (focus == tree_) focusedPane_ = "explorer";
     else if (focus == gitTree_) focusedPane_ = "git";
     else if (focus == branchTree_) focusedPane_ = "branch";
-    else if (focus == viewer().window()) focusedPane_ = "viewer";
+    else if (focus == viewer().window() || IsChild(viewer().window(), focus)) focusedPane_ = "viewer";
     state.focusedPane = focusedPane_;
     terminal_.snapshot(state);
     return state;
@@ -1509,6 +1509,8 @@ bool ProjectRuntime::Impl::key(const MSG& message) {
         if (key && ctrl && !shift && !(GetKeyState(VK_MENU) & 0x8000) && message.wParam == 'P') { quickOpen_.show(); return true; }
         if (key && ctrl && message.wParam == 'O') { quickOpen_.close(); chooseFolder(); return true; }
         if (quickOpen_.visible() && key) return false;
+        if (GetFocus() != terminal_.window() && viewer().findKey(message)) return true;
+        if (key && !ctrl && IsChild(viewer().window(), message.hwnd) && message.wParam == VK_TAB) return false;
         if (key && ctrl && shift && message.wParam == 'E') { selectSidebar(Sidebar::Explorer); return true; }
         if (key && ctrl && shift && message.wParam == 'G') { selectSidebar(Sidebar::Git); return true; }
         if (key && ctrl && shift && message.wParam == 'B') { selectSidebar(Sidebar::Branch); return true; }
@@ -1554,7 +1556,7 @@ void ProjectRuntime::activate(bool active) {
         else if (impl_->lastFocus_ == impl_->tree_) impl_->focusedPane_ = "explorer";
         else if (impl_->lastFocus_ == impl_->gitTree_) impl_->focusedPane_ = "git";
         else if (impl_->lastFocus_ == impl_->branchTree_) impl_->focusedPane_ = "branch";
-        else if (impl_->lastFocus_ == impl_->viewer().window()) impl_->focusedPane_ = "viewer";
+        else if (impl_->lastFocus_ == impl_->viewer().window() || IsChild(impl_->viewer().window(), impl_->lastFocus_)) impl_->focusedPane_ = "viewer";
         impl_->quickOpen_.close(false); impl_->endTabDrag(); ShowWindow(window(), SW_HIDE);
     }
     else {
