@@ -31,11 +31,14 @@ void Viewer::setDpi(UINT dpi) {
     scrollbars(); findLayout(); caretPosition(); InvalidateRect(window_, nullptr, FALSE);
 }
 void Viewer::show(std::shared_ptr<const Document> d, const ResourceId& path, bool preserve) {
+    const auto previous = preserve && document_ ? std::optional<State>(state()) : std::nullopt;
     edit_.reset(); highSurrogate_ = 0;
+    layoutDirty_ = true; caretTrailing_ = false;
     diff_.reset(); document_ = std::move(d); path_ = path; message_.clear(); title_.clear();
     if (!preserve) { top_ = left_ = 0; anchor_ = caret_ = 0; after_ = false; }
     else { anchor_ = std::min(anchor_, document_->text.size()); caret_ = std::min(caret_, document_->text.size()); }
     scrollbars(); findLayout(); requestFind(false, false, false); caretPosition(); InvalidateRect(window_, nullptr, FALSE);
+    if (previous) restore(*previous);
 }
 void Viewer::edit(std::shared_ptr<EditBuffer> buffer, const ResourceId& path, bool preserve) {
     show(std::shared_ptr<const Document>(buffer, &buffer->document), path, preserve);
@@ -43,6 +46,7 @@ void Viewer::edit(std::shared_ptr<EditBuffer> buffer, const ResourceId& path, bo
 }
 void Viewer::showDiff(std::shared_ptr<const DiffDocument> d, const ResourceId& path, bool preserve, std::wstring title) {
     edit_.reset(); highSurrogate_ = 0;
+    textLayout_ = {}; layoutDirty_ = true; caretTrailing_ = false;
     // Share the patch snapshot; both panes only keep references to its lines.
     document_ = std::shared_ptr<const Document>(d, &d->patch); diff_ = std::move(d); path_ = path; message_.clear(); title_ = std::move(title);
     if (!preserve) { top_ = left_ = 0; anchor_ = caret_ = 0; after_ = false; }
@@ -52,10 +56,15 @@ void Viewer::showDiff(std::shared_ptr<const DiffDocument> d, const ResourceId& p
 void Viewer::message(const std::wstring& text, const ResourceId& path) {
     findBar_.close(); KillTimer(window_, findTimer); search_.query("");
     edit_.reset(); highSurrogate_ = 0;
+    textLayout_ = {}; layoutDirty_ = true; caretTrailing_ = false;
     diff_.reset(); document_.reset(); path_ = path; title_.clear(); message_ = text; top_ = left_ = 0; anchor_ = caret_ = 0; after_ = false;
     scrollbars(); caretPosition(); InvalidateRect(window_, nullptr, FALSE);
 }
 Viewer::State Viewer::state() const {
+    if (wrapping() && textLayout_.rows()) {
+        const auto row = textLayout_.row(*document_, static_cast<size_t>(top_));
+        return {static_cast<int>(row.line), 0, anchor_, caret_, after_, row.begin};
+    }
     // Inline row indices retain both sides without storing a layout per tab.
     const int top = diff_ ? static_cast<int>(diff_->mapRow(static_cast<size_t>(top_), inlineView_, true, after_)) : top_;
     return {top, left_, anchor_, caret_, after_};
@@ -63,10 +72,23 @@ Viewer::State Viewer::state() const {
 void Viewer::restore(const State& state) {
     if (!document_) return;
     top_ = diff_ ? static_cast<int>(diff_->mapRow(static_cast<size_t>(std::max(0, state.top)), true, inlineView_, state.after)) : state.top;
+    if (wrapping() && !document_->lines.empty()) {
+        const size_t line = std::min(static_cast<size_t>(std::max(0, state.top)), document_->lines.size() - 1);
+        top_ = static_cast<int>(textLayout_.rowForOffset(*document_, document_->lines[line] + std::min(state.wrapOffset, document_->line(line).size())));
+    }
+    caretTrailing_ = false;
     left_ = state.left; after_ = state.after;
     anchor_ = std::min(state.anchor, document_->text.size()); caret_ = std::min(state.caret, document_->text.size());
     requestFind(false, false, false);
     scrollbars(); caretPosition(); InvalidateRect(window_, nullptr, FALSE);
+}
+void Viewer::setWordWrap(bool enabled) {
+    if (wordWrap_ == enabled) return;
+    const auto previous = state();
+    wordWrap_ = enabled; layoutDirty_ = true;
+    scrollbars(); findLayout();
+    if (document_) { restore(previous); if (edit_ && GetFocus() == window_) caretPosition(true); }
+    else if (window_) InvalidateRect(window_, nullptr, FALSE);
 }
 void Viewer::toggleDiffLayout() { if (diff_) setDiffLayout(!inlineView_); }
 void Viewer::setDiffLayout(bool inlineView) {
@@ -87,16 +109,30 @@ RECT Viewer::layoutButton(bool inlineView) const {
 int Viewer::visibleRows() const { const auto r = Scrollbars::contentRect(window_); return std::max(1, (static_cast<int>(r.bottom) - contentTop()) / cellHeight_); }
 void Viewer::scrollbars() {
     if (!window_) return;
-    const int rows = document_ ? std::max(1, static_cast<int>(rowCount())) : 1;
     const int cols = document_ ? static_cast<int>(diff_ ? diff_->maxColumns : document_->maxColumns) : 1;
+    std::optional<size_t> reflowOffset;
     // Each bar can change the space available to the other.
     for (int pass = 0; pass < 3; ++pass) {
         const auto r = Scrollbars::contentRect(window_);
         const int width = splitDiff() ? (static_cast<int>(r.right) - 1) / 2 : static_cast<int>(r.right);
         const int pageRows = visibleRows(), pageCols = std::max(1, (width - textGutter()) / cellWidth_);
+        if (wrapping()) {
+            // Leave room for the caret after the final cell of a full row.
+            const int columns = std::max(1, (width - gutter_ - 2) / cellWidth_);
+            if (layoutDirty_ || textLayout_.columns() != columns) {
+                if (!layoutDirty_ && !reflowOffset && textLayout_.rows()) {
+                    const auto row = textLayout_.row(*document_, static_cast<size_t>(top_));
+                    reflowOffset = document_->lines[row.line] + row.begin;
+                }
+                textLayout_.build(*document_, columns); layoutDirty_ = false;
+                if (reflowOffset) top_ = static_cast<int>(textLayout_.rowForOffset(*document_, *reflowOffset));
+            }
+        }
+        const int rows = document_ ? std::max(1, static_cast<int>(rowCount())) : 1;
         top_ = std::clamp(top_, 0, std::max(0, rows - pageRows)); left_ = std::clamp(left_, 0, std::max(0, cols - pageCols));
+        if (wrapping()) left_ = 0;
         SCROLLINFO vertical{sizeof(vertical), SIF_RANGE | SIF_PAGE | SIF_POS, 0, rows - 1, static_cast<UINT>(pageRows), top_, 0}; SetScrollInfo(window_, SB_VERT, &vertical, FALSE);
-        SCROLLINFO horizontal{sizeof(horizontal), SIF_RANGE | SIF_PAGE | SIF_POS, 0, cols - 1, static_cast<UINT>(pageCols), left_, 0}; SetScrollInfo(window_, SB_HORZ, &horizontal, FALSE);
+        SCROLLINFO horizontal{sizeof(horizontal), SIF_RANGE | SIF_PAGE | SIF_POS, 0, wrapping() ? 0 : cols - 1, static_cast<UINT>(pageCols), left_, 0}; SetScrollInfo(window_, SB_HORZ, &horizontal, FALSE);
     }
 }
 void Viewer::scroll(int vertical, int horizontal) {
@@ -107,11 +143,14 @@ void Viewer::scroll(int vertical, int horizontal) {
     // before handling another move, including while a thumb is dragged quickly.
     UpdateWindow(window_);
 }
-size_t Viewer::position(int x, int y) const {
+size_t Viewer::position(int x, int y, bool* trailing) const {
+    if (trailing) *trailing = false;
     if (!document_ || !rowCount()) return 0;
     size_t row = std::min(rowCount() - 1, static_cast<size_t>(std::max(0, (y - contentTop()) / cellHeight_ + top_)));
     int origin = textGutter();
-    auto line = document_->line(row); size_t offset = document_->lines[row];
+    const auto wrapped = wrapping() ? textLayout_.row(*document_, row) : WrappedRow{};
+    const size_t logicalRow = wrapping() ? wrapped.line : row;
+    auto line = document_->line(logicalRow); size_t offset = document_->lines[logicalRow];
     if (diff_) {
         const auto rect = Scrollbars::contentRect(window_);
         if (splitDiff()) {
@@ -135,13 +174,15 @@ size_t Viewer::position(int x, int y) const {
         }
         line = diff_->line(source); offset = diff_->offset(source);
     }
-    const int target = std::max(0, (x - origin + cellWidth_ / 2) / cellWidth_ + left_);
-    int col = 0; size_t p = 0;
-    while (p < line.size() && col < target) {
+    const int target = std::max(0, (x - origin + cellWidth_ / 2) / cellWidth_ + left_) + (wrapping() ? wrapped.column : 0);
+    int col = wrapping() ? wrapped.column : 0; size_t p = wrapping() ? wrapped.begin : 0;
+    const size_t end = wrapping() ? wrapped.end : line.size();
+    while (p < end && col < target) {
         const size_t before = p; const char32_t c = decodeUtf8(line, p);
         const int width = c == '\t' ? 4 - col % 4 : std::max(1, cellWidth(c));
         if (col + width > target) { p = before; break; } col += width;
     }
+    if (trailing && wrapping()) *trailing = p == wrapped.end && p < line.size();
     return offset + p;
 }
 void Viewer::copy() {
@@ -220,7 +261,7 @@ bool Viewer::selectSearch(size_t begin, size_t end, const std::string& query, bo
     revealFind_ = false; revealRange({begin, end}); return true;
 }
 void Viewer::revealRange(TextMatch match) {
-    anchor_ = match.begin; caret_ = match.end;
+    anchor_ = match.begin; caret_ = match.end; caretTrailing_ = false;
     const size_t patchRow = static_cast<size_t>(std::upper_bound(document_->lines.begin(), document_->lines.end(), match.begin) - document_->lines.begin() - 1);
     auto line = document_->line(patchRow); size_t offset = document_->lines[patchRow], row = patchRow;
     const int origin = textGutter();
@@ -231,6 +272,7 @@ void Viewer::revealRange(TextMatch match) {
         const auto source = after_ ? change.after : change.before;
         row = diff_->rowForLine(source, after_, inlineView_); line = diff_->line(source); offset = diff_->offset(source);
     }
+    if (wrapping()) row = textLayout_.rowForOffset(*document_, match.begin);
     if (static_cast<int>(row) < top_ || static_cast<int>(row) >= top_ + visibleRows()) top_ = std::max(0, static_cast<int>(row) - visibleRows() / 2);
     int column = 0;
     for (size_t p = 0; p < line.size() && offset + p < match.begin;) { const auto ch = decodeUtf8(line, p); column += ch == '\t' ? 4 - column % 4 : std::max(1, cellWidth(ch)); }
@@ -242,9 +284,12 @@ void Viewer::revealRange(TextMatch match) {
 POINT Viewer::caretPoint() const {
     if (!edit_) return {gutter_, contentTop()};
     const auto& d = edit_->document;
-    const size_t row = static_cast<size_t>(std::upper_bound(d.lines.begin(), d.lines.end(), caret_) - d.lines.begin() - 1);
-    const auto line = d.line(row); int col = 0;
-    for (size_t p = 0; p < line.size() && d.lines[row] + p < caret_;) { const auto c = decodeUtf8(line, p); col += c == '\t' ? 4 - col % 4 : std::max(1, cellWidth(c)); }
+    const size_t row = wrapping() ? textLayout_.rowForOffset(d, caret_, caretTrailing_) : static_cast<size_t>(std::upper_bound(d.lines.begin(), d.lines.end(), caret_) - d.lines.begin() - 1);
+    const auto wrapped = wrapping() ? textLayout_.row(d, row) : WrappedRow{};
+    const size_t logicalRow = wrapping() ? wrapped.line : row;
+    const auto line = d.line(logicalRow); int col = wrapping() ? wrapped.column : 0;
+    for (size_t p = wrapping() ? wrapped.begin : 0; p < line.size() && d.lines[logicalRow] + p < caret_;) { const auto c = decodeUtf8(line, p); col += c == '\t' ? 4 - col % 4 : std::max(1, cellWidth(c)); }
+    if (wrapping()) col -= wrapped.column;
     return {gutter_ + (col - left_) * cellWidth_, contentTop() + (static_cast<int>(row) - top_) * cellHeight_};
 }
 void Viewer::caretPosition(bool reveal) {
@@ -258,8 +303,10 @@ void Viewer::caretPosition(bool reveal) {
         const auto r = Scrollbars::contentRect(window_);
         if (point.y < contentTop()) top_ -= (contentTop() - point.y + cellHeight_ - 1) / cellHeight_;
         else if (point.y + cellHeight_ > r.bottom) top_ += (point.y + cellHeight_ - r.bottom + cellHeight_ - 1) / cellHeight_;
-        if (point.x < gutter_) left_ -= (gutter_ - point.x + cellWidth_ - 1) / cellWidth_;
-        else if (point.x + cellWidth_ > r.right) left_ += (point.x + cellWidth_ - r.right + cellWidth_ - 1) / cellWidth_;
+        if (!wrapping()) {
+            if (point.x < gutter_) left_ -= (gutter_ - point.x + cellWidth_ - 1) / cellWidth_;
+            else if (point.x + cellWidth_ > r.right) left_ += (point.x + cellWidth_ - r.right + cellWidth_ - 1) / cellWidth_;
+        }
         scrollbars(); point = caretPoint();
     }
     if (GetFocus() == window_) {
@@ -274,7 +321,7 @@ void Viewer::caretPosition(bool reveal) {
         if (context) { COMPOSITIONFORM form{}; form.dwStyle = CFS_POINT; form.ptCurrentPos = point; ImmSetCompositionWindow(context, &form); CANDIDATEFORM candidate{}; candidate.dwStyle = CFS_CANDIDATEPOS; candidate.ptCurrentPos = {point.x, point.y + cellHeight_}; ImmSetCandidateWindow(context, &candidate); ImmReleaseContext(window_, context); }
     }
 }
-void Viewer::edited() { requestFind(false, false, false); scrollbars(); caretPosition(true); InvalidateRect(window_, nullptr, FALSE); if (changed) changed(); }
+void Viewer::edited() { layoutDirty_ = true; caretTrailing_ = false; requestFind(false, false, false); scrollbars(); caretPosition(true); InvalidateRect(window_, nullptr, FALSE); if (changed) changed(); }
 void Viewer::replace(std::string text) {
     if (!edit_) return;
     std::string normalized; const auto newline = edit_->newline();
@@ -290,15 +337,22 @@ void Viewer::moveCaret(WPARAM key, bool shift, bool ctrl) {
     revealFind_ = false;
     const auto& d = edit_->document;
     const size_t row = static_cast<size_t>(std::upper_bound(d.lines.begin(), d.lines.end(), caret_) - d.lines.begin() - 1);
+    const size_t visualRow = wrapping() ? textLayout_.rowForOffset(d, caret_, caretTrailing_) : row;
+    const auto wrapped = wrapping() ? textLayout_.row(d, visualRow) : WrappedRow{};
+    const auto point = caretPoint();
+    caretTrailing_ = false;
     size_t next = caret_;
     if (key == VK_LEFT) next = !shift && anchor_ != caret_ ? std::min(anchor_, caret_) : edit_->previous(caret_);
     else if (key == VK_RIGHT) next = !shift && anchor_ != caret_ ? std::max(anchor_, caret_) : edit_->next(caret_);
-    else if (key == VK_HOME) next = ctrl ? 0 : d.lines[row];
-    else if (key == VK_END) next = ctrl ? d.text.size() : d.lines[row] + d.line(row).size();
+    else if (key == VK_HOME) next = ctrl ? 0 : d.lines[row] + (wrapping() ? wrapped.begin : 0);
+    else if (key == VK_END) {
+        next = ctrl ? d.text.size() : d.lines[row] + (wrapping() ? wrapped.end : d.line(row).size());
+        caretTrailing_ = wrapping() && !ctrl && wrapped.end < d.line(row).size();
+    }
     else {
         const int delta = key == VK_UP ? -1 : key == VK_DOWN ? 1 : key == VK_PRIOR ? -visibleRows() : visibleRows();
-        const auto target = static_cast<size_t>(std::clamp<int>(static_cast<int>(row) + delta, 0, static_cast<int>(d.lines.size()) - 1));
-        const auto point = caretPoint(); next = position(point.x, contentTop() + (static_cast<int>(target) - top_) * cellHeight_);
+        const auto target = static_cast<size_t>(std::clamp<int>(static_cast<int>(visualRow) + delta, 0, static_cast<int>(rowCount()) - 1));
+        next = position(point.x, contentTop() + (static_cast<int>(target) - top_) * cellHeight_, &caretTrailing_);
     }
     caret_ = next; if (!shift) anchor_ = caret_; caretPosition(true); InvalidateRect(window_, nullptr, FALSE);
 }
@@ -348,6 +402,8 @@ void Viewer::paint() {
             std::vector<Cell> cells(static_cast<size_t>(columns));
             for (int screenRow = 0; screenRow < rows; ++screenRow) {
                 const int y = body + screenRow * cellHeight_; const size_t row = static_cast<size_t>(top_ + screenRow);
+                const auto wrapped = wrapping() && row < rowCount() ? textLayout_.row(*document_, row) : WrappedRow{};
+                const size_t logicalRow = wrapping() ? wrapped.line : row;
                 Color rowBackground = background; DiffLine source; DiffRow change;
                 if (diff_ && row < rowCount()) {
                     change = diff_->displayRow(row, inlineView_);
@@ -362,21 +418,23 @@ void Viewer::paint() {
                 if (diff_ && inlineView_) {
                     if (change.before.number) dc.label({0, y, std::min(paneRight, gutter_ - 14), y + cellHeight_}, std::to_wstring(change.before.number), muted, DT_RIGHT | DT_SINGLELINE);
                     if (change.after.number) dc.label({gutter_, y, std::min(paneRight, textLeft - 14), y + cellHeight_}, std::to_wstring(change.after.number), muted, DT_RIGHT | DT_SINGLELINE);
-                } else {
+                } else if (!wrapping() || wrapped.begin == 0) {
                     RECT number{paneLeft, y, std::min(paneRight, textLeft - 14), y + cellHeight_};
-                    dc.label(number, std::to_wstring(diff_ ? source.number : row + 1), muted, DT_RIGHT | DT_SINGLELINE);
+                    dc.label(number, std::to_wstring(diff_ ? source.number : logicalRow + 1), muted, DT_RIGHT | DT_SINGLELINE);
                 }
-                auto line = diff_ ? diff_->line(source) : document_->line(row);
-                const size_t lineOffset = diff_ ? diff_->offset(source) : document_->lines[row];
+                auto line = diff_ ? diff_->line(source) : document_->line(logicalRow);
+                const size_t lineOffset = diff_ ? diff_->offset(source) : document_->lines[logicalRow];
                 line = line.substr(0, std::min(line.size(), maxLineColumns * 4));
                 tokens.clear();
-                if (!diff_) { LexState state = document_->states[row]; lexLine(line, document_->language, state, &tokens); }
+                if (!diff_) { LexState state = document_->states[logicalRow]; lexLine(line, document_->language, state, &tokens); }
                 std::fill(cells.begin(), cells.end(), Cell{U' ', foreground, rowBackground, false});
-                int col = 0; size_t token = 0;
+                const int firstColumn = wrapping() ? wrapped.column : left_;
+                int col = wrapping() ? wrapped.column : 0; size_t token = 0;
+                const size_t end = wrapping() ? wrapped.end : line.size();
                 TextSearchCursor highlightCursor;
                 std::optional<TextMatch> highlight;
                 if (findBar_.visible()) highlight = search_.pattern().next(line, highlightCursor, line.size());
-                for (size_t p = 0; p < line.size() && col < left_ + columns && col < static_cast<int>(maxLineColumns);) {
+                for (size_t p = wrapping() ? wrapped.begin : 0; p < end && col < firstColumn + columns && col < static_cast<int>(maxLineColumns);) {
                     const size_t begin = p; char32_t c = decodeUtf8(line, p);
                     const int width = c == '\t' ? 4 - col % 4 : std::max(1, cellWidth(c));
                     while (token < tokens.size() && tokens[token].end <= begin) ++token;
@@ -387,10 +445,10 @@ void Viewer::paint() {
                     const Color bg = (!splitDiff() || static_cast<bool>(side) == after_) && offset >= selectionStart && offset < selectionEnd ? rgb(50, 70, 94) : matched ? rgb(92, 73, 34) : rowBackground;
                     if (c < 32) c = U' ';
                     for (int i = 0; i < width; ++i) {
-                        const int x = col + i - left_; if (x < 0 || x >= columns) continue;
+                        const int x = col + i - firstColumn; if (x < 0 || x >= columns) continue;
                         const bool wideContinuation = cellWidth(c) == 2 && i == 1;
                         cells[x] = {i == 0 ? c : U' ', styles[static_cast<size_t>(style)], bg, wideContinuation};
-                        if (i > 0 && col < left_) cells[x] = {U' ', foreground, bg, false};
+                        if (i > 0 && col < firstColumn) cells[x] = {U' ', foreground, bg, false};
                     }
                     col += width;
                 }
@@ -433,7 +491,7 @@ LRESULT Viewer::handle(UINT m, WPARAM a, LPARAM b) {
     switch (m) {
     case WM_PAINT: paint(); return 0;
     case WM_ERASEBKGND: return 1;
-    case WM_SIZE: scrollbars(); findLayout(); caretPosition(); return 0;
+    case WM_SIZE: scrollbars(); findLayout(); caretPosition(); InvalidateRect(window_, nullptr, FALSE); return 0;
     case WM_SETTINGCHANGE: caretPosition(); return 0;
     case WM_SETFOCUS: caretPosition(); if (focused) focused(); return 0;
     case WM_KILLFOCUS:
@@ -473,9 +531,9 @@ LRESULT Viewer::handle(UINT m, WPARAM a, LPARAM b) {
         const bool extend = (GetKeyState(VK_SHIFT) & 0x8000) && (!splitDiff() || after == after_);
         after_ = after;
         if (!extend) anchor_ = position(GET_X_LPARAM(b), GET_Y_LPARAM(b));
-        caret_ = position(GET_X_LPARAM(b), GET_Y_LPARAM(b)); selecting_ = true; SetCapture(window_); caretPosition(); InvalidateRect(window_, nullptr, FALSE); return 0;
+        caret_ = position(GET_X_LPARAM(b), GET_Y_LPARAM(b), &caretTrailing_); selecting_ = true; SetCapture(window_); caretPosition(); InvalidateRect(window_, nullptr, FALSE); return 0;
     }
-    case WM_MOUSEMOVE: if (selecting_) { caret_ = position(GET_X_LPARAM(b), GET_Y_LPARAM(b)); caretPosition(); InvalidateRect(window_, nullptr, FALSE); } return 0;
+    case WM_MOUSEMOVE: if (selecting_) { caret_ = position(GET_X_LPARAM(b), GET_Y_LPARAM(b), &caretTrailing_); caretPosition(); InvalidateRect(window_, nullptr, FALSE); } return 0;
     case WM_LBUTTONUP: if (selecting_) { selecting_ = false; ReleaseCapture(); } return 0;
     case WM_CAPTURECHANGED: selecting_ = false; return 0;
     case WM_MOUSEWHEEL: scroll(-GET_WHEEL_DELTA_WPARAM(a) / WHEEL_DELTA * 3, 0); return 0;
@@ -549,7 +607,7 @@ LRESULT Viewer::handle(UINT m, WPARAM a, LPARAM b) {
 }
 
 size_t poppy::Viewer::documentBytes() const {
-    size_t bytes = document_ ? document_->text.capacity() + document_->lines.capacity() * sizeof(uint32_t) + document_->states.capacity() * sizeof(LexState) : 0;
+    size_t bytes = textLayout_.bytes() + (document_ ? document_->text.capacity() + document_->lines.capacity() * sizeof(uint32_t) + document_->states.capacity() * sizeof(LexState) : 0);
     if (diff_) bytes += diff_->rows.capacity() * sizeof(DiffRow) + diff_->inlineOrder.capacity() * sizeof(uint32_t);
     return bytes;
 }

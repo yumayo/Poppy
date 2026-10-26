@@ -10,6 +10,8 @@ struct ViewState {
     int top = 0, left = 0;
     size_t anchor = 0, caret = 0;
     bool after = false;
+    // Byte offset of the top continuation within the logical line in top.
+    size_t wrapOffset = 0;
 };
 struct SavedTab {
     std::string path;

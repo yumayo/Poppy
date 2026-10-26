@@ -106,7 +106,8 @@ Poppyは、アプリ全体の状態とプロジェクトごとの状態を別々
 | `position` | `INTEGER PRIMARY KEY` | 0から始まるタブの順序 |
 | `path` | `TEXT` | ファイルの絶対パス |
 | `diff` | `INTEGER` | 差分表示なら `1`、通常表示なら `0` |
-| `file_top` | `INTEGER` | 通常表示の先頭表示行。0から始まる |
+| `file_top` | `INTEGER` | 通常表示の先頭にある元の行。0から始まる |
+| `file_wrap_offset` | `INTEGER` | 先頭の折り返し行の、元の行内でのUTF-8バイトオフセット |
 | `file_left` | `INTEGER` | 通常表示の横スクロール位置。文字セル単位 |
 | `file_anchor` | `INTEGER` | 通常表示の選択開始位置 |
 | `file_caret` | `INTEGER` | 通常表示の選択終了位置 |
@@ -169,7 +170,7 @@ Poppyは、アプリ全体の状態とプロジェクトごとの状態を別々
 
 ## 保存形式のバージョンと上限
 
-現在の形式は全体のデータベースが `PRAGMA user_version = 3`、プロジェクトのデータベースが `PRAGMA user_version = 8` です。未初期化のデータベースではテーブルを作成してバージョンを設定します。それぞれの対応バージョンより `user_version` が大きい場合は、そのデータベースの読み込み・保存を拒否し、形式を上書きしません。
+現在の形式は全体のデータベースが `PRAGMA user_version = 3`、プロジェクトのデータベースが `PRAGMA user_version = 9` です。未初期化のデータベースではテーブルを作成してバージョンを設定します。それぞれの対応バージョンより `user_version` が大きい場合は、そのデータベースの読み込み・保存を拒否し、形式を上書きしません。
 
 プロジェクトの旧形式（バージョン1）はトランザクション内で自動移行します。選択中の差分タブの形式を `session.diff_inline` に引き継ぎます。選択中のタブが通常表示の場合は先頭の差分タブの形式を使い、差分タブがなければSplit表示を使います。タブごとの `file_inline` と `diff_inline` は削除します。旧Split表示の行位置は元のパッチなしでは変換できないため、その差分の縦スクロール位置だけを先頭に戻します。その他のタブ状態とプロジェクト設定は引き継ぎます。
 
@@ -224,5 +225,7 @@ Windowsプロジェクトの識別キーと既存の保存先名は維持しま�
 ## Git比較タブ（プロジェクトDB version 8）
 
 version 7からの移行で`git_comparisons`を追加します。`position INTEGER PRIMARY KEY`は`tabs.position`に対応し、`kind INTEGER NOT NULL`は通常のF6比較（0）、Changes（1）、Staged Changes（2）、コミット（3）を表します。`revision TEXT NOT NULL`はコミットID、`all_changes INTEGER NOT NULL`は全ファイル比較のフラグです。`pane INTEGER NOT NULL`と`displayed INTEGER NOT NULL`で左右の所属と選択を保持します。同じパスを複数の比較対象やコミットで開くことができ、各比較の位置も独立して復元します。旧形式の`tab_groups`は通常タブの互換情報として残し、version 8では位置ごとの比較情報を優先します。
+
+version 9では`tabs.file_wrap_offset`を追加します。元の行番号と行内のバイト位置を保存し、ウィンドウ幅が変わっても対応する折り返し行へ復元します。旧形式からの移行時は`DEFAULT 0`として元の行の先頭を表示します。
 
 `session.git_sidebar`は0=EXPLORER、1=SOURCE CONTROL、2=BRANCHです。`git_collapsed.path`と`view_state.git_selected`はグループを区別する`staged:`または`changes:`を相対パスの前に付けて保存します。BRANCHのコミット・変更ファイルのツリーは必要時にGitから取得し、保存しません。
