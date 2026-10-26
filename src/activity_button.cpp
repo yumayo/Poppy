@@ -26,24 +26,8 @@ void ActivityButton::paint() {
     renderer_.fill(rect, selected_ || (mousePressed_ && hover_) || keyPressed_ ? panel : hover_ && enabled ? RGB(34, 39, 47) : background);
     const COLORREF color = !enabled ? border : selected_ ? foreground : muted;
     const int size = MulDiv(24, dpi_, 96), x = (rect.right - size) / 2, y = (rect.bottom - size) / 2;
-    auto px = [&](int value) { return x + MulDiv(value, dpi_, 96); };
-    auto py = [&](int value) { return y + MulDiv(value, dpi_, 96); };
-    const float stroke = static_cast<float>(std::max(1, MulDiv(2, dpi_, 96)));
-    auto line = [&](int x1, int y1, int x2, int y2) { renderer_.line(static_cast<float>(px(x1)), static_cast<float>(py(y1)), static_cast<float>(px(x2)), static_cast<float>(py(y2)), color, stroke); };
-    if (branch_) {
-        line(5, 5, 5, 19); line(5, 12, 12, 12); line(12, 12, 18, 6);
-        renderer_.ellipse({px(2), py(1), px(8), py(7)}, color, stroke);
-        renderer_.ellipse({px(15), py(1), px(21), py(7)}, color, stroke);
-        renderer_.ellipse({px(2), py(17), px(8), py(23)}, color, stroke);
-    } else if (git_) {
-        line(6, 6, 6, 18); line(18, 6, 18, 9); line(18, 9, 6, 15);
-        renderer_.ellipse({px(3), py(1), px(9), py(7)}, color, stroke);
-        renderer_.ellipse({px(15), py(1), px(21), py(7)}, color, stroke);
-        renderer_.ellipse({px(3), py(17), px(9), py(23)}, color, stroke);
-    } else {
-        line(6, 17, 2, 17); line(2, 17, 2, 2); line(2, 2, 15, 2); line(15, 2, 15, 5);
-        renderer_.outline({px(7), py(7), px(21), py(23)}, color, stroke);
-    }
+    renderer_.icon(branch_ ? Renderer::Icon::Branch : git_ ? Renderer::Icon::SourceControl : Renderer::Icon::Explorer,
+        {x, y, x + size, y + size}, color);
     if (selected_) renderer_.fill({0, MulDiv(8, dpi_, 96), MulDiv(3, dpi_, 96), rect.bottom - MulDiv(8, dpi_, 96)}, accent);
     if (enabled && GetFocus() == window_) { RECT focus = rect; InflateRect(&focus, -4, -4); renderer_.outline(focus, muted); }
 }

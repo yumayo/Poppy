@@ -1,6 +1,8 @@
 #include "render.h"
 #include <algorithm>
+#include <array>
 #include <cmath>
+#include <initializer_list>
 #include <limits>
 #include <stdexcept>
 
@@ -13,6 +15,8 @@ struct Factories {
     ComPtr<ID2D1Factory> drawing;
     ComPtr<IDWriteFactory> text;
     ComPtr<IDWriteTypography> typography;
+    ComPtr<ID2D1StrokeStyle> iconStroke;
+    std::array<ComPtr<ID2D1PathGeometry>, 4> icons;
     Factories() {
         check(D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, drawing.put()), "Direct2D initialization failed");
         check(DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory), reinterpret_cast<IUnknown**>(text.put())), "DirectWrite initialization failed");
@@ -20,6 +24,50 @@ struct Factories {
         // Code and terminal cells keep their own advances, including 'fi'/'fl'.
         check(typography->AddFontFeature({DWRITE_FONT_FEATURE_TAG_STANDARD_LIGATURES, 0}), "DirectWrite typography setup failed");
         check(typography->AddFontFeature({DWRITE_FONT_FEATURE_TAG_CONTEXTUAL_LIGATURES, 0}), "DirectWrite typography setup failed");
+        auto stroke = D2D1::StrokeStyleProperties();
+        stroke.startCap = stroke.endCap = D2D1_CAP_STYLE_ROUND;
+        stroke.lineJoin = D2D1_LINE_JOIN_ROUND;
+        check(drawing->CreateStrokeStyle(stroke, nullptr, 0, iconStroke.put()), "Icon stroke creation failed");
+        for (size_t i = 0; i < icons.size(); ++i) {
+            check(drawing->CreatePathGeometry(icons[i].put()), "Icon geometry creation failed");
+            ComPtr<ID2D1GeometrySink> sink;
+            check(icons[i]->Open(sink.put()), "Icon geometry setup failed");
+            const auto path = [&](std::initializer_list<D2D1_POINT_2F> points, bool closed = false) {
+                auto point = points.begin(); sink->BeginFigure(*point++, D2D1_FIGURE_BEGIN_HOLLOW);
+                for (; point != points.end(); ++point) sink->AddLine(*point);
+                sink->EndFigure(closed ? D2D1_FIGURE_END_CLOSED : D2D1_FIGURE_END_OPEN);
+            };
+            const auto circle = [&](float x, float y) {
+                constexpr float radius = 2.75f;
+                sink->BeginFigure({x - radius, y}, D2D1_FIGURE_BEGIN_HOLLOW);
+                for (const float side : {1.0f, -1.0f})
+                    sink->AddArc(D2D1::ArcSegment({x + side * radius, y}, {radius, radius}, 0.0f, D2D1_SWEEP_DIRECTION_CLOCKWISE, D2D1_ARC_SIZE_SMALL));
+                sink->EndFigure(D2D1_FIGURE_END_CLOSED);
+            };
+            switch (static_cast<Renderer::Icon>(i)) {
+            case Renderer::Icon::Explorer:
+                path({{6, 18}, {3, 18}, {3, 3}, {16, 3}, {16, 5}});
+                path({{8, 8}, {16, 8}, {21, 13}, {21, 22}, {8, 22}}, true);
+                path({{16, 8}, {16, 13}, {21, 13}});
+                break;
+            case Renderer::Icon::SourceControl:
+                path({{6, 7}, {6, 17}}); path({{18, 7}, {18, 9}, {6, 15}});
+                circle(6, 4); circle(18, 4); circle(6, 20);
+                break;
+            case Renderer::Icon::Branch:
+                path({{5, 7}, {5, 17}}); path({{5, 12}, {11, 12}, {18, 7}});
+                circle(5, 4); circle(18, 4); circle(5, 20);
+                break;
+            case Renderer::Icon::OpenAllChanges:
+                path({{7, 4}, {7, 2}, {20, 2}, {20, 18}, {18, 18}});
+                path({{3, 6}, {12, 6}, {16, 10}, {16, 22}, {3, 22}}, true);
+                path({{12, 6}, {12, 10}, {16, 10}});
+                path({{6, 12}, {10, 12}});
+                path({{8, 15}, {8, 19}}); path({{6, 17}, {10, 17}});
+                break;
+            }
+            check(sink->Close(), "Icon geometry completion failed");
+        }
     }
 };
 Factories& factories() { static Factories value; return value; }
@@ -126,7 +174,7 @@ bool Renderer::prepare(HRESULT result) {
     if (SUCCEEDED(result) && !brush_) result = target_->CreateSolidColorBrush(D2D1::ColorF(0.0f, 0.0f, 0.0f), brush_.put());
     if (FAILED(result)) { discard(); return false; }
     target_->SetTransform(D2D1::Matrix3x2F::Identity());
-    target_->SetAntialiasMode(D2D1_ANTIALIAS_MODE_ALIASED);
+    target_->SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
     target_->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE);
     target_->BeginDraw(); return true;
 }
@@ -259,6 +307,18 @@ void Renderer::ellipse(const RECT& rect, COLORREF value, float width) {
 void Renderer::outline(const RECT& rect, COLORREF value, float width) {
     if (empty(rect)) return;
     color(value); target_->DrawRectangle(rectangle(rect), brush_.get(), width);
+}
+void Renderer::icon(Icon icon, const RECT& rect, COLORREF value) {
+    if (empty(rect)) return;
+    const float size = static_cast<float>(std::min(rect.right - rect.left, rect.bottom - rect.top));
+    const float scale = size / 24.0f;
+    const float x = (rect.left + rect.right - size) / 2.0f, y = (rect.top + rect.bottom - size) / 2.0f;
+    D2D1::Matrix3x2F previous; target_->GetTransform(&previous);
+    target_->SetTransform(D2D1::Matrix3x2F::Scale(scale, scale) * D2D1::Matrix3x2F::Translation(x, y) * previous);
+    color(value);
+    auto& resources = factories();
+    target_->DrawGeometry(resources.icons[static_cast<size_t>(icon)].get(), brush_.get(), 1.6f, resources.iconStroke.get());
+    target_->SetTransform(previous);
 }
 }
 

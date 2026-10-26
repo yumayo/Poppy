@@ -96,6 +96,36 @@ void colorsAndClipping() {
     check(other.pixel(0, 0) == accent && other.pixel(511, 127) == accent, "A replacement WIC bitmap was not rendered");
     check(bitmap.pixel(0, 0) == untouched, "Switching WIC targets changed the old bitmap");
 }
+void smoothIcons() {
+    Renderer renderer; Bitmap bitmap;
+    for (const UINT dpi : {96u, 120u, 144u, 192u}) {
+        renderer.setDpi(dpi);
+        check(renderer.begin(bitmap.bitmap.get()), "Could not create the icon test target");
+        renderer.fill(bitmap.bounds(), RGB(0, 0, 0));
+        const int size = MulDiv(24, dpi, 96);
+        const std::vector<Renderer::Icon> icons{Renderer::Icon::Explorer, Renderer::Icon::SourceControl, Renderer::Icon::Branch, Renderer::Icon::OpenAllChanges};
+        for (size_t i = 0; i < icons.size(); ++i) {
+            const int x = 8 + static_cast<int>(i) * 100;
+            renderer.icon(icons[i], {x, 8, x + size, 8 + size}, RGB(255, 255, 255));
+        }
+        // Icon transforms must not leak into subsequent panel/cell fills.
+        renderer.fill({440, 8, 460, 28}, accent);
+        finish(renderer); bitmap.read();
+        for (size_t i = 0; i < icons.size(); ++i) {
+            const int first = 8 + static_cast<int>(i) * 100;
+            bool ink = false, blendedEdge = false;
+            for (int y = 7; y <= 8 + size; ++y) for (int x = first - 1; x <= first + size; ++x) {
+                const auto pixel = bitmap.pixel(x, y);
+                ink = ink || pixel != RGB(0, 0, 0);
+                blendedEdge = blendedEdge || (pixel != RGB(0, 0, 0) && pixel != RGB(255, 255, 255));
+            }
+            check(ink && blendedEdge, "A vector icon is missing or has jagged, unblended edges");
+        }
+        for (int y = 7; y < 29; ++y) for (int x = 439; x < 461; ++x)
+            check(bitmap.pixel(x, y) == (x >= 440 && x < 460 && y >= 8 && y < 28 ? accent : RGB(0, 0, 0)),
+                "Icon scaling changed a subsequent fill or blurred an integer-aligned panel edge");
+    }
+}
 void windowTargets() {
     HWND window = CreateWindowExW(0, L"STATIC", L"Poppy render test", WS_POPUP, 0, 0, 320, 200, nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
     check(window != nullptr, "Could not create a hidden render-test window");
@@ -465,7 +495,7 @@ int main() {
     int result = 0;
     try {
         initializeRendering();
-        cellPositions(); colorsAndClipping(); windowTargets(); editorCaret(); continuousViewerScrolling(); themedScrollbars(); quickOpenStability();
+        cellPositions(); colorsAndClipping(); smoothIcons(); windowTargets(); editorCaret(); continuousViewerScrolling(); themedScrollbars(); quickOpenStability();
         std::cout << "Direct2D rendering tests passed\n";
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; result = 1; }
     if (SUCCEEDED(com)) CoUninitialize();

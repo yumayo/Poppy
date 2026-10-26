@@ -267,10 +267,11 @@ void ProjectRuntime::Impl::create() {
     explorer_.create(window_, instance_, L"Files", 1); tree_ = explorer_.window();
     changes_.create(window_, instance_, L"Git changes", 4); gitTree_ = changes_.window();
     branches_.create(window_, instance_, L"Branches", 6); branchTree_ = branches_.window();
+    branches_.hoverActionsOnly = true;
     branches_.removed = [](uintptr_t data) { delete reinterpret_cast<HistoryNode*>(data); };
     branches_.expanded = [this](TreeItem item, bool expanded) { if (expanded) requestHistory(item); };
     branches_.activated = [this](TreeItem item) { openHistory(item); };
-    branches_.actionText = [this](TreeItem item) { const auto n = historyNode(item); return n && n->kind == HistoryKind::Commit ? L"Open All Changes" : L""; };
+    branches_.actionLabel = [this](TreeItem item) { const auto n = historyNode(item); return n && n->kind == HistoryKind::Commit ? L"Open All Changes" : L""; };
     branches_.actionClicked = [this](TreeItem item) { const auto n = historyNode(item); if (n && n->kind == HistoryKind::Commit && git_) openGitDiff(git_->root, GitDiffKind::Commit, n->revision, true); };
     explorer_.activated = [this](TreeItem item) {
         pendingTreeSelection_.clear();
@@ -288,7 +289,7 @@ void ProjectRuntime::Impl::create() {
     explorer_.canOpenWithDefaultApp = [this](TreeItem item) { const auto n = node(item); return n && !n->directory && !n->unsupported && !root_.wsl(); };
     explorer_.openWithDefaultAppRequested = [this](TreeItem item) { if (const auto n = node(item); n && !n->directory) openWithDefaultApp(n->path); };
     changes_.activated = [this](TreeItem item) { openGitFile(item); };
-    changes_.actionText = [this](TreeItem item) {
+    changes_.actionLabel = [this](TreeItem item) {
         const auto n = changes_.item(item);
         return n && n->data < gitChangeNodes_.size() && gitChangeNodes_[n->data].group && changes_.child(item) ? L"Open All Changes" : L"";
     };
@@ -508,8 +509,6 @@ void ProjectRuntime::Impl::paint() {
     }
 }
 void ProjectRuntime::Impl::selectSidebar(Sidebar sidebar) {
-    // Leave room for the commit subject beside its row action on first use.
-    if (sidebar == Sidebar::Branch && sidebar_ == ProjectSession{}.sidebar) sidebar_ = 420;
     activeSidebar_ = sidebar; layout();
     explorerActivity_.select(sidebar == Sidebar::Explorer); gitActivity_.select(sidebar == Sidebar::Git); branchActivity_.select(sidebar == Sidebar::Branch);
     if (sidebar == Sidebar::Branch) refreshBranches();
