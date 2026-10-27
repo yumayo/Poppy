@@ -965,6 +965,13 @@ void treeInteractionTests(const fs::path& executable) {
     send(tree, WM_HSCROLL, SB_BOTTOM);
     check(scrollInfo(tree, SB_HORZ).nPos > 0, "The tree did not scroll horizontally");
     send(tree, WM_HSCROLL, SB_TOP); send(tree, WM_KEYDOWN, VK_HOME);
+    const int top = scrollInfo(tree).nPos;
+    UINT characters = 3; SystemParametersInfoW(SPI_GETWHEELSCROLLCHARS, 0, &characters, 0);
+    send(tree, WM_MOUSEWHEEL, MAKEWPARAM(MK_SHIFT, static_cast<WORD>(-WHEEL_DELTA)));
+    check(scrollInfo(tree).nPos == top && (!characters || scrollInfo(tree, SB_HORZ).nPos > 0),
+        "Shift+wheel did not scroll long tree labels horizontally while preserving the vertical position");
+    send(tree, WM_MOUSEWHEEL, MAKEWPARAM(MK_SHIFT, WHEEL_DELTA));
+    check(scrollInfo(tree, SB_HORZ).nPos == 0 && scrollInfo(tree).nPos == top, "Shift+wheel up did not return the tree left");
     const int row = static_cast<int>(send(tree, treeGetRow, directory)), height = static_cast<int>(send(tree, treeGetRowHeight));
     const int arrowX = MulDiv(27, GetDpiForWindow(app.window), 96), y = row * height + height / 2;
     click(tree, arrowX, y);

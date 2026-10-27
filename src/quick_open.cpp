@@ -294,10 +294,12 @@ LRESULT QuickOpen::handle(UINT message, WPARAM a, LPARAM b) {
         return 0;
     }
     case WM_MOUSEWHEEL:
+        if (GET_KEYSTATE_WPARAM(a) & MK_SHIFT) return 0;
         wheel_ += GET_WHEEL_DELTA_WPARAM(a);
         while (wheel_ >= WHEEL_DELTA) { move(-3); wheel_ -= WHEEL_DELTA; }
         while (wheel_ <= -WHEEL_DELTA) { move(3); wheel_ += WHEEL_DELTA; }
         return 0;
+    case WM_MOUSEHWHEEL: return 0;
     case WM_IME_STARTCOMPOSITION: composing_ = true; imePosition(); InvalidateRect(window_, nullptr, FALSE); break;
     case WM_IME_ENDCOMPOSITION: composing_ = false; caretChanged(); break;
     case WM_IME_COMPOSITION:
