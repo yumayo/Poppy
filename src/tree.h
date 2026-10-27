@@ -58,6 +58,9 @@ public:
     std::function<std::wstring(TreeItem)> tertiaryActionLabel;
     std::function<Renderer::Icon(TreeItem)> tertiaryActionIcon;
     std::function<void(TreeItem)> tertiaryActionClicked;
+    std::function<std::wstring(TreeItem)> quaternaryActionLabel;
+    std::function<Renderer::Icon(TreeItem)> quaternaryActionIcon;
+    std::function<void(TreeItem)> quaternaryActionClicked;
     bool hoverActionsOnly = false;
 private:
     static LRESULT CALLBACK procedure(HWND, UINT, WPARAM, LPARAM);

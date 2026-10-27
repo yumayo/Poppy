@@ -87,6 +87,19 @@ std::vector<std::string> gitStageAllArguments() {
 std::vector<std::string> gitUnstageAllArguments() {
     return {"git.exe", "--literal-pathspecs", "--no-optional-locks", "reset", "--quiet", "--"};
 }
+std::vector<std::string> gitStashUnstagedArguments(const std::vector<GitStatusEntry>& entries) {
+    if (std::any_of(entries.begin(), entries.end(), [](const GitStatusEntry& entry) { return entry.conflicted(); }))
+        throw std::invalid_argument("Resolve merge conflicts before stashing unstaged changes.");
+    // Git stash omits the worktree deletion of a newly staged addition from
+    // its snapshot. Refuse it before Git can silently discard that state.
+    if (std::any_of(entries.begin(), entries.end(), [](const GitStatusEntry& entry) { return entry.index == 'A' && entry.worktree == 'D'; }))
+        throw std::invalid_argument("Unstage newly added files deleted from the working tree before stashing.");
+    if (std::none_of(entries.begin(), entries.end(), [](const GitStatusEntry& entry) { return entry.changed(); })) return {};
+    // No caller-supplied pathspecs. --literal-pathspecs would also affect
+    // stash's internal checkout of :/ and prevent restoring the kept index.
+    return {"git.exe", "--no-optional-locks", "-c", "submodule.recurse=false",
+        "stash", "push", "--keep-index", "--include-untracked", "--message", "Poppy: unstaged changes", "--"};
+}
 std::vector<std::vector<std::string>> gitDiscardAllArguments(const std::vector<GitStatusEntry>& entries) {
     if (std::any_of(entries.begin(), entries.end(), [](const GitStatusEntry& entry) { return entry.conflicted(); }))
         throw std::invalid_argument("Resolve merge conflicts before discarding all changes.");

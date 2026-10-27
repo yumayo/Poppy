@@ -104,13 +104,13 @@ void smoothIcons() {
         renderer.fill(bitmap.bounds(), RGB(0, 0, 0));
         const int size = MulDiv(24, dpi, 96);
         const std::vector<Renderer::Icon> icons{Renderer::Icon::Explorer, Renderer::Icon::SourceControl, Renderer::Icon::Branch,
-            Renderer::Icon::OpenAllChanges, Renderer::Icon::StageChanges, Renderer::Icon::UnstageChanges, Renderer::Icon::DiscardChanges};
+            Renderer::Icon::OpenAllChanges, Renderer::Icon::StageChanges, Renderer::Icon::UnstageChanges, Renderer::Icon::DiscardChanges, Renderer::Icon::StashChanges};
         for (size_t i = 0; i < icons.size(); ++i) {
             const int x = 8 + static_cast<int>(i) * 64;
             renderer.icon(icons[i], {x, 8, x + size, 8 + size}, RGB(255, 255, 255));
         }
         // Icon transforms must not leak into subsequent panel/cell fills.
-        renderer.fill({440, 8, 460, 28}, accent);
+        renderer.fill({440, 80, 460, 100}, accent);
         finish(renderer); bitmap.read();
         for (size_t i = 0; i < icons.size(); ++i) {
             const int first = 8 + static_cast<int>(i) * 64;
@@ -122,8 +122,8 @@ void smoothIcons() {
             }
             check(ink && blendedEdge, "A vector icon is missing or has jagged, unblended edges");
         }
-        for (int y = 7; y < 29; ++y) for (int x = 439; x < 461; ++x)
-            check(bitmap.pixel(x, y) == (x >= 440 && x < 460 && y >= 8 && y < 28 ? accent : RGB(0, 0, 0)),
+        for (int y = 79; y < 101; ++y) for (int x = 439; x < 461; ++x)
+            check(bitmap.pixel(x, y) == (x >= 440 && x < 460 && y >= 80 && y < 100 ? accent : RGB(0, 0, 0)),
                 "Icon scaling changed a subsequent fill or blurred an integer-aligned panel edge");
     }
 }
