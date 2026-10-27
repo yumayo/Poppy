@@ -24,7 +24,7 @@ private:
     void notify(HWND window, UINT code);
     void cancel(HWND window);
     Hit hot_, pressed_;
-    int dragOffset_ = 0, trackPosition_ = 0;
+    int dragOffset_ = 0, trackPosition_ = 0, horizontalWheel_ = 0;
     static constexpr UINT_PTR repeatTimer = 0x5053;
 };
 }

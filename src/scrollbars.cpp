@@ -1,6 +1,7 @@
 #include "scrollbars.h"
 #include <algorithm>
 #include <cstdint>
+#include <cstdlib>
 
 namespace poppy {
 RECT Scrollbars::contentRect(HWND window) {
@@ -99,6 +100,26 @@ void Scrollbars::cancel(HWND window) {
 bool Scrollbars::handle(HWND window, UINT message, WPARAM a, LPARAM b, LRESULT& result) {
     result = 0;
     switch (message) {
+    case WM_MOUSEWHEEL:
+        if (!(GET_KEYSTATE_WPARAM(a) & MK_SHIFT)) break;
+        [[fallthrough]];
+    case WM_MOUSEHWHEEL: {
+        // Shift+wheel up moves left; native horizontal wheel deltas point right.
+        // Consume horizontal input even when this pane has no horizontal range.
+        if (!(GetWindowLongPtrW(window, GWL_STYLE) & WS_HSCROLL)) { horizontalWheel_ = 0; return true; }
+        horizontalWheel_ += (message == WM_MOUSEWHEEL ? -1 : 1) * GET_WHEEL_DELTA_WPARAM(a);
+        const int steps = horizontalWheel_ / WHEEL_DELTA; horizontalWheel_ %= WHEEL_DELTA;
+        UINT characters = 3; SystemParametersInfoW(SPI_GETWHEELSCROLLCHARS, 0, &characters, 0);
+        const bool pages = characters == WHEEL_PAGESCROLL;
+        const UINT code = pages ? (steps < 0 ? SB_PAGELEFT : SB_PAGERIGHT) : (steps < 0 ? SB_LINELEFT : SB_LINERIGHT);
+        for (int step = 0; step < std::abs(steps); ++step)
+            for (UINT unit = 0; unit < (pages ? 1u : characters); ++unit) {
+                const int before = GetScrollPos(window, SB_HORZ);
+                SendMessageW(window, WM_HSCROLL, code, 0);
+                if (GetScrollPos(window, SB_HORZ) == before) return true;
+            }
+        return true;
+    }
     // These borderless panes use the full client area. Suppress the native
     // nonclient bars while retaining SetScrollInfo/GetScrollInfo and WS_*SCROLL.
     case WM_NCCALCSIZE: case WM_NCPAINT: return true;

@@ -504,6 +504,41 @@ struct ViewerPaintWatch {
         return result;
     }
 };
+void horizontalWheelScrolling() {
+    ScrollbarWindow pane;
+    const auto wheel = [&](UINT message, int delta, WORD keys = 0) {
+        SendMessageW(pane.window, message, MAKEWPARAM(keys, static_cast<WORD>(delta)), 0);
+    };
+    const auto left = [&] { return ScrollbarWindow::info(pane.window, SB_HORZ).nPos; };
+    UINT characters = 3; SystemParametersInfoW(SPI_GETWHEELSCROLLCHARS, 0, &characters, 0);
+    const int distance = characters == WHEEL_PAGESCROLL ? 100 : static_cast<int>(std::min(characters, 999900u));
+    wheel(WM_MOUSEWHEEL, -WHEEL_DELTA / 2, MK_SHIFT);
+    check(left() == 0, "A partial horizontal wheel tick moved before reaching its threshold");
+    LRESULT result = 0;
+    check(!pane.bars.handle(pane.window, WM_MOUSEWHEEL, MAKEWPARAM(0, static_cast<WORD>(-WHEEL_DELTA)), 0, result),
+        "Horizontal wheel handling consumed an ordinary vertical wheel event");
+    wheel(WM_MOUSEWHEEL, -WHEEL_DELTA / 2, MK_SHIFT);
+    check(left() == distance && ScrollbarWindow::info(pane.window, SB_VERT).nPos == 0,
+        "Shift+wheel did not accumulate partial ticks independently or changed the vertical position");
+    wheel(WM_MOUSEWHEEL, WHEEL_DELTA, MK_SHIFT);
+    check(left() == 0, "Shift+wheel up did not move left");
+    wheel(WM_MOUSEHWHEEL, WHEEL_DELTA);
+    check(left() == distance, "A native horizontal wheel tick did not move right");
+    wheel(WM_MOUSEHWHEEL, -WHEEL_DELTA);
+    check(left() == 0, "A native horizontal wheel tick did not move left");
+    wheel(WM_MOUSEWHEEL, WHEEL_DELTA, MK_SHIFT);
+    check(left() == 0, "Horizontal wheel input escaped the left boundary");
+    SCROLLINFO value{sizeof(value), SIF_POS, 0, 0, 0, 999900, 0};
+    SetScrollInfo(pane.window, SB_HORZ, &value, FALSE);
+    wheel(WM_MOUSEWHEEL, -WHEEL_DELTA, MK_SHIFT);
+    check(left() == 999900, "Horizontal wheel input escaped the right boundary");
+    value = {sizeof(value), SIF_RANGE | SIF_PAGE | SIF_POS, 0, 0, 1, 0, 0};
+    SetScrollInfo(pane.window, SB_HORZ, &value, FALSE);
+    check(pane.bars.handle(pane.window, WM_MOUSEWHEEL, MAKEWPARAM(MK_SHIFT, static_cast<WORD>(-WHEEL_DELTA)), 0, result)
+        && pane.bars.handle(pane.window, WM_MOUSEHWHEEL, MAKEWPARAM(0, WHEEL_DELTA), 0, result)
+        && ScrollbarWindow::info(pane.window, SB_VERT).nPos == 0,
+        "A pane without horizontal overflow did not consume horizontal input");
+}
 void continuousViewerScrolling() {
     Viewer viewer;
     const HWND parent = CreateWindowExW(0, L"STATIC", L"Continuous scrolling test", WS_POPUP | WS_CLIPCHILDREN,
@@ -557,6 +592,24 @@ void continuousViewerScrolling() {
         SendMessageW(window, WM_MOUSEWHEEL, MAKEWPARAM(0, static_cast<WORD>(-WHEEL_DELTA)), 0);
         checkPaint(paints);
     }
+    viewer.restore({}); UpdateWindow(window);
+    SendMessageW(window, WM_MOUSEWHEEL, MAKEWPARAM(MK_SHIFT, static_cast<WORD>(-WHEEL_DELTA / 2)), 0);
+    check(viewer.state().left == 0 && viewer.state().top == 0, "A partial Shift+wheel tick moved the viewer");
+    SendMessageW(window, WM_MOUSEWHEEL, MAKEWPARAM(0, static_cast<WORD>(-WHEEL_DELTA)), 0);
+    const auto top = viewer.state().top;
+    const auto paints = observed.paints;
+    SendMessageW(window, WM_MOUSEWHEEL, MAKEWPARAM(MK_SHIFT, static_cast<WORD>(-WHEEL_DELTA / 2)), 0);
+    UINT characters = 3; SystemParametersInfoW(SPI_GETWHEELSCROLLCHARS, 0, &characters, 0);
+    check(viewer.state().top == top, "Shift+wheel changed the viewer's vertical position");
+    if (characters) {
+        check(viewer.state().left > 0, "Shift+wheel down did not move the viewer right"); checkPaint(paints);
+        SendMessageW(window, WM_MOUSEWHEEL, MAKEWPARAM(MK_SHIFT, WHEEL_DELTA), 0);
+        check(viewer.state().left == 0 && viewer.state().top == top, "Shift+wheel up did not return the viewer left");
+    }
+    viewer.setWordWrap(true);
+    const auto wrappedTop = viewer.state().top;
+    SendMessageW(window, WM_MOUSEWHEEL, MAKEWPARAM(MK_SHIFT, static_cast<WORD>(-WHEEL_DELTA)), 0);
+    check(viewer.state().left == 0 && viewer.state().top == wrappedTop, "Shift+wheel scrolled a wrapped viewer vertically");
 }
 void themedScrollbars() {
     ScrollbarWindow pane;
@@ -700,6 +753,8 @@ void quickOpenStability() {
     check(palette.visible(), "An empty result closed quick open");
     SendMessageW(palette.window(), WM_KEYDOWN, VK_BACK, 0);
     SendMessageW(palette.window(), WM_KEYDOWN, VK_DOWN, 0);
+    SendMessageW(palette.window(), WM_MOUSEWHEEL, MAKEWPARAM(MK_SHIFT, static_cast<WORD>(-WHEEL_DELTA)), 0);
+    SendMessageW(palette.window(), WM_MOUSEHWHEEL, MAKEWPARAM(0, WHEEL_DELTA), 0);
     observed.allowClose = true;
     check(accept() && opened == files.root / L"beta.txt", "Quick open lost keyboard selection after clearing the query");
     check(!observed.geometryChanges && !observed.unexpectedHides, "Typing or completing a search resized or hid quick open");
@@ -710,7 +765,7 @@ int main() {
     int result = 0;
     try {
         initializeRendering();
-        cellPositions(); colorsAndClipping(); smoothIcons(); windowTargets(); editorCaret(); editorWrapping(); diffWrapping(); documentFind(); continuousViewerScrolling(); themedScrollbars(); quickOpenStability();
+        cellPositions(); colorsAndClipping(); smoothIcons(); windowTargets(); editorCaret(); editorWrapping(); diffWrapping(); documentFind(); horizontalWheelScrolling(); continuousViewerScrolling(); themedScrollbars(); quickOpenStability();
         std::cout << "Direct2D rendering tests passed\n";
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; result = 1; }
     if (SUCCEEDED(com)) CoUninitialize();
