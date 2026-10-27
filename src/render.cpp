@@ -16,7 +16,7 @@ struct Factories {
     ComPtr<IDWriteFactory> text;
     ComPtr<IDWriteTypography> typography;
     ComPtr<ID2D1StrokeStyle> iconStroke;
-    std::array<ComPtr<ID2D1PathGeometry>, 8> icons;
+    std::array<ComPtr<ID2D1PathGeometry>, 9> icons;
     Factories() {
         check(D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, drawing.put()), "Direct2D initialization failed");
         check(DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory), reinterpret_cast<IUnknown**>(text.put())), "DirectWrite initialization failed");
@@ -82,6 +82,11 @@ struct Factories {
             case Renderer::Icon::DiscardChanges:
                 path({{8, 4}, {3, 9}, {8, 14}});
                 path({{3, 9}, {15, 9}, {20, 13}, {20, 17}, {16, 21}, {9, 21}});
+                break;
+            case Renderer::Icon::StashChanges:
+                path({{3, 13}, {3, 21}, {21, 21}, {21, 13}, {16, 13}, {16, 16}, {8, 16}, {8, 13}}, true);
+                path({{12, 3}, {12, 12}});
+                path({{8, 8}, {12, 12}, {16, 8}});
                 break;
             }
             check(sink->Close(), "Icon geometry completion failed");

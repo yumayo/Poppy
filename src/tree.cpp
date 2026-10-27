@@ -12,7 +12,7 @@ void Tree::create(HWND parent, HINSTANCE instance, const wchar_t* title, int id)
         0, 0, 0, 0, parent, reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), instance, this);
     actionTips_ = CreateWindowExW(WS_EX_TOPMOST, TOOLTIPS_CLASSW, nullptr, WS_POPUP | TTS_ALWAYSTIP | TTS_NOPREFIX,
         CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, window_, nullptr, instance, nullptr);
-    for (const UINT_PTR id : {1, 2, 3}) {
+    for (const UINT_PTR id : {1, 2, 3, 4}) {
         TOOLINFOW tip{}; tip.cbSize = sizeof(tip); tip.uFlags = TTF_SUBCLASS; tip.hwnd = window_; tip.uId = id; tip.lpszText = LPSTR_TEXTCALLBACKW;
         SendMessageW(actionTips_, TTM_ADDTOOLW, 0, reinterpret_cast<LPARAM>(&tip));
     }
@@ -89,7 +89,8 @@ void Tree::layout() {
         if (found == widths_.end()) found = widths_.emplace(row.item, renderer_.textWidth(item(row.item)->text)).first;
         const int actionWidth = (actionLabel && !actionLabel(row.item).empty() ? MulDiv(34, dpi_, 96) : 0) +
             (secondaryActionLabel && !secondaryActionLabel(row.item).empty() ? MulDiv(28, dpi_, 96) : 0) +
-            (tertiaryActionLabel && !tertiaryActionLabel(row.item).empty() ? MulDiv(28, dpi_, 96) : 0);
+            (tertiaryActionLabel && !tertiaryActionLabel(row.item).empty() ? MulDiv(28, dpi_, 96) : 0) +
+            (quaternaryActionLabel && !quaternaryActionLabel(row.item).empty() ? MulDiv(28, dpi_, 96) : 0);
         extent = std::max(extent, static_cast<int>(row.depth + 1) * indent_ + found->second + MulDiv(12, dpi_, 96) + actionWidth);
     }
     // Each bar can change the space available to the other.
@@ -153,7 +154,7 @@ LRESULT CALLBACK Tree::renameProcedure(HWND window, UINT message, WPARAM a, LPAR
 }
 void Tree::scroll(int vertical, int horizontal) { top_ += vertical; left_ += horizontal; changed(); }
 const std::function<std::wstring(TreeItem)>& Tree::actionLabelFor(unsigned slot) const {
-    return slot == 2 ? tertiaryActionLabel : slot == 1 ? secondaryActionLabel : actionLabel;
+    return slot == 3 ? quaternaryActionLabel : slot == 2 ? tertiaryActionLabel : slot == 1 ? secondaryActionLabel : actionLabel;
 }
 RECT Tree::actionBounds(TreeItem id, unsigned slot) const {
     const auto& label = actionLabelFor(slot);
@@ -176,7 +177,7 @@ void Tree::hover(POINT point) {
         SendMessageW(actionTips_, TTM_POP, 0, 0);
         InvalidateRect(window_, nullptr, FALSE);
     }
-    for (const unsigned slot : {0u, 1u, 2u}) {
+    for (const unsigned slot : {0u, 1u, 2u, 3u}) {
         TOOLINFOW tip{}; tip.cbSize = sizeof(tip); tip.hwnd = window_; tip.uId = slot + 1;
         tip.rect = actionVisible(id, slot) ? actionBounds(id, slot) : RECT{};
         SendMessageW(actionTips_, TTM_NEWTOOLRECTW, 0, reinterpret_cast<LPARAM>(&tip));
@@ -209,17 +210,17 @@ void Tree::paint() {
             }
         }
         RECT action{};
-        for (const unsigned slot : {0u, 1u, 2u}) {
+        for (const unsigned slot : {0u, 1u, 2u, 3u}) {
             const auto bounds = actionBounds(row.item, slot);
             if (bounds.right) action = bounds;
         }
         renderer_.label({x + indent_ + padding, y, action.right ? action.left - padding : std::max<LONG>(r.right, x + indent_ + widths_[row.item] + padding), y + rowHeight_},
             node->text, node->color, DT_LEFT | DT_VCENTER | DT_SINGLELINE | (action.right ? DT_END_ELLIPSIS : 0));
-        for (const unsigned slot : {0u, 1u, 2u}) if (actionVisible(row.item, slot)) {
+        for (const unsigned slot : {0u, 1u, 2u, 3u}) if (actionVisible(row.item, slot)) {
             const auto bounds = actionBounds(row.item, slot);
             renderer_.fill(bounds, hotItem_ == row.item ? RGB(50, 70, 94) : background);
             RECT icon = bounds; InflateRect(&icon, -MulDiv(3, dpi_, 96), -MulDiv(3, dpi_, 96));
-            const auto& actionIconFor = slot == 2 ? tertiaryActionIcon : slot == 1 ? secondaryActionIcon : actionIcon;
+            const auto& actionIconFor = slot == 3 ? quaternaryActionIcon : slot == 2 ? tertiaryActionIcon : slot == 1 ? secondaryActionIcon : actionIcon;
             renderer_.icon(actionIconFor ? actionIconFor(row.item) : Renderer::Icon::OpenAllChanges, icon, accent);
         }
     }
@@ -244,7 +245,7 @@ LRESULT Tree::handle(UINT m, WPARAM a, LPARAM b) {
         if (LOWORD(b) == HTCLIENT) {
             POINT point{}; GetCursorPos(&point); ScreenToClient(window_, &point);
             const auto id = hit(point.y);
-            for (const unsigned slot : {0u, 1u, 2u}) {
+            for (const unsigned slot : {0u, 1u, 2u, 3u}) {
                 const auto action = actionVisible(id, slot) ? actionBounds(id, slot) : RECT{};
                 if (PtInRect(&action, point)) { SetCursor(LoadCursorW(nullptr, IDC_HAND)); return TRUE; }
             }
@@ -302,11 +303,11 @@ LRESULT Tree::handle(UINT m, WPARAM a, LPARAM b) {
         SetFocus(window_);
         hover({GET_X_LPARAM(b), GET_Y_LPARAM(b)});
         const auto id = hit(GET_Y_LPARAM(b)); if (!id) return 0;
-        for (const unsigned slot : {0u, 1u, 2u}) {
+        for (const unsigned slot : {0u, 1u, 2u, 3u}) {
             const auto action = actionBounds(id, slot);
             if (actionVisible(id, slot) && PtInRect(&action, {GET_X_LPARAM(b), GET_Y_LPARAM(b)})) {
                 SendMessageW(actionTips_, TTM_POP, 0, 0); select(id, false);
-                const auto& clicked = slot == 2 ? tertiaryActionClicked : slot == 1 ? secondaryActionClicked : actionClicked;
+                const auto& clicked = slot == 3 ? quaternaryActionClicked : slot == 2 ? tertiaryActionClicked : slot == 1 ? secondaryActionClicked : actionClicked;
                 if (clicked) clicked(id);
                 return 0;
             }
@@ -319,7 +320,7 @@ LRESULT Tree::handle(UINT m, WPARAM a, LPARAM b) {
     }
     case WM_LBUTTONDBLCLK: {
         const auto id = hit(GET_Y_LPARAM(b));
-        for (const unsigned slot : {0u, 1u, 2u}) {
+        for (const unsigned slot : {0u, 1u, 2u, 3u}) {
             const auto action = actionBounds(id, slot);
             if (PtInRect(&action, {GET_X_LPARAM(b), GET_Y_LPARAM(b)})) return 0;
         }

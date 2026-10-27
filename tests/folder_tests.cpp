@@ -1284,6 +1284,28 @@ void branchSidebarTests(const fs::path& executable) {
               "Discard did not restore the staged text or removed ignored files");
         GetWindowTextW(GetDlgItem(app.window, 3), badge, 128);
         check(std::wstring(badge) == L"Source Control (1)", "Discard did not update the badge");
+        write(L"src/file.txt", "stash working\n"); write(L"stash 日本語.txt", "stash untracked\n");
+        waitFor([&] {
+            const auto first = nextItem(changes, TreeRelation::Root), second = nextItem(changes, TreeRelation::Next, first);
+            return children(changes, first) == 1 && children(changes, second) == 2;
+        }, "Stash fixture did not show partially staged and untracked changes");
+        const auto stashWorking = nextItem(changes, TreeRelation::Next, nextItem(changes, TreeRelation::Root));
+        send(changes, treeSelect, stashWorking); send(changes, WM_KEYDOWN, VK_F4); waitLines(viewer, 4);
+        expand(changes, stashWorking, false);
+        // Stash is the fourth action, to the left of discard, stage and diff.
+        const int stashX = rect.right - rect.left - MulDiv(102, GetDpiForWindow(app.window), 96);
+        const int stashY = static_cast<int>(send(changes, treeGetRow, stashWorking)) * height + height / 2;
+        send(changes, WM_MOUSEMOVE, 0, MAKELPARAM(stashX, stashY)); click(changes, stashX, stashY); send(changes, WM_MOUSELEAVE);
+        waitFor([&] {
+            const auto first = nextItem(changes, TreeRelation::Root), second = nextItem(changes, TreeRelation::Next, first);
+            return children(changes, first) == 1 && children(changes, second) == 0 && !fs::exists(fixture.root / L"stash 日本語.txt");
+        }, "Stash Unstaged Changes did not preserve Staged Changes or clear a collapsed Changes group");
+        waitLines(viewer, 0);
+        runGit(L"diff --quiet"); runGit(L"rev-parse --verify refs/stash"); runGit(L"diff --cached --quiet stash@{0}^2 --");
+        check(fs::file_size(fixture.root / L"src/file.txt") == 8 && fs::exists(fixture.root / L"ignored.txt"),
+              "Stash did not restore the staged text or removed ignored files");
+        GetWindowTextW(GetDlgItem(app.window, 3), badge, 128);
+        check(std::wstring(badge) == L"Source Control (1)", "Stash did not update the badge");
         send(GetDlgItem(app.window, 5), BM_CLICK);
         waitFor([&] { return IsWindowVisible(branches) && children(branches, nextItem(branches, TreeRelation::Root)) == 51; }, "Branch did not load 50 commits and a load-more row");
         check(!IsWindowVisible(changes), "Branch did not hide Source Control");

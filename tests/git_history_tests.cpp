@@ -108,6 +108,10 @@ struct Repository {
         const auto entries = parseGitStatus(git({"status", "--porcelain=v1", "-z", "--untracked-files=all"}));
         for (const auto& command : gitDiscardAllArguments(entries)) git(command);
     }
+    void stashUnstaged() const {
+        const auto args = gitStashUnstagedArguments(parseGitStatus(git({"status", "--porcelain=v1", "-z", "--untracked-files=all"})));
+        if (!args.empty()) git(args);
+    }
 };
 void multipleRepositories() {
     Repository fixture;
@@ -158,6 +162,11 @@ void multipleRepositories() {
     check(fixture.readFile("app/app-client/same.txt") == "initial\n" && !fs::exists(client / "new 日本語.txt") &&
           fixture.readFile("app/app-server/same.txt") == "server working change\n" && git(server, {"ls-files", "--stage", "-z"}) == serverIndex,
           "Discard All Changes crossed repository boundaries or changed a sibling index");
+    fixture.write("app/app-client/same.txt", "stash client\n");
+    git(client, gitStashUnstagedArguments(parseGitStatus(git(client, {"status", "--porcelain=v1", "-z"}))));
+    check(fixture.readFile("app/app-client/same.txt") == "initial\n" &&
+          fixture.readFile("app/app-server/same.txt") == "server working change\n" && git(server, {"ls-files", "--stage", "-z"}) == serverIndex &&
+          git(server, {"stash", "list"}).empty(), "Stash Unstaged Changes affected a sibling repository");
     fixture.git({"diff", "--cached", "--quiet"});
     const auto worktree = app / "worktree 日本語";
     git(client, {"worktree", "add", "--quiet", "--detach", worktree.string()});
@@ -367,6 +376,85 @@ void repositoryDiscardAll() {
           repo.readFile("src/日本語 [1].txt") == "keep working\n" && repo.readFile("keep untracked.txt") == "keep\n",
           "Discard All Changes modified files before rejecting merge conflicts");
 }
+void repositoryStashUnstaged() {
+    Repository repo;
+    repo.git({"init", "--quiet", "--template=", "--initial-branch=main"});
+    repo.git({"config", "user.name", "Poppy Test"}); repo.git({"config", "user.email", "poppy@example.invalid"});
+    repo.git({"config", "core.autocrlf", "false"}); repo.git({"config", "commit.gpgsign", "false"});
+    repo.git({"config", "core.excludesFile", "/dev/null"});
+    repo.write("partial 日本語 [1].txt", "initial\n");
+    bool failed = false;
+    try { repo.stashUnstaged(); } catch (const std::runtime_error&) { failed = true; }
+    check(failed && repo.readFile("partial 日本語 [1].txt") == "initial\n" && repo.git({"stash", "list"}).empty(),
+          "Stashing before the first commit did not fail without changing files");
+    repo.write(".gitignore", "ignored.txt\n");
+    for (const auto& file : {"deleted.txt", "rename source.txt", "staged only.txt", "staged deletion.txt", "staged rename.txt"}) repo.write(file, "initial\n");
+    repo.git({"add", "."}); repo.git({"commit", "-qm", "baseline"});
+    const auto head = repo.hash();
+    repo.write("partial 日本語 [1].txt", "staged\n"); repo.write("staged only.txt", "staged only\n");
+    repo.write("added.txt", "staged addition\n"); repo.git({"add", "."});
+    repo.git({"rm", "--", "staged deletion.txt"}); repo.git({"mv", "--", "staged rename.txt", "staged renamed.txt"});
+    const auto index = repo.git({"ls-files", "--stage", "-z"});
+    // A stale Changes group must not create a stash containing only the index.
+    repo.stashUnstaged();
+    check(repo.git({"stash", "list"}).empty(), "Staged-only changes created an unstaged stash");
+    repo.write("partial 日本語 [1].txt", "working\n"); repo.write("staged renamed.txt", "working rename\n");
+    fs::remove(repo.path / "added.txt"); fs::remove(repo.path / "deleted.txt");
+    fs::rename(repo.path / "rename source.txt", repo.path / "renamed 日本語.txt");
+    const std::string untracked = "new/quoted' [2]\nfile.txt", binary("\0\1\2", 3);
+    repo.write(untracked, "untracked\n"); repo.write("binary.dat", binary); repo.write("ignored.txt", "keep\n");
+    failed = false;
+    try { repo.stashUnstaged(); } catch (const std::invalid_argument&) { failed = true; }
+    check(failed && !fs::exists(repo.path / "added.txt") && repo.git({"ls-files", "--stage", "-z"}) == index &&
+          repo.git({"stash", "list"}).empty() && repo.readFile(untracked) == "untracked\n",
+          "An unsupported staged addition deletion changed files or created a stash");
+    repo.write("added.txt", "working addition\n");
+    repo.write(".git/index.lock", "locked\n"); failed = false;
+    try { repo.stashUnstaged(); } catch (const std::runtime_error&) { failed = true; }
+    fs::remove(repo.path / ".git/index.lock");
+    check(failed && repo.git({"ls-files", "--stage", "-z"}) == index && repo.git({"stash", "list"}).empty() &&
+          repo.readFile("partial 日本語 [1].txt") == "working\n" && repo.readFile(untracked) == "untracked\n",
+          "Stashing with a locked index changed files or the stash list");
+    repo.stashUnstaged();
+    check(repo.hash() == head && repo.git({"ls-files", "--stage", "-z"}) == index &&
+          repo.readFile("partial 日本語 [1].txt") == "staged\n" && repo.readFile("staged only.txt") == "staged only\n" &&
+          repo.readFile("added.txt") == "staged addition\n" && repo.readFile("staged renamed.txt") == "initial\n" &&
+          !fs::exists(repo.path / "staged deletion.txt") && !fs::exists(repo.path / "staged rename.txt") &&
+          repo.readFile("deleted.txt") == "initial\n" && repo.readFile("rename source.txt") == "initial\n" &&
+          !fs::exists(repo.path / "renamed 日本語.txt") && !fs::exists(repo.path / "new") && !fs::exists(repo.path / "binary.dat") &&
+          repo.readFile("ignored.txt") == "keep\n", "Stash Unstaged Changes lost staged content or retained working changes");
+    repo.git({"diff", "--quiet"});
+    check(repo.git({"show", "stash@{0}:partial 日本語 [1].txt"}) == "working\n" &&
+          repo.git({"show", "stash@{0}^2:partial 日本語 [1].txt"}) == "staged\n" &&
+          repo.git({"show", "stash@{0}:added.txt"}) == "working addition\n" &&
+          repo.git({"show", "stash@{0}^2:added.txt"}) == "staged addition\n" &&
+          repo.git({"show", "stash@{0}^3:" + untracked}) == "untracked\n" && repo.git({"show", "stash@{0}^3:binary.dat"}) == binary,
+          "The stash did not retain working, staged, untracked or binary content");
+    const auto stash = repo.git({"rev-parse", "refs/stash"});
+    repo.stashUnstaged();
+    check(repo.git({"rev-parse", "refs/stash"}) == stash, "Repeating stash on a clean worktree created another entry");
+    // Git's keep-index stash includes both snapshots and can restore the index.
+    repo.git({"restore", "--source=HEAD", "--staged", "--worktree", "--", "."});
+    repo.git({"stash", "apply", "--index"});
+    check(repo.git({"ls-files", "--stage", "-z"}) == index, "Stash apply did not restore the index");
+    check(repo.readFile("partial 日本語 [1].txt") == "working\n" && repo.readFile("staged renamed.txt") == "working rename\n",
+          "Stash apply did not restore partially staged file text");
+    check(repo.readFile("added.txt") == "working addition\n", "Stash apply did not restore a partially staged addition");
+    check(!fs::exists(repo.path / "deleted.txt") && repo.readFile("renamed 日本語.txt") == "initial\n" &&
+          repo.readFile(untracked) == "untracked\n" && repo.readFile("binary.dat") == binary,
+          "Stash apply lost tracked, renamed or untracked content");
+    // Conflict rejection must precede saving or cleaning unrelated files.
+    repo.git({"restore", "--source=HEAD", "--staged", "--worktree", "--", "."});
+    repo.git({"checkout", "-qb", "topic"}); repo.write("deleted.txt", "topic\n"); repo.git({"add", "deleted.txt"}); repo.git({"commit", "-qm", "topic"});
+    repo.git({"checkout", "-q", "main"}); repo.write("deleted.txt", "main\n"); repo.git({"add", "deleted.txt"}); repo.git({"commit", "-qm", "main"});
+    try { repo.git({"merge", "topic"}); } catch (const std::runtime_error&) {}
+    const auto conflict = repo.readFile("deleted.txt"), conflictedIndex = repo.git({"ls-files", "--stage", "-z"});
+    failed = false;
+    try { repo.stashUnstaged(); } catch (const std::invalid_argument&) { failed = true; }
+    check(failed && repo.readFile("deleted.txt") == conflict && repo.git({"ls-files", "--stage", "-z"}) == conflictedIndex &&
+          repo.readFile(untracked) == "untracked\n" && repo.git({"rev-parse", "refs/stash"}) == stash,
+          "Stashing with conflicts changed files, the index or an existing stash");
+}
 void repositorySyntax() {
     Repository repo;
     repo.git({"init", "--quiet", "--template=", "--initial-branch=main"});
@@ -459,7 +547,7 @@ int main() {
     try {
         statusGroups(); records(); patchLists(); repositoryOwnership();
 #ifndef _WIN32
-        repositoryStaging(); repositoryStageAll(); repositoryUnstageAll(); repositoryDiscardAll(); repositorySyntax(); repositoryHistory(); multipleRepositories();
+        repositoryStaging(); repositoryStageAll(); repositoryUnstageAll(); repositoryDiscardAll(); repositoryStashUnstaged(); repositorySyntax(); repositoryHistory(); multipleRepositories();
 #endif
         std::cout << "Git history tests passed.\n"; return 0;
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }

@@ -211,6 +211,7 @@ private:
     void openGitFile(TreeItem item);
     void stageGitChanges(TreeItem item, bool all = false);
     void discardGitChanges(TreeItem item);
+    void stashUnstagedGitChanges(TreeItem item);
     void openGitDiff(const ResourceId& path, GitDiffKind kind, std::string revision = {}, bool allChanges = false, ResourceId root = {});
     std::wstring repositoryLabel(const ResourceId& root) const;
     void refreshBranches();
@@ -285,6 +286,7 @@ private:
     bool createPending_ = false;
     bool gitStagePending_ = false;
     bool gitDiscardPending_ = false;
+    bool gitStashPending_ = false;
     bool gitTreeView_ = true;
     std::vector<SourceNode> gitChangeNodes_;
     uint64_t branchRequest_ = 0;
@@ -363,7 +365,7 @@ void ProjectRuntime::Impl::create() {
     explorer_.removed = [this](uintptr_t data) { const auto n = reinterpret_cast<Node*>(data); if (n) { nodes_.erase(n->id); delete n; } };
     explorer_.canCreate = [this](TreeItem item) { return canCreateItem(item); };
     explorer_.createCommitted = [this](TreeItem item, const std::wstring& name, bool directory) { createItem(item, name, directory); };
-    explorer_.canRename = [this](TreeItem item) { return item != rootItem_ && node(item) && !node(item)->unsupported && !renamePending_ && !pastePending_ && !createPending_ && !gitDiscardPending_ && (!root_.wsl() || (connected_ && provider_->state() == ConnectionState::Ready)); };
+    explorer_.canRename = [this](TreeItem item) { return item != rootItem_ && node(item) && !node(item)->unsupported && !renamePending_ && !pastePending_ && !createPending_ && !gitDiscardPending_ && !gitStashPending_ && (!root_.wsl() || (connected_ && provider_->state() == ConnectionState::Ready)); };
     explorer_.renameRequested = [this](TreeItem item) { if (const auto n = node(item); n && item != rootItem_ && !renamePending_) explorer_.rename(item, n->path.filename().native()); };
     explorer_.renameCommitted = [this](TreeItem item, const std::wstring& name) { renameFile(item, name); };
     explorer_.canOpenWithDefaultApp = [this](TreeItem item) { const auto n = node(item); return n && !n->directory && !n->unsupported && !root_.wsl(); };
@@ -411,6 +413,14 @@ void ProjectRuntime::Impl::create() {
     };
     changes_.tertiaryActionIcon = [](TreeItem) { return Renderer::Icon::DiscardChanges; };
     changes_.tertiaryActionClicked = [this](TreeItem item) { discardGitChanges(item); };
+    changes_.quaternaryActionLabel = [this](TreeItem item) {
+        const auto n = changes_.item(item);
+        if (!n || n->data >= gitChangeNodes_.size()) return L"";
+        const auto& node = gitChangeNodes_[n->data];
+        return node.group && !node.staged && changes_.child(item) ? L"Stash Unstaged Changes" : L"";
+    };
+    changes_.quaternaryActionIcon = [](TreeItem) { return Renderer::Icon::StashChanges; };
+    changes_.quaternaryActionClicked = [this](TreeItem item) { stashUnstagedGitChanges(item); };
     changes_.expanded = [this](TreeItem item, bool value) {
         if (updatingGitFiles_) return;
         const auto node = changes_.item(item);
@@ -734,7 +744,7 @@ void ProjectRuntime::Impl::openGitFile(TreeItem item) {
     openGitDiff(entry.path, node.staged ? GitDiffKind::Staged : GitDiffKind::Changes, {}, false, repo.root);
 }
 void ProjectRuntime::Impl::stageGitChanges(TreeItem item, bool all) {
-    if (updatingGitFiles_ || gitStagePending_ || gitDiscardPending_ || renamePending_ || !git_ || git_->repositories.empty()) return;
+    if (updatingGitFiles_ || gitStagePending_ || gitDiscardPending_ || gitStashPending_ || renamePending_ || !git_ || git_->repositories.empty()) return;
     if (root_.wsl() && (!connected_ || provider_->state() != ConnectionState::Ready)) { status(L"Reconnect WSL before staging changes."); return; }
     const auto value = changes_.item(item);
     if (!value || value->data >= gitChangeNodes_.size()) return;
@@ -769,7 +779,7 @@ void ProjectRuntime::Impl::stageGitChanges(TreeItem item, bool all) {
     });
 }
 void ProjectRuntime::Impl::discardGitChanges(TreeItem item) {
-    if (updatingGitFiles_ || gitStagePending_ || gitDiscardPending_ || renamePending_ || pastePending_ || createPending_ || !git_) return;
+    if (updatingGitFiles_ || gitStagePending_ || gitDiscardPending_ || gitStashPending_ || renamePending_ || pastePending_ || createPending_ || !git_) return;
     if (root_.wsl() && (!connected_ || provider_->state() != ConnectionState::Ready)) { status(L"Reconnect WSL before discarding changes."); return; }
     const auto value = changes_.item(item);
     if (!value || value->data >= gitChangeNodes_.size()) return;
@@ -812,6 +822,43 @@ void ProjectRuntime::Impl::discardGitChanges(TreeItem item) {
             refresh(false);
             if (activeSidebar_ == Sidebar::Search) searchPane_.refresh();
             status(code ? L"Discard failed: " + error : L"Discard completed in " + name);
+        });
+    });
+}
+void ProjectRuntime::Impl::stashUnstagedGitChanges(TreeItem item) {
+    if (updatingGitFiles_ || gitStagePending_ || gitDiscardPending_ || gitStashPending_ || renamePending_ || pastePending_ || createPending_ || !git_) return;
+    if (root_.wsl() && (!connected_ || provider_->state() != ConnectionState::Ready)) { status(L"Reconnect WSL before stashing changes."); return; }
+    const auto value = changes_.item(item);
+    if (!value || value->data >= gitChangeNodes_.size()) return;
+    const auto& node = gitChangeNodes_[value->data];
+    if (!node.group || node.staged || !changes_.child(item) || node.repository >= git_->repositories.size()) return;
+    const auto& repo = *git_->repositories[node.repository];
+    if (!repo.error.empty()) return;
+    if (std::any_of(tabs_.begin(), tabs_.end(), [](const Tab& tab) { return tab.buffer && tab.buffer->saving; })) {
+        status(L"Wait for file saves to finish before stashing changes."); return;
+    }
+    const auto root = repo.root; const auto name = repositoryLabel(root);
+    const auto provider = provider_; const auto generation = generation_;
+    gitStashPending_ = true;
+    status(L"Stashing unstaged changes in " + name + L"…");
+    gitWorker_->submit(L"git-stash-unstaged", [this, root, provider, generation] {
+        auto result = provider->git({L"git.exe", L"--no-optional-locks", L"rev-parse", L"--show-toplevel"}, root, gitWorker_->cancellation());
+        if (!result.code && pathKey(root.at(utf8(trimmed(result.output)))) != pathKey(root)) {
+            result.code = 1; result.error = L"The Git repository changed. Refresh before stashing changes.";
+        }
+        if (!result.code) result = provider->git({L"git.exe", L"--no-optional-locks", L"-c", L"core.fsmonitor=false", L"status", L"--porcelain=v1", L"-z", L"--untracked-files=all"}, root, gitWorker_->cancellation());
+        if (!result.code) try {
+            const auto arguments = gitStashUnstagedArguments(parseGitStatus(result.output));
+            if (arguments.empty()) result.output = "No unstaged changes to stash.";
+            else result = provider->git(gitArguments(arguments), root, gitWorker_->cancellation());
+        } catch (const std::exception& error) { result.code = 1; result.error = wide(error.what()); }
+        gitWorker_->complete([this, generation, code = result.code, error = result.error, output = result.output] {
+            gitStashPending_ = false;
+            if (generation != generation_) return;
+            filesDirty_ = fileDirty_ = true;
+            refresh(false);
+            if (activeSidebar_ == Sidebar::Search) searchPane_.refresh();
+            status(code ? L"Stash failed: " + error : L"Stash: " + trimmed(output));
         });
     });
 }
@@ -1052,7 +1099,7 @@ void ProjectRuntime::Impl::updateLabel(TreeItem item) {
 }
 bool ProjectRuntime::Impl::canPasteImage(TreeItem item) const {
     const auto n = node(item ? item : rootItem_);
-    if (!n || n->unsupported || pastePending_ || createPending_ || renamePending_ || gitDiscardPending_ || (n->directory && n->reparse)) return false;
+    if (!n || n->unsupported || pastePending_ || createPending_ || renamePending_ || gitDiscardPending_ || gitStashPending_ || (n->directory && n->reparse)) return false;
     return !root_.wsl() || (connected_ && provider_->state() == ConnectionState::Ready);
 }
 bool ProjectRuntime::Impl::canCreateItem(TreeItem item) const {
@@ -1137,7 +1184,7 @@ void ProjectRuntime::Impl::pasteImage(TreeItem item) {
     });
 }
 void ProjectRuntime::Impl::renameFile(TreeItem item, const std::wstring& name) {
-    const auto n = node(item); if (!n || n->unsupported || item == rootItem_ || renamePending_ || pastePending_ || createPending_ || gitDiscardPending_) return;
+    const auto n = node(item); if (!n || n->unsupported || item == rootItem_ || renamePending_ || pastePending_ || createPending_ || gitDiscardPending_ || gitStashPending_) return;
     if (root_.wsl() && (!connected_ || provider_->state() != ConnectionState::Ready)) { status(L"Reconnect WSL before renaming."); return; }
     std::wstring error = L"Enter a valid Linux filename (no /, NUL, . or ..; at most 255 UTF-8 bytes).";
     if (!(root_.wsl() ? validPosixName(utf8(name)) : validFileName(name, error))) { MessageBoxW(window_, error.c_str(), L"Poppy — Rename", MB_OK | MB_ICONWARNING); return; }
@@ -1483,9 +1530,9 @@ void ProjectRuntime::Impl::saveTab() {
     }
 }
 bool ProjectRuntime::Impl::saveFile(size_t index, bool wait) {
-    if (gitDiscardPending_) {
+    if (gitDiscardPending_ || gitStashPending_) {
         if (wait) { gitWorker_->drain(); gitWorker_->dispatch(); }
-        if (gitDiscardPending_) { status(L"Discard in progress. Save again when it finishes."); return false; }
+        if (gitDiscardPending_ || gitStashPending_) { status(L"Git operation in progress. Save again when it finishes."); return false; }
     }
     if (renamePending_) { if (wait) { worker_->drain(); worker_->dispatch(); } else { status(L"Rename in progress. Save again when it finishes."); return false; } }
     saveTab(); if (index >= tabs_.size()) return true;
@@ -1973,7 +2020,7 @@ void ProjectRuntime::shutdown() {
     if (impl_->worker_) impl_->worker_->stop();
     impl_->terminal_.stop();
 }
-bool ProjectRuntime::canClose() { if (impl_->gitDiscardPending_) { impl_->gitWorker_->drain(); impl_->gitWorker_->dispatch(); if (impl_->gitDiscardPending_) return false; } if (impl_->renamePending_ || impl_->pastePending_ || impl_->createPending_) { impl_->worker_->drain(); impl_->worker_->dispatch(); } impl_->saveTab(); for (size_t i = 0; i < impl_->tabs_.size(); ++i) if (!impl_->confirmTab(i)) return false; return true; }
+bool ProjectRuntime::canClose() { if (impl_->gitDiscardPending_ || impl_->gitStashPending_) { impl_->gitWorker_->drain(); impl_->gitWorker_->dispatch(); if (impl_->gitDiscardPending_ || impl_->gitStashPending_) return false; } if (impl_->renamePending_ || impl_->pastePending_ || impl_->createPending_) { impl_->worker_->drain(); impl_->worker_->dispatch(); } impl_->saveTab(); for (size_t i = 0; i < impl_->tabs_.size(); ++i) if (!impl_->confirmTab(i)) return false; return true; }
 void ProjectRuntime::revalidate() { PostMessageW(window(), WM_APP+13, 0, 0); }
 void ProjectRuntime::initialize(const ResourceId& path, const ProjectSession& state, bool saved) { if (saved) impl_->initialState_ = state; impl_->openFolder(path); }
 void ProjectRuntime::activate(bool active) {

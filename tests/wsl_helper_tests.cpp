@@ -299,6 +299,18 @@ void gitAndCancellation(const std::string& executable) {
                   disk(fixture.root/"rename.txt") == "rename\n" && !fs::exists(fixture.root/"renamed.txt") &&
                   !fs::exists(fixture.root/"untracked \\ '$.txt") && disk(fixture.root/"ignored.txt") == "keep\n",
                   "WSL Discard All Changes lost staged content, retained changes or removed ignored files");
+            git({"config","user.name","Fixture"}); git({"config","user.email","fixture@example.invalid"});
+            write(fixture.root/"tracked 日本語.txt","stash working\n");
+            write(fixture.root/"stash \\ '$.txt","stash untracked\n");
+            auto stash = poppy::gitStashUnstagedArguments(poppy::parseGitStatus(git({"status","--porcelain=v1","-z","--untracked-files=all"}).bytes));
+            stash.erase(stash.begin());
+            check(field(git(std::move(stash)).metadata,"exitCode") == "0" &&
+                  git({"ls-files","--stage","-z"}).bytes == indexBeforeDiscard &&
+                  disk(fixture.root/"tracked 日本語.txt") == "partially staged\n" && !fs::exists(fixture.root/"stash \\ '$.txt") &&
+                  disk(fixture.root/"ignored.txt") == "keep\n" &&
+                  git({"show","stash@{0}:tracked 日本語.txt"}).bytes == "stash working\n" &&
+                  git({"show","stash@{0}^3:stash \\ '$.txt"}).bytes == "stash untracked\n",
+                  "WSL Stash Unstaged Changes lost staged content or failed to save working and untracked files");
         }
         helper.eof();
     }
