@@ -516,6 +516,36 @@ void wrappingTabTests(const fs::path& executable) {
     checkRows(5);
     clickTab(app, 0); waitLines(viewer, 100); clickTab(app, 4); waitLines(viewer, 104);
 }
+void pasteImageTests(const fs::path& executable) {
+    Fixture fixture; fs::create_directory(fixture.root/L"images"); writeFile(fixture.root/L"images"/L"existing.txt");
+    Application app(executable,fixture.root); const auto tree = app.tree();
+    waitFor([&]{return send(tree,treeGetCount)==2;},"Image paste folder did not load");
+    const auto root = nextItem(tree,TreeRelation::Root), folder = nextItem(tree,TreeRelation::Child,root);
+    send(tree,treeSelect,folder);
+    BITMAPINFOHEADER header{}; header.biSize = sizeof(header); header.biWidth = 1; header.biHeight = 1; header.biPlanes = 1; header.biBitCount = 24;
+    const auto data = GlobalAlloc(GMEM_MOVEABLE,sizeof(header)+4); check(data != nullptr,"Cannot allocate clipboard image");
+    const auto pixels = static_cast<char*>(GlobalLock(data)); check(pixels != nullptr,"Cannot lock clipboard image");
+    memcpy(pixels,&header,sizeof(header)); memset(pixels+sizeof(header),0,4); pixels[sizeof(header)+2] = static_cast<char>(255); GlobalUnlock(data);
+    check(OpenClipboard(app.host)!=FALSE,"Cannot open image test clipboard");
+    EmptyClipboard(); const bool set = SetClipboardData(CF_DIB,data) != nullptr; CloseClipboard();
+    if (!set) GlobalFree(data);
+    check(set,"Cannot set image test clipboard");
+    send(tree,WM_PASTE);
+    fs::path created;
+    waitFor([&]{for(const auto& entry:fs::directory_iterator(fixture.root/L"images")) if(entry.path().extension()==L".png") created=entry.path(); return !created.empty();},"Pasting into a collapsed folder did not create an image");
+    const auto name = created.filename().wstring();
+    check(name.size()==29 && name.substr(0,6)==L"paste-" && name[16]==L'T' && name.substr(25)==L".png","Image filename does not match the requested timestamp format");
+    std::ifstream png(created,std::ios::binary); char signature[8]{}; png.read(signature,8);
+    check(std::string(signature,8)==std::string("\x89PNG\r\n\x1a\n",8),"Explorer paste did not write a PNG");
+    waitFor([&]{return send(tree,treeGetCount)==4 && send(tree,treeGetSelection)!=static_cast<LRESULT>(folder);},"Pasted image was not revealed and selected");
+    // A selected file uses its parent folder. Start in a later second so both
+    // names follow the exact timestamp format without a collision suffix.
+    const auto selected = send(tree,treeGetSelection);
+    waitFor([&]{SYSTEMTIME now{}; GetLocalTime(&now); return std::stoi(name.substr(23,2)) != now.wSecond;},"Clock did not advance before the second paste");
+    send(tree,WM_PASTE);
+    waitFor([&]{return send(tree,treeGetCount)==5 && send(tree,treeGetSelection)!=selected;},"Pasting with a selected file did not use its parent folder");
+    check(fs::exists(fixture.root/L"images"/L"existing.txt"),"Pasting removed another file");
+}
 void renameTests(const fs::path& executable) {
     Fixture fixture; writeLines(fixture.root/L"a.txt",120); writeLines(fixture.root/L"b.txt",240);
     {
@@ -1339,7 +1369,7 @@ int wmain(int argc, wchar_t** argv) {
         check(argc == 2, "Pass the path to Poppy.exe");
         SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         for (const auto test : {folderTests, sidebarTests, treeInteractionTests, tabTests, pinnedTabTests,
-                tabDragTests, wrappingTabDragTests, wrappingTabTests, renameTests, splitPaneTests, quickOpenTests, fullSearchTests, gitSidebarTests, gitAutoRefreshTests, branchSidebarTests, multiRepositoryTests, sessionTests, multiProjectTests, terminalBackspaceTests}) {
+                tabDragTests, wrappingTabDragTests, wrappingTabTests, renameTests, pasteImageTests, splitPaneTests, quickOpenTests, fullSearchTests, gitSidebarTests, gitAutoRefreshTests, branchSidebarTests, multiRepositoryTests, sessionTests, multiProjectTests, terminalBackspaceTests}) {
             Fixture appData; AppDataEnvironment environment(appData.root);
             test(fs::absolute(argv[1]));
         }
