@@ -326,7 +326,9 @@ LRESULT Tree::handle(UINT m, WPARAM a, LPARAM b) {
         }
         if (id && item(id)->expandable) {
             const auto& row = model_.visible()[static_cast<size_t>(this->row(id))];
-            if (GET_X_LPARAM(b) + left_ >= static_cast<int>(row.depth + 1) * indent_) expand(id, !item(id)->expanded);
+            // Windows replaces the second button-down with this message.
+            // Arrow clicks must toggle on every press, even in a double-click.
+            if (GET_X_LPARAM(b) + left_ >= static_cast<int>(row.depth) * indent_) expand(id, !item(id)->expanded);
         }
         return 0;
     }
