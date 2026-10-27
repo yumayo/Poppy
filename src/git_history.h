@@ -35,6 +35,9 @@ std::vector<std::string> gitUnstageAllArguments();
 // Git also records the index snapshot in the stash. No command for a clean
 // worktree; reject conflicts before modifying files.
 std::vector<std::string> gitStashUnstagedArguments(const std::vector<GitStatusEntry>& entries);
+// Stash only the index changes, keeping unstaged and untracked changes.
+// Requires Git 2.35+. No command for a clean index; reject merge conflicts.
+std::vector<std::string> gitStashStagedArguments(const std::vector<GitStatusEntry>& entries);
 // Restore working files from the index, then remove nonignored untracked files.
 // Use fresh, complete status entries. Reject conflicts before changing any files;
 // do not recurse into submodules or force removal of nested repositories.

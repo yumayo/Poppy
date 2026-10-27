@@ -311,6 +311,17 @@ void gitAndCancellation(const std::string& executable) {
                   git({"show","stash@{0}:tracked 日本語.txt"}).bytes == "stash working\n" &&
                   git({"show","stash@{0}^3:stash \\ '$.txt"}).bytes == "stash untracked\n",
                   "WSL Stash Unstaged Changes lost staged content or failed to save working and untracked files");
+            write(fixture.root/"keep \\ '$.txt","keep untracked\n");
+            write(fixture.root/"delete.txt","keep unstaged\n");
+            auto stagedStash = poppy::gitStashStagedArguments(poppy::parseGitStatus(git({"status","--porcelain=v1","-z","--untracked-files=all"}).bytes));
+            stagedStash.erase(stagedStash.begin());
+            check(field(git(std::move(stagedStash)).metadata,"exitCode") == "0" &&
+                  field(git({"diff","--cached","--quiet"}).metadata,"exitCode") == "0" &&
+                  disk(fixture.root/"tracked 日本語.txt") == "before\n" && disk(fixture.root/"delete.txt") == "keep unstaged\n" &&
+                  disk(fixture.root/"keep \\ '$.txt") == "keep untracked\n" && disk(fixture.root/"ignored.txt") == "keep\n" &&
+                  git({"show","stash@{0}:tracked 日本語.txt"}).bytes == "partially staged\n" &&
+                  git({"show","stash@{0}:delete.txt"}).bytes == "delete\n",
+                  "WSL Stash Staged Changes failed to clear the index, save staged text or preserve unstaged/untracked/ignored files");
         }
         helper.eof();
     }

@@ -211,7 +211,7 @@ private:
     void openGitFile(TreeItem item);
     void stageGitChanges(TreeItem item, bool all = false);
     void discardGitChanges(TreeItem item);
-    void stashUnstagedGitChanges(TreeItem item);
+    void stashGitChanges(TreeItem item);
     void openGitDiff(const ResourceId& path, GitDiffKind kind, std::string revision = {}, bool allChanges = false, ResourceId root = {});
     std::wstring repositoryLabel(const ResourceId& root) const;
     void refreshBranches();
@@ -409,10 +409,17 @@ void ProjectRuntime::Impl::create() {
         const auto n = changes_.item(item);
         if (!n || n->data >= gitChangeNodes_.size()) return L"";
         const auto& node = gitChangeNodes_[n->data];
-        return node.group && !node.staged && changes_.child(item) ? L"Discard All Changes" : L"";
+        return node.group && changes_.child(item) ? node.staged ? L"Stash Staged Changes" : L"Discard All Changes" : L"";
     };
-    changes_.tertiaryActionIcon = [](TreeItem) { return Renderer::Icon::DiscardChanges; };
-    changes_.tertiaryActionClicked = [this](TreeItem item) { discardGitChanges(item); };
+    changes_.tertiaryActionIcon = [this](TreeItem item) {
+        const auto n = changes_.item(item);
+        return n && n->data < gitChangeNodes_.size() && gitChangeNodes_[n->data].staged ? Renderer::Icon::StashChanges : Renderer::Icon::DiscardChanges;
+    };
+    changes_.tertiaryActionClicked = [this](TreeItem item) {
+        const auto n = changes_.item(item);
+        if (n && n->data < gitChangeNodes_.size() && gitChangeNodes_[n->data].staged) stashGitChanges(item);
+        else discardGitChanges(item);
+    };
     changes_.quaternaryActionLabel = [this](TreeItem item) {
         const auto n = changes_.item(item);
         if (!n || n->data >= gitChangeNodes_.size()) return L"";
@@ -420,7 +427,7 @@ void ProjectRuntime::Impl::create() {
         return node.group && !node.staged && changes_.child(item) ? L"Stash Unstaged Changes" : L"";
     };
     changes_.quaternaryActionIcon = [](TreeItem) { return Renderer::Icon::StashChanges; };
-    changes_.quaternaryActionClicked = [this](TreeItem item) { stashUnstagedGitChanges(item); };
+    changes_.quaternaryActionClicked = [this](TreeItem item) { stashGitChanges(item); };
     changes_.expanded = [this](TreeItem item, bool value) {
         if (updatingGitFiles_) return;
         const auto node = changes_.item(item);
@@ -825,13 +832,13 @@ void ProjectRuntime::Impl::discardGitChanges(TreeItem item) {
         });
     });
 }
-void ProjectRuntime::Impl::stashUnstagedGitChanges(TreeItem item) {
+void ProjectRuntime::Impl::stashGitChanges(TreeItem item) {
     if (updatingGitFiles_ || gitStagePending_ || gitDiscardPending_ || gitStashPending_ || renamePending_ || pastePending_ || createPending_ || !git_) return;
     if (root_.wsl() && (!connected_ || provider_->state() != ConnectionState::Ready)) { status(L"Reconnect WSL before stashing changes."); return; }
     const auto value = changes_.item(item);
     if (!value || value->data >= gitChangeNodes_.size()) return;
     const auto& node = gitChangeNodes_[value->data];
-    if (!node.group || node.staged || !changes_.child(item) || node.repository >= git_->repositories.size()) return;
+    if (!node.group || !changes_.child(item) || node.repository >= git_->repositories.size()) return;
     const auto& repo = *git_->repositories[node.repository];
     if (!repo.error.empty()) return;
     if (std::any_of(tabs_.begin(), tabs_.end(), [](const Tab& tab) { return tab.buffer && tab.buffer->saving; })) {
@@ -840,16 +847,18 @@ void ProjectRuntime::Impl::stashUnstagedGitChanges(TreeItem item) {
     const auto root = repo.root; const auto name = repositoryLabel(root);
     const auto provider = provider_; const auto generation = generation_;
     gitStashPending_ = true;
-    status(L"Stashing unstaged changes in " + name + L"…");
-    gitWorker_->submit(L"git-stash-unstaged", [this, root, provider, generation] {
+    const bool staged = node.staged;
+    status((staged ? L"Stashing staged changes in " : L"Stashing unstaged changes in ") + name + L"…");
+    gitWorker_->submit(staged ? L"git-stash-staged" : L"git-stash-unstaged", [this, root, provider, generation, staged] {
         auto result = provider->git({L"git.exe", L"--no-optional-locks", L"rev-parse", L"--show-toplevel"}, root, gitWorker_->cancellation());
         if (!result.code && pathKey(root.at(utf8(trimmed(result.output)))) != pathKey(root)) {
             result.code = 1; result.error = L"The Git repository changed. Refresh before stashing changes.";
         }
         if (!result.code) result = provider->git({L"git.exe", L"--no-optional-locks", L"-c", L"core.fsmonitor=false", L"status", L"--porcelain=v1", L"-z", L"--untracked-files=all"}, root, gitWorker_->cancellation());
         if (!result.code) try {
-            const auto arguments = gitStashUnstagedArguments(parseGitStatus(result.output));
-            if (arguments.empty()) result.output = "No unstaged changes to stash.";
+            const auto entries = parseGitStatus(result.output);
+            const auto arguments = staged ? gitStashStagedArguments(entries) : gitStashUnstagedArguments(entries);
+            if (arguments.empty()) result.output = staged ? "No staged changes to stash." : "No unstaged changes to stash.";
             else result = provider->git(gitArguments(arguments), root, gitWorker_->cancellation());
         } catch (const std::exception& error) { result.code = 1; result.error = wide(error.what()); }
         gitWorker_->complete([this, generation, code = result.code, error = result.error, output = result.output] {
