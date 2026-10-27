@@ -3,6 +3,7 @@
 #include "terminal.h"
 #include "project_provider.h"
 #include "wsl_dialog.h"
+#include "quick_open.h"
 #include <commctrl.h>
 #include <dwmapi.h>
 #include <shlobj.h>
@@ -49,6 +50,8 @@ private:
     void choose();
     void chooseWindows();
     void chooseWsl();
+    void showRecent();
+    void remember(const ResourceId& path);
     void open(fs::path path, bool select = true);
     void open(ResourceId path, bool select = true);
     void select(size_t index, bool attention = false);
@@ -72,11 +75,13 @@ private:
     HWND window_ = nullptr, tooltips_ = nullptr;
     HINSTANCE instance_ = nullptr;
     Renderer renderer_;
+    QuickOpen recent_;
     HookServer hooks_;
     std::unique_ptr<Worker> storageWorker_;
     // This connection is created, used and destroyed on storageWorker_ only.
     std::unique_ptr<Storage> storage_;
     std::vector<OpenProject> projects_;
+    std::vector<ResourceId> history_;
     std::optional<ProjectDrag> projectDrag_;
     AppSession session_;
     fs::path initial_;
@@ -101,9 +106,12 @@ int Workspace::run(HINSTANCE instance,int show,fs::path initial) {
     if(!window_)return 1;
     MSG message{};
     while(GetMessageW(&message,nullptr,0,0)>0) {
+        if(recent_.visible() && message.hwnd!=recent_.window() &&
+            (message.message==WM_LBUTTONDOWN || message.message==WM_MBUTTONDOWN || message.message==WM_RBUTTONDOWN))recent_.close();
         const bool key=message.message==WM_KEYDOWN;
         if(key && message.wParam==VK_ESCAPE && projectDrag_){endProjectDrag();continue;}
         if(key && (GetKeyState(VK_CONTROL)&0x8000) && message.wParam=='O'){choose();continue;}
+        if(key && (GetKeyState(VK_CONTROL)&0x8000) && !(GetKeyState(VK_SHIFT)&0x8000) && !(GetKeyState(VK_MENU)&0x8000) && message.wParam=='R'){showRecent();continue;}
         if(!projects_.empty() && (message.hwnd==window_ || IsChild(projects_[active_].runtime->window(),message.hwnd) || message.hwnd==projects_[active_].runtime->window())) {
             if((message.message>=WM_KEYFIRST&&message.message<=WM_KEYLAST)||(message.message>=WM_MOUSEFIRST&&message.message<=WM_MOUSELAST))markDirty();
             if (key && message.wParam == VK_F5) checkFolder(projects_[active_]);
@@ -115,16 +123,19 @@ int Workspace::run(HINSTANCE instance,int show,fs::path initial) {
 }
 void Workspace::create(){
     dpi_=GetDpiForWindow(window_);renderer_.setDpi(dpi_);
+    recent_.create(window_,instance_,true);recent_.setDpi(dpi_);
+    recent_.opened=[this](const ResourceId& path){open(path);};
     const BOOL dark=TRUE;DwmSetWindowAttribute(window_,20,&dark,sizeof(dark));
     tooltips_=CreateWindowExW(WS_EX_TOPMOST,TOOLTIPS_CLASSW,nullptr,WS_POPUP|TTS_ALWAYSTIP|TTS_NOPREFIX,CW_USEDEFAULT,CW_USEDEFAULT,CW_USEDEFAULT,CW_USEDEFAULT,window_,nullptr,instance_,nullptr);
     SendMessageW(tooltips_,TTM_SETMAXTIPWIDTH,0,700);
     hooks_.start(window_);
     storageWorker_=std::make_unique<Worker>(window_);
     storageWorker_->submit(L"load-app",[this]{
-        AppSession state;std::string error;
-        try{storage_=std::make_unique<Storage>(stateDirectory());state=storage_->loadApp();}catch(const std::exception& failure){error=failure.what();storage_.reset();}
-        storageWorker_->complete([this,state=std::move(state),error]{
+        AppSession state;std::vector<std::string> history;std::string error;
+        try{storage_=std::make_unique<Storage>(stateDirectory());state=storage_->loadApp();history=storage_->projectHistory();}catch(const std::exception& failure){error=failure.what();storage_.reset();}
+        storageWorker_->complete([this,state=std::move(state),history=std::move(history),error]{
             session_=state;restoring_=false;
+            for(const auto& path:history)history_.push_back(ResourceId::parse(path));
             if(session_.positioned){
                 RECT rect{session_.x,session_.y,session_.x+session_.width,session_.y+session_.height};MONITORINFO monitor{};monitor.cbSize=sizeof(monitor);
                 if(GetMonitorInfoW(MonitorFromRect(&rect,MONITOR_DEFAULTTONEAREST),&monitor)){
@@ -163,9 +174,22 @@ void Workspace::showInitialWindow(){
 }
 void Workspace::choose(){
     endProjectDrag();
+    recent_.close();
     HMENU menu = CreatePopupMenu(); AppendMenuW(menu, MF_STRING, 1, L"Open Windows folder…"); AppendMenuW(menu, MF_STRING | (listingWsl_ ? MF_GRAYED : 0), 2, L"Open WSL folder…");
+    AppendMenuW(menu, MF_STRING, 3, L"Recent projects…\tCtrl+R");
     POINT point{}; GetCursorPos(&point); const auto command = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, point.x, point.y, 0, window_, nullptr); DestroyMenu(menu);
-    if (command == 1) chooseWindows(); else if (command == 2) chooseWsl();
+    if (command == 1) chooseWindows(); else if (command == 2) chooseWsl(); else if (command == 3) showRecent();
+}
+void Workspace::showRecent(){
+    if(restoring_)return;
+    endProjectDrag();
+    recent_.setProjects(history_);recent_.show();
+}
+void Workspace::remember(const ResourceId& path){
+    const auto key=pathKey(path);
+    const auto found=std::find_if(history_.begin(),history_.end(),[&](const ResourceId& entry){return pathKey(entry)==key;});
+    if(found==history_.end())history_.insert(history_.begin(),path);
+    else *found=path;
 }
 void Workspace::chooseWsl(){
     if (listingWsl_) return;
@@ -206,9 +230,11 @@ void Workspace::open(ResourceId path,bool shouldSelect){
     if (restoring_) return;
     if (!path.wsl() && wslUncLocation(path.u8string())) { open(path.local(), shouldSelect); return; }
     if (!path.wsl()) { std::error_code error; const auto local = fs::absolute(path.local(), error).lexically_normal().make_preferred(); if (error) return; path = ResourceId(local); }
+    recent_.close(false);
     const auto key=pathKey(path);
     for(size_t i=0;i<projects_.size();++i)if(pathKey(projects_[i].path)==key){if(shouldSelect)select(i);return;}
     if (projects_.size() >= 1000) return;
+    remember(path);
     endProjectDrag();
     OpenProject project;project.id=nextId_++;project.path=path;project.runtime=std::make_unique<ProjectRuntime>();
     project.runtime->openFolder=[this](const fs::path& folder){open(folder);};
@@ -221,6 +247,7 @@ void Workspace::open(ResourceId path,bool shouldSelect){
                 return;
             }
             project->path = resolved; project->dirty = true; project->changedAt = GetTickCount64(); appDirty_ = true; appChanged_ = GetTickCount64();
+            remember(resolved);
         }
     };
     project.runtime->create(window_,instance_,&hooks_);project.runtime->setDpi(dpi_);
@@ -401,6 +428,7 @@ void Workspace::layout(){
     RECT r{};GetClientRect(window_,&r);const int left=px(session_.projectListWidth)+px(5);
     const int page=std::max(1,(static_cast<int>(r.bottom)-px(88))/px(48));scroll_=std::clamp(scroll_,0,std::max(0,static_cast<int>(projects_.size())-page));
     if(!projects_.empty())SetWindowPos(projects_[active_].runtime->window(),nullptr,left,0,std::max(0L,r.right-left),r.bottom,SWP_NOZORDER|SWP_NOACTIVATE);
+    recent_.layout();
     updateTools();InvalidateRect(window_,nullptr,FALSE);
 }
 void Workspace::updateTools(){
@@ -434,14 +462,14 @@ LRESULT CALLBACK Workspace::procedure(HWND w,UINT m,WPARAM a,LPARAM b){auto self
 LRESULT Workspace::handle(UINT m,WPARAM a,LPARAM b){switch(m){
 case WM_CREATE:create();return 0;case WM_PAINT:paint();return 0;case WM_ERASEBKGND:return 1;case WM_SIZE:endProjectDrag();layout();if(!restoring_){appDirty_=true;appChanged_=GetTickCount64();}return 0;
 case WM_GETMINMAXINFO:reinterpret_cast<MINMAXINFO*>(b)->ptMinTrackSize={px(900),px(480)};return 0;
-case WM_DPICHANGED:{endProjectDrag();dpi_=HIWORD(a);renderer_.setDpi(dpi_);for(auto& project:projects_)project.runtime->setDpi(dpi_);const auto rect=reinterpret_cast<RECT*>(b);SetWindowPos(window_,nullptr,rect->left,rect->top,rect->right-rect->left,rect->bottom-rect->top,SWP_NOZORDER|SWP_NOACTIVATE);layout();return 0;}
+case WM_DPICHANGED:{endProjectDrag();dpi_=HIWORD(a);renderer_.setDpi(dpi_);recent_.setDpi(dpi_);for(auto& project:projects_)project.runtime->setDpi(dpi_);const auto rect=reinterpret_cast<RECT*>(b);SetWindowPos(window_,nullptr,rect->left,rect->top,rect->right-rect->left,rect->bottom-rect->top,SWP_NOZORDER|SWP_NOACTIVATE);layout();return 0;}
 case wmWork:storageWorker_->dispatch();return 0;
 case WM_APP + 21:{ const auto project = find(static_cast<uint64_t>(a)); if (!project || project->runtime->hasUnsaved()) return 0; const bool active = project == &projects_[active_]; const auto index = static_cast<size_t>(project - projects_.data()); close(index); if (active) for (size_t i = 0; i < projects_.size(); ++i) if (projects_[i].id == static_cast<uint64_t>(b)) { select(i); break; } return 0; }
 case wmAiEvent:for(const auto& event:hooks_.drain())for(auto& project:projects_)if(project.runtime->apply(event))break;return 0;
 case WM_TIMER:if(a==77)Terminal::pump();else tick();return 0;
 case WM_ACTIVATE:if(LOWORD(a)==WA_INACTIVE)endProjectDrag();else if(!projects_.empty())PostMessageW(projects_[active_].runtime->window(),WM_APP+12,0,0);return 0;
 case WM_SETFOCUS:if(!projects_.empty())projects_[active_].runtime->activate(true);return 0;
-case WM_LBUTTONDOWN:{endProjectDrag();const POINT point{GET_X_LPARAM(b),GET_Y_LPARAM(b)};RECT r{};GetClientRect(window_,&r);const int width=px(session_.projectListWidth);if(point.x>=width&&point.x<width+px(5)){dragging_=true;SetCapture(window_);}else if(point.x<width&&point.y>=r.bottom-px(44))choose();else if(const auto index=hit(point);index<projects_.size()){select(index,point.x<px(30));projectDrag_=ProjectDrag{projects_[index].id,point,point,false,std::nullopt};SetCapture(window_);}return 0;}
+case WM_LBUTTONDOWN:{recent_.close();endProjectDrag();const POINT point{GET_X_LPARAM(b),GET_Y_LPARAM(b)};RECT r{};GetClientRect(window_,&r);const int width=px(session_.projectListWidth);if(point.x>=width&&point.x<width+px(5)){dragging_=true;SetCapture(window_);}else if(point.x<width&&point.y>=r.bottom-px(44))choose();else if(const auto index=hit(point);index<projects_.size()){select(index,point.x<px(30));projectDrag_=ProjectDrag{projects_[index].id,point,point,false,std::nullopt};SetCapture(window_);}return 0;}
 case WM_MOUSEMOVE:if(projectDrag_){updateProjectDrag({GET_X_LPARAM(b),GET_Y_LPARAM(b)});return 0;}if(dragging_){session_.projectListWidth=std::clamp(MulDiv(GET_X_LPARAM(b),96,dpi_),100,600);appDirty_=true;appChanged_=GetTickCount64();layout();}return 0;
 case WM_LBUTTONUP:if(projectDrag_&&projectDrag_->active)updateProjectDrag({GET_X_LPARAM(b),GET_Y_LPARAM(b)});endProjectDrag(true);dragging_=false;if(GetCapture()==window_)ReleaseCapture();return 0;
 case WM_CANCELMODE:endProjectDrag();dragging_=false;if(GetCapture()==window_)ReleaseCapture();return 0;

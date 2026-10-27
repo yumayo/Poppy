@@ -1328,6 +1328,101 @@ void multiProjectTests(const fs::path& executable) {
         check(childProcesses(restored.process.dwProcessId).empty(), "Restoring terminal configuration automatically started a process");
     }
 }
+void recentProjectTests(const fs::path& executable) {
+    Fixture fixture;
+    const auto a = fixture.root / L"左 日本語" / L"project", b = fixture.root / L"右 日本語" / L"project";
+    fs::create_directories(a); fs::create_directories(b);
+    writeLines(a / L"a.txt", 200); writeLines(b / L"b.txt", 300);
+    const auto findHost = [&](Application& app) {
+        waitFor([&] {
+            EnumWindows([](HWND candidate, LPARAM context) -> BOOL {
+                auto& app = *reinterpret_cast<Application*>(context);
+                DWORD id = 0; GetWindowThreadProcessId(candidate, &id);
+                wchar_t name[32]{}; GetClassNameW(candidate, name, 32);
+                if (id == app.process.dwProcessId && std::wstring(name) == L"PoppyMain") app.host = candidate;
+                return TRUE;
+            }, reinterpret_cast<LPARAM>(&app));
+            return app.host && IsWindowVisible(app.host);
+        }, "Empty workspace did not appear");
+    };
+    const auto count = [](HWND host) {
+        size_t result = 0;
+        for (HWND project = nullptr; (project = FindWindowExW(host, project, L"PoppyProject", nullptr));) ++result;
+        return result;
+    };
+    const auto show = [&](Application& app, HWND target) {
+        const auto palette = FindWindowExW(app.host, nullptr, L"PoppyQuickOpen", L"Recent projects");
+        check(palette != nullptr, "Recent projects palette is missing");
+        // Share the application's input state while posting a real message-loop
+        // shortcut. This also verifies Ctrl+R from editor/tree/terminal focus.
+        struct Input {
+            DWORD thread; BYTE previous[256]{};
+            explicit Input(DWORD target) : thread(target) {
+                check(AttachThreadInput(GetCurrentThreadId(), thread, TRUE) != FALSE, "Cannot attach shortcut input");
+                GetKeyboardState(previous);
+            }
+            ~Input() { SetKeyboardState(previous); AttachThreadInput(GetCurrentThreadId(), thread, FALSE); }
+        } input(app.process.dwThreadId);
+        SetFocus(target);
+        BYTE keys[256]{}; keys[VK_CONTROL] = keys[VK_LCONTROL] = 0x80;
+        check(SetKeyboardState(keys) != FALSE && PostMessageW(target, WM_KEYDOWN, 'R', 0) != FALSE, "Cannot post Ctrl+R");
+        waitFor([&] { return IsWindowVisible(palette) != FALSE; }, "Ctrl+R did not open recent projects");
+        return palette;
+    };
+    const auto type = [](HWND palette, const std::wstring& query) { for (const auto ch : query) send(palette, WM_CHAR, ch); };
+    {
+        Application app(executable); findHost(app);
+        auto palette = show(app, app.host);
+        send(palette, WM_KEYDOWN, VK_RETURN);
+        check(IsWindowVisible(palette) && count(app.host) == 0, "Empty history opened a project");
+        send(palette, WM_KEYDOWN, VK_ESCAPE);
+        const auto open = [&](const fs::path& path, int lines) {
+            const auto text = path.native();
+            COPYDATASTRUCT data{0x50505901, static_cast<DWORD>((text.size()+1)*sizeof(wchar_t)), const_cast<wchar_t*>(text.c_str())};
+            check(send(app.host, WM_COPYDATA, 0, reinterpret_cast<LPARAM>(&data)), "Cannot add a history test project");
+            const auto tree = app.tree(); const auto root = nextItem(tree, TreeRelation::Root);
+            waitFor([&] { return nextItem(tree, TreeRelation::Child, root) != 0; }, "History test project did not load");
+            send(tree, treeSelect, nextItem(tree, TreeRelation::Child, root));
+            waitLines(FindWindowExW(app.window, nullptr, L"PoppyViewer", nullptr), lines);
+            return app.window;
+        };
+        const auto surfaceA = open(a, 200), surfaceB = open(b, 300);
+        const auto treeB = app.tree();
+        const auto px = [dpi = GetDpiForWindow(app.host)](int value) { return MulDiv(value, dpi, 96); };
+        palette = show(app, treeB); type(palette, L"zz-no-such-history-97216");
+        send(palette, WM_KEYDOWN, VK_RETURN);
+        check(IsWindowVisible(palette) && count(app.host) == 2 && IsWindowVisible(surfaceB), "Unmatched history opened a stale project");
+        send(palette, WM_KEYDOWN, VK_ESCAPE);
+        check(!IsWindowVisible(palette) && IsWindowVisible(surfaceB), "Cancelling history switched projects");
+        GUITHREADINFO focus{}; focus.cbSize = sizeof(focus);
+        check(GetGUIThreadInfo(app.process.dwThreadId, &focus) && focus.hwndFocus == treeB, "Cancelling history did not restore focus");
+        palette = show(app, treeB);
+        check(PostMessageW(surfaceB, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(px(12), px(22))) != FALSE, "Cannot click outside history");
+        waitFor([&] { return !IsWindowVisible(palette); }, "An outside click did not close recent projects");
+        // The second row opens an existing project instead of creating a copy.
+        const auto pane = FindWindowExW(surfaceB, nullptr, L"PoppyTerminalPane", nullptr);
+        const auto terminal = FindWindowExW(pane, nullptr, L"PoppyTerminal", nullptr);
+        check(terminal != nullptr, "History test terminal is missing");
+        palette = show(app, terminal); send(palette, WM_KEYDOWN, VK_DOWN); send(palette, WM_KEYDOWN, VK_RETURN);
+        app.tree(); check(app.window == surfaceA && count(app.host) == 2, "History duplicated an already open project");
+        click(app.host, px(60), px(44+48+24), true);
+        check(!IsWindow(surfaceB) && count(app.host) == 1, "History test could not close project B");
+        palette = show(app, FindWindowExW(surfaceA, nullptr, L"PoppyViewer", nullptr));
+        type(palette, L"右 日本語"); click(palette, px(24), px(108));
+        app.tree(); waitLines(FindWindowExW(app.window, nullptr, L"PoppyViewer", nullptr), 300);
+        check(count(app.host) == 2 && !IsWindowVisible(palette), "History could not reopen a closed project by path");
+        // Close both, leaving a saved workspace with no open project.
+        click(app.host, px(60), px(44+48+24), true); click(app.host, px(60), px(68), true);
+        check(count(app.host) == 0, "History test did not close all projects");
+    }
+    {
+        Application app(executable); findHost(app);
+        check(count(app.host) == 0, "Restart automatically opened a history entry");
+        const auto palette = show(app, app.host); type(palette, L"左 日本語"); send(palette, WM_KEYDOWN, VK_RETURN);
+        app.tree(); waitLines(FindWindowExW(app.window, nullptr, L"PoppyViewer", nullptr), 200);
+        check(count(app.host) == 1 && !IsWindowVisible(palette), "Closed project history did not survive restart");
+    }
+}
 void projectDragTests(const fs::path& executable) {
     Fixture a,b,c;
     writeLines(a.root/L"a.txt",200);writeLines(b.root/L"b.txt",300);writeLines(c.root/L"c.txt",400);
@@ -1518,7 +1613,7 @@ int wmain(int argc, wchar_t** argv) {
         check(argc == 2, "Pass the path to Poppy.exe");
         SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         for (const auto test : {folderTests, sidebarTests, treeInteractionTests, tabTests, pinnedTabTests,
-                tabDragTests, wrappingTabDragTests, wrappingTabTests, renameTests, createItemTests, pasteImageTests, splitPaneTests, quickOpenTests, fullSearchTests, gitSidebarTests, gitAutoRefreshTests, branchSidebarTests, multiRepositoryTests, sessionTests, multiProjectTests, projectDragTests, scrollingProjectDragTests, terminalBackspaceTests}) {
+                tabDragTests, wrappingTabDragTests, wrappingTabTests, renameTests, createItemTests, pasteImageTests, splitPaneTests, quickOpenTests, fullSearchTests, gitSidebarTests, gitAutoRefreshTests, branchSidebarTests, multiRepositoryTests, sessionTests, multiProjectTests, recentProjectTests, projectDragTests, scrollingProjectDragTests, terminalBackspaceTests}) {
             Fixture appData; AppDataEnvironment environment(appData.root);
             test(fs::absolute(argv[1]));
         }
