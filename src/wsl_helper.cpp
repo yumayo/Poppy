@@ -185,6 +185,7 @@ private:
     void watchGit(const std::string& directory);
     void events();
     void save(Request& request);
+    void create(Request& request);
     void git(Request& request);
     std::atomic<bool> stopping_{false};
     std::mutex mutex_, outputMutex_, watchMutex_;
@@ -252,7 +253,7 @@ void Server::accept(Frame frame) {
     number(m, "generation");
     if (requests_.count(id) || requests_.size() >= 128) throw std::runtime_error("WSL request queue is full or ID is reused");
     auto r = std::make_shared<Request>(); r->message = std::move(m); requests_[id] = r;
-    if (op == "saveFile" || op == "searchContent") {
+    if (op == "saveFile" || op == "createFile" || op == "searchContent") {
         if (upload_) throw std::runtime_error("Concurrent upload is unsupported");
         r->size = number(r->message, "size"); if (r->size > maxFileBytes || uploadBytes_ + r->size > 64 * 1024 * 1024) throw std::runtime_error("Save exceeds the file or upload queue limit"); uploadBytes_ += r->size; upload_ = r;
     } else { queue_.push_back(r); condition_.notify_all(); }
@@ -320,6 +321,26 @@ void Server::save(Request& request) {
     catch (const std::exception&) { throw std::runtime_error("Replacement completed, but its new version could not be verified. Reload to verify before saving again."); }
     reply(request, {{"version", saved.version}, {"done", "1"}});
 }
+void Server::create(Request& request) {
+    const auto p = path(request.message), parent = std::filesystem::path(p).parent_path().string();
+    std::string pattern = parent + "/.poppy-paste-XXXXXX"; std::vector<char> name(pattern.begin(), pattern.end()); name.push_back(0);
+    Fd temporary(mkostemp(name.data(), O_CLOEXEC)); if (temporary.value < 0) failure("Cannot create temporary image");
+    struct Cleanup { const char* name; ~Cleanup() { unlink(name); } } cleanup{name.data()};
+    size_t offset = 0;
+    while (offset < request.bytes.size()) {
+        if (request.cancelled) throw std::runtime_error("Request cancelled");
+        const auto count = ::write(temporary.value, request.bytes.data() + offset, request.bytes.size() - offset);
+        if (count < 0) { if (errno == EINTR) continue; failure("Cannot write image"); }
+        if (!count) throw std::runtime_error("Short image write");
+        offset += static_cast<size_t>(count);
+    }
+    if (fsync(temporary.value)) failure("Cannot flush image");
+    if (request.cancelled) throw std::runtime_error("Request cancelled");
+    if (syscall(SYS_renameat2, AT_FDCWD, name.data(), AT_FDCWD, p.c_str(), 1 /* RENAME_NOREPLACE */)) failure("Cannot create image without overwriting");
+    Fd directory(open(parent.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC));
+    if (directory.value < 0 || fsync(directory.value)) throw std::runtime_error("Image created, but directory flush failed. Refresh to verify before pasting again.");
+    reply(request, {{"done", "1"}});
+}
 void Server::git(Request& request) {
     const auto p = path(request.message); const auto argc = number(request.message, "argc"); if (argc > 64) throw std::runtime_error("Too many Git arguments");
     std::vector<std::string> args{"git"}; for (size_t i = 0; i < argc; ++i) { auto arg = field(request.message, "arg" + std::to_string(i)); if (arg.find('\0') != arg.npos) throw std::runtime_error("Invalid Git argument"); args.push_back(std::move(arg)); }
@@ -362,7 +383,7 @@ void Server::execute(const std::shared_ptr<Request>& r) {
         if (op == "hello") {
             if (number(r->message, "protocolVersion") != protocolVersion) throw std::runtime_error("WSL protocol version mismatch");
             utsname system{}; if (uname(&system)) failure("Cannot detect architecture");
-            reply(*r, {{"protocolVersion", std::to_string(protocolVersion)}, {"helperVersion", helperVersion}, {"uid", std::to_string(getuid())}, {"home", home()}, {"shell", shell()}, {"executable", real("/proc/self/exe")}, {"architecture", system.machine}, {"capabilities", "list,read,save,rename,index,git,repositories,inotify,terminal,search"}, {"done", "1"}});
+            reply(*r, {{"protocolVersion", std::to_string(protocolVersion)}, {"helperVersion", helperVersion}, {"uid", std::to_string(getuid())}, {"home", home()}, {"shell", shell()}, {"executable", real("/proc/self/exe")}, {"architecture", system.machine}, {"capabilities", "list,read,save,create,rename,index,git,repositories,inotify,terminal,search"}, {"done", "1"}});
         } else if (op == "connect") {
             const auto p = real(path(r->message)); struct stat info{}; if (stat(p.c_str(), &info)) failure("Cannot inspect project"); if (!S_ISDIR(info.st_mode)) throw std::runtime_error("The project path is not a directory"); watch(p); reply(*r, {{"path", p}, {"done", "1"}});
         } else if (op == "stat") {
@@ -372,6 +393,7 @@ void Server::execute(const std::shared_ptr<Request>& r) {
             const auto p = path(r->message); const auto snapshot = read(p, &r->cancelled); watch(std::filesystem::path(snapshot.target).parent_path().string());
             reply(*r, {{"body", "1"}, {"size", std::to_string(snapshot.bytes.size())}, {"version", snapshot.version}}); body(*r, snapshot.bytes); reply(*r, {{"done", "1"}});
         } else if (op == "saveFile") save(*r);
+        else if (op == "createFile") create(*r);
         else if (op == "renameResource") {
             const auto p = path(r->message); const auto name = field(r->message, "name"); const auto parent = std::filesystem::path(p).parent_path().string();
             errno = 0; const auto limit = pathconf(parent.c_str(), _PC_NAME_MAX); if (limit < 0 && errno) failure("Cannot determine filename limit");

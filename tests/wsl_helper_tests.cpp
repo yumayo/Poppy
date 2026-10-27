@@ -112,6 +112,18 @@ void files(const std::string& executable) {
     for (const auto& entry : listed.entries) { names.insert(field(entry,"name")); unsupported = unsupported || field(entry,"unsupported") == "1"; }
     check(names.count("A.cpp") && names.count("a.cpp") && names.count(unusual.filename().string()) && unsupported,"Linux listing lost names or encoding diagnostics");
     const auto indexed = helper.call("indexFiles",fixture.root); for (const auto& item : indexed.entries) check(field(item,"path").find("directory-link/") == std::string::npos,"Index followed a directory link");
+    const auto image = fixture.root/"src"/"paste-2026-10-27T08-03-09.png";
+    const std::string imageBytes("\x89PNG\r\n\x1a\n\0binary", 15), otherImage = "replacement";
+    helper.call("createFile",image,{{"size",std::to_string(imageBytes.size())}},&imageBytes);
+    check(disk(image) == imageBytes,"New image bytes were changed or saved in the wrong folder");
+    helper.call("createFile",image,{{"size",std::to_string(otherImage.size())}},&otherImage,false);
+    check(disk(image) == imageBytes,"Image collision overwrote an existing file");
+    const auto imageLink = fixture.root/"image-link.png"; fs::create_symlink(image,imageLink);
+    helper.call("createFile",imageLink,{{"size",std::to_string(otherImage.size())}},&otherImage,false);
+    check(fs::is_symlink(imageLink) && disk(image) == imageBytes,"Image creation followed or replaced an existing symlink");
+    helper.call("createFile",fixture.root/"src",{{"size",std::to_string(imageBytes.size())}},&imageBytes,false);
+    helper.call("createFile",fixture.root/"missing"/"image.png",{{"size",std::to_string(imageBytes.size())}},&imageBytes,false);
+    for (const auto& entry : fs::directory_iterator(image.parent_path())) check(entry.path().filename().string().find(".poppy-paste-") != 0,"Image creation leaked a temporary file");
     check(helper.call("readFile",unusual).bytes == disk(unusual),"UTF-8 bytes changed");
     check(helper.call("readFile",fixture.root/"empty").last,"Empty file omitted final chunk");
     const std::string utf16("\xff\xfe\x41\0\r\0\n\0",8); write(fixture.root/"utf16",utf16); check(helper.call("readFile",fixture.root/"utf16").bytes == utf16,"UTF-16 bytes changed");

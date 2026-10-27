@@ -230,17 +230,19 @@ LRESULT Tree::handle(UINT m, WPARAM a, LPARAM b) {
     }
     case WM_COMMAND: if (LOWORD(a) == 1002 && HIWORD(a) == EN_KILLFOCUS) finishRename(false); return 0;
     case WM_CONTEXTMENU: {
-        if (!renameRequested && !openWithDefaultAppRequested) return 0;
+        if (!renameRequested && !openWithDefaultAppRequested && !pasteImageRequested) return 0;
         POINT screen{GET_X_LPARAM(b), GET_Y_LPARAM(b)}; auto id = selection();
         if (screen.x == -1 && screen.y == -1) { screen = {indent_, (row(id) - top_ + 1) * rowHeight_}; ClientToScreen(window_, &screen); }
         else { auto point = screen; ScreenToClient(window_, &point); id = hit(point.y); if (id) select(id, false); }
-        if (!id) return 0;
-        const bool canOpen = openWithDefaultAppRequested && (!canOpenWithDefaultApp || canOpenWithDefaultApp(id));
-        if (!renameRequested && !canOpen) return 0;
+        if (!id && !pasteImageRequested) return 0;
+        const bool canOpen = id && openWithDefaultAppRequested && (!canOpenWithDefaultApp || canOpenWithDefaultApp(id));
+        if (!renameRequested && !canOpen && !pasteImageRequested) return 0;
         HMENU menu = CreatePopupMenu(); if (!menu) return 0;
         if (canOpen) AppendMenuW(menu, MF_STRING, 2, L"デフォルトのアプリケーションで開く");
-        if (renameRequested) AppendMenuW(menu, MF_STRING | (canRename && !canRename(id) ? MF_GRAYED : 0), 1, L"Rename\tF2");
+        if (id && renameRequested) AppendMenuW(menu, MF_STRING | (canRename && !canRename(id) ? MF_GRAYED : 0), 1, L"Rename\tF2");
+        if (pasteImageRequested) AppendMenuW(menu, MF_STRING | (canPasteImage && !canPasteImage(id) ? MF_GRAYED : 0), 3, L"Paste Image\tCtrl+V");
         const auto command = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, screen.x, screen.y, 0, window_, nullptr); DestroyMenu(menu);
+        if (command == 3 && pasteImageRequested && (!canPasteImage || canPasteImage(id))) { pasteImageRequested(id); return 0; }
         if (!item(id)) return 0;
         if (command == 2 && openWithDefaultAppRequested && (!canOpenWithDefaultApp || canOpenWithDefaultApp(id))) openWithDefaultAppRequested(id);
         else if (command == 1 && renameRequested && (!canRename || canRename(id))) renameRequested(id);
@@ -293,6 +295,9 @@ LRESULT Tree::handle(UINT m, WPARAM a, LPARAM b) {
         changed(); return 0;
     }
     case WM_KEYDOWN: {
+        if (a == 'V' && (GetKeyState(VK_CONTROL) & 0x8000) && !(GetKeyState(VK_SHIFT) & 0x8000) && !(GetKeyState(VK_MENU) & 0x8000)) {
+            SendMessageW(window_, WM_PASTE, 0, 0); return 0;
+        }
         const auto& rows = model_.visible(); if (rows.empty()) return 0;
         const auto id = selection(); const auto node = item(id);
         int index = row(id); if (index < 0) index = 0;
@@ -309,6 +314,9 @@ LRESULT Tree::handle(UINT m, WPARAM a, LPARAM b) {
         }
         select(rows[static_cast<size_t>(std::clamp(index, 0, static_cast<int>(rows.size()) - 1))].item); return 0;
     }
+    case WM_PASTE:
+        if (pasteImageRequested && (!canPasteImage || canPasteImage(selection()))) pasteImageRequested(selection());
+        return 0;
     case WM_CHAR: {
         if (a <= 32 || a == 127) return 0;
         const auto now = GetTickCount64();

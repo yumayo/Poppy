@@ -53,6 +53,23 @@ public:
         if (!error.empty()) DeleteFileW(temporary.c_str());
         return {{}, error};
     }
+    std::wstring createFile(const ResourceId& path, const std::string& bytes) override {
+        if (bytes.size() > maxFileBytes) return L"New file exceeds the 16 MiB limit.";
+        const auto temporary = path.local().parent_path() / (L".poppy-paste-" + wide(newSessionId()) + L".tmp");
+        Handle output(CreateFileW(temporary.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr));
+        if (!output) return winError();
+        std::wstring error; size_t offset = 0;
+        while (offset < bytes.size()) {
+            DWORD count = 0;
+            if (!WriteFile(output.value, bytes.data() + offset, static_cast<DWORD>(bytes.size() - offset), &count, nullptr) || !count) { error = winError(); break; }
+            offset += count;
+        }
+        if (error.empty() && !FlushFileBuffers(output.value)) error = winError();
+        output.reset();
+        if (error.empty() && !MoveFileExW(temporary.c_str(), path.local().c_str(), MOVEFILE_WRITE_THROUGH)) error = winError();
+        if (!error.empty()) DeleteFileW(temporary.c_str());
+        return error;
+    }
     std::wstring renameResource(const ResourceId& source, const ResourceId& destination) override { return MoveFileExW(source.local().c_str(), destination.local().c_str(), MOVEFILE_WRITE_THROUGH) ? std::wstring{} : winError(); }
     FileIndex indexFiles(const ResourceId& root, const std::function<bool()>& cancelled) override { return poppy::indexFiles(root.local(), cancelled); }
     ContentSearchSummary searchContent(const ResourceId& root, const ContentSearchOptions& options,
