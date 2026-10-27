@@ -1,5 +1,6 @@
 #pragma once
 #include "win.h"
+#include "image_preview.h"
 #include <d2d1.h>
 #include <dwrite.h>
 #include <wincodec.h>
@@ -64,6 +65,8 @@ public:
     void ellipse(const RECT& rect, COLORREF color, float width);
     void outline(const RECT& rect, COLORREF color, float width = 1.0f);
     void icon(Icon icon, const RECT& rect, COLORREF color);
+    void setImage(std::shared_ptr<const ImagePreview> image);
+    bool drawImage(const RECT& bounds, int checkerSize);
 private:
     bool prepare(HRESULT result);
     void color(COLORREF value);
@@ -73,6 +76,8 @@ private:
     IWICBitmap* bitmap_ = nullptr; // Retained by bitmapTarget_.
     ID2D1RenderTarget* target_ = nullptr;
     ComPtr<ID2D1SolidColorBrush> brush_;
+    std::shared_ptr<const ImagePreview> image_;
+    ComPtr<ID2D1Bitmap> imageBitmap_;
     ComPtr<IDWriteTextFormat> uiFont_, codeFont_;
     Font font_ = Font::Ui;
     int cellWidth_ = 8, textHeight_ = 18;

@@ -96,6 +96,43 @@ void colorsAndClipping() {
     check(other.pixel(0, 0) == accent && other.pixel(511, 127) == accent, "A replacement WIC bitmap was not rendered");
     check(bitmap.pixel(0, 0) == untouched, "Switching WIC targets changed the old bitmap");
 }
+void imagePreviews() {
+    Renderer renderer; Bitmap bitmap;
+    auto image = std::make_shared<ImagePreview>(); image->width = 2; image->height = 1;
+    image->pixels = {0, 0, 255, 255, 0, 0, 0, 0};
+    renderer.setImage(image);
+    for (int pass = 0; pass < 2; ++pass) {
+        check(renderer.begin(bitmap.bitmap.get()), "Could not create the image test target");
+        renderer.fill(bitmap.bounds(), background);
+        check(renderer.drawImage({10, 10, 30, 20}, 4), "Could not render image pixels");
+        finish(renderer); bitmap.read();
+        check(bitmap.pixel(19, 14) == RGB(255, 0, 0), "Opaque image color was lost");
+        check(bitmap.pixel(20, 14) == RGB(68, 74, 84), "Transparent image pixel hid the checkerboard");
+        check(bitmap.pixel(18, 14) == background && bitmap.pixel(21, 14) == background, "Image escaped its fitted rectangle");
+        renderer.discard(); // Device loss must recreate the bitmap from CPU pixels.
+    }
+    HWND parent = CreateWindowExW(0, L"STATIC", L"Image viewer test", WS_POPUP, 0, 0, 320, 200, nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
+    check(parent != nullptr, "Could not create an image viewer parent");
+    struct WindowOwner { HWND value; ~WindowOwner() { DestroyWindow(value); } } owner{parent};
+    Viewer viewer; viewer.create(parent, GetModuleHandleW(nullptr));
+    SetWindowPos(viewer.window(), nullptr, 0, 0, 320, 200, SWP_NOZORDER);
+    auto buffer = std::make_shared<EditBuffer>();
+    buffer->document.text = std::string(1000, '\n'); indexDocument(buffer->document); buffer->initialize(buffer->document.text);
+    viewer.edit(buffer, L"before.txt"); viewer.find();
+    viewer.showImage(image, ResourceId(fs::path(L"preview.png")));
+    check(viewer.hasDocument() && !viewer.buffer(), "Image did not replace the editable document");
+    SendMessageW(viewer.window(), WM_CHAR, 'x', 0); viewer.find();
+    check(!viewer.buffer() && viewer.state().caret == 0, "Image accepted text editing or selection");
+    viewer.setDpi(192); SetWindowPos(viewer.window(), nullptr, 0, 0, 90, 90, SWP_NOZORDER);
+    SendMessageW(viewer.window(), WM_PAINT, 0, 0);
+    check(viewer.documentBytes() >= image->pixels.size(), "Image was omitted from memory accounting");
+    const std::weak_ptr<const ImagePreview> lifetime = image;
+    viewer.edit(buffer, L"after.txt");
+    check(viewer.buffer() == buffer, "Switching from an image did not restore text editing");
+    viewer.showImage(image, ResourceId(fs::path(L"preview.png"))); image.reset();
+    viewer.message(L"Closed"); renderer.setImage({});
+    check(!viewer.hasDocument() && viewer.documentBytes() == 0 && lifetime.expired(), "Closing an image retained its pixels");
+}
 void smoothIcons() {
     Renderer renderer; Bitmap bitmap;
     for (const UINT dpi : {96u, 120u, 144u, 192u}) {
@@ -765,7 +802,7 @@ int main() {
     int result = 0;
     try {
         initializeRendering();
-        cellPositions(); colorsAndClipping(); smoothIcons(); windowTargets(); editorCaret(); editorWrapping(); diffWrapping(); documentFind(); horizontalWheelScrolling(); continuousViewerScrolling(); themedScrollbars(); quickOpenStability();
+        cellPositions(); colorsAndClipping(); imagePreviews(); smoothIcons(); windowTargets(); editorCaret(); editorWrapping(); diffWrapping(); documentFind(); horizontalWheelScrolling(); continuousViewerScrolling(); themedScrollbars(); quickOpenStability();
         std::cout << "Direct2D rendering tests passed\n";
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; result = 1; }
     if (SUCCEEDED(com)) CoUninitialize();
