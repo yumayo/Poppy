@@ -165,6 +165,12 @@ Storage::Storage(fs::path directory) : impl_(std::make_unique<Impl>()) {
         "INSERT INTO open_projects SELECT COALESCE((SELECT path_key FROM projects WHERE path=last_project),lower(last_project)),last_project,0 FROM app WHERE last_project<>'';", appLocations});
 }
 Storage::~Storage() = default;
+std::vector<std::string> Storage::projectHistory() {
+    std::vector<std::string> paths;
+    Statement rows(*impl_->app, "SELECT path FROM projects ORDER BY rowid DESC");
+    while (rows.row()) paths.push_back(rows.text(0));
+    return paths;
+}
 AppSession Storage::loadApp() {
     AppSession state;
     Transaction snapshot(*impl_->app, false);

@@ -14,6 +14,8 @@ public:
     Storage(const Storage&) = delete;
     Storage& operator=(const Storage&) = delete;
     AppSession loadApp();
+    // The registry outlives open_projects, including projects closed by the user.
+    std::vector<std::string> projectHistory();
     void saveApp(const AppSession& state);
     std::optional<ProjectSession> loadProject(const std::string& key, const std::string& path);
     void saveProject(const std::string& key, const std::string& path, const ProjectSession& state);

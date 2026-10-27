@@ -114,6 +114,37 @@ void atomicSave() {
     rejects([&] { storage.saveProject(key, key, changed); }, "Oversized sessions were silently truncated");
     check(same(*storage.loadProject(key, key), original), "An oversized session overwrote previous state");
 }
+void projectHistory() {
+    Fixture fixture;
+    const std::string key = "c:\\work\\日本語 project", path = "C:\\work\\日本語 project";
+    const auto ubuntu = poppy::ResourceId::wsl("Ubuntu", "/home/user/project", "user");
+    const auto debian = poppy::ResourceId::wsl("Debian", "/home/user/project", "user");
+    poppy::ProjectSession state; state.sidebar = 321; state.terminals[0].directory = path;
+    {
+        poppy::Storage storage(fixture.directory);
+        check(storage.projectHistory().empty(), "New storage has project history");
+        storage.loadProject(key, path);
+        storage.saveProject(key, path, state);
+        storage.loadProject(ubuntu.key(), ubuntu.serialized());
+        storage.loadProject(debian.key(), debian.serialized());
+        poppy::AppSession app; app.openProjects = {path}; app.openProjectKeys = {key};
+        storage.saveApp(app);
+        // Closing the last project must only clear the currently open list.
+        storage.saveApp({});
+    }
+    {
+        poppy::Storage storage(fixture.directory);
+        check(storage.loadApp().openProjects.empty(), "Closing projects retained the open list");
+        const std::vector<std::string> expected{debian.serialized(), ubuntu.serialized(), path};
+        check(storage.projectHistory() == expected, "Closed Windows/WSL history was lost or duplicated after restart");
+        check(same(*storage.loadProject(key, path), state), "Reopening from history lost the saved project session");
+        check(storage.projectHistory() == expected, "Reopening a project duplicated its history");
+        // History also works for projects saved before this feature existed:
+        // it reads the registry and does not require a new app-state write.
+        execute(fixture.directory / "storage.sql", "DELETE FROM app;");
+        check(storage.projectHistory() == expected, "History depended on the open workspace or app settings");
+    }
+}
 void migrateProjectLayout() {
     Fixture fixture;
     poppy::Storage storage(fixture.directory);
@@ -202,6 +233,7 @@ void migrateWorkspaceAndTerminals() {
     poppy::Storage storage(fixture.directory);
     const auto app = storage.loadApp();
     check(app.openProjects == std::vector<std::string>{"C:\\selected"} && app.projectListWidth == 180 && app.x == 20, "App migration opened recent projects or lost placement");
+    check(storage.projectHistory() == std::vector<std::string>{"C:\\recent"}, "Legacy closed project was missing from history");
     const std::string key = "c:\\terminals";
     poppy::ProjectSession original;
     original.terminalHeight = 333; original.terminalVisible = false;
@@ -312,7 +344,7 @@ void wslRoundTripAndMigration() {
 }
 int main() {
     try {
-        roundTripAndIsolation(); atomicSave(); migrateProjectLayout(); migrateGitLayout(); migratePinnedTabs(); migrateWorkspaceAndTerminals(); migrateSplitLayout(); migrateWrapping(); schemaAndRegistry(); gitComparisonRoundTrip(); wslRoundTripAndMigration();
+        roundTripAndIsolation(); atomicSave(); projectHistory(); migrateProjectLayout(); migrateGitLayout(); migratePinnedTabs(); migrateWorkspaceAndTerminals(); migrateSplitLayout(); migrateWrapping(); schemaAndRegistry(); gitComparisonRoundTrip(); wslRoundTripAndMigration();
         std::cout << "Storage tests passed\n";
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
 }

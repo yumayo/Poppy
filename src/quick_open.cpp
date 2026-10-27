@@ -3,14 +3,23 @@
 #include <algorithm>
 
 namespace poppy {
-void QuickOpen::create(HWND parent, HINSTANCE instance) {
+namespace {
+std::wstring projectDescription(const ResourceId& path) {
+    return path.wsl() ? L"WSL · " + wide(path.location().distro) +
+        (path.location().user.empty() ? L"" : L" · " + wide(path.location().user)) + L" · " + path.native() : path.native();
+}
+}
+void QuickOpen::create(HWND parent, HINSTANCE instance, bool projects) {
+    projectMode_ = projects;
     WNDCLASSW cls{}; cls.lpfnWndProc = procedure; cls.hInstance = instance;
     cls.lpszClassName = L"PoppyQuickOpen"; cls.hCursor = LoadCursorW(nullptr, IDC_ARROW);
     RegisterClassW(&cls);
-    window_ = CreateWindowExW(WS_EX_CONTROLPARENT, cls.lpszClassName, L"Go to file", WS_CHILD | WS_CLIPSIBLINGS,
+    window_ = CreateWindowExW(WS_EX_CONTROLPARENT, cls.lpszClassName, projects ? L"Recent projects" : L"Go to file", WS_CHILD | WS_CLIPSIBLINGS,
         0, 0, 0, 0, parent, nullptr, instance, this);
-    worker_ = std::make_unique<Worker>(window_);
-    indexWorker_ = std::make_unique<Worker>(window_);
+    if (!projects) {
+        worker_ = std::make_unique<Worker>(window_);
+        indexWorker_ = std::make_unique<Worker>(window_);
+    }
 }
 void QuickOpen::setDpi(UINT dpi) { dpi_ = dpi; renderer_.setDpi(dpi); layout(); }
 int QuickOpen::rows() const {
@@ -40,16 +49,23 @@ void QuickOpen::setRoot(const ResourceId& root) {
     root_ = root; index_.reset(); indexing_ = indexAgain_ = false;
     refresh();
 }
+void QuickOpen::setProjects(std::vector<ResourceId> projects) {
+    projects_ = std::move(projects);
+    request();
+}
 void QuickOpen::show() {
     if (visible_) { SetFocus(window_); anchor_ = 0; caret_ = query_.size(); caretChanged(); return; }
     previousFocus_ = GetFocus(); query_.clear(); caret_ = anchor_ = inputFirst_ = 0;
     selected_ = first_ = 0; wheel_ = 0; highSurrogate_ = 0; result_ = {}; visible_ = true;
-    request(); ShowWindow(window_, SW_SHOW); SetFocus(window_);
+    request();
+    SetWindowPos(window_, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+    ShowWindow(window_, SW_SHOW); SetFocus(window_);
 }
 void QuickOpen::close(bool restoreFocus) {
     if (!visible_) return;
     visible_ = false; ++revision_;
-    worker_->cancelPending(); result_ = {}; loading_ = false;
+    if (worker_) worker_->cancelPending();
+    result_ = {}; loading_ = false;
     if (composing_) {
         const auto context = ImmGetContext(window_);
         if (context) { ImmNotifyIME(context, NI_COMPOSITIONSTR, CPS_CANCEL, 0); ImmReleaseContext(window_, context); }
@@ -64,7 +80,7 @@ void QuickOpen::stop() {
     if (worker_) worker_->stop();
 }
 void QuickOpen::refresh() {
-    if (root_.empty()) return;
+    if (projectMode_ || root_.empty()) return;
     // Publish the current scan even if more changes arrive, then scan again.
     // Typing and closing the palette never cancel an initial file-list load.
     if (indexing_) { indexAgain_ = true; return; }
@@ -88,6 +104,17 @@ void QuickOpen::changed() {
 }
 void QuickOpen::request() {
     if (!visible_) return;
+    if (projectMode_) {
+        result_ = {};
+        const auto query = utf8(query_);
+        for (const auto& path : projects_) {
+            const int score = fileSearchScore(utf8(projectDescription(path)), query);
+            if (score >= 0) result_.matches.push_back({{}, score, path.serialized()});
+        }
+        std::stable_sort(result_.matches.begin(), result_.matches.end(),
+            [](const FileMatch& a, const FileMatch& b) { return a.score < b.score; });
+        selected_ = first_ = 0; layout(); return;
+    }
     const auto revision = ++revision_; worker_->cancelPending();
     loading_ = !root_.empty();
     const auto index = index_; const auto query = utf8(query_);
@@ -135,7 +162,8 @@ void QuickOpen::replace(std::wstring text) {
 }
 void QuickOpen::accept() {
     if (loading_ || selected_ >= result_.matches.size()) return;
-    const auto path = root_ / std::string_view(result_.matches[selected_].exactRelative);
+    const auto& saved = result_.matches[selected_].exactRelative;
+    const auto path = projectMode_ ? ResourceId::parse(saved) : root_ / std::string_view(saved);
     close(false); if (opened) opened(path);
 }
 void QuickOpen::move(int delta) {
@@ -163,7 +191,7 @@ void QuickOpen::paint() {
     RECT rect{}; GetClientRect(window_, &rect);
     renderer_.fill(rect, panel); renderer_.outline({0, 0, rect.right - 1, rect.bottom - 1}, border);
     renderer_.fill({1, 1, rect.right - 1, px(2)}, accent);
-    renderer_.label({px(16), px(6), rect.right - px(16), px(34)}, L"Go to file", foreground);
+    renderer_.label({px(16), px(6), rect.right - px(16), px(34)}, projectMode_ ? L"Recent projects" : L"Go to file", foreground);
     const RECT input{px(16), px(38), rect.right - px(16), px(76)};
     renderer_.fill(input, background); renderer_.outline(input, accent);
     const auto begin = std::max(inputFirst_, std::min(anchor_, caret_)), end = std::max(anchor_, caret_);
@@ -173,7 +201,7 @@ void QuickOpen::paint() {
         renderer_.fill({left, px(43), std::min<LONG>(right, input.right - px(8)), px(71)}, RGB(57, 75, 89));
     }
     renderer_.label({px(24), input.top, input.right - px(8), input.bottom},
-        query_.empty() ? L"Search files by name or path" : query_.substr(inputFirst_), query_.empty() ? muted : foreground,
+        query_.empty() ? (projectMode_ ? L"Search projects by name or path" : L"Search files by name or path") : query_.substr(inputFirst_), query_.empty() ? muted : foreground,
         DT_LEFT | DT_VCENTER | DT_SINGLELINE);
     if (GetFocus() == window_ && !composing_) renderer_.fill({caretX_, px(47), caretX_ + std::max(1, px(1)), px(67)}, foreground);
     const int count = std::min(rows(), static_cast<int>(result_.matches.size() - std::min(first_, result_.matches.size())));
@@ -181,11 +209,12 @@ void QuickOpen::paint() {
         const auto index = first_ + row; const auto& match = result_.matches[index];
         const int top = px(86 + row * 44);
         if (index == selected_) renderer_.fill({px(8), top, rect.right - px(8), top + px(44)}, RGB(43, 55, 66));
-        renderer_.label({px(20), top, rect.right - px(20), top + px(23)}, root_.at(match.exactRelative).filename().native(), foreground);
-        renderer_.label({px(20), top + px(23), rect.right - px(20), top + px(43)}, wide(match.exactRelative), muted, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_PATH_ELLIPSIS);
+        const auto path = projectMode_ ? ResourceId::parse(match.exactRelative) : root_.at(match.exactRelative);
+        renderer_.label({px(20), top, rect.right - px(20), top + px(23)}, path.filename().empty() ? path.native() : path.filename().native(), foreground);
+        renderer_.label({px(20), top + px(23), rect.right - px(20), top + px(43)}, projectMode_ ? projectDescription(path) : wide(match.exactRelative), muted, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_PATH_ELLIPSIS);
     }
     if (result_.matches.empty()) {
-        const auto message = root_.empty() ? L"Open a folder with Ctrl+O to search files." : !index_ ? L"Loading file list…" : loading_ ? L"Searching…" : !result_.error.empty() ? L"Cannot search this folder. Press F5 to retry." : L"No matching files.";
+        const auto message = projectMode_ ? (projects_.empty() ? L"No recent projects. Open a folder with Ctrl+O." : L"No matching projects.") : root_.empty() ? L"Open a folder with Ctrl+O to search files." : !index_ ? L"Loading file list…" : loading_ ? L"Searching…" : !result_.error.empty() ? L"Cannot search this folder. Press F5 to retry." : L"No matching files.";
         renderer_.label({px(20), px(86), rect.right - px(20), px(130)}, message, muted);
     }
     const auto hint = indexing_ ? L"Updating file list…" : result_.resultsLimited ? L"Top 100 matches · Type to narrow the results" : L"↑↓ Select    Enter Open    Esc Close";
@@ -206,7 +235,7 @@ LRESULT QuickOpen::handle(UINT message, WPARAM a, LPARAM b) {
     case WM_SIZE: case WM_SETFOCUS: caretChanged(); return 0;
     case WM_KILLFOCUS: close(false); return 0;
     case WM_GETDLGCODE: return DLGC_WANTALLKEYS;
-    case wmWork: indexWorker_->dispatch(); worker_->dispatch(); return 0;
+    case wmWork: if (indexWorker_) indexWorker_->dispatch(); if (worker_) worker_->dispatch(); return 0;
     case WM_KEYDOWN: {
         if (!visible_ || composing_) break;
         const bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0, shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;

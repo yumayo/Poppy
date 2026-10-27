@@ -8,10 +8,11 @@ namespace poppy {
 class QuickOpen {
 public:
     ~QuickOpen() { stop(); }
-    void create(HWND parent, HINSTANCE instance);
+    void create(HWND parent, HINSTANCE instance, bool projects = false);
     void setDpi(UINT dpi);
     void setProvider(std::shared_ptr<ProjectProvider> provider) { provider_ = std::move(provider); }
     void setRoot(const ResourceId& root);
+    void setProjects(std::vector<ResourceId> projects);
     void show();
     void close(bool restoreFocus = true);
     void layout();
@@ -41,6 +42,8 @@ private:
     std::atomic<uint64_t> revision_{0}, indexRevision_{0};
     UINT dpi_ = 96;
     ResourceId root_;
+    bool projectMode_ = false;
+    std::vector<ResourceId> projects_;
     std::shared_ptr<ProjectProvider> provider_;
     std::shared_ptr<const FileIndex> index_;
     std::wstring query_;

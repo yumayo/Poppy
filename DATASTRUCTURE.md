@@ -54,6 +54,8 @@ Poppyは、アプリ全体の状態とプロジェクトごとの状態を別々
 
 `directory` を使ってプロジェクトのデータベースを開きます。全体のデータベースとプロジェクトのデータベースを結ぶSQLの外部キーはありません。
 
+プロジェクトを閉じてもこの行は削除しません。Ctrl+Rの履歴一覧はこの表を登録の新しい順に読み、現在開いている一覧とは別に保持します。既存バージョンで登録したプロジェクトも対象です。履歴表示のための保存形式の変更はありません。
+
 ### `open_projects`: 開いている一覧（全体形式2）
 
 `path_key TEXT PRIMARY KEY`、`path TEXT NOT NULL`、`position INTEGER NOT NULL UNIQUE` を持ちます。`projects` は最近使った保存先の対応表、こちらは現在開いている一覧です。保存時は全行をトランザクション内で置き換えます。`app.project_list_width INTEGER NOT NULL DEFAULT 180` は96 DPI基準の一覧幅です。
