@@ -127,6 +127,23 @@ void creation(const std::string& executable) {
     helper.call("createDirectory", fixture.root / "CON");
     helper.call("createDirectory", fixture.root / "con");
     check(fs::is_directory(fixture.root / "CON") && fs::is_directory(fixture.root / "con"), "Folder creation lost Linux name semantics");
+    // Nested creation reuses real intermediate directories, while the final
+    // component retains the existing no-overwrite behavior.
+    const Message intermediate{{"allowExisting", "1"}};
+    helper.call("createDirectory", folder, intermediate);
+    const auto nested = folder / "path" / "to";
+    helper.call("createDirectory", nested.parent_path(), intermediate);
+    helper.call("createDirectory", nested, intermediate);
+    helper.call("createFile", nested / "file.md", {{"size", "0"}}, &empty);
+    check(fs::is_regular_file(nested / "file.md") && fs::file_size(nested / "file.md") == 0, "Nested file creation failed");
+    helper.call("createDirectory", nested, intermediate);
+    helper.call("createDirectory", nested / "folder");
+    check(fs::is_directory(nested / "folder"), "Nested folder creation failed");
+    helper.call("createDirectory", file, intermediate, nullptr, false);
+    helper.call("createDirectory", link, intermediate, nullptr, false);
+    helper.call("createDirectory", dangling, intermediate, nullptr, false);
+    check(disk(file) == "keep existing content" && fs::is_symlink(link) && fs::is_symlink(dangling), "Intermediate folder handling changed an existing item");
+    fs::remove_all(folder / "path");
     for (const auto& entry : fs::directory_iterator(folder)) check(entry.path() == file, "Failed creation left a temporary file");
     helper.eof();
 }

@@ -70,7 +70,16 @@ public:
         if (!error.empty()) DeleteFileW(temporary.c_str());
         return error;
     }
-    std::wstring createDirectory(const ResourceId& path) override { return CreateDirectoryW(path.local().c_str(), nullptr) ? std::wstring{} : winError(); }
+    std::wstring createDirectory(const ResourceId& path, bool allowExisting) override {
+        if (CreateDirectoryW(path.local().c_str(), nullptr)) return {};
+        const auto code = GetLastError();
+        if (allowExisting && code == ERROR_ALREADY_EXISTS) {
+            const auto attributes = GetFileAttributesW(path.local().c_str());
+            if (attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_DIRECTORY) && !(attributes & FILE_ATTRIBUTE_REPARSE_POINT)) return {};
+            return L"An intermediate path component is not a folder or is a link/junction.";
+        }
+        return winError(code);
+    }
     std::wstring renameResource(const ResourceId& source, const ResourceId& destination) override { return MoveFileExW(source.local().c_str(), destination.local().c_str(), MOVEFILE_WRITE_THROUGH) ? std::wstring{} : winError(); }
     FileIndex indexFiles(const ResourceId& root, const std::function<bool()>& cancelled) override { return poppy::indexFiles(root.local(), cancelled); }
     ContentSearchSummary searchContent(const ResourceId& root, const ContentSearchOptions& options,

@@ -1,4 +1,5 @@
 #include "file_name.h"
+#include "resource.h"
 #include <algorithm>
 
 namespace poppy {
@@ -13,5 +14,28 @@ bool validFileName(std::wstring_view name, std::wstring& error) {
         ((base[3] >= L'1' && base[3] <= L'9') || base[3] == L'¹' || base[3] == L'²' || base[3] == L'³');
     if (base == L"CON" || base == L"PRN" || base == L"AUX" || base == L"NUL" || base == L"CONIN$" || base == L"CONOUT$" || device) { error = L"This name is reserved by Windows."; return false; }
     error.clear(); return true;
+}
+std::optional<CreationPath> parseCreationPath(std::wstring_view name, bool directory, bool posix, std::wstring& error) {
+    if (name.empty() || name.size() > maxCreationPathLength) {
+        error = L"Enter a relative path between 1 and 4096 characters."; return std::nullopt;
+    }
+    CreationPath result;
+    result.directory = directory || name.back() == L'/';
+    if (name.back() == L'/') name.remove_suffix(1);
+    size_t start = 0;
+    for (;;) {
+        const auto end = name.find(L'/', start);
+        const auto component = name.substr(start, end == name.npos ? name.size() - start : end - start);
+        if (posix) {
+            if (!validPosixName(resourceUtf8(component))) {
+                error = L"Each path component must be a valid Linux filename (no empty name, NUL, . or ..; at most 255 UTF-8 bytes).";
+                return std::nullopt;
+            }
+        } else if (!validFileName(component, error)) return std::nullopt;
+        result.components.emplace_back(component);
+        if (end == name.npos) break;
+        start = end + 1;
+    }
+    error.clear(); return result;
 }
 }

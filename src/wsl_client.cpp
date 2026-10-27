@@ -246,7 +246,10 @@ public:
             call("createFile", path, {{"size", std::to_string(bytes.size())}}, &bytes); return {};
         } catch (const std::exception& error) { return wide(error.what()); }
     }
-    std::wstring createDirectory(const ResourceId& path) override { try { call("createDirectory", path); return {}; } catch (const std::exception& error) { return wide(error.what()); } }
+    std::wstring createDirectory(const ResourceId& path, bool allowExisting) override {
+        try { call("createDirectory", path, {{"allowExisting", allowExisting ? "1" : "0"}}); return {}; }
+        catch (const std::exception& error) { return wide(error.what()); }
+    }
     std::wstring renameResource(const ResourceId& source, const ResourceId& destination) override { try { const auto info = call("stat", source); call("renameResource", source, {{"name", destination.filename().u8string()}, {"version", field(info.metadata, "version")}}); return {}; } catch (const std::exception& error) { return wide(error.what()); } }
     FileIndex indexFiles(const ResourceId& root, const std::function<bool()>& cancelled) override {
         FileIndex index;

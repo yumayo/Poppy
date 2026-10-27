@@ -24,7 +24,8 @@ public:
     virtual ProviderSave saveFile(const ResourceId& path, const std::string& bytes, const std::string& version, const std::string& baseline) = 0;
     // Publish a new file only after writing it completely; never replace a name.
     virtual std::wstring createFile(const ResourceId& path, const std::string& bytes) = 0;
-    virtual std::wstring createDirectory(const ResourceId& path) = 0;
+    // Intermediate components may reuse an existing directory, never a link.
+    virtual std::wstring createDirectory(const ResourceId& path, bool allowExisting = false) = 0;
     virtual std::wstring renameResource(const ResourceId& source, const ResourceId& destination) = 0;
     virtual FileIndex indexFiles(const ResourceId& root, const std::function<bool()>& cancelled) = 0;
     virtual ContentSearchSummary searchContent(const ResourceId& root, const ContentSearchOptions& options,

@@ -567,6 +567,68 @@ void createItemTests(const fs::path& executable) {
     check(fs::file_size(fixture.root / L"root.txt") == 0 && fs::is_directory(created.parent_path()) && fs::exists(created), "Creation collision changed an existing item");
     check(visibleTabCount(app) == 2, "Failed or cancelled creation changed file tabs");
 }
+void newFileShortcutTests(const fs::path& executable) {
+    Fixture fixture; fs::create_directory(fixture.root / L"chosen 日本語");
+    writeFile(fixture.root / L"chosen 日本語" / L"existing.txt");
+    Application app(executable, fixture.root); const auto tree = app.tree();
+    const auto viewer = FindWindowExW(app.window, nullptr, L"PoppyViewer", nullptr);
+    waitFor([&] { return send(tree, treeGetCount) == 2; }, "Shortcut fixture did not load");
+    const auto root = nextItem(tree, TreeRelation::Root), folder = nextItem(tree, TreeRelation::Child, root);
+    const auto start = [&](HWND target, const std::wstring& name) {
+        struct Input {
+            DWORD thread; BYTE previous[256]{};
+            explicit Input(DWORD target) : thread(target) {
+                check(AttachThreadInput(GetCurrentThreadId(), thread, TRUE) != FALSE, "Cannot attach Ctrl+N input");
+                GetKeyboardState(previous);
+            }
+            ~Input() { SetKeyboardState(previous); AttachThreadInput(GetCurrentThreadId(), thread, FALSE); }
+        } input(app.process.dwThreadId);
+        SetFocus(target);
+        BYTE keys[256]{}; keys[VK_CONTROL] = keys[VK_LCONTROL] = 0x80;
+        check(SetKeyboardState(keys) && PostMessageW(target, WM_KEYDOWN, 'N', 0), "Cannot post Ctrl+N");
+        HWND edit = nullptr;
+        waitFor([&] { edit = FindWindowExW(tree, nullptr, L"EDIT", nullptr); return edit != nullptr; }, "Ctrl+N did not show the path input");
+        check(IsWindowVisible(tree) && SetWindowTextW(edit, name.c_str()), "Ctrl+N did not reveal Explorer or accept the path");
+        return edit;
+    };
+    const auto commit = [&](HWND edit) { check(PostMessageW(edit, WM_KEYDOWN, VK_RETURN, 0), "Cannot commit new path"); };
+    const auto selected = [&] { return static_cast<TreeItem>(send(tree, treeGetSelection)); };
+    send(tree, treeSelect, folder);
+    send(GetDlgItem(app.window, 3), BM_CLICK); // Invoke from the editor with Explorer hidden.
+    auto edit = start(viewer, L"path/to/file.md"); commit(edit);
+    const auto file = fixture.root / L"chosen 日本語" / L"path" / L"to" / L"file.md";
+    waitFor([&] { return fs::is_regular_file(file) && send(tree, treeGetCount) == 6; }, "Ctrl+N did not create and reveal nested parents");
+    check(fs::file_size(file) == 0 && visibleTabCount(app) == 1, "New file was not empty or did not open a tab");
+    const auto to = nextItem(tree, TreeRelation::Parent, selected());
+    check(to && nextItem(tree, TreeRelation::Child, to) == selected(), "Nested new file was not selected");
+    // With a file selected, a trailing slash creates a sibling folder.
+    edit = start(tree, L"nested/empty 日本語/"); commit(edit);
+    waitFor([&] { return fs::is_directory(file.parent_path() / L"nested" / L"empty 日本語") && send(tree, treeGetCount) == 8; }, "Trailing slash did not create nested folders beside the selected file");
+    check(visibleTabCount(app) == 1, "Trailing slash opened a file tab");
+    // Reuse existing intermediate folders instead of treating them as a collision.
+    send(tree, treeSelect, folder);
+    edit = start(tree, L"path/to/second.txt"); commit(edit);
+    waitFor([&] { return fs::is_regular_file(file.parent_path() / L"second.txt") && send(tree, treeGetCount) == 9; }, "Could not reuse existing intermediate folders");
+    check(visibleTabCount(app) == 2, "Second new file did not open a tab");
+    send(tree, treeSelect, root); expand(tree, root, false);
+    const auto terminalPane = FindWindowExW(app.window, nullptr, L"PoppyTerminalPane", nullptr);
+    const auto terminal = FindWindowExW(terminalPane, nullptr, L"PoppyTerminal", nullptr);
+    check(terminal != nullptr, "Shortcut terminal is missing");
+    edit = start(terminal, L"cancelled/path.txt"); send(edit, WM_KEYDOWN, VK_ESCAPE);
+    check(!fs::exists(fixture.root / L"cancelled") && !FindWindowExW(tree, nullptr, L"EDIT", nullptr), "Escape created intermediate folders");
+    edit = start(viewer, L"focus-cancelled/path.txt"); click(tree, 30, 10);
+    check(!fs::exists(fixture.root / L"focus-cancelled") && !FindWindowExW(tree, nullptr, L"EDIT", nullptr), "Focus loss created intermediate folders");
+    // The full input, not only one 255-character component, reaches creation.
+    const auto longPath = std::wstring(130, L'a') + L"/" + std::wstring(130, L'b') + L"/long.txt";
+    edit = start(terminal, longPath);
+    check(GetWindowTextLengthW(edit) == static_cast<int>(longPath.size()), "Ctrl+N truncated a path longer than 255 characters");
+    send(edit, WM_KEYDOWN, VK_ESCAPE);
+    // Keep the filesystem check below MAX_PATH so the test does not depend on
+    // the host's long-path registry setting.
+    edit = start(terminal, L"root.txt"); commit(edit);
+    waitFor([&] { return fs::is_regular_file(fixture.root / L"root.txt") && expanded(tree, root); }, "Ctrl+N from a terminal did not create a file inside the collapsed root");
+    check(visibleTabCount(app) == 3, "Root file did not open a tab");
+}
 void pasteImageTests(const fs::path& executable) {
     Fixture fixture; fs::create_directory(fixture.root/L"images"); writeFile(fixture.root/L"images"/L"existing.txt");
     Application app(executable,fixture.root); const auto tree = app.tree();
@@ -1613,7 +1675,7 @@ int wmain(int argc, wchar_t** argv) {
         check(argc == 2, "Pass the path to Poppy.exe");
         SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         for (const auto test : {folderTests, sidebarTests, treeInteractionTests, tabTests, pinnedTabTests,
-                tabDragTests, wrappingTabDragTests, wrappingTabTests, renameTests, createItemTests, pasteImageTests, splitPaneTests, quickOpenTests, fullSearchTests, gitSidebarTests, gitAutoRefreshTests, branchSidebarTests, multiRepositoryTests, sessionTests, multiProjectTests, recentProjectTests, projectDragTests, scrollingProjectDragTests, terminalBackspaceTests}) {
+                tabDragTests, wrappingTabDragTests, wrappingTabTests, renameTests, createItemTests, newFileShortcutTests, pasteImageTests, splitPaneTests, quickOpenTests, fullSearchTests, gitSidebarTests, gitAutoRefreshTests, branchSidebarTests, multiRepositoryTests, sessionTests, multiProjectTests, recentProjectTests, projectDragTests, scrollingProjectDragTests, terminalBackspaceTests}) {
             Fixture appData; AppDataEnvironment environment(appData.root);
             test(fs::absolute(argv[1]));
         }

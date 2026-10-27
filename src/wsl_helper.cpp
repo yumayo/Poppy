@@ -396,7 +396,12 @@ void Server::execute(const std::shared_ptr<Request>& r) {
         else if (op == "createFile") create(*r);
         else if (op == "createDirectory") {
             const auto p = path(r->message);
-            if (mkdir(p.c_str(), 0777)) failure("Cannot create folder without overwriting");
+            if (mkdir(p.c_str(), 0777)) {
+                if (errno != EEXIST || field(r->message, "allowExisting") != "1") failure("Cannot create folder without overwriting");
+                struct stat info{};
+                if (lstat(p.c_str(), &info)) failure("Cannot inspect intermediate folder");
+                if (!S_ISDIR(info.st_mode)) throw std::runtime_error("An intermediate path component is not a folder or is a link");
+            }
             reply(*r, {{"done", "1"}});
         }
         else if (op == "renameResource") {

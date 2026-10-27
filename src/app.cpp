@@ -229,6 +229,7 @@ private:
     void clearChildren(TreeItem parent);
     void updateLabel(TreeItem item);
     bool canCreateItem(TreeItem item) const;
+    void newFile();
     void createItem(TreeItem parent, const std::wstring& name, bool directory);
     void renameFile(TreeItem item, const std::wstring& name);
     bool canPasteImage(TreeItem item) const;
@@ -981,27 +982,45 @@ bool ProjectRuntime::Impl::canCreateItem(TreeItem item) const {
     const auto n = node(item);
     return n && n->directory && canPasteImage(item);
 }
+void ProjectRuntime::Impl::newFile() {
+    auto parent = explorer_.selection();
+    if (const auto n = node(parent)) {
+        if (!n->directory) parent = explorer_.item(parent)->parent;
+    } else parent = rootItem_;
+    if (!canCreateItem(parent)) return;
+    quickOpen_.close(); selectSidebar(Sidebar::Explorer);
+    explorer_.createItem(parent, false);
+}
 void ProjectRuntime::Impl::createItem(TreeItem parent, const std::wstring& name, bool directory) {
     if (!canCreateItem(parent)) return;
     const auto title = directory ? L"Poppy — New Folder" : L"Poppy — New File";
-    std::wstring error = L"Enter a valid Linux filename (no /, NUL, . or ..; at most 255 UTF-8 bytes).";
-    if (!(root_.wsl() ? validPosixName(utf8(name)) : validFileName(name, error))) {
+    std::wstring error;
+    const auto path = parseCreationPath(name, directory, root_.wsl(), error);
+    if (!path) {
         MessageBoxW(window_, error.c_str(), title, MB_OK | MB_ICONWARNING); return;
     }
-    const auto folder = node(parent)->path, destination = folder / name;
+    directory = path->directory;
+    const auto folder = node(parent)->path;
+    auto destination = folder;
+    std::vector<ResourceId> parents;
+    for (const auto& component : path->components) { parents.push_back(destination); destination = destination / component; }
     createPending_ = true; status(directory ? L"Creating folder…" : L"Creating file…");
     const auto generation = generation_; const auto provider = provider_;
-    worker_->submit(L"create-item", [this, provider, folder, destination, directory, generation] {
+    worker_->submit(L"create-item", [this, provider, folder, destination, parents, directory, generation] {
         std::wstring error;
-        try { error = directory ? provider->createDirectory(destination) : provider->createFile(destination, {}); }
+        try {
+            for (size_t i = 1; i < parents.size() && error.empty(); ++i) error = provider->createDirectory(parents[i], true);
+            if (error.empty()) error = directory ? provider->createDirectory(destination) : provider->createFile(destination, {});
+        }
         catch (const std::exception& failure) { error = wide(failure.what()); }
-        worker_->complete([this, folder, destination, directory, generation, error] {
+        worker_->complete([this, folder, destination, parents, directory, generation, error] {
             createPending_ = false; if (generation != generation_) return;
             if (!error.empty()) {
-                status(L"Create failed");
+                refresh(); status(L"Create failed");
                 MessageBoxW(window_, (destination.native() + L"\n\n" + error).c_str(), directory ? L"Poppy — New Folder" : L"Poppy — New File", MB_OK | MB_ICONWARNING); return;
             }
             pendingTreeSelection_ = destination;
+            for (const auto& path : parents) expandedPaths_[pathKey(path)] = path;
             for (const auto& pair : nodes_) if (const auto n = node(pair.second); n && pathKey(n->path) == pathKey(folder)) { explorer_.expand(pair.second, true); requestDirectory(pair.second); break; }
             refresh();
             if (!directory) openFile(destination);
@@ -1826,6 +1845,7 @@ bool ProjectRuntime::Impl::key(const MSG& message) {
         const bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
         const bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
         if (key && message.wParam == VK_ESCAPE && tabDrag_) { endTabDrag(); return true; }
+        if (key && ctrl && !shift && !(GetKeyState(VK_MENU) & 0x8000) && message.wParam == 'N') { newFile(); return true; }
         if (key && ctrl && shift && !(GetKeyState(VK_MENU) & 0x8000) && message.wParam == 'F') { quickOpen_.close(); selectSidebar(Sidebar::Search); return true; }
         if (key && ctrl && !shift && !(GetKeyState(VK_MENU) & 0x8000) && message.wParam == 'P') { quickOpen_.show(); return true; }
         if (key && ctrl && message.wParam == 'O') { quickOpen_.close(); chooseFolder(); return true; }
