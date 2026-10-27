@@ -710,6 +710,93 @@ void renameTests(const fs::path& executable) {
         check(visibleTabCount(app)==1,"Restart lost the renamed tab");
     }
 }
+void explorerMoveTests(const fs::path& executable) {
+    Fixture fixture;
+    const auto source = fixture.root / L"a source", target = fixture.root / L"b target 日本語";
+    fs::create_directories(source / L"nested"); fs::create_directory(target);
+    writeLines(source / L"nested" / L"edited.txt", 120);
+    writeLines(fixture.root / L"collision.txt", 140); writeLines(target / L"collision.txt", 240);
+    const auto movedFile = target / L"nested" / L"edited.txt";
+    {
+        Application app(executable, fixture.root); const auto tree = app.tree();
+        const auto viewer = FindWindowExW(app.window, nullptr, L"PoppyViewer", nullptr);
+        waitFor([&] { return send(tree, treeGetCount) == 4; }, "Move fixture did not load");
+        const auto root = nextItem(tree, TreeRelation::Root), from = nextItem(tree, TreeRelation::Child, root);
+        const auto to = nextItem(tree, TreeRelation::Next, from), collision = nextItem(tree, TreeRelation::Next, to);
+        expand(tree, from);
+        waitFor([&] { return nextItem(tree, TreeRelation::Child, from) != 0; }, "Move source did not expand");
+        const auto nested = nextItem(tree, TreeRelation::Child, from); expand(tree, nested);
+        waitFor([&] { return nextItem(tree, TreeRelation::Child, nested) != 0; }, "Nested move source did not expand");
+        const auto file = nextItem(tree, TreeRelation::Child, nested);
+        const auto point = [&](TreeItem id, int x = 110) {
+            const int height = static_cast<int>(send(tree, treeGetRowHeight));
+            return POINT{MulDiv(x, GetDpiForWindow(tree), 96),
+                (static_cast<int>(send(tree, treeGetRow, id)) - scrollInfo(tree).nPos) * height + height / 2};
+        };
+        const auto drag = [&](TreeItem id, POINT destination, UINT cancel = 0) {
+            const auto origin = point(id);
+            send(tree, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(origin.x, origin.y));
+            send(tree, WM_MOUSEMOVE, MK_LBUTTON, MAKELPARAM(destination.x, destination.y));
+            if (cancel) send(tree, cancel, cancel == WM_KEYDOWN ? VK_ESCAPE : 0);
+            send(tree, WM_LBUTTONUP, 0, MAKELPARAM(destination.x, destination.y));
+        };
+        const auto origin = point(file); click(tree, origin.x, origin.y); waitLines(viewer, 120);
+        check(fs::exists(source / L"nested" / L"edited.txt"), "A click moved a file");
+        send(viewer, WM_CHAR, '\r'); waitLines(viewer, 121);
+        const auto hoverOrigin = point(nested), hoverTarget = point(to);
+        send(tree, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(hoverOrigin.x, hoverOrigin.y));
+        send(tree, WM_MOUSEMOVE, MK_LBUTTON, MAKELPARAM(hoverTarget.x, hoverTarget.y));
+        waitFor([&] { return expanded(tree, to); }, "Hovering during a drag did not expand the destination");
+        send(tree, WM_KEYDOWN, VK_ESCAPE);
+        send(tree, WM_LBUTTONUP, 0, MAKELPARAM(hoverTarget.x, hoverTarget.y));
+        for (const UINT cancel : {WM_KEYDOWN, WM_CANCELMODE, WM_CAPTURECHANGED}) {
+            drag(nested, point(to), cancel);
+            check(fs::exists(source / L"nested") && !fs::exists(target / L"nested"), "Cancelled drag moved a folder");
+        }
+        drag(nested, {-20, -20});
+        drag(from, point(nested)); // Cannot move a folder into its descendants.
+        drag(nested, point(nested, 160)); // Cannot move into itself.
+        drag(nested, point(from)); // Already in this folder.
+        drag(root, point(to)); // The project root cannot be moved.
+        check(fs::exists(source / L"nested" / L"edited.txt") && !fs::exists(target / L"nested"), "Invalid drag moved a folder");
+        drag(nested, point(to));
+        waitFor([&] { return fs::exists(movedFile) && !fs::exists(source / L"nested"); }, "Dragging a folder did not move its descendants");
+        waitFor([&] { return expanded(tree, to) && nextItem(tree, TreeRelation::Parent, nested) == to && expanded(tree, nested); },
+            "Moving did not preserve the subtree or expand its destination");
+        waitLines(viewer, 121);
+        check(visibleTabCount(app) == 1, "Moving a folder closed or duplicated its edited tab");
+        {
+            check(AttachThreadInput(GetCurrentThreadId(), app.process.dwThreadId, TRUE) != FALSE, "Cannot attach save input");
+            BYTE previous[256]{}, keys[256]{}; GetKeyboardState(previous); keys[VK_CONTROL] = keys[VK_LCONTROL] = 0x80;
+            SetKeyboardState(keys); send(viewer, WM_KEYDOWN, 'S'); SetKeyboardState(previous);
+            AttachThreadInput(GetCurrentThreadId(), app.process.dwThreadId, FALSE);
+        }
+        waitFor([&] { std::ifstream saved(movedFile); const auto first = saved.peek(); return first == '\n' || first == '\r'; }, "Saving an edited moved tab used its old path");
+        check(!fs::exists(source / L"nested" / L"edited.txt"), "Saving recreated the old path");
+        drag(collision, point(to));
+        HWND dialog = nullptr;
+        waitFor([&] {
+            dialog = FindWindowW(L"#32770", L"Poppy — Move"); DWORD pid = 0; if (dialog) GetWindowThreadProcessId(dialog, &pid);
+            return dialog && pid == app.process.dwProcessId;
+        }, "Move collision did not report an error");
+        send(dialog, WM_COMMAND, IDOK);
+        check(fs::file_size(fixture.root / L"collision.txt") != fs::file_size(target / L"collision.txt"), "Move collision overwrote a file");
+        // Moving an individual file to the root also relocates its existing tab.
+        const int height = static_cast<int>(send(tree, treeGetRowHeight));
+        const POINT blank{point(root).x, static_cast<LONG>((send(tree, treeGetCount) - scrollInfo(tree).nPos) * height + height / 2)};
+        drag(file, blank);
+        waitFor([&] { return fs::exists(fixture.root / L"edited.txt") && !fs::exists(movedFile); }, "Cannot drag a file back to the project root");
+        waitFor([&] { return nextItem(tree, TreeRelation::Parent, file) == root; }, "File move left the tree under the old parent");
+        waitLines(viewer, 121); check(visibleTabCount(app) == 1, "File move duplicated its tab");
+        drag(nested, point(root));
+        waitFor([&] { return fs::is_directory(fixture.root / L"nested") && !fs::exists(target / L"nested"); }, "Cannot drop a folder onto the root row");
+    }
+    {
+        Application app(executable, fixture.root); app.tree();
+        const auto viewer = FindWindowExW(app.window, nullptr, L"PoppyViewer", nullptr);
+        waitLines(viewer, 121); check(visibleTabCount(app) == 1, "Restart did not restore the moved tab");
+    }
+}
 void splitPaneTests(const fs::path& executable) {
     Fixture fixture; writeLines(fixture.root / L"a.txt", 120); writeLines(fixture.root / L"b.txt", 240);
     LONG divider = 0;
@@ -1852,7 +1939,7 @@ int wmain(int argc, wchar_t** argv) {
         check(argc == 2, "Pass the path to Poppy.exe");
         SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         for (const auto test : {folderTests, sidebarTests, treeInteractionTests, tabTests, pinnedTabTests,
-                tabDragTests, wrappingTabDragTests, wrappingTabTests, renameTests, createItemTests, newFileShortcutTests, pasteImageTests, splitPaneTests, quickOpenTests, fullSearchTests, gitSidebarTests, gitAutoRefreshTests, branchSidebarTests, multiRepositoryTests, sessionTests, multiProjectTests, recentProjectTests, projectDragTests, scrollingProjectDragTests, terminalBackspaceTests}) {
+                tabDragTests, wrappingTabDragTests, wrappingTabTests, renameTests, explorerMoveTests, createItemTests, newFileShortcutTests, pasteImageTests, splitPaneTests, quickOpenTests, fullSearchTests, gitSidebarTests, gitAutoRefreshTests, branchSidebarTests, multiRepositoryTests, sessionTests, multiProjectTests, recentProjectTests, projectDragTests, scrollingProjectDragTests, terminalBackspaceTests}) {
             Fixture appData; AppDataEnvironment environment(appData.root);
             test(fs::absolute(argv[1]));
         }

@@ -22,6 +22,19 @@ bool TreeModel::descendant(TreeItem item, TreeItem ancestor) const {
     for (auto current = parent(item); current; current = parent(current)) if (current == ancestor) return true;
     return false;
 }
+bool TreeModel::reparent(TreeItem item, TreeItem parent) {
+    const auto node = get(item), target = get(parent);
+    if (!node || !node->parent || !target || !target->expandable || node->parent == parent || item == parent || descendant(parent, item)) return false;
+    auto& siblings = nodes_.at(node->parent).children;
+    const auto found = std::find(siblings.begin(), siblings.end(), item);
+    if (found != siblings.begin()) nodes_.at(*(found - 1)).next = node->next;
+    siblings.erase(found);
+    auto& children = nodes_.at(parent).children;
+    if (!children.empty()) nodes_.at(children.back()).next = item;
+    children.push_back(item);
+    nodes_.at(item).parent = parent; nodes_.at(item).next = 0;
+    dirty_ = true; return true;
+}
 bool TreeModel::expand(TreeItem item, bool expanded) {
     const auto found = nodes_.find(item);
     if (found == nodes_.end() || !found->second.expandable || found->second.expanded == expanded) return false;

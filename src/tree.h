@@ -1,6 +1,7 @@
 #pragma once
 #include "scrollbars.h"
 #include "tree_messages.h"
+#include <optional>
 
 namespace poppy {
 class Tree {
@@ -25,6 +26,7 @@ public:
     void clearChildren(TreeItem id);
     void clear();
     void sort(TreeItem parent, const std::function<bool(uintptr_t, uintptr_t)>& compare);
+    void reparent(TreeItem id, TreeItem parent) { if (model_.reparent(id, parent)) changed(); }
     void expand(TreeItem id, bool expanded);
     void select(TreeItem id, bool activate = true);
     TreeItem child(TreeItem parent = 0) const { return model_.child(parent); }
@@ -33,6 +35,7 @@ public:
     int left() const { return MulDiv(left_, 96, dpi_); }
     void restoreScroll(int top, int left) { top_ = top; left_ = MulDiv(left, dpi_, 96); changed(); }
     TreeItem selection() const { return model_.selection(); }
+    bool dragging() const { return drag_.has_value(); }
     void rename(TreeItem item, const std::wstring& name);
     void createItem(TreeItem parent, bool directory);
     std::function<bool(TreeItem)> canCreate;
@@ -40,6 +43,9 @@ public:
     std::function<bool(TreeItem)> canRename;
     std::function<void(TreeItem)> renameRequested;
     std::function<void(TreeItem, const std::wstring&)> renameCommitted;
+    std::function<bool(TreeItem)> canDrag;
+    std::function<bool(TreeItem, TreeItem)> canDrop;
+    std::function<void(TreeItem, TreeItem)> moveCommitted;
     std::function<bool(TreeItem)> canOpenWithDefaultApp;
     std::function<void(TreeItem)> openWithDefaultAppRequested;
     std::function<bool(TreeItem)> canRevealInFileExplorer;
@@ -66,6 +72,9 @@ private:
     static LRESULT CALLBACK procedure(HWND, UINT, WPARAM, LPARAM);
     static LRESULT CALLBACK renameProcedure(HWND, UINT, WPARAM, LPARAM, UINT_PTR, DWORD_PTR);
     void finishRename(bool commit);
+    void updateDrag(POINT point);
+    void tickDrag();
+    void endDrag(bool drop = false);
     void layoutRename();
     LRESULT handle(UINT, WPARAM, LPARAM);
     void paint();
@@ -98,5 +107,12 @@ private:
     bool layingOut_ = false;
     std::wstring search_;
     ULONGLONG searchTime_ = 0;
+    struct Drag {
+        TreeItem source, target = 0;
+        POINT origin{}, point{};
+        bool active = false;
+        ULONGLONG hoverTime = 0;
+    };
+    std::optional<Drag> drag_;
 };
 }

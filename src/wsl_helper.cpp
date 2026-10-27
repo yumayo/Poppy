@@ -405,7 +405,11 @@ void Server::execute(const std::shared_ptr<Request>& r) {
             reply(*r, {{"done", "1"}});
         }
         else if (op == "renameResource") {
-            const auto p = path(r->message); const auto name = field(r->message, "name"); const auto parent = std::filesystem::path(p).parent_path().string();
+            const auto p = path(r->message); const auto name = field(r->message, "name");
+            const auto requestedParent = field(r->message, "parent");
+            const auto parent = requestedParent.empty() ? std::filesystem::path(p).parent_path().string() : path({{"path", requestedParent}});
+            struct stat directory{}; if (lstat(parent.c_str(), &directory)) failure("Cannot inspect destination folder");
+            if (!S_ISDIR(directory.st_mode)) throw std::runtime_error("The destination is not a folder or is a link");
             errno = 0; const auto limit = pathconf(parent.c_str(), _PC_NAME_MAX); if (limit < 0 && errno) failure("Cannot determine filename limit");
             if (!validPosixName(name, limit > 0 ? static_cast<size_t>(limit) : 255)) throw std::runtime_error("Invalid Linux filename");
             struct stat info{}; if (lstat(p.c_str(), &info)) failure("Cannot inspect rename source");

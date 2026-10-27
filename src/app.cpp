@@ -234,6 +234,8 @@ private:
     void newFile();
     void createItem(TreeItem parent, const std::wstring& name, bool directory);
     void renameFile(TreeItem item, const std::wstring& name);
+    bool canMoveFile(TreeItem item, TreeItem parent) const;
+    void relocateFile(TreeItem item, const ResourceId& destination, TreeItem parent = 0);
     bool canPasteImage(TreeItem item) const;
     void pasteImage(TreeItem item);
     wchar_t stateFor(const ResourceId& path) const;
@@ -368,6 +370,11 @@ void ProjectRuntime::Impl::create() {
     explorer_.canRename = [this](TreeItem item) { return item != rootItem_ && node(item) && !node(item)->unsupported && !renamePending_ && !pastePending_ && !createPending_ && !gitDiscardPending_ && !gitStashPending_ && (!root_.wsl() || (connected_ && provider_->state() == ConnectionState::Ready)); };
     explorer_.renameRequested = [this](TreeItem item) { if (const auto n = node(item); n && item != rootItem_ && !renamePending_) explorer_.rename(item, n->path.filename().native()); };
     explorer_.renameCommitted = [this](TreeItem item, const std::wstring& name) { renameFile(item, name); };
+    explorer_.canDrag = [this](TreeItem item) { return explorer_.canRename(item) && !gitStagePending_; };
+    explorer_.canDrop = [this](TreeItem item, TreeItem parent) { return canMoveFile(item, parent); };
+    explorer_.moveCommitted = [this](TreeItem item, TreeItem parent) {
+        if (canMoveFile(item, parent)) relocateFile(item, node(parent)->path / node(item)->path.filename().native(), parent);
+    };
     explorer_.canOpenWithDefaultApp = [this](TreeItem item) { const auto n = node(item); return n && !n->directory && !n->unsupported && !root_.wsl(); };
     explorer_.openWithDefaultAppRequested = [this](TreeItem item) { if (const auto n = node(item); n && !n->directory) openWithDefaultApp(n->path); };
     explorer_.canRevealInFileExplorer = [this](TreeItem item) { const auto n = node(item); return n && !n->unsupported; };
@@ -1197,27 +1204,40 @@ void ProjectRuntime::Impl::renameFile(TreeItem item, const std::wstring& name) {
     if (root_.wsl() && (!connected_ || provider_->state() != ConnectionState::Ready)) { status(L"Reconnect WSL before renaming."); return; }
     std::wstring error = L"Enter a valid Linux filename (no /, NUL, . or ..; at most 255 UTF-8 bytes).";
     if (!(root_.wsl() ? validPosixName(utf8(name)) : validFileName(name, error))) { MessageBoxW(window_, error.c_str(), L"Poppy — Rename", MB_OK | MB_ICONWARNING); return; }
-    const auto source = n->path, destination = source.parent_path() / name;
+    relocateFile(item, n->path.parent_path() / name);
+}
+bool ProjectRuntime::Impl::canMoveFile(TreeItem item, TreeItem parent) const {
+    const auto source = node(item), target = node(parent);
+    return explorer_.canDrag && explorer_.canDrag(item) && source && target && target->directory && !target->reparse && !target->unsupported &&
+        root_.contains(source->path) && root_.contains(target->path) && !source->path.contains(target->path) &&
+        pathKey(source->path.parent_path()) != pathKey(target->path);
+}
+void ProjectRuntime::Impl::relocateFile(TreeItem item, const ResourceId& destination, TreeItem parent) {
+    const auto n = node(item); if (!n) return;
+    const auto source = n->path;
     if (source.native() == destination.native()) return;
-    saveTab(); endTabDrag(); renamePending_ = true; status(L"Renaming " + source.filename().native() + L"…");
+    const bool moving = parent != 0;
+    saveTab(); endTabDrag(); renamePending_ = true; status((moving ? L"Moving " : L"Renaming ") + source.filename().native() + L"…");
     const auto generation = generation_;
     struct RenamedBuffer { ResourceId path; std::shared_ptr<EditBuffer> buffer; std::string baseline, version; };
     std::vector<RenamedBuffer> buffers;
     if (root_.wsl()) for (const auto& tab : tabs_) if (tab.buffer && source.contains(tab.path)) buffers.push_back({relocateResource(tab.path, source, destination), tab.buffer, tab.buffer->baseline, {}});
-    worker_->submit(L"rename", [this, source, destination, generation, buffers = std::move(buffers)]() mutable {
+    worker_->submit(L"rename", [this, source, destination, generation, item, parent, moving, buffers = std::move(buffers)]() mutable {
         // Deliberately omit MOVEFILE_REPLACE_EXISTING: collisions must never overwrite.
         const auto error = provider_->renameResource(source, destination);
         if (error.empty()) for (auto& item : buffers) { const auto file = provider_->readFile(item.path); if (file.error.empty() && file.bytes == item.baseline) item.version = file.version; }
-        worker_->complete([this, source, destination, generation, error, buffers = std::move(buffers)] {
+        worker_->complete([this, source, destination, generation, item, parent, moving, error, buffers = std::move(buffers)] {
             renamePending_ = false; if (generation != generation_) return;
-            if (!error.empty()) { status(L"Rename failed"); MessageBoxW(window_, (source.native() + L"\n\n" + error).c_str(), L"Poppy — Rename", MB_OK | MB_ICONWARNING); return; }
+            if (!error.empty()) { status(moving ? L"Move failed" : L"Rename failed"); MessageBoxW(window_, (source.native() + L"\n\n" + error).c_str(), moving ? L"Poppy — Move" : L"Poppy — Rename", MB_OK | MB_ICONWARNING); return; }
             for (const auto& item : buffers) if (!item.version.empty() && item.buffer->baseline == item.baseline) item.buffer->fileVersion = item.version;
             saveTab(); ++generation_; ++serial_[0]; ++serial_[1];
             std::map<std::wstring, ResourceId> expanded;
             for (const auto& pair : expandedPaths_) { auto path = relocateResource(pair.second, source, destination); expanded[pathKey(path)] = std::move(path); }
             expandedPaths_ = std::move(expanded); pendingTreeSelection_ = destination;
+            if (moving) expandedPaths_[pathKey(destination.parent_path())] = destination.parent_path();
             {
                 Tree::Batch batch(explorer_);
+                if (moving) explorer_.reparent(item, parent);
                 for (const auto& pair : nodes_) if (auto current = node(pair.second)) {
                     current->path = relocateResource(current->path, source, destination); current->loading = false; updateLabel(pair.second);
                 }
@@ -1226,6 +1246,7 @@ void ProjectRuntime::Impl::renameFile(TreeItem item, const std::wstring& name) {
                     if (x->directory != y->directory) return x->directory;
                     return CompareStringOrdinal(x->path.filename().native().c_str(), -1, y->path.filename().native().c_str(), -1, x->path.wsl() ? FALSE : TRUE) == CSTR_LESS_THAN;
                 });
+                if (moving && node(parent)) requestDirectory(parent);
             }
             for (auto& tab : tabs_) {
                 const auto gitRoot = relocateResource(tab.gitRoot, source, destination);
@@ -1239,7 +1260,7 @@ void ProjectRuntime::Impl::renameFile(TreeItem item, const std::wstring& name) {
             }
             terminal_.relocate(source, destination);
             layout(); refresh();
-            status(L"Renamed to " + destination.filename().native());
+            status((moving ? L"Moved to " : L"Renamed to ") + (moving ? destination.native() : destination.filename().native()));
             if (owner_ && owner_->changed) owner_->changed();
         });
     });
@@ -1977,6 +1998,9 @@ LRESULT ProjectRuntime::Impl::handle(UINT m, WPARAM a, LPARAM b) {
     return DefWindowProcW(window_, m, a, b);
 }
 bool ProjectRuntime::Impl::key(const MSG& message) {
+        if (explorer_.dragging() && (message.message == WM_KEYDOWN || message.message == WM_CHAR)) {
+            SendMessageW(tree_, message.message, message.wParam, message.lParam); return true;
+        }
         if (terminal_.key(message)) return true;
         const bool key = message.message == WM_KEYDOWN;
         const bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
