@@ -1302,6 +1302,16 @@ void multiProjectTests(const fs::path& executable) {
     LARGE_INTEGER frequency{}; QueryPerformanceFrequency(&frequency); double maximum = 0;
     for (int i = 0; i < 6; ++i) { LARGE_INTEGER start{}, end{}; QueryPerformanceCounter(&start); select(i % 2); QueryPerformanceCounter(&end); maximum = std::max(maximum, (end.QuadPart-start.QuadPart)*1000.0/frequency.QuadPart); }
     std::cout << "Retained project switch maximum: " << maximum << " ms\n";
+    send(app.host,WM_LBUTTONDOWN,MK_LBUTTON,MAKELPARAM(px(60),px(68)));
+    send(app.host,WM_MOUSEMOVE,MK_LBUTTON,MAKELPARAM(px(60),px(44+3*48-1)));
+    send(app.host,WM_LBUTTONUP,0,MAKELPARAM(px(60),px(44+3*48-1)));
+    check(app.tree()==treeA && app.window==surfaceA && scrollInfo(viewerA).nPos==top &&
+          IsWindow(shell) && WaitForSingleObject(shellProcess,0)==WAIT_TIMEOUT,"Reordering a project lost its document or running terminal");
+    select(0);check(app.window==surfaceB,"Dragging a project did not change the row order");
+    send(app.host,WM_LBUTTONDOWN,MK_LBUTTON,MAKELPARAM(px(60),px(44+2*48+24)));
+    send(app.host,WM_MOUSEMOVE,MK_LBUTTON,MAKELPARAM(px(60),px(45)));
+    send(app.host,WM_LBUTTONUP,0,MAKELPARAM(px(60),px(45)));
+    select(0);check(app.window==surfaceA,"Dragging a project back to the first row failed");
     open(a.root);check(app.window==surfaceA,"Reopening a registered path duplicated the project");
     const auto oldB=surfaceB;const auto dpi=GetDpiForWindow(app.host);click(app.host,MulDiv(60,dpi,96),MulDiv(44+48+24,dpi,96),true);
     check(!IsWindow(oldB)&&IsWindow(surfaceA)&&IsWindow(shell) && WaitForSingleObject(shellProcess, 0) == WAIT_TIMEOUT,"Closing an inactive project affected another session");
@@ -1317,6 +1327,94 @@ void multiProjectTests(const fs::path& executable) {
         check(count == 2, "Restart lost terminal configuration");
         check(childProcesses(restored.process.dwProcessId).empty(), "Restoring terminal configuration automatically started a process");
     }
+}
+void projectDragTests(const fs::path& executable) {
+    Fixture a,b,c;
+    writeLines(a.root/L"a.txt",200);writeLines(b.root/L"b.txt",300);writeLines(c.root/L"c.txt",400);
+    {
+        Application app(executable,a.root);
+        const auto loadFile=[&](int lines){
+            const auto tree=app.tree();const auto root=nextItem(tree,TreeRelation::Root);
+            waitFor([&]{return nextItem(tree,TreeRelation::Child,root)!=0;},"A drag test project did not load");
+            send(tree,treeSelect,nextItem(tree,TreeRelation::Child,root));
+            waitLines(FindWindowExW(app.window,nullptr,L"PoppyViewer",nullptr),lines);
+            return app.window;
+        };
+        const auto open=[&](const fs::path& path,int lines){
+            const auto text=path.native();COPYDATASTRUCT data{0x50505901,static_cast<DWORD>((text.size()+1)*sizeof(wchar_t)),const_cast<wchar_t*>(text.c_str())};
+            check(send(app.host,WM_COPYDATA,0,reinterpret_cast<LPARAM>(&data)),"Could not add a drag test project");
+            return loadFile(lines);
+        };
+        const auto surfaceA=loadFile(200),surfaceB=open(b.root,300),surfaceC=open(c.root,400);
+        const auto px=[dpi=GetDpiForWindow(app.host)](int value){return MulDiv(value,dpi,96);};
+        const auto point=[&](int row,int offset){return POINT{px(60),px(44+row*48+offset)};};
+        const auto order=[&](std::initializer_list<HWND> expected){
+            int index=0;for(const auto surface:expected){const auto p=point(index++,24);click(app.host,p.x,p.y);app.tree();check(app.window==surface,"Project drag produced the wrong order");}
+        };
+        const auto begin=[&](int from,POINT target){
+            const auto p=point(from,24);send(app.host,WM_LBUTTONDOWN,MK_LBUTTON,MAKELPARAM(p.x,p.y));
+            send(app.host,WM_MOUSEMOVE,MK_LBUTTON,MAKELPARAM(target.x,target.y));
+        };
+        const auto drop=[&](POINT target){send(app.host,WM_LBUTTONUP,0,MAKELPARAM(target.x,target.y));};
+        begin(0,point(2,47));drop(point(2,47));app.tree();
+        check(app.window==surfaceA,"Reordering changed the selected project");order({surfaceB,surfaceC,surfaceA});
+        begin(2,point(0,1));drop(point(0,1));order({surfaceA,surfaceB,surfaceC});
+        begin(0,point(0,47));drop(point(0,47));order({surfaceA,surfaceB,surfaceC});
+        auto tiny=point(0,24);++tiny.x;begin(0,tiny);drop(tiny);order({surfaceA,surfaceB,surfaceC});
+        for(const auto cancel:{WM_CANCELMODE,WM_CAPTURECHANGED,WM_KEYDOWN}){
+            begin(0,point(2,47));send(app.host,cancel,cancel==WM_KEYDOWN?VK_ESCAPE:0);drop(point(2,47));order({surfaceA,surfaceB,surfaceC});
+        }
+        RECT client{};GetClientRect(app.host,&client);
+        for(const POINT outside: {POINT{px(300),px(80)},POINT{px(60),px(1)},POINT{px(60),client.bottom-px(1)}}){
+            begin(0,point(2,47));drop(outside);order({surfaceA,surfaceB,surfaceC});
+        }
+        // Escape must work while a project's editor owns keyboard focus.
+        begin(0,point(2,47));
+        check(PostMessageW(FindWindowExW(surfaceA,nullptr,L"PoppyViewer",nullptr),WM_KEYDOWN,VK_ESCAPE,0)!=FALSE,"Could not post drag cancellation");
+        waitFor([&]{GUITHREADINFO info{};info.cbSize=sizeof(info);check(GetGUIThreadInfo(app.process.dwThreadId,&info)!=FALSE,"Could not inspect project capture");return info.hwndCapture==nullptr;},"Escape did not release project drag capture");
+        drop(point(2,47));order({surfaceA,surfaceB,surfaceC});
+        // Blank space after the last project accepts an append operation.
+        begin(1,point(4,24));drop(point(4,24));order({surfaceA,surfaceC,surfaceB});
+    }
+    {
+        Application app(executable);app.tree();
+        waitLines(FindWindowExW(app.window,nullptr,L"PoppyViewer",nullptr),300);
+        const auto px=[dpi=GetDpiForWindow(app.host)](int value){return MulDiv(value,dpi,96);};
+        int index=0;for(const int lines:{200,400,300}){
+            click(app.host,px(60),px(44+index++*48+24));app.tree();
+            waitLines(FindWindowExW(app.window,nullptr,L"PoppyViewer",nullptr),lines);
+        }
+    }
+}
+void scrollingProjectDragTests(const fs::path& executable) {
+    Fixture fixture;HWND surfaces[12]{};
+    for(int i=0;i<12;++i){const auto path=fixture.root/std::to_wstring(i);fs::create_directory(path);writeFile(path/L"test.txt");}
+    Application app(executable,fixture.root/L"0");app.tree();surfaces[0]=app.window;
+    for(int i=1;i<12;++i){
+        const auto text=(fixture.root/std::to_wstring(i)).native();
+        COPYDATASTRUCT data{0x50505901,static_cast<DWORD>((text.size()+1)*sizeof(wchar_t)),const_cast<wchar_t*>(text.c_str())};
+        check(send(app.host,WM_COPYDATA,0,reinterpret_cast<LPARAM>(&data)),"Could not add a scrolling project");app.tree();surfaces[i]=app.window;
+    }
+    const auto px=[dpi=GetDpiForWindow(app.host)](int value){return MulDiv(value,dpi,96);};
+    check(SetWindowPos(app.host,nullptr,0,0,px(1000),px(480),SWP_NOMOVE|SWP_NOZORDER)!=FALSE,"Could not resize the project drag test");
+    RECT client{};GetClientRect(app.host,&client);POINT wheel{px(60),px(68)};ClientToScreen(app.host,&wheel);
+    send(app.host,WM_MOUSEWHEEL,MAKEWPARAM(0,12000),MAKELPARAM(wheel.x,wheel.y));
+    const POINT bottom{px(60),client.bottom-px(45)};
+    send(app.host,WM_LBUTTONDOWN,MK_LBUTTON,MAKELPARAM(px(60),px(68)));
+    send(app.host,WM_MOUSEMOVE,MK_LBUTTON,MAKELPARAM(bottom.x,bottom.y));
+    for(int i=0;i<20;++i)send(app.host,WM_TIMER,1);
+    send(app.host,WM_LBUTTONUP,0,MAKELPARAM(bottom.x,bottom.y));app.tree();
+    check(app.window==surfaces[0],"Scrolling a dragged project lost its selection");
+    send(app.host,WM_MOUSEWHEEL,MAKEWPARAM(0,12000),MAKELPARAM(wheel.x,wheel.y));
+    click(app.host,px(60),px(68));app.tree();check(app.window==surfaces[1],"Auto-scroll did not move the first project to the end");
+    send(app.host,WM_MOUSEWHEEL,MAKEWPARAM(0,-12000),MAKELPARAM(wheel.x,wheel.y));
+    const int page=(client.bottom-px(88))/px(48);
+    const int lastY=px(44)+(page-1)*px(48)+px(24);
+    send(app.host,WM_LBUTTONDOWN,MK_LBUTTON,MAKELPARAM(px(60),lastY));
+    send(app.host,WM_MOUSEMOVE,MK_LBUTTON,MAKELPARAM(px(60),px(45)));
+    for(int i=0;i<20;++i)send(app.host,WM_TIMER,1);
+    send(app.host,WM_LBUTTONUP,0,MAKELPARAM(px(60),px(45)));
+    click(app.host,px(60),px(68));app.tree();check(app.window==surfaces[0],"Auto-scroll did not move the last project to the start");
 }
 void terminalBackspaceTests(const fs::path& executable) {
     Fixture fixture;
@@ -1420,7 +1518,7 @@ int wmain(int argc, wchar_t** argv) {
         check(argc == 2, "Pass the path to Poppy.exe");
         SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         for (const auto test : {folderTests, sidebarTests, treeInteractionTests, tabTests, pinnedTabTests,
-                tabDragTests, wrappingTabDragTests, wrappingTabTests, renameTests, createItemTests, pasteImageTests, splitPaneTests, quickOpenTests, fullSearchTests, gitSidebarTests, gitAutoRefreshTests, branchSidebarTests, multiRepositoryTests, sessionTests, multiProjectTests, terminalBackspaceTests}) {
+                tabDragTests, wrappingTabDragTests, wrappingTabTests, renameTests, createItemTests, pasteImageTests, splitPaneTests, quickOpenTests, fullSearchTests, gitSidebarTests, gitAutoRefreshTests, branchSidebarTests, multiRepositoryTests, sessionTests, multiProjectTests, projectDragTests, scrollingProjectDragTests, terminalBackspaceTests}) {
             Fixture appData; AppDataEnvironment environment(appData.root);
             test(fs::absolute(argv[1]));
         }
