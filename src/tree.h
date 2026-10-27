@@ -34,6 +34,9 @@ public:
     void restoreScroll(int top, int left) { top_ = top; left_ = MulDiv(left, dpi_, 96); changed(); }
     TreeItem selection() const { return model_.selection(); }
     void rename(TreeItem item, const std::wstring& name);
+    void createItem(TreeItem parent, bool directory);
+    std::function<bool(TreeItem)> canCreate;
+    std::function<void(TreeItem, const std::wstring&, bool)> createCommitted;
     std::function<bool(TreeItem)> canRename;
     std::function<void(TreeItem)> renameRequested;
     std::function<void(TreeItem, const std::wstring&)> renameCommitted;
@@ -73,6 +76,7 @@ private:
     bool trackingMouse_ = false;
     std::wstring actionTip_;
     TreeItem renaming_ = 0;
+    bool creating_ = false, creatingDirectory_ = false;
     Renderer renderer_;
     Scrollbars scrollbars_;
     TreeModel model_;

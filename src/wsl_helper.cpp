@@ -383,7 +383,7 @@ void Server::execute(const std::shared_ptr<Request>& r) {
         if (op == "hello") {
             if (number(r->message, "protocolVersion") != protocolVersion) throw std::runtime_error("WSL protocol version mismatch");
             utsname system{}; if (uname(&system)) failure("Cannot detect architecture");
-            reply(*r, {{"protocolVersion", std::to_string(protocolVersion)}, {"helperVersion", helperVersion}, {"uid", std::to_string(getuid())}, {"home", home()}, {"shell", shell()}, {"executable", real("/proc/self/exe")}, {"architecture", system.machine}, {"capabilities", "list,read,save,create,rename,index,git,repositories,inotify,terminal,search"}, {"done", "1"}});
+            reply(*r, {{"protocolVersion", std::to_string(protocolVersion)}, {"helperVersion", helperVersion}, {"uid", std::to_string(getuid())}, {"home", home()}, {"shell", shell()}, {"executable", real("/proc/self/exe")}, {"architecture", system.machine}, {"capabilities", "list,read,save,create,mkdir,rename,index,git,repositories,inotify,terminal,search"}, {"done", "1"}});
         } else if (op == "connect") {
             const auto p = real(path(r->message)); struct stat info{}; if (stat(p.c_str(), &info)) failure("Cannot inspect project"); if (!S_ISDIR(info.st_mode)) throw std::runtime_error("The project path is not a directory"); watch(p); reply(*r, {{"path", p}, {"done", "1"}});
         } else if (op == "stat") {
@@ -394,6 +394,11 @@ void Server::execute(const std::shared_ptr<Request>& r) {
             reply(*r, {{"body", "1"}, {"size", std::to_string(snapshot.bytes.size())}, {"version", snapshot.version}}); body(*r, snapshot.bytes); reply(*r, {{"done", "1"}});
         } else if (op == "saveFile") save(*r);
         else if (op == "createFile") create(*r);
+        else if (op == "createDirectory") {
+            const auto p = path(r->message);
+            if (mkdir(p.c_str(), 0777)) failure("Cannot create folder without overwriting");
+            reply(*r, {{"done", "1"}});
+        }
         else if (op == "renameResource") {
             const auto p = path(r->message); const auto name = field(r->message, "name"); const auto parent = std::filesystem::path(p).parent_path().string();
             errno = 0; const auto limit = pathconf(parent.c_str(), _PC_NAME_MAX); if (limit < 0 && errno) failure("Cannot determine filename limit");

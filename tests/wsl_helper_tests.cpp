@@ -101,6 +101,35 @@ private:
     FrameReader reader_; std::deque<Frame> frames_, deferred_; size_t events_ = 0;
 };
 std::string version(const Result& result) { return field(result.metadata,"version"); }
+void creation(const std::string& executable) {
+    Fixture fixture; Helper helper(executable); helper.hello(); helper.call("connect", fixture.root);
+    const auto folder = fixture.root / "新規 フォルダー", file = folder / "空のファイル.txt";
+    const std::string empty, replacement = "must not overwrite";
+    helper.call("createDirectory", folder);
+    check(fs::is_directory(folder) && fs::is_empty(folder), "New folder was not empty or used the wrong path");
+    helper.call("createFile", file, {{"size", "0"}}, &empty);
+    check(fs::is_regular_file(file) && fs::file_size(file) == 0, "New text file was not empty");
+    write(file, "keep existing content");
+    helper.call("createFile", file, {{"size", std::to_string(replacement.size())}}, &replacement, false);
+    helper.call("createDirectory", file, {}, nullptr, false);
+    helper.call("createDirectory", folder, {}, nullptr, false);
+    helper.call("createFile", folder, {{"size", "0"}}, &empty, false);
+    check(disk(file) == "keep existing content", "File/folder collision overwrote existing content");
+    const auto link = fixture.root / "folder-link"; fs::create_directory_symlink(folder, link);
+    helper.call("createDirectory", link, {}, nullptr, false);
+    check(fs::is_symlink(link), "Folder creation replaced an existing link");
+    const auto dangling = fixture.root / "dangling"; fs::create_symlink(fixture.root / "absent", dangling);
+    helper.call("createDirectory", dangling, {}, nullptr, false);
+    check(fs::is_symlink(dangling) && !fs::exists(fixture.root / "absent"), "Folder creation followed a dangling link");
+    helper.call("createDirectory", fixture.root / "missing" / "child", {}, nullptr, false);
+    helper.call("createFile", fixture.root / "missing" / "child.txt", {{"size", "0"}}, &empty, false);
+    check(!fs::exists(fixture.root / "missing"), "Creation unexpectedly made intermediate folders");
+    helper.call("createDirectory", fixture.root / "CON");
+    helper.call("createDirectory", fixture.root / "con");
+    check(fs::is_directory(fixture.root / "CON") && fs::is_directory(fixture.root / "con"), "Folder creation lost Linux name semantics");
+    for (const auto& entry : fs::directory_iterator(folder)) check(entry.path() == file, "Failed creation left a temporary file");
+    helper.eof();
+}
 void files(const std::string& executable) {
     Fixture fixture; const auto a = fixture.root/"A.cpp", b = fixture.root/"a.cpp", unusual = fixture.root/"quote' $ \\ file.cpp";
     write(a,"upper"); write(b,"lower"); write(unusual,"日本語\r\n"); write(fixture.root/"empty","");
@@ -298,6 +327,6 @@ void terminals(const std::string& executable) {
 }
 int main(int argc,char** argv) {
     signal(SIGPIPE,SIG_IGN);
-    try { check(argc == 2,"Expected helper executable argument"); const std::string executable = argv[1]; installation(executable); files(executable); repositories(executable); protocolFailures(executable); gitAndCancellation(executable); contentSearch(executable); terminals(executable); std::cout << "WSL helper integration tests passed\n"; }
+    try { check(argc == 2,"Expected helper executable argument"); const std::string executable = argv[1]; installation(executable); creation(executable); files(executable); repositories(executable); protocolFailures(executable); gitAndCancellation(executable); contentSearch(executable); terminals(executable); std::cout << "WSL helper integration tests passed\n"; }
     catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
 }
