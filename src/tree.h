@@ -55,6 +55,9 @@ public:
     std::function<std::wstring(TreeItem)> secondaryActionLabel;
     std::function<Renderer::Icon(TreeItem)> secondaryActionIcon;
     std::function<void(TreeItem)> secondaryActionClicked;
+    std::function<std::wstring(TreeItem)> tertiaryActionLabel;
+    std::function<Renderer::Icon(TreeItem)> tertiaryActionIcon;
+    std::function<void(TreeItem)> tertiaryActionClicked;
     bool hoverActionsOnly = false;
 private:
     static LRESULT CALLBACK procedure(HWND, UINT, WPARAM, LPARAM);
@@ -68,8 +71,9 @@ private:
     void ensureVisible();
     int row(TreeItem id) const;
     TreeItem hit(int y) const;
-    RECT actionBounds(TreeItem id, bool secondary = false) const;
-    bool actionVisible(TreeItem id, bool secondary = false) const;
+    RECT actionBounds(TreeItem id, unsigned slot = 0) const;
+    bool actionVisible(TreeItem id, unsigned slot = 0) const;
+    const std::function<std::wstring(TreeItem)>& actionLabelFor(unsigned slot) const;
     void hover(POINT point);
     void scroll(int vertical, int horizontal = 0);
     void release(const std::vector<std::pair<TreeItem, uintptr_t>>& items);

@@ -104,7 +104,7 @@ void smoothIcons() {
         renderer.fill(bitmap.bounds(), RGB(0, 0, 0));
         const int size = MulDiv(24, dpi, 96);
         const std::vector<Renderer::Icon> icons{Renderer::Icon::Explorer, Renderer::Icon::SourceControl, Renderer::Icon::Branch,
-            Renderer::Icon::OpenAllChanges, Renderer::Icon::StageChanges, Renderer::Icon::UnstageChanges};
+            Renderer::Icon::OpenAllChanges, Renderer::Icon::StageChanges, Renderer::Icon::UnstageChanges, Renderer::Icon::DiscardChanges};
         for (size_t i = 0; i < icons.size(); ++i) {
             const int x = 8 + static_cast<int>(i) * 64;
             renderer.icon(icons[i], {x, 8, x + size, 8 + size}, RGB(255, 255, 255));
