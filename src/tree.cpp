@@ -12,8 +12,10 @@ void Tree::create(HWND parent, HINSTANCE instance, const wchar_t* title, int id)
         0, 0, 0, 0, parent, reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), instance, this);
     actionTips_ = CreateWindowExW(WS_EX_TOPMOST, TOOLTIPS_CLASSW, nullptr, WS_POPUP | TTS_ALWAYSTIP | TTS_NOPREFIX,
         CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, window_, nullptr, instance, nullptr);
-    TOOLINFOW tip{}; tip.cbSize = sizeof(tip); tip.uFlags = TTF_SUBCLASS; tip.hwnd = window_; tip.uId = 1; tip.lpszText = LPSTR_TEXTCALLBACKW;
-    SendMessageW(actionTips_, TTM_ADDTOOLW, 0, reinterpret_cast<LPARAM>(&tip));
+    for (const UINT_PTR id : {1, 2}) {
+        TOOLINFOW tip{}; tip.cbSize = sizeof(tip); tip.uFlags = TTF_SUBCLASS; tip.hwnd = window_; tip.uId = id; tip.lpszText = LPSTR_TEXTCALLBACKW;
+        SendMessageW(actionTips_, TTM_ADDTOOLW, 0, reinterpret_cast<LPARAM>(&tip));
+    }
     setDpi(GetDpiForWindow(parent));
 }
 void Tree::setDpi(UINT dpi, int rowHeight) {
@@ -85,7 +87,8 @@ void Tree::layout() {
     for (const auto& row : rows) {
         auto found = widths_.find(row.item);
         if (found == widths_.end()) found = widths_.emplace(row.item, renderer_.textWidth(item(row.item)->text)).first;
-        const int actionWidth = actionLabel && !actionLabel(row.item).empty() ? MulDiv(34, dpi_, 96) : 0;
+        const int actionWidth = (actionLabel && !actionLabel(row.item).empty() ? MulDiv(34, dpi_, 96) : 0) +
+            (secondaryActionLabel && !secondaryActionLabel(row.item).empty() ? MulDiv(28, dpi_, 96) : 0);
         extent = std::max(extent, static_cast<int>(row.depth + 1) * indent_ + found->second + MulDiv(12, dpi_, 96) + actionWidth);
     }
     // Each bar can change the space available to the other.
@@ -148,15 +151,18 @@ LRESULT CALLBACK Tree::renameProcedure(HWND window, UINT message, WPARAM a, LPAR
     return DefSubclassProc(window, message, a, b);
 }
 void Tree::scroll(int vertical, int horizontal) { top_ += vertical; left_ += horizontal; changed(); }
-RECT Tree::actionBounds(TreeItem id) const {
-    if (!actionLabel || actionLabel(id).empty()) return {};
+RECT Tree::actionBounds(TreeItem id, bool secondary) const {
+    const auto& label = secondary ? secondaryActionLabel : actionLabel;
+    if (!id || !label || label(id).empty()) return {};
     const auto r = Scrollbars::contentRect(window_);
     const int y = (row(id) - top_) * rowHeight_, padding = MulDiv(6, dpi_, 96);
     const int width = MulDiv(24, dpi_, 96);
-    return {std::max(0L, r.right - width - padding), y + MulDiv(2, dpi_, 96), r.right - padding, y + rowHeight_ - MulDiv(2, dpi_, 96)};
+    const int offset = secondary ? MulDiv(28, dpi_, 96) : 0;
+    return {std::max(0L, r.right - width - padding - offset), y + MulDiv(2, dpi_, 96), r.right - padding - offset, y + rowHeight_ - MulDiv(2, dpi_, 96)};
 }
-bool Tree::actionVisible(TreeItem id) const {
-    return id && (!hoverActionsOnly || hotItem_ == id) && actionLabel && !actionLabel(id).empty();
+bool Tree::actionVisible(TreeItem id, bool secondary) const {
+    const auto& label = secondary ? secondaryActionLabel : actionLabel;
+    return id && (!hoverActionsOnly || hotItem_ == id) && label && !label(id).empty();
 }
 void Tree::hover(POINT point) {
     const auto content = Scrollbars::contentRect(window_);
@@ -166,9 +172,11 @@ void Tree::hover(POINT point) {
         SendMessageW(actionTips_, TTM_POP, 0, 0);
         InvalidateRect(window_, nullptr, FALSE);
     }
-    TOOLINFOW tip{}; tip.cbSize = sizeof(tip); tip.hwnd = window_; tip.uId = 1;
-    tip.rect = actionVisible(id) ? actionBounds(id) : RECT{};
-    SendMessageW(actionTips_, TTM_NEWTOOLRECTW, 0, reinterpret_cast<LPARAM>(&tip));
+    for (const bool secondary : {false, true}) {
+        TOOLINFOW tip{}; tip.cbSize = sizeof(tip); tip.hwnd = window_; tip.uId = secondary ? 2 : 1;
+        tip.rect = actionVisible(id, secondary) ? actionBounds(id, secondary) : RECT{};
+        SendMessageW(actionTips_, TTM_NEWTOOLRECTW, 0, reinterpret_cast<LPARAM>(&tip));
+    }
 }
 void Tree::paint() {
     Renderer::Paint paint(renderer_, window_); if (!paint) return;
@@ -196,13 +204,16 @@ void Tree::paint() {
                 renderer_.line(cx + arrow / 2.0f, cy, cx - arrow / 2.0f, cy + arrow, muted, stroke);
             }
         }
-        const auto action = actionBounds(row.item);
+        const auto secondary = actionBounds(row.item, true);
+        const auto action = secondary.right ? secondary : actionBounds(row.item);
         renderer_.label({x + indent_ + padding, y, action.right ? action.left - padding : std::max<LONG>(r.right, x + indent_ + widths_[row.item] + padding), y + rowHeight_},
             node->text, node->color, DT_LEFT | DT_VCENTER | DT_SINGLELINE | (action.right ? DT_END_ELLIPSIS : 0));
-        if (actionVisible(row.item)) {
-            renderer_.fill(action, hotItem_ == row.item ? RGB(50, 70, 94) : background);
-            RECT icon = action; InflateRect(&icon, -MulDiv(3, dpi_, 96), -MulDiv(3, dpi_, 96));
-            renderer_.icon(actionIcon ? actionIcon(row.item) : Renderer::Icon::OpenAllChanges, icon, accent);
+        for (const bool secondaryAction : {false, true}) if (actionVisible(row.item, secondaryAction)) {
+            const auto bounds = actionBounds(row.item, secondaryAction);
+            renderer_.fill(bounds, hotItem_ == row.item ? RGB(50, 70, 94) : background);
+            RECT icon = bounds; InflateRect(&icon, -MulDiv(3, dpi_, 96), -MulDiv(3, dpi_, 96));
+            const auto& actionIconFor = secondaryAction ? secondaryActionIcon : actionIcon;
+            renderer_.icon(actionIconFor ? actionIconFor(row.item) : Renderer::Icon::OpenAllChanges, icon, accent);
         }
     }
     scrollbars_.paint(window_, renderer_, panel);
@@ -225,8 +236,11 @@ LRESULT Tree::handle(UINT m, WPARAM a, LPARAM b) {
     case WM_SETCURSOR:
         if (LOWORD(b) == HTCLIENT) {
             POINT point{}; GetCursorPos(&point); ScreenToClient(window_, &point);
-            const auto id = hit(point.y); const auto action = actionVisible(id) ? actionBounds(id) : RECT{};
-            if (PtInRect(&action, point)) { SetCursor(LoadCursorW(nullptr, IDC_HAND)); return TRUE; }
+            const auto id = hit(point.y);
+            for (const bool secondary : {false, true}) {
+                const auto action = actionVisible(id, secondary) ? actionBounds(id, secondary) : RECT{};
+                if (PtInRect(&action, point)) { SetCursor(LoadCursorW(nullptr, IDC_HAND)); return TRUE; }
+            }
         }
         return DefWindowProcW(window_, m, a, b);
     case WM_SIZE: changed(); return 0;
@@ -236,8 +250,10 @@ LRESULT Tree::handle(UINT m, WPARAM a, LPARAM b) {
     case WM_NOTIFY: {
         const auto header = reinterpret_cast<NMHDR*>(b);
         if (header->hwndFrom == actionTips_ && header->code == TTN_GETDISPINFOW) {
-            actionTip_ = actionLabel && hotItem_ ? actionLabel(hotItem_) : L"";
-            if (!actionTip_.empty()) actionTip_ += L" (F4)";
+            const bool secondary = header->idFrom == 2;
+            const auto& label = secondary ? secondaryActionLabel : actionLabel;
+            actionTip_ = label && hotItem_ ? label(hotItem_) : L"";
+            if (!secondary && !actionTip_.empty()) actionTip_ += L" (F4)";
             reinterpret_cast<NMTTDISPINFOW*>(b)->lpszText = actionTip_.data();
         }
         return 0;
@@ -279,8 +295,15 @@ LRESULT Tree::handle(UINT m, WPARAM a, LPARAM b) {
         SetFocus(window_);
         hover({GET_X_LPARAM(b), GET_Y_LPARAM(b)});
         const auto id = hit(GET_Y_LPARAM(b)); if (!id) return 0;
-        const auto action = actionBounds(id);
-        if (actionVisible(id) && PtInRect(&action, {GET_X_LPARAM(b), GET_Y_LPARAM(b)})) { SendMessageW(actionTips_, TTM_POP, 0, 0); select(id, false); if (actionClicked) actionClicked(id); return 0; }
+        for (const bool secondary : {false, true}) {
+            const auto action = actionBounds(id, secondary);
+            if (actionVisible(id, secondary) && PtInRect(&action, {GET_X_LPARAM(b), GET_Y_LPARAM(b)})) {
+                SendMessageW(actionTips_, TTM_POP, 0, 0); select(id, false);
+                const auto& clicked = secondary ? secondaryActionClicked : actionClicked;
+                if (clicked) clicked(id);
+                return 0;
+            }
+        }
         const auto& row = model_.visible()[static_cast<size_t>(this->row(id))];
         const int x = GET_X_LPARAM(b) + left_, edge = static_cast<int>(row.depth) * indent_;
         if (item(id)->expandable && x >= edge && x < edge + indent_) expand(id, !item(id)->expanded);
@@ -289,8 +312,10 @@ LRESULT Tree::handle(UINT m, WPARAM a, LPARAM b) {
     }
     case WM_LBUTTONDBLCLK: {
         const auto id = hit(GET_Y_LPARAM(b));
-        const auto action = actionBounds(id);
-        if (PtInRect(&action, {GET_X_LPARAM(b), GET_Y_LPARAM(b)})) return 0;
+        for (const bool secondary : {false, true}) {
+            const auto action = actionBounds(id, secondary);
+            if (PtInRect(&action, {GET_X_LPARAM(b), GET_Y_LPARAM(b)})) return 0;
+        }
         if (id && item(id)->expandable) {
             const auto& row = model_.visible()[static_cast<size_t>(this->row(id))];
             if (GET_X_LPARAM(b) + left_ >= static_cast<int>(row.depth + 1) * indent_) expand(id, !item(id)->expanded);

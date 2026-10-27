@@ -1209,6 +1209,19 @@ void branchSidebarTests(const fs::path& executable) {
         const int row = static_cast<int>(send(changes, treeGetRow, working));
         click(changes, rect.right - rect.left - MulDiv(18, GetDpiForWindow(app.window), 96), row * height + height / 2);
         waitLines(viewer, 4);
+        // The group keeps its diff action and adds Stage All Changes beside it,
+        // including when its file list is collapsed.
+        expand(changes, working, false);
+        const int stageX = rect.right - rect.left - MulDiv(46, GetDpiForWindow(app.window), 96);
+        send(changes, WM_MOUSEMOVE, 0, MAKELPARAM(stageX, row * height + height / 2));
+        click(changes, stageX, row * height + height / 2);
+        send(changes, WM_MOUSELEAVE);
+        waitFor([&] {
+            const auto first = nextItem(changes, TreeRelation::Root), second = nextItem(changes, TreeRelation::Next, first);
+            return children(changes, first) == 2 && children(changes, second) == 0;
+        }, "Stage All Changes did not stage partially staged and untracked files from a collapsed group");
+        waitLines(viewer, 0);
+        runGit(L"diff --quiet");
         send(GetDlgItem(app.window, 5), BM_CLICK);
         waitFor([&] { return IsWindowVisible(branches) && children(branches, nextItem(branches, TreeRelation::Root)) == 51; }, "Branch did not load 50 commits and a load-more row");
         check(!IsWindowVisible(changes), "Branch did not hide Source Control");
@@ -1296,6 +1309,18 @@ void multiRepositoryTests(const fs::path& executable) {
         send(changes, WM_KEYDOWN, VK_F4);
         waitFor([&] { clientRepo = nextItem(changes, TreeRelation::Root); return children(changes, group(clientRepo, true)) == 0; }, "Unstaging did not update the owning repository");
         runGit(client, L"diff --cached --quiet");
+        RECT changesRect{}; GetClientRect(changes, &changesRect);
+        const int height = static_cast<int>(send(changes, treeGetRowHeight));
+        const int row = static_cast<int>(send(changes, treeGetRow, group(clientRepo, false)));
+        const int x = changesRect.right - MulDiv(46, GetDpiForWindow(app.window), 96), y = row * height + height / 2;
+        send(changes, WM_MOUSEMOVE, 0, MAKELPARAM(x, y)); click(changes, x, y); send(changes, WM_MOUSELEAVE);
+        waitFor([&] {
+            clientRepo = nextItem(changes, TreeRelation::Root); serverRepo = nextItem(changes, TreeRelation::Next, clientRepo);
+            return children(changes, group(clientRepo, true)) == 2 && children(changes, group(clientRepo, false)) == 0 &&
+                children(changes, group(serverRepo, true)) == 0 && children(changes, group(serverRepo, false)) == 2;
+        }, "Stage All Changes affected a sibling repository or missed a file in the selected repository");
+        runGit(client, L"diff --cached --quiet", 1); runGit(server, L"diff --cached --quiet");
+        runGit(fixture.root, L"diff --cached --quiet");
         send(GetDlgItem(app.window, 5), BM_CLICK);
         waitFor([&] { return IsWindowVisible(branches) && roots(branches); }, "Branch did not discover sibling repositories");
         const auto clientBranchRepo = nextItem(branches, TreeRelation::Root), serverBranchRepo = nextItem(branches, TreeRelation::Next, clientBranchRepo);
