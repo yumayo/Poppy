@@ -1092,6 +1092,79 @@ void branchSidebarTests(const fs::path& executable) {
         waitLines(viewer, 5);
     }
 }
+void multiRepositoryTests(const fs::path& executable) {
+    wchar_t git[MAX_PATH]{};
+    const auto length = SearchPathW(nullptr, L"git.exe", nullptr, MAX_PATH, git, nullptr);
+    if (!length || length >= MAX_PATH) { std::cout << "Multi-repository GUI tests skipped: Git for Windows is not on PATH.\n"; return; }
+    Fixture fixture;
+    const auto client = fixture.root / L"app-client", server = fixture.root / L"app-server";
+    fs::create_directory(client); fs::create_directory(server);
+    const auto runGit = [&](const fs::path& directory, const std::wstring& args, DWORD expected = 0) {
+        std::wstring command = L"\"" + std::wstring(git) + L"\" " + args;
+        STARTUPINFOW startup{}; startup.cb = sizeof(startup); PROCESS_INFORMATION process{};
+        check(CreateProcessW(git, command.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, directory.c_str(), &startup, &process) != FALSE, "Cannot start multi-repository Git fixture");
+        CloseHandle(process.hThread); const auto wait = WaitForSingleObject(process.hProcess, 5000);
+        if (wait != WAIT_OBJECT_0) { TerminateProcess(process.hProcess, 1); WaitForSingleObject(process.hProcess, 1000); }
+        DWORD code = 1; GetExitCodeProcess(process.hProcess, &code); CloseHandle(process.hProcess);
+        check(wait == WAIT_OBJECT_0 && code == expected, "Multi-repository Git fixture command failed");
+    };
+    for (const auto& directory : {client, server}) {
+        runGit(directory, L"init --quiet --template= --initial-branch=main");
+        runGit(directory, L"config user.name PoppyTest"); runGit(directory, L"config user.email poppy@example.invalid");
+        runGit(directory, L"config commit.gpgsign false"); runGit(directory, L"config core.autocrlf false");
+        writeLines(directory / L"extra.txt", 1); writeLines(directory / L"same.txt", directory == client ? 1 : 3);
+        runGit(directory, L"add ."); runGit(directory, L"commit -qm initial");
+        runGit(directory, L"commit --allow-empty -qm latest");
+        writeLines(directory / L"same.txt", directory == client ? 2 : 4);
+        writeLines(directory / L"untracked.txt", directory == client ? 111 : 222);
+    }
+    const auto children = [](HWND tree, TreeItem parent) {
+        size_t count = 0;
+        for (auto item = nextItem(tree, TreeRelation::Child, parent); item; item = nextItem(tree, TreeRelation::Next, item)) ++count;
+        return count;
+    };
+    {
+        Application app(executable, fixture.root); app.tree();
+        const auto changes = GetDlgItem(app.window, 4), branches = GetDlgItem(app.window, 6);
+        const auto viewer = FindWindowExW(app.window, nullptr, L"PoppyViewer", nullptr);
+        send(GetDlgItem(app.window, 3), BM_CLICK);
+        const auto roots = [&](HWND tree) { const auto first = nextItem(tree, TreeRelation::Root); return first && nextItem(tree, TreeRelation::Next, first); };
+        waitFor([&] { return IsWindowVisible(changes) && roots(changes); }, "Source Control did not discover sibling repositories");
+        const auto group = [&](TreeItem repo, bool staged) { const auto first = nextItem(changes, TreeRelation::Child, repo); return staged ? first : nextItem(changes, TreeRelation::Next, first); };
+        auto clientRepo = nextItem(changes, TreeRelation::Root), serverRepo = nextItem(changes, TreeRelation::Next, clientRepo);
+        check(children(changes, clientRepo) == 2 && children(changes, serverRepo) == 2, "Repositories did not get independent change groups");
+        for (const auto repo : {clientRepo, serverRepo}) {
+            const auto tracked = nextItem(changes, TreeRelation::Child, group(repo, false));
+            send(changes, treeSelect, nextItem(changes, TreeRelation::Next, tracked));
+            waitLines(viewer, repo == clientRepo ? 111 : 222);
+        }
+        send(changes, treeSelect, nextItem(changes, TreeRelation::Child, group(clientRepo, false)));
+        send(changes, WM_KEYDOWN, VK_F4);
+        waitFor([&] { clientRepo = nextItem(changes, TreeRelation::Root); return children(changes, group(clientRepo, true)) == 1; }, "Staging did not update the owning repository");
+        runGit(client, L"diff --cached --quiet", 1); runGit(server, L"diff --cached --quiet");
+        send(changes, treeSelect, nextItem(changes, TreeRelation::Child, group(clientRepo, true)));
+        send(changes, WM_KEYDOWN, VK_F4);
+        waitFor([&] { clientRepo = nextItem(changes, TreeRelation::Root); return children(changes, group(clientRepo, true)) == 0; }, "Unstaging did not update the owning repository");
+        runGit(client, L"diff --cached --quiet");
+        send(GetDlgItem(app.window, 5), BM_CLICK);
+        waitFor([&] { return IsWindowVisible(branches) && roots(branches); }, "Branch did not discover sibling repositories");
+        const auto clientBranchRepo = nextItem(branches, TreeRelation::Root), serverBranchRepo = nextItem(branches, TreeRelation::Next, clientBranchRepo);
+        for (const auto repo : {clientBranchRepo, serverBranchRepo}) {
+            const auto branch = nextItem(branches, TreeRelation::Child, repo);
+            waitFor([&] { return children(branches, branch) == 2; }, "A repository's main branch did not load its history");
+            const auto latest = nextItem(branches, TreeRelation::Child, branch), commit = nextItem(branches, TreeRelation::Next, latest);
+            expand(branches, commit);
+            waitFor([&] { return children(branches, commit) == 2; }, "A repository's commit did not load its files");
+            const auto extra = nextItem(branches, TreeRelation::Child, commit);
+            send(branches, treeSelect, nextItem(branches, TreeRelation::Next, extra));
+            waitLines(viewer, repo == clientBranchRepo ? 1 : 3);
+        }
+    }
+    {
+        Application app(executable, fixture.root); app.tree();
+        waitLines(FindWindowExW(app.window, nullptr, L"PoppyViewer", nullptr), 3);
+    }
+}
 std::set<DWORD> childProcesses(DWORD parent) {
     std::set<DWORD> result; const auto snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
     check(snapshot != INVALID_HANDLE_VALUE, "Cannot inspect shell processes");
@@ -1259,7 +1332,7 @@ int wmain(int argc, wchar_t** argv) {
         check(argc == 2, "Pass the path to Poppy.exe");
         SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         for (const auto test : {folderTests, sidebarTests, treeInteractionTests, tabTests, pinnedTabTests,
-                tabDragTests, wrappingTabDragTests, wrappingTabTests, renameTests, splitPaneTests, quickOpenTests, fullSearchTests, gitSidebarTests, gitAutoRefreshTests, branchSidebarTests, sessionTests, multiProjectTests, terminalBackspaceTests}) {
+                tabDragTests, wrappingTabDragTests, wrappingTabTests, renameTests, splitPaneTests, quickOpenTests, fullSearchTests, gitSidebarTests, gitAutoRefreshTests, branchSidebarTests, multiRepositoryTests, sessionTests, multiProjectTests, terminalBackspaceTests}) {
             Fixture appData; AppDataEnvironment environment(appData.root);
             test(fs::absolute(argv[1]));
         }

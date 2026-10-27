@@ -129,6 +129,42 @@ void files(const std::string& executable) {
     write(fixture.root/"notify","external update"); check(helper.event(),"inotify did not request a refresh");
     helper.eof();
 }
+void repositories(const std::string& executable) {
+    Fixture fixture;
+    const auto app = fixture.root / "app", client = app / "app-client", server = app / "app-server";
+    fs::create_directories(client); fs::create_directories(server);
+    Helper helper(executable); helper.hello(); helper.call("connect", app);
+    auto git = [&](const fs::path& directory, std::vector<std::string> args) {
+        Message message{{"argc", std::to_string(args.size())}};
+        for (size_t i = 0; i < args.size(); ++i) message["arg" + std::to_string(i)] = args[i];
+        auto result = helper.call("git", directory, std::move(message));
+        check(number(result.metadata, "exitCode") == 0, result.bytes.c_str()); return result.bytes;
+    };
+    for (const auto& directory : {client, server}) {
+        git(directory, {"init", "--quiet", "--template=", "--initial-branch=main"});
+        git(directory, {"config", "user.name", "Poppy Test"}); git(directory, {"config", "user.email", "poppy@example.invalid"});
+        git(directory, {"config", "commit.gpgsign", "false"});
+        write(directory / "same.txt", directory.filename().string() + "\n");
+        git(directory, {"add", "."}); git(directory, {"commit", "-qm", directory.filename().string()});
+    }
+    auto scan = helper.call("gitRepositories", app);
+    std::set<std::string> roots;
+    for (const auto& entry : scan.entries) roots.insert(field(entry, "path"));
+    check(roots == std::set<std::string>{client.string(), server.string()}, "WSL discovery missed siblings below a non-Git parent");
+    write(client / "same.txt", "client edit\n"); write(server / "same.txt", "server edit\n");
+    check(helper.event(), "A nested repository did not receive a watch");
+    git(client, {"add", "same.txt"});
+    check(git(client, {"status", "--porcelain=v1"}).find("M  same.txt") != std::string::npos &&
+          git(server, {"status", "--porcelain=v1"}).find(" M same.txt") != std::string::npos, "WSL staging crossed repositories");
+    check(git(server, {"log", "-1", "--format=%s"}) == "app-server\n", "WSL history used a sibling repository");
+    const auto worktree = app / "worktree 日本語";
+    git(client, {"worktree", "add", "--quiet", "--detach", worktree.string()});
+    fs::create_directory_symlink(app, app / "loop");
+    check(helper.call("gitRepositories", app).entries.size() == 3, "WSL discovery missed a gitfile or entered a directory link");
+    fs::remove_all(server);
+    check(helper.call("gitRepositories", app).entries.size() == 2, "WSL discovery retained a removed repository");
+    helper.eof();
+}
 void protocolFailures(const std::string& executable) {
     { Helper helper(executable); helper.raw(std::string("\x7f\xff\xff\xff",4)); helper.eof(); }
     { Helper helper(executable); helper.raw(std::string("\0\0",2)); helper.eof(); }
@@ -232,6 +268,6 @@ void terminals(const std::string& executable) {
 }
 int main(int argc,char** argv) {
     signal(SIGPIPE,SIG_IGN);
-    try { check(argc == 2,"Expected helper executable argument"); const std::string executable = argv[1]; installation(executable); files(executable); protocolFailures(executable); gitAndCancellation(executable); contentSearch(executable); terminals(executable); std::cout << "WSL helper integration tests passed\n"; }
+    try { check(argc == 2,"Expected helper executable argument"); const std::string executable = argv[1]; installation(executable); files(executable); repositories(executable); protocolFailures(executable); gitAndCancellation(executable); contentSearch(executable); terminals(executable); std::cout << "WSL helper integration tests passed\n"; }
     catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
 }

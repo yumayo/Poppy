@@ -171,7 +171,7 @@ Poppyは、アプリ全体の状態とプロジェクトごとの状態を別々
 
 ## 保存形式のバージョンと上限
 
-現在の形式は全体のデータベースが `PRAGMA user_version = 3`、プロジェクトのデータベースが `PRAGMA user_version = 10` です。未初期化のデータベースではテーブルを作成してバージョンを設定します。それぞれの対応バージョンより `user_version` が大きい場合は、そのデータベースの読み込み・保存を拒否し、形式を上書きしません。
+現在の形式は全体のデータベースが `PRAGMA user_version = 3`、プロジェクトのデータベースが `PRAGMA user_version = 11` です。未初期化のデータベースではテーブルを作成してバージョンを設定します。それぞれの対応バージョンより `user_version` が大きい場合は、そのデータベースの読み込み・保存を拒否し、形式を上書きしません。
 
 プロジェクトの旧形式（バージョン1）はトランザクション内で自動移行します。選択中の差分タブの形式を `session.diff_inline` に引き継ぎます。選択中のタブが通常表示の場合は先頭の差分タブの形式を使い、差分タブがなければSplit表示を使います。タブごとの `file_inline` と `diff_inline` は削除します。旧Split表示の行位置は元のパッチなしでは変換できないため、その差分の縦スクロール位置だけを先頭に戻します。その他のタブ状態とプロジェクト設定は引き継ぎます。
 
@@ -231,4 +231,6 @@ version 9では`tabs.file_wrap_offset`を追加します。元の行番号と行
 
 version 10では`tabs.diff_wrap_offset`を追加します。`diff_top`に対応する本文行内の位置を保存し、Inline／Splitの表示幅に合わせて折り返し位置を再計算します。Splitで短い側の空白部分が先頭にある場合は、長い側の行を`diff_top`の基準にします。選択側の`diff_after`は独立して保持します。旧形式からは`DEFAULT 0`で移行します。
 
-`session.git_sidebar`は0=EXPLORER、1=SOURCE CONTROL、2=BRANCHです。`git_collapsed.path`と`view_state.git_selected`はグループを区別する`staged:`または`changes:`を相対パスの前に付けて保存します。BRANCHのコミット・変更ファイルのツリーは必要時にGitから取得し、保存しません。
+version 11では`git_comparisons.repository TEXT NOT NULL DEFAULT ''`を追加します。比較元のリポジトリルートをWindowsの絶対パスまたはWSLのLinuxパスで保持し、所属プロジェクトの接続先と組み合わせて復元します。入れ子のリポジトリで同じファイルを別のリポジトリのコミットと比較する場合も対象を保持します。旧形式の空欄は、読み込み時にパスが属する最も内側のリポジトリを使用します。
+
+`session.git_sidebar`は0=EXPLORER、1=SOURCE CONTROL、2=BRANCHです。`git_collapsed.path`と`view_state.git_selected`はグループを区別する`staged:`または`changes:`を相対パスの前に付けて保存します。複数リポジトリの場合はさらに`repository:<リポジトリの正規化キー>\n`を先頭に付け、リポジトリ見出しの折りたたみも同じキーで保存します。BRANCHのコミット・変更ファイルのツリーは必要時にGitから取得し、保存しません。

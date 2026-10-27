@@ -45,12 +45,13 @@ struct Tab {
     std::shared_ptr<EditBuffer> buffer; int group = 0; bool displayed = false;
     GitDiffKind diffKind = GitDiffKind::Automatic; std::string revision; bool allChanges = false;
     std::optional<ContentMatch> searchTarget; std::string searchQuery; bool searchMatchCase = false;
+    ResourceId gitRoot = {};
 };
 std::wstring tabKey(const Tab& tab) {
-    return pathKey(tab.path) + L"\n" + std::to_wstring(static_cast<int>(tab.diffKind)) + L"\n" + wide(tab.revision) + (tab.allChanges ? L"\nall" : L"");
+    return pathKey(tab.path) + L"\n" + std::to_wstring(static_cast<int>(tab.diffKind)) + L"\n" + wide(tab.revision) + (tab.allChanges ? L"\nall" : L"") + (tab.gitRoot.empty() ? L"" : L"\n" + pathKey(tab.gitRoot));
 }
 std::wstring tabTitle(const Tab& tab) {
-    auto title = tab.allChanges ? L"All Changes" : tab.path.filename().native();
+    auto title = tab.allChanges ? L"All Changes · " + tab.path.filename().native() : tab.path.filename().native();
     if (tab.diffKind == GitDiffKind::Commit) title += L" · " + wide(tab.revision.substr(0, 8));
     else if (tab.diffKind == GitDiffKind::Staged) title += L" · Staged";
     else if (tab.diffKind != GitDiffKind::Automatic) title += L" · Changes";
@@ -65,13 +66,27 @@ struct TabDrag {
     std::optional<TabDrop> target;
 };
 struct GitEntry { ResourceId path; wchar_t state; bool staged = false, changed = false; char index = ' ', worktree = ' '; std::string previousPath; };
-struct GitResult { ResourceId root; std::wstring branch, error; std::map<std::wstring, wchar_t> states; std::vector<GitEntry> entries; size_t changed = 0, untracked = 0; bool truncated = false, unsupportedNames = false; };
-struct SourceNode { std::wstring path; size_t entry = noGitChange; bool directory = false, staged = false, group = false; };
-enum class HistoryKind { Branch, Commit, Directory, File, More, Message };
+struct GitResult { ResourceId root; std::wstring branch, error; std::vector<GitEntry> entries; size_t changed = 0, untracked = 0; bool truncated = false, unsupportedNames = false; };
+struct GitWorkspace {
+    std::vector<std::shared_ptr<GitResult>> repositories;
+    std::vector<ResourceId> roots;
+    std::map<std::wstring, wchar_t> states;
+    std::wstring error, warning;
+    size_t changed = 0, untracked = 0;
+    bool truncated = false, unsupportedNames = false;
+    const GitResult* repository(const ResourceId& path) const {
+        const auto root = gitRepositoryFor(roots, path);
+        for (const auto& repo : repositories) if (pathKey(repo->root) == pathKey(root)) return repo.get();
+        return nullptr;
+    }
+};
+struct SourceNode { std::wstring path; size_t entry = noGitChange; bool directory = false, staged = false, group = false; size_t repository = 0; };
+enum class HistoryKind { Branch, Commit, Directory, File, More, Message, Repository };
 struct HistoryNode {
     HistoryKind kind; std::string ref, revision; ResourceId path;
     bool loaded = false, loading = false; size_t count = 0;
     uint64_t generation = 0;
+    ResourceId root = {};
 };
 std::vector<std::wstring> gitArguments(const std::vector<std::string>& args) {
     std::vector<std::wstring> result; result.reserve(args.size());
@@ -116,18 +131,59 @@ std::shared_ptr<GitResult> readGit(ProjectProvider& provider, const ResourceId& 
         ResourceId path = (result->root / std::string_view(entry.path)).lexically_normal();
         if (result->entries.size() < maxTreeNodes) result->entries.push_back({path, state, entry.staged(), entry.changed(), x, y, entry.previousPath});
         else result->truncated = true;
-        auto mark = [&](ResourceId current) {
-            for (;;) {
-                const auto key = pathKey(current); auto found = result->states.find(key);
-                if (found != result->states.end()) { if (state == L'U') found->second = state; }
-                else if (result->states.size() < maxTreeNodes) result->states[key] = state;
-                else result->truncated = true;
-                if (current == result->root || current == current.root_path() || current.empty()) break;
-                current = current.parent_path();
-            }
-        };
-        mark(path);
-        if (!entry.previousPath.empty()) { if (!directory.wsl() || validUtf8(entry.previousPath)) mark(result->root / std::string_view(entry.previousPath)); else result->unsupportedNames = true; }
+    }
+    return result;
+}
+std::shared_ptr<GitWorkspace> readGitWorkspace(ProjectProvider& provider, const ResourceId& directory, const std::atomic<bool>* cancelled) {
+    auto result = std::make_shared<GitWorkspace>();
+    auto enclosing = readGit(provider, directory, cancelled);
+    auto scan = provider.gitRepositories(directory, [cancelled] { return cancelled && *cancelled; });
+    result->warning = wide(scan.error); result->truncated = scan.truncated;
+    if (!enclosing->root.empty()) { result->repositories.push_back(enclosing); result->roots.push_back(enclosing->root); }
+    else result->error = enclosing->error;
+    for (const auto& candidate : scan.roots) {
+        if (cancelled && *cancelled) return result;
+        if (std::any_of(result->roots.begin(), result->roots.end(), [&](const ResourceId& root) { return pathKey(root) == pathKey(candidate); })) continue;
+        if (result->repositories.size() >= 256) { result->truncated = true; break; }
+        auto repo = readGit(provider, candidate, cancelled);
+        if (repo->root.empty()) {
+            if (repo->error.empty()) continue;
+            repo->root = candidate;
+        }
+        if (std::any_of(result->roots.begin(), result->roots.end(), [&](const ResourceId& root) { return pathKey(root) == pathKey(repo->root); })) continue;
+        result->roots.push_back(repo->root); result->repositories.push_back(std::move(repo));
+    }
+    if (!result->repositories.empty()) result->error = result->repositories.size() == 1 ? result->repositories.front()->error : std::wstring{};
+    else if (result->error.empty()) result->error = result->warning;
+    std::sort(result->repositories.begin(), result->repositories.end(), [](const auto& a, const auto& b) { return pathKey(a->root) < pathKey(b->root); });
+    size_t remainingEntries = maxTreeNodes;
+    for (const auto& repo : result->repositories) {
+        // A nested worktree supplies its own untracked files. Keep tracked
+        // entries in the parent, including submodule pointer changes.
+        auto& entries = repo->entries;
+        entries.erase(std::remove_if(entries.begin(), entries.end(), [&](const GitEntry& entry) {
+            if (entry.state != L'?' || pathKey(gitRepositoryFor(result->roots, entry.path)) == pathKey(repo->root)) return false;
+            --repo->untracked; return true;
+        }), entries.end());
+        result->changed += repo->changed; result->untracked += repo->untracked;
+        if (entries.size() > remainingEntries) { entries.resize(remainingEntries); repo->truncated = true; }
+        remainingEntries -= entries.size();
+        result->truncated = result->truncated || repo->truncated;
+        result->unsupportedNames = result->unsupportedNames || repo->unsupportedNames;
+        for (const auto& entry : entries) {
+            auto mark = [&](ResourceId path) {
+                while (!path.empty()) {
+                    auto found = result->states.find(pathKey(path));
+                    if (found != result->states.end()) { if (entry.state == L'U') found->second = entry.state; }
+                    else if (result->states.size() < maxTreeNodes) result->states[pathKey(path)] = entry.state;
+                    else result->truncated = true;
+                    if (path == directory || path == path.root_path() || (path == repo->root && !directory.contains(path))) break;
+                    path = path.parent_path();
+                }
+            };
+            mark(entry.path);
+            if (!entry.previousPath.empty()) mark(repo->root / std::string_view(entry.previousPath));
+        }
     }
     return result;
 }
@@ -150,7 +206,8 @@ private:
     void updateGitFiles();
     void openGitFile(TreeItem item);
     void stageGitFile(TreeItem item);
-    void openGitDiff(const ResourceId& path, GitDiffKind kind, std::string revision = {}, bool allChanges = false);
+    void openGitDiff(const ResourceId& path, GitDiffKind kind, std::string revision = {}, bool allChanges = false, ResourceId root = {});
+    std::wstring repositoryLabel(const ResourceId& root) const;
     void refreshBranches();
     void requestHistory(TreeItem item, bool more = false);
     void openHistory(TreeItem item);
@@ -217,7 +274,7 @@ private:
     bool gitTreeView_ = true;
     std::vector<SourceNode> gitChangeNodes_;
     uint64_t branchRequest_ = 0;
-    bool branchesLoading_ = false, branchesLoaded_ = false;
+    bool branchesLoading_ = false, branchesLoaded_ = false, branchRepositories_ = false;
     std::wstring branchError_;
     std::set<std::wstring> collapsedGitPaths_;
     Sidebar activeSidebar_ = Sidebar::Explorer;
@@ -254,7 +311,7 @@ private:
     TreeItem rootItem_ = 0;
     uint64_t generation_ = 0, serial_[2]{}, nextId_ = 1;
     std::map<uint64_t, TreeItem> nodes_;
-    std::shared_ptr<GitResult> git_;
+    std::shared_ptr<GitWorkspace> git_;
     std::shared_ptr<ProjectProvider> provider_;
     bool connecting_ = false, connected_ = false, active_ = false;
     uint64_t providerRevision_ = 0;
@@ -279,7 +336,7 @@ void ProjectRuntime::Impl::create() {
     branches_.expanded = [this](TreeItem item, bool expanded) { if (expanded) requestHistory(item); };
     branches_.activated = [this](TreeItem item) { openHistory(item); };
     branches_.actionLabel = [this](TreeItem item) { const auto n = historyNode(item); return n && n->kind == HistoryKind::Commit ? L"Open All Changes" : L""; };
-    branches_.actionClicked = [this](TreeItem item) { const auto n = historyNode(item); if (n && n->kind == HistoryKind::Commit && git_) openGitDiff(git_->root, GitDiffKind::Commit, n->revision, true); };
+    branches_.actionClicked = [this](TreeItem item) { const auto n = historyNode(item); if (n && n->kind == HistoryKind::Commit) openGitDiff(n->root, GitDiffKind::Commit, n->revision, true, n->root); };
     explorer_.activated = [this](TreeItem item) {
         pendingTreeSelection_.clear();
         if (const auto n = node(item); n && !n->directory) openFile(n->path);
@@ -312,7 +369,7 @@ void ProjectRuntime::Impl::create() {
     changes_.actionClicked = [this](TreeItem item) {
         const auto n = changes_.item(item);
         if (!n || n->data >= gitChangeNodes_.size() || !git_) return;
-        if (gitChangeNodes_[n->data].group) openGitDiff(git_->root, gitChangeNodes_[n->data].staged ? GitDiffKind::Staged : GitDiffKind::Changes, {}, true);
+        if (gitChangeNodes_[n->data].group) { const auto& source = gitChangeNodes_[n->data]; const auto root = git_->repositories[source.repository]->root; openGitDiff(root, source.staged ? GitDiffKind::Staged : GitDiffKind::Changes, {}, true, root); }
         else stageGitFile(item);
     };
     changes_.expanded = [this](TreeItem item, bool value) {
@@ -387,7 +444,7 @@ void ProjectRuntime::Impl::layout(bool revealTab) {
     terminalSplitter_ = {right, toolbar_ + viewerSize, width, toolbar_ + viewerSize + (terminalVisible_ ? splitter_ : 0)};
     const int gitTop = toolbar_ + sidebarHeader_ + gitHeader_;
     const bool showExplorer = activeSidebar_ == Sidebar::Explorer && !root_.empty();
-    const bool showGitFiles = activeSidebar_ == Sidebar::Git && git_ && git_->error.empty() && !git_->root.empty() && !git_->entries.empty();
+    const bool showGitFiles = activeSidebar_ == Sidebar::Git && git_ && git_->error.empty() && !git_->repositories.empty() && (git_->changed + git_->untracked || git_->repositories.size() > 1);
     normalizeGroups();
     editorRect_ = {right, toolbar_, width, toolbar_ + viewerSize};
     const bool split = std::any_of(tabs_.begin(), tabs_.end(), [](const Tab& tab) { return tab.group == 1; });
@@ -475,7 +532,7 @@ void ProjectRuntime::Impl::paint() {
     dc.label({scaled(374), 0, scaled(460), toolbar_}, L"Terminal", terminalVisible_ ? accent : muted);
     dc.label({scaled(480), 0, scaled(566), toolbar_}, L"Find file", foreground);
     dc.label({scaled(582), 0, r.right - scaled(16), toolbar_}, root_.empty() ? L"" : root_.native(), muted, DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_PATH_ELLIPSIS);
-    const std::wstring gitLabel = !git_ ? L"Git" : !git_->error.empty() ? L"Git unavailable" : git_->root.empty() ? L"No Git repository" : git_->branch + L"  ·  " + std::to_wstring(git_->changed) + L" changed  ·  " + std::to_wstring(git_->untracked) + L" untracked";
+    const std::wstring gitLabel = !git_ ? L"Git" : !git_->error.empty() ? L"Git unavailable" : git_->repositories.empty() ? L"No Git repository" : (git_->repositories.size() == 1 ? git_->repositories.front()->branch : std::to_wstring(git_->repositories.size()) + L" repositories") + L"  ·  " + std::to_wstring(git_->changed) + L" changed  ·  " + std::to_wstring(git_->untracked) + L" untracked";
     dc.label({scaled(12), r.bottom - footer_, scaled(390), r.bottom}, gitLabel, muted);
     dc.label({scaled(400), r.bottom - footer_, r.right - scaled(12), r.bottom}, status_, muted, DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
     dc.fill({0, toolbar_, activityWidth_, r.bottom - footer_}, background);
@@ -485,8 +542,8 @@ void ProjectRuntime::Impl::paint() {
     dc.label({left, toolbar_, edge, top}, activeSidebar_ == Sidebar::Explorer ? L"EXPLORER" : activeSidebar_ == Sidebar::Git ? L"SOURCE CONTROL" : activeSidebar_ == Sidebar::Search ? L"SEARCH" : L"BRANCH", foreground);
     dc.fill({sidebarRect_.left, top - 1, sidebarRect_.right, top}, border);
     if (activeSidebar_ == Sidebar::Git) {
-        const bool repository = git_ && !git_->root.empty() && git_->error.empty();
-        dc.label({left, top, edge, top + scaled(28)}, repository ? git_->branch : L"Git", repository ? accent : muted);
+        const bool repository = git_ && !git_->repositories.empty();
+        dc.label({left, top, edge, top + scaled(28)}, repository ? (git_->repositories.size() == 1 ? git_->repositories.front()->branch : std::to_wstring(git_->repositories.size()) + L" repositories") : L"Git", repository ? accent : muted);
         const auto summary = repository ? std::to_wstring(git_->changed + git_->untracked) + L" pending changes" : L"";
         dc.label({left, top + scaled(28), edge, top + scaled(56)}, summary, muted);
         for (const bool tree : {true, false}) {
@@ -495,13 +552,13 @@ void ProjectRuntime::Impl::paint() {
             dc.label(button, tree ? L"Tree" : L"List", tree == gitTreeView_ ? foreground : muted, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
         }
         dc.fill({sidebarRect_.left, top + gitHeader_ - 1, sidebarRect_.right, top + gitHeader_}, border);
-        if (!repository || git_->entries.empty()) {
-            const std::wstring message = root_.empty() ? L"Open a folder to view Git changes." : !git_ ? L"Loading Git changes…" : !git_->error.empty() ? L"Git unavailable.\n" + git_->error.substr(0, 2048) + L"\nPress F5 to retry." : git_->root.empty() ? L"This folder is not in a Git repository." : L"No pending changes.";
+        if (!repository || (!(git_->changed + git_->untracked) && git_->repositories.size() == 1)) {
+            const std::wstring message = root_.empty() ? L"Open a folder to view Git changes." : !git_ ? L"Loading Git changes…" : !git_->error.empty() ? L"Git unavailable.\n" + git_->error.substr(0, 2048) + L"\nPress F5 to retry." : git_->repositories.empty() ? L"No Git repositories found in this folder." : L"No pending changes.";
             dc.label({left, top + gitHeader_ + scaled(16), edge, sidebarRect_.bottom - scaled(12)}, message, muted, DT_LEFT | DT_TOP | DT_WORDBREAK);
         }
     } else if (activeSidebar_ == Sidebar::Branch && !branches_.child()) {
         const auto message = root_.empty() ? L"Open a folder to view branches." : !git_ || branchesLoading_ ? L"Loading branches…" :
-            !git_->error.empty() ? L"Git unavailable.\n" + git_->error : git_->root.empty() ? L"This folder is not in a Git repository." :
+            !git_->error.empty() ? L"Git unavailable.\n" + git_->error : git_->repositories.empty() ? L"No Git repositories found in this folder." :
             !branchError_.empty() ? branchError_ + L"\nPress F5 to retry." : L"No branches or commits yet.";
         dc.label({left, top + scaled(16), edge, sidebarRect_.bottom - scaled(12)}, message, muted, DT_LEFT | DT_TOP | DT_WORDBREAK);
     } else if (root_.empty()) {
@@ -559,8 +616,12 @@ void ProjectRuntime::Impl::setGitView(bool tree) {
     updateGitFiles();
     if (IsWindowVisible(gitTree_)) SetFocus(gitTree_);
 }
+std::wstring ProjectRuntime::Impl::repositoryLabel(const ResourceId& root) const {
+    if (root_.contains(root) && pathKey(root_) != pathKey(root)) return root.lexically_relative(root_).generic_wstring();
+    return root.filename().empty() ? root.native() : root.filename().native();
+}
 void ProjectRuntime::Impl::updateGitFiles() {
-    gitActivity_.setBadgeCount(git_ && git_->error.empty() && !git_->root.empty() ? git_->changed + git_->untracked : 0);
+    gitActivity_.setBadgeCount(git_ ? git_->changed + git_->untracked : 0);
     std::wstring selected = wide(pendingGitSelection_);
     const int oldTop = changes_.top(), oldLeft = changes_.left();
     if (const auto node = changes_.item(changes_.selection()); node && node->data < gitChangeNodes_.size()) selected = gitChangeNodes_[node->data].path;
@@ -568,33 +629,49 @@ void ProjectRuntime::Impl::updateGitFiles() {
     {
         Tree::Batch batch(changes_); changes_.clear(); gitChangeNodes_.clear();
         TreeItem selection = 0;
-        if (git_ && git_->error.empty()) for (const bool staged : {true, false}) {
-            const std::wstring prefix = staged ? L"staged:" : L"changes:";
-            std::vector<std::wstring> paths; std::vector<size_t> entries;
-            for (size_t i = 0; i < git_->entries.size(); ++i) {
-                const auto& entry = git_->entries[i];
-                if (staged ? !entry.staged : !entry.changed) continue;
-                paths.push_back(entry.path.lexically_relative(git_->root).generic_wstring()); entries.push_back(i);
-            }
-            const size_t groupIndex = gitChangeNodes_.size();
-            gitChangeNodes_.push_back({prefix, noGitChange, true, staged, true});
-            const auto group = changes_.insert(0, (staged ? L"Staged Changes" : L"Changes") + (L" (" + std::to_wstring(entries.size()) + L")"), true, groupIndex);
-            const auto nodes = buildGitChanges(paths, gitTreeView_);
-            std::vector<TreeItem> items; items.reserve(nodes.size());
-            for (const auto& node : nodes) {
-                const auto parent = node.parent == noGitChange ? group : items[node.parent];
-                const auto offset = node.parent == noGitChange ? 0 : nodes[node.parent].path.size() + 1;
+        if (git_) for (size_t repository = 0; repository < git_->repositories.size(); ++repository) {
+            const auto& repo = *git_->repositories[repository];
+            const bool multiple = git_->repositories.size() > 1;
+            const auto repoKey = multiple ? L"repository:" + pathKey(repo.root) + L"\n" : std::wstring{};
+            TreeItem parent = 0;
+            if (multiple) {
                 const auto index = gitChangeNodes_.size();
-                const auto entryIndex = node.directory() ? noGitChange : entries[node.entry];
-                gitChangeNodes_.push_back({prefix + node.path, entryIndex, node.directory(), staged, false});
-                const auto state = node.directory() ? wchar_t{} : staged ? static_cast<wchar_t>(git_->entries[entryIndex].index) : git_->entries[entryIndex].state;
-                const auto item = changes_.insert(parent, node.path.substr(offset), node.directory(), index, node.directory() ? foreground : stateColor(state));
-                items.push_back(item);
-                if (node.directory()) changes_.expand(item, !collapsedGitPaths_.count(prefix + node.path));
-                if (prefix + node.path == selected || (!staged && node.path == selected)) selection = item;
+                gitChangeNodes_.push_back({repoKey, noGitChange, true, false, false, repository});
+                parent = changes_.insert(0, repositoryLabel(repo.root) + L" · " + repo.branch, true, index, accent);
+                if (selected == repoKey) selection = parent;
             }
-            changes_.expand(group, !collapsedGitPaths_.count(prefix));
-            if (selected == prefix) selection = group;
+            if (!repo.error.empty()) {
+                const auto index = gitChangeNodes_.size(); gitChangeNodes_.push_back({repoKey + L"error", noGitChange, true, false, false, repository});
+                changes_.insert(parent, L"Git unavailable: " + repo.error, false, index, muted);
+            } else for (const bool staged : {true, false}) {
+                const std::wstring prefix = repoKey + (staged ? L"staged:" : L"changes:");
+                std::vector<std::wstring> paths; std::vector<size_t> entries;
+                for (size_t i = 0; i < repo.entries.size(); ++i) {
+                    const auto& entry = repo.entries[i];
+                    if (staged ? !entry.staged : !entry.changed) continue;
+                    paths.push_back(entry.path.lexically_relative(repo.root).generic_wstring()); entries.push_back(i);
+                }
+                const size_t groupIndex = gitChangeNodes_.size();
+                gitChangeNodes_.push_back({prefix, noGitChange, true, staged, true, repository});
+                const auto group = changes_.insert(parent, (staged ? L"Staged Changes" : L"Changes") + (L" (" + std::to_wstring(entries.size()) + L")"), true, groupIndex);
+                const auto nodes = buildGitChanges(paths, gitTreeView_);
+                std::vector<TreeItem> items; items.reserve(nodes.size());
+                for (const auto& node : nodes) {
+                    const auto parentItem = node.parent == noGitChange ? group : items[node.parent];
+                    const auto offset = node.parent == noGitChange ? 0 : nodes[node.parent].path.size() + 1;
+                    const auto index = gitChangeNodes_.size();
+                    const auto entryIndex = node.directory() ? noGitChange : entries[node.entry];
+                    gitChangeNodes_.push_back({prefix + node.path, entryIndex, node.directory(), staged, false, repository});
+                    const auto state = node.directory() ? wchar_t{} : staged ? static_cast<wchar_t>(repo.entries[entryIndex].index) : repo.entries[entryIndex].state;
+                    const auto item = changes_.insert(parentItem, node.path.substr(offset), node.directory(), index, node.directory() ? foreground : stateColor(state));
+                    items.push_back(item);
+                    if (node.directory()) changes_.expand(item, !collapsedGitPaths_.count(prefix + node.path));
+                    if (prefix + node.path == selected || (!multiple && !staged && node.path == selected)) selection = item;
+                }
+                changes_.expand(group, !collapsedGitPaths_.count(prefix));
+                if (selected == prefix) selection = group;
+            }
+            if (parent) changes_.expand(parent, !collapsedGitPaths_.count(repoKey));
         }
         for (auto item = selection; item;) {
             const auto node = changes_.item(item); item = node ? node->parent : 0;
@@ -611,22 +688,24 @@ void ProjectRuntime::Impl::openGitFile(TreeItem item) {
     const auto value = changes_.item(item);
     if (!value || value->data >= gitChangeNodes_.size()) return;
     const auto& node = gitChangeNodes_[value->data];
-    if (node.directory || node.entry >= git_->entries.size()) return;
-    const auto entry = git_->entries[node.entry];
+    const auto& repo = *git_->repositories[node.repository];
+    if (node.directory || node.entry >= repo.entries.size()) return;
+    const auto entry = repo.entries[node.entry];
     if (entry.state == L'?') { openFile(entry.path); return; }
-    openGitDiff(entry.path, node.staged ? GitDiffKind::Staged : GitDiffKind::Changes);
+    openGitDiff(entry.path, node.staged ? GitDiffKind::Staged : GitDiffKind::Changes, {}, false, repo.root);
 }
 void ProjectRuntime::Impl::stageGitFile(TreeItem item) {
-    if (updatingGitFiles_ || gitStagePending_ || renamePending_ || !git_ || git_->root.empty() || !git_->error.empty()) return;
+    if (updatingGitFiles_ || gitStagePending_ || renamePending_ || !git_ || git_->repositories.empty()) return;
     if (root_.wsl() && (!connected_ || provider_->state() != ConnectionState::Ready)) { status(L"Reconnect WSL before staging changes."); return; }
     const auto value = changes_.item(item);
     if (!value || value->data >= gitChangeNodes_.size()) return;
     const auto& node = gitChangeNodes_[value->data];
-    if (node.directory || node.entry >= git_->entries.size()) return;
-    const auto& entry = git_->entries[node.entry];
+    const auto& repo = *git_->repositories[node.repository];
+    if (node.directory || node.entry >= repo.entries.size() || !repo.error.empty()) return;
+    const auto& entry = repo.entries[node.entry];
     const bool stage = !node.staged;
-    const auto args = gitArguments(gitStageArguments({entry.path.lexically_relative(git_->root).generic_u8string(), entry.previousPath, entry.index, entry.worktree}, stage));
-    const auto root = git_->root; const auto provider = provider_; const auto generation = generation_;
+    const auto args = gitArguments(gitStageArguments({entry.path.lexically_relative(repo.root).generic_u8string(), entry.previousPath, entry.index, entry.worktree}, stage));
+    const auto root = repo.root; const auto provider = provider_; const auto generation = generation_;
     const auto name = entry.path.filename().native();
     gitStagePending_ = true;
     status((stage ? L"Staging " : L"Unstaging ") + name + L"…");
@@ -645,51 +724,92 @@ HistoryNode* ProjectRuntime::Impl::historyNode(TreeItem item) const {
     const auto value = branches_.item(item); return value ? reinterpret_cast<HistoryNode*>(value->data) : nullptr;
 }
 TreeItem ProjectRuntime::Impl::insertHistory(TreeItem parent, std::wstring text, HistoryNode node, bool expandable, COLORREF color) {
+    if (node.root.empty()) if (const auto n = historyNode(parent)) node.root = n->root;
     auto data = std::make_unique<HistoryNode>(std::move(node));
     const auto item = branches_.insert(parent, std::move(text), expandable, reinterpret_cast<uintptr_t>(data.get()), color);
     if (item) data.release();
     return item;
 }
 void ProjectRuntime::Impl::refreshBranches() {
-    if (!git_ || !git_->error.empty() || git_->root.empty() || (root_.wsl() && !connected_)) return;
-    const auto root = git_->root; const auto generation = generation_, request = ++branchRequest_;
+    if (!git_ || git_->repositories.empty() || (root_.wsl() && !connected_)) return;
+    const auto workspace = git_; const auto generation = generation_, request = ++branchRequest_;
     branchesLoading_ = true;
-    gitWorker_->submit(L"branches", [this, root, generation, request] {
-        auto result = provider_->git({L"git.exe", L"--no-optional-locks", L"for-each-ref", L"--sort=refname",
-            L"--format=%(refname)%00%(refname:short)%00%(objectname)%00%(HEAD)", L"refs/heads", L"refs/remotes"}, root, gitWorker_->cancellation());
-        auto refs = parseGitBranches(result.output);
-        // Detached HEAD remains browsable even when no branch points to it.
-        if (!result.code && std::none_of(refs.begin(), refs.end(), [](const GitBranch& ref) { return ref.current; })) {
-            auto head = provider_->git({L"git.exe", L"rev-parse", L"--verify", L"HEAD"}, root, gitWorker_->cancellation());
-            if (!head.code) refs.insert(refs.begin(), {"HEAD", "HEAD (detached)", utf8(trimmed(head.output)), true});
-        }
-        const auto error = result.error; const auto code = result.code;
-        gitWorker_->complete([this, generation, request, refs = std::move(refs), error, code] {
-            if (generation != generation_ || request != branchRequest_) return;
-            branchesLoading_ = false; branchError_ = code ? error : L"";
-            if (code) { status(L"Branches: " + error); layout(false); return; }
-            Tree::Batch batch(branches_);
-            std::map<std::string, TreeItem> existing;
-            for (auto item = branches_.child(); item; item = branches_.next(item)) if (const auto n = historyNode(item)) existing[n->ref] = item;
-            for (const auto& ref : refs) {
-                const auto found = existing.find(ref.ref);
-                const auto text = (ref.current ? L"● " : L"") + wide(ref.name);
-                if (found == existing.end()) {
-                    const auto item = insertHistory(0, text, {HistoryKind::Branch, ref.ref, ref.tip, {}}, true, ref.current ? accent : foreground);
-                    if (!branchesLoaded_ && ref.current) branches_.expand(item, true);
-                } else {
-                    const auto item = found->second; auto n = historyNode(item);
-                    branches_.label(item, text, ref.current ? accent : foreground);
-                    if (n->revision != ref.tip || (n->loading && n->generation != generation_)) {
-                        n->revision = ref.tip; n->loaded = n->loading = false; n->count = 0;
-                        branches_.clearChildren(item);
-                        if (branches_.item(item)->expanded) requestHistory(item);
-                    }
-                    existing.erase(found);
+    gitWorker_->submit(L"branches", [this, workspace, generation, request] {
+        struct Listing { ResourceId root; std::wstring branch, error; std::vector<GitBranch> refs; };
+        std::vector<Listing> listings;
+        for (const auto& repo : workspace->repositories) {
+            if (*gitWorker_->cancellation()) return;
+            Listing listing{repo->root, repo->branch, repo->error, {}};
+            if (listing.error.empty()) {
+                auto result = provider_->git({L"git.exe", L"--no-optional-locks", L"for-each-ref", L"--sort=refname",
+                    L"--format=%(refname)%00%(refname:short)%00%(objectname)%00%(HEAD)", L"refs/heads", L"refs/remotes"}, repo->root, gitWorker_->cancellation());
+                listing.refs = parseGitBranches(result.output);
+                if (result.code) listing.error = result.error;
+                // Detached HEAD remains browsable even without a branch.
+                if (!result.code && std::none_of(listing.refs.begin(), listing.refs.end(), [](const GitBranch& ref) { return ref.current; })) {
+                    auto head = provider_->git({L"git.exe", L"rev-parse", L"--verify", L"HEAD"}, repo->root, gitWorker_->cancellation());
+                    if (!head.code) listing.refs.insert(listing.refs.begin(), {"HEAD", "HEAD (detached)", utf8(trimmed(head.output)), true});
                 }
             }
-            for (const auto& stale : existing) branches_.erase(stale.second);
-            branches_.sort(0, [](uintptr_t a, uintptr_t b) { return reinterpret_cast<HistoryNode*>(a)->ref < reinterpret_cast<HistoryNode*>(b)->ref; });
+            listings.push_back(std::move(listing));
+        }
+        gitWorker_->complete([this, generation, request, listings = std::move(listings)] {
+            if (generation != generation_ || request != branchRequest_) return;
+            branchesLoading_ = false; branchError_.clear();
+            const bool multiple = listings.size() > 1;
+            Tree::Batch batch(branches_);
+            if (multiple != branchRepositories_) { branches_.clear(); branchesLoaded_ = false; branchRepositories_ = multiple; }
+            std::map<std::string, TreeItem> repositories;
+            if (multiple) for (auto item = branches_.child(); item; item = branches_.next(item)) if (const auto n = historyNode(item)) repositories[n->root.key()] = item;
+            for (const auto& listing : listings) {
+                TreeItem parent = 0; bool fresh = !branchesLoaded_;
+                if (multiple) {
+                    const auto found = repositories.find(listing.root.key());
+                    if (found != repositories.end()) { parent = found->second; repositories.erase(found); }
+                    else {
+                        HistoryNode node{HistoryKind::Repository, {}, {}, {}}; node.root = listing.root;
+                        parent = insertHistory(0, L"", std::move(node), true, accent); fresh = true;
+                    }
+                    branches_.label(parent, repositoryLabel(listing.root) + L" · " + listing.branch, accent);
+                }
+                std::map<std::string, TreeItem> existing;
+                for (auto item = branches_.child(parent); item;) {
+                    const auto next = branches_.next(item); const auto n = historyNode(item);
+                    if (n && n->kind == HistoryKind::Branch && pathKey(n->root) == pathKey(listing.root)) existing[n->ref] = item;
+                    else branches_.erase(item);
+                    item = next;
+                }
+                if (!listing.error.empty()) {
+                    // Keep an error local to its repository; siblings remain usable.
+                    for (const auto& stale : existing) branches_.erase(stale.second);
+                    if (multiple) insertHistory(parent, L"Git unavailable: " + listing.error, {HistoryKind::Message, {}, {}, {}}, false, muted);
+                    else branchError_ = listing.error;
+                } else {
+                    for (const auto& ref : listing.refs) {
+                        const auto found = existing.find(ref.ref);
+                        const auto text = (ref.current ? L"● " : L"") + wide(ref.name);
+                        if (found == existing.end()) {
+                            HistoryNode node{HistoryKind::Branch, ref.ref, ref.tip, {}}; node.root = listing.root;
+                            const auto item = insertHistory(parent, text, std::move(node), true, ref.current ? accent : foreground);
+                            if (fresh && ref.current) branches_.expand(item, true);
+                        } else {
+                            const auto item = found->second; auto n = historyNode(item);
+                            branches_.label(item, text, ref.current ? accent : foreground);
+                            if (n->revision != ref.tip || (n->loading && n->generation != generation_)) {
+                                n->revision = ref.tip; n->loaded = n->loading = false; n->count = 0;
+                                branches_.clearChildren(item);
+                                if (branches_.item(item)->expanded) requestHistory(item);
+                            }
+                            existing.erase(found);
+                        }
+                    }
+                    for (const auto& stale : existing) branches_.erase(stale.second);
+                    if (multiple && listing.refs.empty()) insertHistory(parent, L"No branches or commits yet.", {HistoryKind::Message, {}, {}, {}}, false, muted);
+                    branches_.sort(parent, [](uintptr_t a, uintptr_t b) { return reinterpret_cast<HistoryNode*>(a)->ref < reinterpret_cast<HistoryNode*>(b)->ref; });
+                }
+                if (multiple && fresh) branches_.expand(parent, true);
+            }
+            for (const auto& stale : repositories) branches_.erase(stale.second);
             branchesLoaded_ = true; layout(false);
         });
     });
@@ -697,11 +817,11 @@ void ProjectRuntime::Impl::refreshBranches() {
 void ProjectRuntime::Impl::requestHistory(TreeItem item, bool more) {
     auto n = historyNode(item);
     if (n && n->loading && n->generation != generation_) n->loading = false;
-    if (!n || n->loading || (n->loaded && !more) || !git_ || git_->root.empty()) return;
+    if (!n || n->loading || (n->loaded && !more) || !git_ || n->root.empty()) return;
     if (n->kind != HistoryKind::Branch && n->kind != HistoryKind::Commit) return;
     n->loading = true; n->generation = generation_;
     const auto kind = n->kind; const auto revision = n->revision; const auto count = n->count;
-    const auto root = git_->root; const auto generation = generation_;
+    const auto root = n->root; const auto generation = generation_;
     {
         Tree::Batch batch(branches_);
         if (!more) branches_.clearChildren(item);
@@ -720,7 +840,7 @@ void ProjectRuntime::Impl::requestHistory(TreeItem item, bool more) {
         const auto error = result.error; const auto code = result.code;
         gitWorker_->complete([this, item, kind, revision, count, root, generation, commits = std::move(commits), files = std::move(files), code, error] {
             if (generation != generation_) return;
-            auto n = historyNode(item); if (!n || n->revision != revision) return;
+            auto n = historyNode(item); if (!n || n->revision != revision || pathKey(n->root) != pathKey(root)) return;
             n->loading = false; n->loaded = code == 0;
             Tree::Batch batch(branches_);
             for (auto child = branches_.child(item); child;) {
@@ -765,7 +885,7 @@ void ProjectRuntime::Impl::requestHistory(TreeItem item, bool more) {
 }
 void ProjectRuntime::Impl::openHistory(TreeItem item) {
     const auto n = historyNode(item); if (!n) return;
-    if (n->kind == HistoryKind::File) openGitDiff(n->path, GitDiffKind::Commit, n->revision);
+    if (n->kind == HistoryKind::File) openGitDiff(n->path, GitDiffKind::Commit, n->revision, false, n->root);
     else if (n->kind == HistoryKind::More) {
         const auto value = branches_.item(item); if (value) requestHistory(value->parent, true);
     } else if (n->kind == HistoryKind::Branch || n->kind == HistoryKind::Commit) {
@@ -849,7 +969,10 @@ void ProjectRuntime::Impl::renameFile(TreeItem item, const std::wstring& name) {
                 });
             }
             for (auto& tab : tabs_) {
-                if (tab.diffKind == GitDiffKind::Commit) continue;
+                const auto gitRoot = relocateResource(tab.gitRoot, source, destination);
+                const bool repositoryMoved = pathKey(gitRoot) != pathKey(tab.gitRoot);
+                tab.gitRoot = gitRoot;
+                if (tab.diffKind == GitDiffKind::Commit && !repositoryMoved) continue;
                 const auto path = relocateResource(tab.path, source, destination);
                 if (path == tab.path) continue;
                 tab.path = path;
@@ -908,7 +1031,7 @@ void ProjectRuntime::Impl::connectRemote() {
                 for (const auto& item : expandedPaths_) { auto path = relocateResource(item.second, previous, root_); expanded[pathKey(path)] = std::move(path); }
                 expandedPaths_ = std::move(expanded); expandedPaths_[pathKey(root_)] = root_;
                 pendingTreeSelection_ = relocateResource(pendingTreeSelection_, previous, root_);
-                for (auto& tab : tabs_) tab.path = relocateResource(tab.path, previous, root_);
+                for (auto& tab : tabs_) { tab.path = relocateResource(tab.path, previous, root_); tab.gitRoot = relocateResource(tab.gitRoot, previous, root_); }
                 for (const auto& pair : nodes_) if (auto n = node(pair.second)) { n->path = relocateResource(n->path, previous, root_); n->loading = false; updateLabel(pair.second); }
                 terminal_.relocate(previous, root_); terminal_.setDirectory(root_); quickOpen_.setRoot(root_); searchPane_.setContext(root_, provider_);
                 fileDirty_ = true; requestDirectory(rootItem_); refresh(false); status(L"WSL connected · " + wide(root_.location().distro));
@@ -925,7 +1048,7 @@ ProjectSession ProjectRuntime::Impl::saveSession() {
     state.sidebar = sidebar_; state.terminalHeight = terminalHeight_; state.terminalVisible = terminalVisible_;
     state.gitSidebar = activeSidebar_ == Sidebar::Git; state.branchSidebar = activeSidebar_ == Sidebar::Branch; state.activeTab = activeTab_;
     state.diffInline = viewer().diffInline(); state.gitTree = gitTreeView_; state.firstTabRow = editorGroups_[0].firstRow; state.rightTabRow = editorGroups_[1].firstRow; state.editorRatio = editorRatio_;
-    for (const auto& tab : tabs_) state.tabs.push_back({tab.path.u8string(), tab.diff, tab.fileView, tab.diffView, tab.pinned, tab.group, tab.displayed, tab.diffKind, tab.revision, tab.allChanges});
+    for (const auto& tab : tabs_) state.tabs.push_back({tab.path.u8string(), tab.diff, tab.fileView, tab.diffView, tab.pinned, tab.group, tab.displayed, tab.diffKind, tab.revision, tab.allChanges, tab.gitRoot.u8string()});
     for (const auto& entry : expandedPaths_) state.expanded.push_back(entry.second.u8string());
     if (!pendingTreeSelection_.empty()) state.selected = pendingTreeSelection_.u8string();
     else if (const auto selected = node(explorer_.selection())) state.selected = selected->path.u8string();
@@ -968,7 +1091,7 @@ void ProjectRuntime::Impl::restoreProject(const ProjectSession& state) {
         const auto& saved = state.tabs[i];
         const auto path = root_.at(saved.path);
         if (!path.is_absolute()) continue;
-        Tab target{path, saved.diff, saved.fileView, saved.diffView, saved.pinned, {}, saved.group, saved.displayed, saved.diffKind, saved.revision, saved.allChanges, {}, {}, false};
+        Tab target{path, saved.diff, saved.fileView, saved.diffView, saved.pinned, {}, saved.group, saved.displayed, saved.diffKind, saved.revision, saved.allChanges, {}, {}, false, saved.gitRoot.empty() ? ResourceId{} : root_.at(saved.gitRoot)};
         const auto duplicate = std::find_if(tabs_.begin(), tabs_.end(), [&](const Tab& tab) { return tabKey(tab) == tabKey(target); });
         if (duplicate != tabs_.end()) continue;
         if (i <= state.activeTab) activeTab_ = tabs_.size();
@@ -1219,10 +1342,10 @@ void ProjectRuntime::Impl::applyContentResult(size_t index) {
     if (!viewers_[tab.group].selectSearch(match.begin, match.end, tab.searchQuery, tab.searchMatchCase))
         status(L"File changed since the search. Press F5 in Search to refresh the results.");
 }
-void ProjectRuntime::Impl::openGitDiff(const ResourceId& path, GitDiffKind kind, std::string revision, bool allChanges) {
+void ProjectRuntime::Impl::openGitDiff(const ResourceId& path, GitDiffKind kind, std::string revision, bool allChanges, ResourceId root) {
     if (path.empty()) return;
     endTabDrag(); saveTab();
-    Tab target; target.path = path; target.diff = true; target.diffKind = kind; target.revision = std::move(revision); target.allChanges = allChanges; target.group = focusedGroup_;
+    Tab target; target.path = path; target.diff = true; target.diffKind = kind; target.revision = std::move(revision); target.allChanges = allChanges; target.group = focusedGroup_; target.gitRoot = std::move(root);
     const auto key = tabKey(target);
     const auto found = std::find_if(tabs_.begin(), tabs_.end(), [&](const Tab& tab) { return tabKey(tab) == key; });
     const size_t index = static_cast<size_t>(found - tabs_.begin());
@@ -1334,11 +1457,12 @@ void ProjectRuntime::Impl::loadTab(bool preserve, int group) {
         return;
     }
     if (!git_) { waitingForGit_[group] = true; viewers_[group].message(L"Loading Git repository…", path); return; }
-    if (git_->root.empty() || !git_->error.empty()) { viewers_[group].message(L"Git repository unavailable. Check Git in the project environment and press F5.", path); return; }
-    const auto root = git_->root;
+    const auto repo = git_->repository(tab.gitRoot.empty() ? path : tab.gitRoot);
+    if (!repo || !repo->error.empty() || (!tab.gitRoot.empty() && pathKey(repo->root) != pathKey(tab.gitRoot))) { viewers_[group].message(L"Git repository unavailable for this file. Press F5 to refresh.", path); return; }
+    const auto root = tab.gitRoot.empty() ? repo->root : tab.gitRoot;
     const auto kind = tab.diffKind; const auto revision = tab.revision; const auto allChanges = tab.allChanges;
-    const auto title = tabTitle(tab);
-    gitWorker_->submit(L"diff:" + std::to_wstring(group), [this, group, serial, generation, path, root, preserve, state, kind, revision, allChanges, title] {
+    const auto title = tabTitle(tab); const auto roots = git_->roots;
+    gitWorker_->submit(L"diff:" + std::to_wstring(group), [this, group, serial, generation, path, root, preserve, state, kind, revision, allChanges, title, roots] {
         constexpr size_t maxPatchBytes = 4 * 1024 * 1024;
         const auto relative = allChanges ? std::string{} : path.lexically_relative(root).generic_u8string();
         auto readDiff = [&](GitDiffKind scope) { return provider_->git(gitArguments(gitDiffArguments(scope, revision, relative)), root, gitWorker_->cancellation()); };
@@ -1350,7 +1474,9 @@ void ProjectRuntime::Impl::loadTab(bool preserve, int group) {
             auto status = provider_->git({L"git.exe", L"--no-optional-locks", L"-c", L"core.fsmonitor=false", L"status", L"--porcelain=v1", L"-z", L"--untracked-files=all"}, root, gitWorker_->cancellation());
             if (status.code) { result.code = status.code; result.error = status.error; }
             else for (const auto& entry : parseGitStatus(status.output)) if (entry.index == '?' && (!root.wsl() || validUtf8(entry.path))) {
-                untracked.push_back(root / std::string_view(entry.path));
+                const auto file = (root / std::string_view(entry.path)).lexically_normal();
+                if (pathKey(gitRepositoryFor(roots, file)) != pathKey(root)) continue;
+                untracked.push_back(file);
                 if (untracked.size() >= maxTreeNodes) break;
             }
         }
@@ -1389,18 +1515,18 @@ void ProjectRuntime::Impl::showDiff() {
         else status(L"This Git comparison is read only. F7: split / inline.");
         return;
     }
-    if (!tab.diff && (!git_ || git_->root.empty() || !git_->error.empty())) { status(L"Git repository unavailable. Check Git in the project environment and press F5."); return; }
+    if (!tab.diff && (!git_ || !git_->repository(tab.path) || !git_->repository(tab.path)->error.empty())) { status(L"Git repository unavailable. Check Git in the project environment and press F5."); return; }
     saveTab(); tab.diff = !tab.diff; layout(); loadTab();
 }
 void ProjectRuntime::Impl::refreshGit() {
     if (root_.empty() || (root_.wsl() && !connected_)) return;
     const auto generation = generation_; const auto root = root_;
     gitWorker_->submit(L"git", [this, root, generation] {
-        auto result = readGit(*provider_, root, gitWorker_->cancellation());
+        auto result = readGitWorkspace(*provider_, root, gitWorker_->cancellation());
         gitWorker_->complete([this, generation, result] {
             if (generation != generation_) return;
             git_ = result;
-            if (result->root.empty() || !result->error.empty()) {
+            if (result->repositories.empty()) {
                 branches_.clear(); branchesLoaded_ = branchesLoading_ = false; branchError_.clear(); ++branchRequest_;
             }
             { Tree::Batch batch(explorer_); for (const auto& pair : nodes_) updateLabel(pair.second); }
@@ -1408,8 +1534,9 @@ void ProjectRuntime::Impl::refreshGit() {
             if (activeSidebar_ == Sidebar::Branch || branchesLoaded_) refreshBranches();
             for (int group = 0; group < 2; ++group) if (waitingForGit_[group]) loadTab(false, group);
             if (!result->error.empty()) status(L"Git: " + result->error);
+            else if (!result->warning.empty()) status(L"Git repository scan: " + result->warning);
             else if (result->unsupportedNames) status(L"Some Git filenames are not UTF-8 and cannot be opened.");
-            else if (result->truncated) status(L"Git display limited to 50,000 files and badge paths.");
+            else if (result->truncated) status(L"Git repository scan or change display reached its limit.");
             InvalidateRect(window_, nullptr, FALSE);
         });
     });

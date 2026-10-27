@@ -58,6 +58,7 @@ public:
     ContentSearchSummary searchContent(const ResourceId& root, const ContentSearchOptions& options,
         const ContentPublish& publish, const std::function<bool()>& cancelled) override { return searchContents(root.local(), options, publish, cancelled); }
     ProcessResult git(const std::vector<std::wstring>& args, const ResourceId& directory, const std::atomic<bool>* cancelled) override { return runProcess(args, directory.local(), 5000, cancelled); }
+    GitRepositoryScan gitRepositories(const ResourceId& root, const std::function<bool()>& cancelled) override { return scanGitRepositories(root.local(), cancelled); }
 };
 }
 std::shared_ptr<ProjectProvider> createProjectProvider(const ResourceId& root) { return root.wsl() ? createWslProvider(root) : std::make_shared<WindowsProvider>(); }

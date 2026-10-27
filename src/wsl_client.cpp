@@ -221,6 +221,16 @@ public:
         try { connection_->ensure(); if (!expectedUid_.empty() && identity() != expectedUid_) throw std::runtime_error("The WSL user UID changed. Reopen this project with the previous Linux user; saved edits have been kept."); const auto response = call("connect", root); projectState_ = ConnectionState::Ready; return ResourceId::wsl(root.location().distro, field(response.metadata, "path"), root.location().user); }
         catch (...) { projectState_ = ConnectionState::Unavailable; throw; }
     }
+    GitRepositoryScan gitRepositories(const ResourceId& root, const std::function<bool()>& cancelled) override {
+        GitRepositoryScan result;
+        try {
+            const auto response = call("gitRepositories", root, {}, nullptr, cancelled, 60000);
+            result.truncated = field(response.metadata, "truncated") == "1";
+            result.error = field(response.metadata, "scanError");
+            for (const auto& entry : response.entries) result.roots.push_back(root.at(field(entry, "path")));
+        } catch (const std::exception& error) { result.error = error.what(); }
+        return result;
+    }
     ProviderListing listDirectory(const ResourceId& path) override {
         ProviderListing result;
         try { const auto response = call("listDirectory", path); result.truncated = field(response.metadata, "truncated") == "1"; for (const auto& item : response.entries) { const bool unsupported = field(item, "unsupported") == "1"; result.entries.push_back({unsupported ? ResourceId{} : path.at(field(item, "path")), field(item, "directory") == "1", field(item, "link") == "1", unsupported, wide(field(item, "name"))}); } } catch (const std::exception& error) { result.error = wide(error.what()); }
