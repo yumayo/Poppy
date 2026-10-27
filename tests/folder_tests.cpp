@@ -140,6 +140,26 @@ void click(HWND window, int x, int y, bool middle = false) {
     send(window, middle ? WM_MBUTTONDOWN : WM_LBUTTONDOWN, middle ? MK_MBUTTON : MK_LBUTTON, MAKELPARAM(x, y));
     send(window, middle ? WM_MBUTTONUP : WM_LBUTTONUP, 0, MAKELPARAM(x, y));
 }
+void discardGroup(const Application& app, HWND changes, TreeItem group, int answer) {
+    expand(changes, group, false);
+    RECT rect{}; GetClientRect(changes, &rect);
+    const int x = rect.right - MulDiv(74, GetDpiForWindow(app.window), 96);
+    const int height = static_cast<int>(send(changes, treeGetRowHeight));
+    const int y = (static_cast<int>(send(changes, treeGetRow, group)) - scrollInfo(changes).nPos) * height + height / 2;
+    // Post the click because its handler opens a modal confirmation.
+    PostMessageW(changes, WM_MOUSEMOVE, 0, MAKELPARAM(x, y));
+    PostMessageW(changes, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(x, y));
+    PostMessageW(changes, WM_LBUTTONUP, 0, MAKELPARAM(x, y));
+    HWND dialog = nullptr;
+    waitFor([&] {
+        dialog = FindWindowW(L"#32770", L"Poppy — Discard All Changes");
+        DWORD pid = 0; if (dialog) GetWindowThreadProcessId(dialog, &pid);
+        return dialog && pid == app.process.dwProcessId;
+    }, "Discard All Changes did not ask for confirmation from a collapsed group");
+    check(send(dialog, DM_GETDEFID) == MAKELONG(IDCANCEL, DC_HASDEFID), "Discard confirmation must default to Cancel");
+    send(dialog, WM_COMMAND, answer);
+    waitFor([&] { return !IsWindow(dialog); }, "Discard confirmation did not close");
+}
 HWND tabTooltips(const Application& app) {
     HWND result = nullptr;
     struct Context { HWND owner; HWND& result; } context{app.window, result};
@@ -1239,6 +1259,31 @@ void branchSidebarTests(const fs::path& executable) {
         runGit(L"diff --cached --quiet");
         wchar_t badge[128]{}; GetWindowTextW(GetDlgItem(app.window, 3), badge, 128);
         check(std::wstring(badge) == L"Source Control (2)", "Unstage All Changes lost or duplicated the change count");
+        runGit(L"add -- src/file.txt");
+        write(L"src/file.txt", "discard this\n");
+        write(L".git/info/exclude", "ignored.txt\n"); write(L"ignored.txt", "keep\n");
+        waitFor([&] {
+            const auto first = nextItem(changes, TreeRelation::Root), second = nextItem(changes, TreeRelation::Next, first);
+            return children(changes, first) == 1 && children(changes, second) == 2;
+        }, "Discard fixture did not show partially staged and untracked changes");
+        auto discardWorking = nextItem(changes, TreeRelation::Next, nextItem(changes, TreeRelation::Root));
+        send(changes, treeSelect, discardWorking); send(changes, WM_KEYDOWN, VK_F4); waitLines(viewer, 4);
+        discardGroup(app, changes, discardWorking, IDCANCEL);
+        check(fs::exists(fixture.root / L"untracked.txt") && fs::file_size(fixture.root / L"src/file.txt") == 13,
+              "Cancelling discard changed working files");
+        waitLines(viewer, 4);
+        discardWorking = nextItem(changes, TreeRelation::Next, nextItem(changes, TreeRelation::Root));
+        discardGroup(app, changes, discardWorking, IDOK);
+        waitFor([&] {
+            const auto first = nextItem(changes, TreeRelation::Root), second = nextItem(changes, TreeRelation::Next, first);
+            return children(changes, first) == 1 && children(changes, second) == 0 && !fs::exists(fixture.root / L"untracked.txt");
+        }, "Discard did not preserve Staged Changes or clear Changes");
+        waitLines(viewer, 0);
+        runGit(L"diff --quiet");
+        check(fs::file_size(fixture.root / L"src/file.txt") == 8 && fs::exists(fixture.root / L"ignored.txt"),
+              "Discard did not restore the staged text or removed ignored files");
+        GetWindowTextW(GetDlgItem(app.window, 3), badge, 128);
+        check(std::wstring(badge) == L"Source Control (1)", "Discard did not update the badge");
         send(GetDlgItem(app.window, 5), BM_CLICK);
         waitFor([&] { return IsWindowVisible(branches) && children(branches, nextItem(branches, TreeRelation::Root)) == 51; }, "Branch did not load 50 commits and a load-more row");
         check(!IsWindowVisible(changes), "Branch did not hide Source Control");
@@ -1355,6 +1400,13 @@ void multiRepositoryTests(const fs::path& executable) {
         }, "Unstage All Changes affected a sibling repository or left a file staged in the selected repository");
         runGit(client, L"diff --cached --quiet"); runGit(server, L"diff --cached --quiet", 1);
         runGit(fixture.root, L"diff --cached --quiet");
+        discardGroup(app, changes, group(clientRepo, false), IDOK);
+        waitFor([&] {
+            clientRepo = nextItem(changes, TreeRelation::Root); serverRepo = nextItem(changes, TreeRelation::Next, clientRepo);
+            return children(changes, group(clientRepo, false)) == 0 && children(changes, group(serverRepo, true)) == 1 &&
+                children(changes, group(serverRepo, false)) == 1;
+        }, "Discard All Changes affected a sibling repository or retained Changes");
+        runGit(client, L"diff --quiet"); runGit(server, L"diff --cached --quiet", 1);
         send(GetDlgItem(app.window, 5), BM_CLICK);
         waitFor([&] { return IsWindowVisible(branches) && roots(branches); }, "Branch did not discover sibling repositories");
         const auto clientBranchRepo = nextItem(branches, TreeRelation::Root), serverBranchRepo = nextItem(branches, TreeRelation::Next, clientBranchRepo);

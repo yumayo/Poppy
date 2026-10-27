@@ -104,6 +104,10 @@ struct Repository {
         return {std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>()};
     }
     std::string hash() const { auto result = git({"rev-parse", "HEAD"}); result.pop_back(); return result; }
+    void discardAll() const {
+        const auto entries = parseGitStatus(git({"status", "--porcelain=v1", "-z", "--untracked-files=all"}));
+        for (const auto& command : gitDiscardAllArguments(entries)) git(command);
+    }
 };
 void multipleRepositories() {
     Repository fixture;
@@ -149,6 +153,11 @@ void multipleRepositories() {
           parseGitStatus(git(server, {"status", "--porcelain=v1", "-z"}))[0].staged() &&
           fixture.readFile("app/app-client/same.txt") == "client change\n" && fixture.readFile("app/app-client/new 日本語.txt") == "client addition\n",
           "Unstage All Changes changed a sibling index or the selected repository's working files");
+    fixture.write("app/app-server/same.txt", "server working change\n");
+    for (const auto& command : gitDiscardAllArguments(parseGitStatus(git(client, {"status", "--porcelain=v1", "-z", "--untracked-files=all"})))) git(client, command);
+    check(fixture.readFile("app/app-client/same.txt") == "initial\n" && !fs::exists(client / "new 日本語.txt") &&
+          fixture.readFile("app/app-server/same.txt") == "server working change\n" && git(server, {"ls-files", "--stage", "-z"}) == serverIndex,
+          "Discard All Changes crossed repository boundaries or changed a sibling index");
     fixture.git({"diff", "--cached", "--quiet"});
     const auto worktree = app / "worktree 日本語";
     git(client, {"worktree", "add", "--quiet", "--detach", worktree.string()});
@@ -288,6 +297,76 @@ void repositoryUnstageAll() {
     check(repo.git({"ls-files", "--stage", "-z"}) == committedIndex && workingFilesUnchanged(),
         "Unstage All Changes changed files when the index was already clean");
 }
+void repositoryDiscardAll() {
+    Repository repo;
+    repo.git({"init", "--quiet", "--template=", "--initial-branch=main"});
+    repo.git({"config", "user.name", "Poppy Test"}); repo.git({"config", "user.email", "poppy@example.invalid"});
+    repo.git({"config", "core.autocrlf", "false"}); repo.git({"config", "commit.gpgsign", "false"});
+    repo.git({"config", "core.excludesFile", "/dev/null"});
+    // No HEAD or index exists. Empty directories and untracked files are removed.
+    repo.write("new 日本語 [1].txt", "untracked\n"); fs::create_directory(repo.path / "empty");
+    repo.discardAll();
+    check(!fs::exists(repo.path / "new 日本語 [1].txt") && !fs::exists(repo.path / "empty"),
+          "Discard All Changes failed before the first index or commit");
+    repo.write(".gitignore", "ignored.txt\nignored-dir/\n");
+    repo.write("ignored.txt", "keep\n"); repo.write("ignored-dir/file", "keep\n");
+    repo.write("src/日本語 [1].txt", "staged before first commit\n");
+    repo.git({"add", "."});
+    const auto initialIndex = repo.git({"ls-files", "--stage", "-z"});
+    repo.write("src/日本語 [1].txt", "unstaged\n"); repo.write("nested/untracked.txt", "remove\n");
+    repo.discardAll();
+    check(repo.readFile("src/日本語 [1].txt") == "staged before first commit\n" && !fs::exists(repo.path / "nested") &&
+          repo.git({"ls-files", "--stage", "-z"}) == initialIndex && repo.readFile("ignored.txt") == "keep\n",
+          "Discard All Changes lost staged or ignored content before the first commit");
+    for (const auto& file : {"deleted.txt", "rename source.txt", "staged deletion.txt", "staged rename.txt"}) repo.write(file, "initial\n");
+    repo.git({"add", "."}); repo.git({"commit", "-qm", "baseline"});
+    const auto head = repo.hash();
+    repo.write("src/日本語 [1].txt", "partially staged\n"); repo.git({"add", "."});
+    repo.write("src/日本語 [1].txt", "working\n");
+    fs::remove(repo.path / "deleted.txt");
+    fs::rename(repo.path / "rename source.txt", repo.path / "renamed 日本語.txt");
+    repo.git({"rm", "--", "staged deletion.txt"});
+    repo.git({"mv", "--", "staged rename.txt", "staged renamed.txt"});
+    repo.write("staged renamed.txt", "working rename\n");
+    repo.write("added.txt", "staged addition\n"); repo.git({"add", "--", "added.txt"});
+    fs::remove(repo.path / "added.txt");
+    repo.write("new/quoted' [2]\nfile.txt", "untracked\n");
+    // Both forms of nested repositories and an external symlink target survive.
+    fs::create_directories(repo.path / "nested-repo");
+    repo.git({"-C", (repo.path / "nested-repo").string(), "init", "-q", "--template="});
+    repo.write("nested-repo/keep.txt", "nested\n");
+    repo.git({"worktree", "add", "--quiet", "--detach", (repo.path / "nested-worktree").string()});
+    repo.write("nested-worktree/src/日本語 [1].txt", "nested worktree\n");
+    Repository outside; outside.write("keep.txt", "outside\n");
+    fs::create_directory_symlink(outside.path, repo.path / "untracked-link");
+    const auto index = repo.git({"ls-files", "--stage", "-z"});
+    repo.discardAll();
+    check(repo.hash() == head && repo.git({"ls-files", "--stage", "-z"}) == index &&
+          repo.readFile("src/日本語 [1].txt") == "partially staged\n" && repo.readFile("added.txt") == "staged addition\n" &&
+          repo.readFile("deleted.txt") == "initial\n" && repo.readFile("rename source.txt") == "initial\n" &&
+          repo.readFile("staged renamed.txt") == "initial\n" && !fs::exists(repo.path / "staged rename.txt") &&
+          !fs::exists(repo.path / "staged deletion.txt") && !fs::exists(repo.path / "renamed 日本語.txt") && !fs::exists(repo.path / "new") &&
+          repo.readFile("ignored.txt") == "keep\n" && repo.readFile("ignored-dir/file") == "keep\n" &&
+          repo.readFile("nested-repo/keep.txt") == "nested\n" && repo.readFile("nested-worktree/src/日本語 [1].txt") == "nested worktree\n" &&
+          !fs::exists(repo.path / "untracked-link") && outside.readFile("keep.txt") == "outside\n",
+          "Discard All Changes failed to restore the index or protect staged, ignored, nested or external content");
+    repo.git({"diff", "--quiet"});
+    repo.discardAll(); // Repeating a clean operation keeps staged changes intact.
+    check(repo.git({"ls-files", "--stage", "-z"}) == index, "Repeated discard changed the index");
+    // Reject a conflicted index before restoring unrelated files or cleaning.
+    repo.git({"add", "--all", "--", "src/日本語 [1].txt", "added.txt", "staged renamed.txt"});
+    repo.git({"commit", "-qm", "staged changes"});
+    repo.git({"checkout", "-qb", "topic"}); repo.write("deleted.txt", "topic\n"); repo.git({"add", "deleted.txt"}); repo.git({"commit", "-qm", "topic"});
+    repo.git({"checkout", "-q", "main"}); repo.write("deleted.txt", "main\n"); repo.git({"add", "deleted.txt"}); repo.git({"commit", "-qm", "main"});
+    try { repo.git({"merge", "topic"}); } catch (const std::runtime_error&) {}
+    repo.write("src/日本語 [1].txt", "keep working\n"); repo.write("keep untracked.txt", "keep\n");
+    const auto conflictedIndex = repo.git({"ls-files", "--stage", "-z"}), conflict = repo.readFile("deleted.txt");
+    bool failed = false;
+    try { repo.discardAll(); } catch (const std::invalid_argument&) { failed = true; }
+    check(failed && repo.git({"ls-files", "--stage", "-z"}) == conflictedIndex && repo.readFile("deleted.txt") == conflict &&
+          repo.readFile("src/日本語 [1].txt") == "keep working\n" && repo.readFile("keep untracked.txt") == "keep\n",
+          "Discard All Changes modified files before rejecting merge conflicts");
+}
 void repositorySyntax() {
     Repository repo;
     repo.git({"init", "--quiet", "--template=", "--initial-branch=main"});
@@ -380,7 +459,7 @@ int main() {
     try {
         statusGroups(); records(); patchLists(); repositoryOwnership();
 #ifndef _WIN32
-        repositoryStaging(); repositoryStageAll(); repositoryUnstageAll(); repositorySyntax(); repositoryHistory(); multipleRepositories();
+        repositoryStaging(); repositoryStageAll(); repositoryUnstageAll(); repositoryDiscardAll(); repositorySyntax(); repositoryHistory(); multipleRepositories();
 #endif
         std::cout << "Git history tests passed.\n"; return 0;
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }

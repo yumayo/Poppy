@@ -31,6 +31,10 @@ std::vector<std::string> gitStageAllArguments();
 // Reset the repository's entire index without changing HEAD or working files.
 // Omitting the revision also supports repositories before their first commit.
 std::vector<std::string> gitUnstageAllArguments();
+// Restore working files from the index, then remove nonignored untracked files.
+// Use fresh, complete status entries. Reject conflicts before changing any files;
+// do not recurse into submodules or force removal of nested repositories.
+std::vector<std::vector<std::string>> gitDiscardAllArguments(const std::vector<GitStatusEntry>& entries);
 // A decoded UTF-8 untracked file, represented as an addition in a patch list.
 std::string untrackedPatch(const std::string& path, std::string_view text);
 }

@@ -210,6 +210,7 @@ private:
     void updateGitFiles();
     void openGitFile(TreeItem item);
     void stageGitChanges(TreeItem item, bool all = false);
+    void discardGitChanges(TreeItem item);
     void openGitDiff(const ResourceId& path, GitDiffKind kind, std::string revision = {}, bool allChanges = false, ResourceId root = {});
     std::wstring repositoryLabel(const ResourceId& root) const;
     void refreshBranches();
@@ -283,6 +284,7 @@ private:
     bool pastePending_ = false;
     bool createPending_ = false;
     bool gitStagePending_ = false;
+    bool gitDiscardPending_ = false;
     bool gitTreeView_ = true;
     std::vector<SourceNode> gitChangeNodes_;
     uint64_t branchRequest_ = 0;
@@ -361,7 +363,7 @@ void ProjectRuntime::Impl::create() {
     explorer_.removed = [this](uintptr_t data) { const auto n = reinterpret_cast<Node*>(data); if (n) { nodes_.erase(n->id); delete n; } };
     explorer_.canCreate = [this](TreeItem item) { return canCreateItem(item); };
     explorer_.createCommitted = [this](TreeItem item, const std::wstring& name, bool directory) { createItem(item, name, directory); };
-    explorer_.canRename = [this](TreeItem item) { return item != rootItem_ && node(item) && !node(item)->unsupported && !renamePending_ && !pastePending_ && !createPending_ && (!root_.wsl() || (connected_ && provider_->state() == ConnectionState::Ready)); };
+    explorer_.canRename = [this](TreeItem item) { return item != rootItem_ && node(item) && !node(item)->unsupported && !renamePending_ && !pastePending_ && !createPending_ && !gitDiscardPending_ && (!root_.wsl() || (connected_ && provider_->state() == ConnectionState::Ready)); };
     explorer_.renameRequested = [this](TreeItem item) { if (const auto n = node(item); n && item != rootItem_ && !renamePending_) explorer_.rename(item, n->path.filename().native()); };
     explorer_.renameCommitted = [this](TreeItem item, const std::wstring& name) { renameFile(item, name); };
     explorer_.canOpenWithDefaultApp = [this](TreeItem item) { const auto n = node(item); return n && !n->directory && !n->unsupported && !root_.wsl(); };
@@ -401,6 +403,14 @@ void ProjectRuntime::Impl::create() {
         return n && n->data < gitChangeNodes_.size() && gitChangeNodes_[n->data].staged ? Renderer::Icon::UnstageChanges : Renderer::Icon::StageChanges;
     };
     changes_.secondaryActionClicked = [this](TreeItem item) { stageGitChanges(item, true); };
+    changes_.tertiaryActionLabel = [this](TreeItem item) {
+        const auto n = changes_.item(item);
+        if (!n || n->data >= gitChangeNodes_.size()) return L"";
+        const auto& node = gitChangeNodes_[n->data];
+        return node.group && !node.staged && changes_.child(item) ? L"Discard All Changes" : L"";
+    };
+    changes_.tertiaryActionIcon = [](TreeItem) { return Renderer::Icon::DiscardChanges; };
+    changes_.tertiaryActionClicked = [this](TreeItem item) { discardGitChanges(item); };
     changes_.expanded = [this](TreeItem item, bool value) {
         if (updatingGitFiles_) return;
         const auto node = changes_.item(item);
@@ -724,7 +734,7 @@ void ProjectRuntime::Impl::openGitFile(TreeItem item) {
     openGitDiff(entry.path, node.staged ? GitDiffKind::Staged : GitDiffKind::Changes, {}, false, repo.root);
 }
 void ProjectRuntime::Impl::stageGitChanges(TreeItem item, bool all) {
-    if (updatingGitFiles_ || gitStagePending_ || renamePending_ || !git_ || git_->repositories.empty()) return;
+    if (updatingGitFiles_ || gitStagePending_ || gitDiscardPending_ || renamePending_ || !git_ || git_->repositories.empty()) return;
     if (root_.wsl() && (!connected_ || provider_->state() != ConnectionState::Ready)) { status(L"Reconnect WSL before staging changes."); return; }
     const auto value = changes_.item(item);
     if (!value || value->data >= gitChangeNodes_.size()) return;
@@ -755,6 +765,53 @@ void ProjectRuntime::Impl::stageGitChanges(TreeItem item, bool all) {
             if (code) { refreshGit(); status((stage ? L"Stage failed: " : L"Unstage failed: ") + error); return; }
             refresh(false);
             status((stage ? L"Staged " : L"Unstaged ") + name);
+        });
+    });
+}
+void ProjectRuntime::Impl::discardGitChanges(TreeItem item) {
+    if (updatingGitFiles_ || gitStagePending_ || gitDiscardPending_ || renamePending_ || pastePending_ || createPending_ || !git_) return;
+    if (root_.wsl() && (!connected_ || provider_->state() != ConnectionState::Ready)) { status(L"Reconnect WSL before discarding changes."); return; }
+    const auto value = changes_.item(item);
+    if (!value || value->data >= gitChangeNodes_.size()) return;
+    const auto& node = gitChangeNodes_[value->data];
+    if (!node.group || node.staged || !changes_.child(item) || node.repository >= git_->repositories.size()) return;
+    const auto& repo = *git_->repositories[node.repository];
+    if (!repo.error.empty()) return;
+    if (std::any_of(tabs_.begin(), tabs_.end(), [](const Tab& tab) { return tab.buffer && tab.buffer->saving; })) {
+        status(L"Wait for file saves to finish before discarding changes."); return;
+    }
+    // MessageBox dispatches UI completions. Copy the target before entering it.
+    const auto root = repo.root; const auto name = repositoryLabel(root);
+    const auto provider = provider_; const auto generation = generation_;
+    gitDiscardPending_ = true;
+    const auto answer = MessageBoxW(window_, (L"Discard all unstaged changes in " + root.native() +
+        L"?\n\nWorking files will be restored from the index. Untracked files and folders will be permanently deleted. This cannot be undone.\n\n"
+        L"Staged changes, ignored files, untracked nested repositories, submodules and unsaved editor text will be kept.").c_str(),
+        L"Poppy — Discard All Changes", MB_OKCANCEL | MB_ICONWARNING | MB_DEFBUTTON2);
+    if (answer != IDOK || generation != generation_) { gitDiscardPending_ = false; return; }
+    status(L"Discarding changes in " + name + L"…");
+    gitWorker_->submit(L"git-discard", [this, root, provider, generation, name] {
+        // A removed .git must not redirect this destructive operation to a parent.
+        auto result = provider->git({L"git.exe", L"--no-optional-locks", L"rev-parse", L"--show-toplevel"}, root, gitWorker_->cancellation());
+        if (!result.code && (pathKey(root.at(utf8(trimmed(result.output)))) != pathKey(root))) {
+            result.code = 1; result.error = L"The Git repository changed. Refresh before discarding changes.";
+        }
+        // Read complete status here, rather than using the bounded UI snapshot.
+        if (!result.code) result = provider->git({L"git.exe", L"--no-optional-locks", L"-c", L"core.fsmonitor=false", L"status", L"--porcelain=v1", L"-z", L"--untracked-files=all"}, root, gitWorker_->cancellation());
+        if (!result.code) try {
+            const auto commands = gitDiscardAllArguments(parseGitStatus(result.output));
+            for (const auto& command : commands) {
+                result = provider->git(gitArguments(command), root, gitWorker_->cancellation());
+                if (result.code) break;
+            }
+        } catch (const std::exception& error) { result.code = 1; result.error = wide(error.what()); }
+        gitWorker_->complete([this, generation, name, code = result.code, error = result.error] {
+            gitDiscardPending_ = false;
+            if (generation != generation_) return;
+            filesDirty_ = fileDirty_ = true;
+            refresh(false);
+            if (activeSidebar_ == Sidebar::Search) searchPane_.refresh();
+            status(code ? L"Discard failed: " + error : L"Discard completed in " + name);
         });
     });
 }
@@ -995,7 +1052,7 @@ void ProjectRuntime::Impl::updateLabel(TreeItem item) {
 }
 bool ProjectRuntime::Impl::canPasteImage(TreeItem item) const {
     const auto n = node(item ? item : rootItem_);
-    if (!n || n->unsupported || pastePending_ || createPending_ || renamePending_ || (n->directory && n->reparse)) return false;
+    if (!n || n->unsupported || pastePending_ || createPending_ || renamePending_ || gitDiscardPending_ || (n->directory && n->reparse)) return false;
     return !root_.wsl() || (connected_ && provider_->state() == ConnectionState::Ready);
 }
 bool ProjectRuntime::Impl::canCreateItem(TreeItem item) const {
@@ -1080,7 +1137,7 @@ void ProjectRuntime::Impl::pasteImage(TreeItem item) {
     });
 }
 void ProjectRuntime::Impl::renameFile(TreeItem item, const std::wstring& name) {
-    const auto n = node(item); if (!n || n->unsupported || item == rootItem_ || renamePending_ || pastePending_ || createPending_) return;
+    const auto n = node(item); if (!n || n->unsupported || item == rootItem_ || renamePending_ || pastePending_ || createPending_ || gitDiscardPending_) return;
     if (root_.wsl() && (!connected_ || provider_->state() != ConnectionState::Ready)) { status(L"Reconnect WSL before renaming."); return; }
     std::wstring error = L"Enter a valid Linux filename (no /, NUL, . or ..; at most 255 UTF-8 bytes).";
     if (!(root_.wsl() ? validPosixName(utf8(name)) : validFileName(name, error))) { MessageBoxW(window_, error.c_str(), L"Poppy — Rename", MB_OK | MB_ICONWARNING); return; }
@@ -1426,6 +1483,10 @@ void ProjectRuntime::Impl::saveTab() {
     }
 }
 bool ProjectRuntime::Impl::saveFile(size_t index, bool wait) {
+    if (gitDiscardPending_) {
+        if (wait) { gitWorker_->drain(); gitWorker_->dispatch(); }
+        if (gitDiscardPending_) { status(L"Discard in progress. Save again when it finishes."); return false; }
+    }
     if (renamePending_) { if (wait) { worker_->drain(); worker_->dispatch(); } else { status(L"Rename in progress. Save again when it finishes."); return false; } }
     saveTab(); if (index >= tabs_.size()) return true;
     const auto buffer = tabs_[index].buffer; const auto path = tabs_[index].path;
@@ -1912,7 +1973,7 @@ void ProjectRuntime::shutdown() {
     if (impl_->worker_) impl_->worker_->stop();
     impl_->terminal_.stop();
 }
-bool ProjectRuntime::canClose() { if (impl_->renamePending_ || impl_->pastePending_ || impl_->createPending_) { impl_->worker_->drain(); impl_->worker_->dispatch(); } impl_->saveTab(); for (size_t i = 0; i < impl_->tabs_.size(); ++i) if (!impl_->confirmTab(i)) return false; return true; }
+bool ProjectRuntime::canClose() { if (impl_->gitDiscardPending_) { impl_->gitWorker_->drain(); impl_->gitWorker_->dispatch(); if (impl_->gitDiscardPending_) return false; } if (impl_->renamePending_ || impl_->pastePending_ || impl_->createPending_) { impl_->worker_->drain(); impl_->worker_->dispatch(); } impl_->saveTab(); for (size_t i = 0; i < impl_->tabs_.size(); ++i) if (!impl_->confirmTab(i)) return false; return true; }
 void ProjectRuntime::revalidate() { PostMessageW(window(), WM_APP+13, 0, 0); }
 void ProjectRuntime::initialize(const ResourceId& path, const ProjectSession& state, bool saved) { if (saved) impl_->initialState_ = state; impl_->openFolder(path); }
 void ProjectRuntime::activate(bool active) {

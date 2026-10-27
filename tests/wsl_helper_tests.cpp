@@ -283,6 +283,22 @@ void gitAndCancellation(const std::string& executable) {
                   disk(fixture.root/"tracked 日本語.txt") == "partially staged\n" && disk(fixture.root/"renamed.txt") == "rename\n" &&
                   disk(fixture.root/"untracked \\ '$.txt") == "untracked\n" && !fs::exists(fixture.root/"delete.txt") && !fs::exists(fixture.root/"rename.txt"),
                   "WSL Unstage All Changes left staged entries or changed working files");
+            // Use the same discard plan through the helper, preserving its index.
+            check(field(git({"add","--","tracked 日本語.txt"}).metadata,"exitCode") == "0", "Cannot partially stage WSL discard fixture");
+            const auto indexBeforeDiscard = git({"ls-files","--stage","-z"}).bytes;
+            write(fixture.root/"tracked 日本語.txt","discard this\n");
+            git({"config","core.excludesFile","/dev/null"});
+            write(fixture.root/".git/info/exclude","ignored.txt\n"); write(fixture.root/"ignored.txt","keep\n");
+            const auto discardStatus = git({"status","--porcelain=v1","-z","--untracked-files=all"});
+            for (auto command : poppy::gitDiscardAllArguments(poppy::parseGitStatus(discardStatus.bytes))) {
+                command.erase(command.begin());
+                check(field(git(std::move(command)).metadata,"exitCode") == "0", "WSL discard command failed");
+            }
+            check(git({"ls-files","--stage","-z"}).bytes == indexBeforeDiscard &&
+                  disk(fixture.root/"tracked 日本語.txt") == "partially staged\n" && disk(fixture.root/"delete.txt") == "delete\n" &&
+                  disk(fixture.root/"rename.txt") == "rename\n" && !fs::exists(fixture.root/"renamed.txt") &&
+                  !fs::exists(fixture.root/"untracked \\ '$.txt") && disk(fixture.root/"ignored.txt") == "keep\n",
+                  "WSL Discard All Changes lost staged content, retained changes or removed ignored files");
         }
         helper.eof();
     }

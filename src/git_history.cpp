@@ -1,5 +1,6 @@
 #include "git_history.h"
 #include <algorithm>
+#include <stdexcept>
 
 namespace poppy {
 namespace {
@@ -85,6 +86,17 @@ std::vector<std::string> gitStageAllArguments() {
 }
 std::vector<std::string> gitUnstageAllArguments() {
     return {"git.exe", "--literal-pathspecs", "--no-optional-locks", "reset", "--quiet", "--"};
+}
+std::vector<std::vector<std::string>> gitDiscardAllArguments(const std::vector<GitStatusEntry>& entries) {
+    if (std::any_of(entries.begin(), entries.end(), [](const GitStatusEntry& entry) { return entry.conflicted(); }))
+        throw std::invalid_argument("Resolve merge conflicts before discarding all changes.");
+    if (entries.empty()) return {};
+    std::vector<std::vector<std::string>> commands;
+    // An untracked-only repository may not have an index (or even HEAD).
+    if (std::any_of(entries.begin(), entries.end(), [](const GitStatusEntry& entry) { return entry.index != '?' && entry.changed(); }))
+        commands.push_back({"git.exe", "--literal-pathspecs", "--no-optional-locks", "restore", "--worktree", "--no-recurse-submodules", "--", "."});
+    commands.push_back({"git.exe", "--literal-pathspecs", "--no-optional-locks", "clean", "-f", "-d", "--", "."});
+    return commands;
 }
 std::string untrackedPatch(const std::string& path, std::string_view text) {
     std::string patch = "diff --git a/" + path + " b/" + path + "\nnew file mode 100644\n";
