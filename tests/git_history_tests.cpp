@@ -113,6 +113,9 @@ void multipleRepositories() {
         if (!args.empty() && args.front() == "git.exe") args.erase(args.begin());
         args.insert(args.begin(), {"-C", directory.string()}); return fixture.git(std::move(args));
     };
+    git(fixture.path, {"init", "--quiet", "--template=", "--initial-branch=main"});
+    fixture.write("unrelated/file.txt", "outside the opened folder\n");
+    check(scanGitRepositories(app).roots.empty(), "Discovery included an ancestor repository");
     for (const auto& directory : {client, server}) {
         git(directory, {"init", "--quiet", "--template=", "--initial-branch=main"});
         git(directory, {"config", "user.name", "Poppy Test"}); git(directory, {"config", "user.email", "poppy@example.invalid"});
@@ -124,6 +127,7 @@ void multipleRepositories() {
     std::ofstream(server / "same.txt") << "server change\n";
     const auto scan = scanGitRepositories(app);
     check(scan.roots.size() == 2 && scan.error.empty() && !scan.truncated, "Sibling repositories were not discovered below a non-Git parent");
+    check(scanGitRepositories(client).roots == std::vector<ResourceId>{ResourceId(client)}, "Discovery missed the opened repository itself");
     const auto owner = gitRepositoryFor(scan.roots, ResourceId(client / "same.txt"));
     check(owner == ResourceId(client), "Discovery lost the owner of an identically named file");
     const auto patch = git(owner.local(), gitDiffArguments(GitDiffKind::Changes, {}, "same.txt"));
