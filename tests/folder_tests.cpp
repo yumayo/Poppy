@@ -884,6 +884,25 @@ void treeInteractionTests(const fs::path& executable) {
     waitFor([&] { return expanded(tree, directory) && nextItem(tree, TreeRelation::Child, directory); }, "Clicking the arrow did not expand the custom tree");
     click(tree, arrowX, y);
     check(!expanded(tree, directory) && !nextItem(tree, TreeRelation::Child, directory), "Clicking the arrow did not collapse and release children");
+    // Real rapid clicks arrive as DOWN/UP/DBLCLK/UP, not two DOWN/UP pairs.
+    // Check each press without waiting for the asynchronous folder listing.
+    bool open = false;
+    for (const auto message : {WM_LBUTTONDOWN, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONDBLCLK}) {
+        send(tree, message, MK_LBUTTON, MAKELPARAM(arrowX, y));
+        send(tree, WM_LBUTTONUP, 0, MAKELPARAM(arrowX, y));
+        open = !open;
+        check(expanded(tree, directory) == open, "Rapid arrow clicks skipped an expand/collapse press");
+        if (!open) check(!nextItem(tree, TreeRelation::Child, directory), "Rapid collapse retained child nodes");
+    }
+    const int labelX = MulDiv(50, GetDpiForWindow(app.window), 96);
+    for (const bool expected : {true, false}) {
+        click(tree, labelX, y);
+        check(expanded(tree, directory) != expected, "A single label click toggled the folder");
+        send(tree, WM_LBUTTONDBLCLK, MK_LBUTTON, MAKELPARAM(labelX, y));
+        send(tree, WM_LBUTTONUP, 0, MAKELPARAM(labelX, y));
+        check(expanded(tree, directory) == expected, "Double-clicking the label did not toggle the folder once");
+        if (expected) waitFor([&] { return nextItem(tree, TreeRelation::Child, directory) != 0; }, "Rapid clicks prevented the next folder load");
+    }
 }
 void folderTests(const fs::path& executable) {
     Fixture fixture;
