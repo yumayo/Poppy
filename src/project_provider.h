@@ -3,6 +3,7 @@
 #include "resource.h"
 #include "file_search.h"
 #include "content_search.h"
+#include "git_repositories.h"
 #include <memory>
 
 namespace poppy {
@@ -26,6 +27,7 @@ public:
     virtual ContentSearchSummary searchContent(const ResourceId& root, const ContentSearchOptions& options,
         const ContentPublish& publish, const std::function<bool()>& cancelled) = 0;
     virtual ProcessResult git(const std::vector<std::wstring>& args, const ResourceId& directory, const std::atomic<bool>* cancelled) = 0;
+    virtual GitRepositoryScan gitRepositories(const ResourceId& root, const std::function<bool()>& cancelled) = 0;
     virtual ConnectionState state() const { return ConnectionState::Ready; }
     virtual std::wstring error() const { return {}; }
     virtual uint64_t revision() const { return 0; }

@@ -1,3 +1,4 @@
+#include "git_repositories.h"
 #include "wsl_protocol.h"
 #include "content_search_protocol.h"
 #include "resource.h"
@@ -181,6 +182,7 @@ private:
     void execute(const std::shared_ptr<Request>& request);
     void worker(bool search = false);
     void watch(const std::string& p);
+    void watchGit(const std::string& directory);
     void events();
     void save(Request& request);
     void git(Request& request);
@@ -264,6 +266,16 @@ void Server::watch(const std::string& p) {
     if (wd < 0) { watchLimited_ = true; return; }
     const auto existing = watchPaths_.find(wd); if (existing != watchPaths_.end()) watched_.erase(existing->second);
     watchPaths_[wd] = p; watched_.insert(p);
+}
+void Server::watchGit(const std::string& directory) {
+    const auto p = directory + "/.git"; auto gitDirectory = p; struct stat gitInfo{};
+    if (!lstat(p.c_str(), &gitInfo) && S_ISREG(gitInfo.st_mode)) { std::ifstream pointer(p); std::string line; std::getline(pointer,line); if (line.rfind("gitdir: ",0) == 0) { auto target = std::filesystem::path(line.substr(8)); gitDirectory = (target.is_absolute() ? target : std::filesystem::path(directory)/target).lexically_normal().string(); } }
+    watch(gitDirectory);
+    std::ifstream common(gitDirectory+"/commondir"); std::string shared;
+    if (std::getline(common,shared) && !shared.empty()) { const auto target = std::filesystem::path(shared); gitDirectory = (target.is_absolute() ? target : std::filesystem::path(gitDirectory)/target).lexically_normal().string(); watch(gitDirectory); }
+    struct stat refs{};
+    if (!lstat((gitDirectory+"/refs").c_str(),&refs) && S_ISDIR(refs.st_mode)) watch(gitDirectory+"/refs");
+    if (!lstat((gitDirectory+"/refs/heads").c_str(),&refs) && S_ISDIR(refs.st_mode)) watch(gitDirectory+"/refs/heads");
 }
 void Server::events() {
     auto lastFallback = Clock::now(); alignas(inotify_event) char bytes[65536];
@@ -350,7 +362,7 @@ void Server::execute(const std::shared_ptr<Request>& r) {
         if (op == "hello") {
             if (number(r->message, "protocolVersion") != protocolVersion) throw std::runtime_error("WSL protocol version mismatch");
             utsname system{}; if (uname(&system)) failure("Cannot detect architecture");
-            reply(*r, {{"protocolVersion", std::to_string(protocolVersion)}, {"helperVersion", helperVersion}, {"uid", std::to_string(getuid())}, {"home", home()}, {"shell", shell()}, {"executable", real("/proc/self/exe")}, {"architecture", system.machine}, {"capabilities", "list,read,save,rename,index,git,inotify,terminal,search"}, {"done", "1"}});
+            reply(*r, {{"protocolVersion", std::to_string(protocolVersion)}, {"helperVersion", helperVersion}, {"uid", std::to_string(getuid())}, {"home", home()}, {"shell", shell()}, {"executable", real("/proc/self/exe")}, {"architecture", system.machine}, {"capabilities", "list,read,save,rename,index,git,repositories,inotify,terminal,search"}, {"done", "1"}});
         } else if (op == "connect") {
             const auto p = real(path(r->message)); struct stat info{}; if (stat(p.c_str(), &info)) failure("Cannot inspect project"); if (!S_ISDIR(info.st_mode)) throw std::runtime_error("The project path is not a directory"); watch(p); reply(*r, {{"path", p}, {"done", "1"}});
         } else if (op == "stat") {
@@ -369,6 +381,16 @@ void Server::execute(const std::shared_ptr<Request>& r) {
             const auto destination = parent + '/' + name;
             if (syscall(SYS_renameat2, AT_FDCWD, p.c_str(), AT_FDCWD, destination.c_str(), 1 /* RENAME_NOREPLACE */)) failure("Cannot rename without overwriting");
             reply(*r, {{"path", destination}, {"done", "1"}});
+        } else if (op == "gitRepositories") {
+            const auto result = poppy::scanGitRepositories(std::filesystem::u8path(path(r->message)),
+                [&] { return r->cancelled.load() || stopping_.load(); },
+                [&](const std::filesystem::path& directory) { watch(directory.string()); });
+            for (const auto& root : result.roots) {
+                const auto p = root.u8string();
+                if (!validUtf8(p)) continue;
+                watchGit(p); reply(*r, {{"entry", "1"}, {"path", p}});
+            }
+            reply(*r, {{"truncated", result.truncated ? "1" : "0"}, {"scanError", validUtf8(result.error) ? result.error : "Repository scan failed"}, {"done", "1"}});
         } else if (op == "listDirectory" || op == "indexFiles") {
             const auto root = path(r->message); std::deque<std::string> pending{root}; size_t entries = 0, directories = 0; bool truncated = false;
             while (!pending.empty()) {
@@ -381,14 +403,7 @@ void Server::execute(const std::shared_ptr<Request>& r) {
                     const std::string name = entry->d_name; if (name == "." || name == "..") continue;
                     const auto p = directory + (directory.back() == '/' ? "" : "/") + name;
                     if (name == ".git") {
-                        auto gitDirectory = p; struct stat gitInfo{};
-                        if (!lstat(p.c_str(), &gitInfo) && S_ISREG(gitInfo.st_mode)) { std::ifstream pointer(p); std::string line; std::getline(pointer,line); if (line.rfind("gitdir: ",0) == 0) { auto target = std::filesystem::path(line.substr(8)); gitDirectory = (target.is_absolute() ? target : std::filesystem::path(directory)/target).lexically_normal().string(); } }
-                        watch(gitDirectory);
-                        std::ifstream common(gitDirectory+"/commondir"); std::string shared;
-                        if (std::getline(common,shared) && !shared.empty()) { const auto target = std::filesystem::path(shared); gitDirectory = (target.is_absolute() ? target : std::filesystem::path(gitDirectory)/target).lexically_normal().string(); watch(gitDirectory); }
-                        struct stat refs{};
-                        if (!lstat((gitDirectory+"/refs").c_str(),&refs) && S_ISDIR(refs.st_mode)) watch(gitDirectory+"/refs");
-                        if (!lstat((gitDirectory+"/refs/heads").c_str(),&refs) && S_ISDIR(refs.st_mode)) watch(gitDirectory+"/refs/heads");
+                        watchGit(directory);
                         if (op == "indexFiles") continue;
                     }
                     struct stat info{}; if (fstatat(dirfd(dir.get()), name.c_str(), &info, AT_SYMLINK_NOFOLLOW)) continue;

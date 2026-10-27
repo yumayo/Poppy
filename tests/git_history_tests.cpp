@@ -1,4 +1,5 @@
 #include "git_history.h"
+#include "git_repositories.h"
 #include "diff.h"
 #include <algorithm>
 #include <chrono>
@@ -40,6 +41,18 @@ void records() {
     check(commits.size() == 2 && commits[0].subject == "日本語 subject\twith spaces" && commits[1].hash == "def", "NUL-delimited commit records lost metadata");
     const auto files = parseGitCommitFiles(nul({"A", "src/new.txt", "D", "old.txt", "M", "path\nwith newline.txt"}));
     check(files.size() == 3 && files[1].state == 'D' && files[2].path == "path\nwith newline.txt", "Commit files lost states or unusual paths");
+}
+void repositoryOwnership() {
+    const auto app = ResourceId::wsl("Ubuntu", "/home/user/app");
+    const auto client = app / std::string_view("app-client"), server = app / std::string_view("app-server");
+    const auto nested = client / std::string_view("packages/日本語");
+    const std::vector<ResourceId> roots{server, app, nested, client};
+    check(gitRepositoryFor(roots, client / std::string_view("same.txt")) == client, "A sibling file belongs to the wrong repository");
+    check(gitRepositoryFor(roots, nested / std::string_view("same.txt")) == nested, "A nested file belongs to the outer repository");
+    check(gitRepositoryFor({client}, app / std::string_view("app-client-other/same.txt")).empty(), "A path prefix was mistaken for repository membership");
+    check(gitRepositoryFor(roots, ResourceId::wsl("Debian", "/home/user/app/app-client/same.txt")).empty(), "Repository lookup crossed distributions");
+    check(gitRepositoryFor({client}, app / std::string_view("App-client/same.txt")).empty(), "Repository lookup folded a WSL path's case");
+    check(gitRepositoryFor(roots, server) == server, "All Changes selected the wrong repository");
 }
 void patchLists() {
     DiffDocument diff;
@@ -91,6 +104,43 @@ struct Repository {
     }
     std::string hash() const { auto result = git({"rev-parse", "HEAD"}); result.pop_back(); return result; }
 };
+void multipleRepositories() {
+    Repository fixture;
+    const auto app = fixture.path / "app", client = app / "app-client", server = app / "app-server";
+    fs::create_directories(client); fs::create_directories(server);
+    check(scanGitRepositories(app).roots.empty(), "A non-repository was detected as Git");
+    auto git = [&](const fs::path& directory, std::vector<std::string> args) {
+        if (!args.empty() && args.front() == "git.exe") args.erase(args.begin());
+        args.insert(args.begin(), {"-C", directory.string()}); return fixture.git(std::move(args));
+    };
+    for (const auto& directory : {client, server}) {
+        git(directory, {"init", "--quiet", "--template=", "--initial-branch=main"});
+        git(directory, {"config", "user.name", "Poppy Test"}); git(directory, {"config", "user.email", "poppy@example.invalid"});
+        git(directory, {"config", "commit.gpgsign", "false"});
+        std::ofstream(directory / "same.txt") << "initial\n";
+        git(directory, {"add", "."}); git(directory, {"commit", "-qm", directory.filename().string()});
+    }
+    std::ofstream(client / "same.txt") << "client change\n";
+    std::ofstream(server / "same.txt") << "server change\n";
+    const auto scan = scanGitRepositories(app);
+    check(scan.roots.size() == 2 && scan.error.empty() && !scan.truncated, "Sibling repositories were not discovered below a non-Git parent");
+    const auto owner = gitRepositoryFor(scan.roots, ResourceId(client / "same.txt"));
+    check(owner == ResourceId(client), "Discovery lost the owner of an identically named file");
+    const auto patch = git(owner.local(), gitDiffArguments(GitDiffKind::Changes, {}, "same.txt"));
+    check(patch.find("+client change") != patch.npos && patch.find("server change") == patch.npos, "Diff mixed sibling repositories");
+    git(owner.local(), gitStageArguments({"same.txt", {}, ' ', 'M'}, true));
+    check(parseGitStatus(git(client, {"status", "--porcelain=v1", "-z"}))[0].staged() &&
+          !parseGitStatus(git(server, {"status", "--porcelain=v1", "-z"}))[0].staged(), "Staging crossed repository boundaries");
+    const auto worktree = app / "worktree 日本語";
+    git(client, {"worktree", "add", "--quiet", "--detach", worktree.string()});
+    fs::create_directories(client / ".git" / "trap" / ".git");
+    fs::create_directory_symlink(app, client / "loop");
+    check(scanGitRepositories(app).roots.size() == 3, "Discovery entered .git or a directory link, or missed a gitfile worktree");
+    fs::create_directories(client / "nested"); git(client / "nested", {"init", "--quiet", "--template=", "--initial-branch=main"});
+    check(scanGitRepositories(app).roots.size() == 4, "Discovery stopped at an outer repository");
+    check(scanGitRepositories(app, [] { return true; }).roots.empty(), "Repository scan ignored cancellation");
+    check(scanGitRepositories(app, {}, {}, 1).truncated && scanGitRepositories(app, {}, {}, 50000, 0).truncated, "Repository scan did not report its limits");
+}
 void repositoryStaging() {
     Repository repo;
     repo.git({"init", "--quiet", "--template=", "--initial-branch=main"});
@@ -188,9 +238,9 @@ void repositoryHistory() {
 }
 int main() {
     try {
-        statusGroups(); records(); patchLists();
+        statusGroups(); records(); patchLists(); repositoryOwnership();
 #ifndef _WIN32
-        repositoryStaging(); repositoryHistory();
+        repositoryStaging(); repositoryHistory(); multipleRepositories();
 #endif
         std::cout << "Git history tests passed.\n"; return 0;
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }

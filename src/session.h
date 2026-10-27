@@ -23,6 +23,7 @@ struct SavedTab {
     GitDiffKind diffKind = GitDiffKind::Automatic;
     std::string revision = {};
     bool allChanges = false;
+    std::string gitRoot = {};
 };
 struct SavedTerminal {
     std::string id = "shell-1", name = "Shell", directory;
