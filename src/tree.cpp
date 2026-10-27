@@ -1,4 +1,5 @@
 #include "tree.h"
+#include "file_name.h"
 #include <algorithm>
 #include <commctrl.h>
 
@@ -117,7 +118,8 @@ void Tree::createItem(TreeItem parent, bool directory) {
     rename(parent, L"");
     if (!rename_) return;
     creating_ = true; creatingDirectory_ = directory;
-    SendMessageW(rename_, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(directory ? L"New folder name" : L"New file name"));
+    SendMessageW(rename_, EM_SETLIMITTEXT, maxCreationPathLength, 0);
+    SendMessageW(rename_, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(directory ? L"New folder path" : L"New file path (folder/ for a folder)"));
 }
 void Tree::layoutRename() {
     if (!rename_) return;
@@ -130,7 +132,8 @@ void Tree::finishRename(bool commit) {
     if (!rename_) return;
     const auto id = renaming_; const auto edit = std::exchange(rename_, nullptr); renaming_ = 0;
     const bool creating = std::exchange(creating_, false), directory = creatingDirectory_;
-    wchar_t name[256]{}; GetWindowTextW(edit, name, 256);
+    std::wstring name(static_cast<size_t>(GetWindowTextLengthW(edit)) + 1, L'\0');
+    const auto length = GetWindowTextW(edit, name.data(), static_cast<int>(name.size())); name.resize(static_cast<size_t>(length));
     const bool focus = GetFocus() == edit; DestroyWindow(edit); if (focus) SetFocus(window_);
     if (commit && item(id)) {
         if (creating) { if (createCommitted) createCommitted(id, name, directory); }
