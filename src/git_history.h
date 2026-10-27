@@ -26,6 +26,8 @@ std::vector<std::string> gitCommitFilesArguments(const std::string& hash);
 std::vector<std::string> gitDiffArguments(GitDiffKind kind, const std::string& hash, const std::string& path);
 // Update only this file's index entries; a rename also includes its source.
 std::vector<std::string> gitStageArguments(const GitStatusEntry& entry, bool stage);
+// Stage tracked and untracked changes throughout the command's repository.
+std::vector<std::string> gitStageAllArguments();
 // A decoded UTF-8 untracked file, represented as an addition in a patch list.
 std::string untrackedPatch(const std::string& path, std::string_view text);
 }

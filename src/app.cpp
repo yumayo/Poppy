@@ -209,7 +209,7 @@ private:
     void setGitView(bool tree);
     void updateGitFiles();
     void openGitFile(TreeItem item);
-    void stageGitFile(TreeItem item);
+    void stageGitChanges(TreeItem item, bool all = false);
     void openGitDiff(const ResourceId& path, GitDiffKind kind, std::string revision = {}, bool allChanges = false, ResourceId root = {});
     std::wstring repositoryLabel(const ResourceId& root) const;
     void refreshBranches();
@@ -388,8 +388,16 @@ void ProjectRuntime::Impl::create() {
         const auto n = changes_.item(item);
         if (!n || n->data >= gitChangeNodes_.size() || !git_) return;
         if (gitChangeNodes_[n->data].group) { const auto& source = gitChangeNodes_[n->data]; const auto root = git_->repositories[source.repository]->root; openGitDiff(root, source.staged ? GitDiffKind::Staged : GitDiffKind::Changes, {}, true, root); }
-        else stageGitFile(item);
+        else stageGitChanges(item);
     };
+    changes_.secondaryActionLabel = [this](TreeItem item) {
+        const auto n = changes_.item(item);
+        if (!n || n->data >= gitChangeNodes_.size()) return L"";
+        const auto& node = gitChangeNodes_[n->data];
+        return node.group && !node.staged && changes_.child(item) ? L"Stage All Changes" : L"";
+    };
+    changes_.secondaryActionIcon = [](TreeItem) { return Renderer::Icon::StageChanges; };
+    changes_.secondaryActionClicked = [this](TreeItem item) { stageGitChanges(item, true); };
     changes_.expanded = [this](TreeItem item, bool value) {
         if (updatingGitFiles_) return;
         const auto node = changes_.item(item);
@@ -712,19 +720,28 @@ void ProjectRuntime::Impl::openGitFile(TreeItem item) {
     if (entry.state == L'?') { openFile(entry.path); return; }
     openGitDiff(entry.path, node.staged ? GitDiffKind::Staged : GitDiffKind::Changes, {}, false, repo.root);
 }
-void ProjectRuntime::Impl::stageGitFile(TreeItem item) {
+void ProjectRuntime::Impl::stageGitChanges(TreeItem item, bool all) {
     if (updatingGitFiles_ || gitStagePending_ || renamePending_ || !git_ || git_->repositories.empty()) return;
     if (root_.wsl() && (!connected_ || provider_->state() != ConnectionState::Ready)) { status(L"Reconnect WSL before staging changes."); return; }
     const auto value = changes_.item(item);
     if (!value || value->data >= gitChangeNodes_.size()) return;
     const auto& node = gitChangeNodes_[value->data];
+    if (node.repository >= git_->repositories.size()) return;
     const auto& repo = *git_->repositories[node.repository];
-    if (node.directory || node.entry >= repo.entries.size() || !repo.error.empty()) return;
-    const auto& entry = repo.entries[node.entry];
+    if (!repo.error.empty()) return;
+    if (all) { if (!node.group || node.staged || !changes_.child(item)) return; }
+    else if (node.directory || node.entry >= repo.entries.size()) return;
     const bool stage = !node.staged;
-    const auto args = gitArguments(gitStageArguments({entry.path.lexically_relative(repo.root).generic_u8string(), entry.previousPath, entry.index, entry.worktree}, stage));
+    std::vector<std::string> arguments;
+    std::wstring name;
+    if (all) { arguments = gitStageAllArguments(); name = L"all changes in " + repositoryLabel(repo.root); }
+    else {
+        const auto& entry = repo.entries[node.entry];
+        arguments = gitStageArguments({entry.path.lexically_relative(repo.root).generic_u8string(), entry.previousPath, entry.index, entry.worktree}, stage);
+        name = entry.path.filename().native();
+    }
+    const auto args = gitArguments(arguments);
     const auto root = repo.root; const auto provider = provider_; const auto generation = generation_;
-    const auto name = entry.path.filename().native();
     gitStagePending_ = true;
     status((stage ? L"Staging " : L"Unstaging ") + name + L"…");
     gitWorker_->submit(L"git-stage", [this, args, root, provider, generation, name, stage] {
