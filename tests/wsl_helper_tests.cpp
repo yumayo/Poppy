@@ -1,4 +1,5 @@
 #include "wsl_protocol.h"
+#include "git_history.h"
 #include "content_search_protocol.h"
 #include "wsl_bootstrap.h"
 #include "text.h"
@@ -274,6 +275,14 @@ void gitAndCancellation(const std::string& executable) {
             const auto status = git({"--no-optional-locks","-c","core.fsmonitor=false","status","--porcelain=v1","-z","--untracked-files=all"});
             check(status.bytes.find("tracked 日本語.txt") != status.bytes.npos && status.bytes.find("delete.txt") != status.bytes.npos && status.bytes.find("renamed.txt") != status.bytes.npos && status.bytes.find("untracked \\ '$.txt") != status.bytes.npos && status.bytes.find('\0') != status.bytes.npos,"Linux Git lost porcelain NUL paths or change kinds");
             const auto diff = git({"diff","--no-ext-diff","--no-textconv","--patch","--","tracked 日本語.txt"}); check(diff.bytes.find("-before") != diff.bytes.npos && diff.bytes.find("+after") != diff.bytes.npos,"Linux Git patch was not returned");
+            check(field(git({"add","--all","--"}).metadata,"exitCode") == "0","Cannot stage WSL changes for Unstage All Changes");
+            write(fixture.root/"tracked 日本語.txt","partially staged\n");
+            auto unstage = poppy::gitUnstageAllArguments(); unstage.erase(unstage.begin());
+            check(field(git(std::move(unstage)).metadata,"exitCode") == "0" &&
+                  field(git({"diff","--cached","--quiet"}).metadata,"exitCode") == "0" &&
+                  disk(fixture.root/"tracked 日本語.txt") == "partially staged\n" && disk(fixture.root/"renamed.txt") == "rename\n" &&
+                  disk(fixture.root/"untracked \\ '$.txt") == "untracked\n" && !fs::exists(fixture.root/"delete.txt") && !fs::exists(fixture.root/"rename.txt"),
+                  "WSL Unstage All Changes left staged entries or changed working files");
         }
         helper.eof();
     }

@@ -1222,6 +1222,23 @@ void branchSidebarTests(const fs::path& executable) {
         }, "Stage All Changes did not stage partially staged and untracked files from a collapsed group");
         waitLines(viewer, 0);
         runGit(L"diff --quiet");
+        const auto stagedAll = nextItem(changes, TreeRelation::Root);
+        const int stagedRow = static_cast<int>(send(changes, treeGetRow, stagedAll));
+        const int stagedY = stagedRow * height + height / 2;
+        // Open All Changes remains the rightmost action on Staged Changes.
+        click(changes, rect.right - rect.left - MulDiv(18, GetDpiForWindow(app.window), 96), stagedY);
+        waitLines(viewer, 4);
+        expand(changes, stagedAll, false);
+        send(changes, WM_MOUSEMOVE, 0, MAKELPARAM(stageX, stagedY));
+        click(changes, stageX, stagedY); send(changes, WM_MOUSELEAVE);
+        waitFor([&] {
+            const auto first = nextItem(changes, TreeRelation::Root), second = nextItem(changes, TreeRelation::Next, first);
+            return children(changes, first) == 0 && children(changes, second) == 2;
+        }, "Unstage All Changes did not clear the index from a collapsed Staged Changes group");
+        waitLines(viewer, 0);
+        runGit(L"diff --cached --quiet");
+        wchar_t badge[128]{}; GetWindowTextW(GetDlgItem(app.window, 3), badge, 128);
+        check(std::wstring(badge) == L"Source Control (2)", "Unstage All Changes lost or duplicated the change count");
         send(GetDlgItem(app.window, 5), BM_CLICK);
         waitFor([&] { return IsWindowVisible(branches) && children(branches, nextItem(branches, TreeRelation::Root)) == 51; }, "Branch did not load 50 commits and a load-more row");
         check(!IsWindowVisible(changes), "Branch did not hide Source Control");
@@ -1320,6 +1337,23 @@ void multiRepositoryTests(const fs::path& executable) {
                 children(changes, group(serverRepo, true)) == 0 && children(changes, group(serverRepo, false)) == 2;
         }, "Stage All Changes affected a sibling repository or missed a file in the selected repository");
         runGit(client, L"diff --cached --quiet", 1); runGit(server, L"diff --cached --quiet");
+        send(changes, treeSelect, nextItem(changes, TreeRelation::Child, group(serverRepo, false)));
+        send(changes, WM_KEYDOWN, VK_F4);
+        waitFor([&] {
+            clientRepo = nextItem(changes, TreeRelation::Root); serverRepo = nextItem(changes, TreeRelation::Next, clientRepo);
+            return children(changes, group(serverRepo, true)) == 1;
+        }, "Could not stage the sibling repository before testing Unstage All Changes");
+        const auto stagedClient = group(clientRepo, true);
+        expand(changes, stagedClient, false);
+        const int unstageRow = static_cast<int>(send(changes, treeGetRow, stagedClient));
+        const int unstageY = unstageRow * height + height / 2;
+        send(changes, WM_MOUSEMOVE, 0, MAKELPARAM(x, unstageY)); click(changes, x, unstageY); send(changes, WM_MOUSELEAVE);
+        waitFor([&] {
+            clientRepo = nextItem(changes, TreeRelation::Root); serverRepo = nextItem(changes, TreeRelation::Next, clientRepo);
+            return children(changes, group(clientRepo, true)) == 0 && children(changes, group(clientRepo, false)) == 2 &&
+                children(changes, group(serverRepo, true)) == 1 && children(changes, group(serverRepo, false)) == 1;
+        }, "Unstage All Changes affected a sibling repository or left a file staged in the selected repository");
+        runGit(client, L"diff --cached --quiet"); runGit(server, L"diff --cached --quiet", 1);
         runGit(fixture.root, L"diff --cached --quiet");
         send(GetDlgItem(app.window, 5), BM_CLICK);
         waitFor([&] { return IsWindowVisible(branches) && roots(branches); }, "Branch did not discover sibling repositories");

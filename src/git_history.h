@@ -28,6 +28,9 @@ std::vector<std::string> gitDiffArguments(GitDiffKind kind, const std::string& h
 std::vector<std::string> gitStageArguments(const GitStatusEntry& entry, bool stage);
 // Stage tracked and untracked changes throughout the command's repository.
 std::vector<std::string> gitStageAllArguments();
+// Reset the repository's entire index without changing HEAD or working files.
+// Omitting the revision also supports repositories before their first commit.
+std::vector<std::string> gitUnstageAllArguments();
 // A decoded UTF-8 untracked file, represented as an addition in a patch list.
 std::string untrackedPatch(const std::string& path, std::string_view text);
 }
