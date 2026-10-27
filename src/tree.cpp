@@ -241,27 +241,30 @@ LRESULT Tree::handle(UINT m, WPARAM a, LPARAM b) {
     }
     case WM_COMMAND: if (LOWORD(a) == 1002 && HIWORD(a) == EN_KILLFOCUS) finishRename(false); return 0;
     case WM_CONTEXTMENU: {
-        if (!renameRequested && !openWithDefaultAppRequested && !pasteImageRequested && !createCommitted) return 0;
+        if (!renameRequested && !openWithDefaultAppRequested && !revealInFileExplorerRequested && !pasteImageRequested && !createCommitted) return 0;
         POINT screen{GET_X_LPARAM(b), GET_Y_LPARAM(b)}; auto id = selection();
         if (screen.x == -1 && screen.y == -1) { screen = {indent_, (row(id) - top_ + 1) * rowHeight_}; ClientToScreen(window_, &screen); }
         else { auto point = screen; ScreenToClient(window_, &point); id = hit(point.y); if (id) select(id, false); }
         if (!id && !pasteImageRequested) return 0;
         const bool canOpen = id && openWithDefaultAppRequested && (!canOpenWithDefaultApp || canOpenWithDefaultApp(id));
+        const bool canReveal = id && revealInFileExplorerRequested && (!canRevealInFileExplorer || canRevealInFileExplorer(id));
         const bool create = id && createCommitted && canCreate && canCreate(id);
-        if (!renameRequested && !canOpen && !pasteImageRequested && !create) return 0;
+        if (!renameRequested && !canOpen && !canReveal && !pasteImageRequested && !create) return 0;
         HMENU menu = CreatePopupMenu(); if (!menu) return 0;
         if (create) {
             AppendMenuW(menu, MF_STRING, 4, L"New File…");
             AppendMenuW(menu, MF_STRING, 5, L"New Folder…");
             AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
         }
-        if (canOpen) AppendMenuW(menu, MF_STRING, 2, L"デフォルトのアプリケーションで開く");
+        if (canReveal) AppendMenuW(menu, MF_STRING, 6, L"Reveal in File Explorer");
+        if (canOpen) AppendMenuW(menu, MF_STRING, 2, L"Open with Default Application");
         if (id && renameRequested) AppendMenuW(menu, MF_STRING | (canRename && !canRename(id) ? MF_GRAYED : 0), 1, L"Rename\tF2");
         if (pasteImageRequested) AppendMenuW(menu, MF_STRING | (canPasteImage && !canPasteImage(id) ? MF_GRAYED : 0), 3, L"Paste Image\tCtrl+V");
         const auto command = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, screen.x, screen.y, 0, window_, nullptr); DestroyMenu(menu);
         if (command == 3 && pasteImageRequested && (!canPasteImage || canPasteImage(id))) { pasteImageRequested(id); return 0; }
         if (!item(id)) return 0;
         if (command == 4 || command == 5) createItem(id, command == 5);
+        else if (command == 6 && revealInFileExplorerRequested && (!canRevealInFileExplorer || canRevealInFileExplorer(id))) revealInFileExplorerRequested(id);
         else if (command == 2 && openWithDefaultAppRequested && (!canOpenWithDefaultApp || canOpenWithDefaultApp(id))) openWithDefaultAppRequested(id);
         else if (command == 1 && renameRequested && (!canRename || canRename(id))) renameRequested(id);
         return 0;
