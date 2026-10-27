@@ -70,6 +70,7 @@ public:
         if (!error.empty()) DeleteFileW(temporary.c_str());
         return error;
     }
+    std::wstring createDirectory(const ResourceId& path) override { return CreateDirectoryW(path.local().c_str(), nullptr) ? std::wstring{} : winError(); }
     std::wstring renameResource(const ResourceId& source, const ResourceId& destination) override { return MoveFileExW(source.local().c_str(), destination.local().c_str(), MOVEFILE_WRITE_THROUGH) ? std::wstring{} : winError(); }
     FileIndex indexFiles(const ResourceId& root, const std::function<bool()>& cancelled) override { return poppy::indexFiles(root.local(), cancelled); }
     ContentSearchSummary searchContent(const ResourceId& root, const ContentSearchOptions& options,

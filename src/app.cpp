@@ -228,6 +228,8 @@ private:
     Node* node(TreeItem item) const;
     void clearChildren(TreeItem parent);
     void updateLabel(TreeItem item);
+    bool canCreateItem(TreeItem item) const;
+    void createItem(TreeItem parent, const std::wstring& name, bool directory);
     void renameFile(TreeItem item, const std::wstring& name);
     bool canPasteImage(TreeItem item) const;
     void pasteImage(TreeItem item);
@@ -277,6 +279,7 @@ private:
     bool updatingGitFiles_ = false;
     bool renamePending_ = false;
     bool pastePending_ = false;
+    bool createPending_ = false;
     bool gitStagePending_ = false;
     bool gitTreeView_ = true;
     std::vector<SourceNode> gitChangeNodes_;
@@ -354,7 +357,9 @@ void ProjectRuntime::Impl::create() {
         else { forgetExpanded(n->path); n->expandRequested = false; clearChildren(item); n->loaded = false; }
     };
     explorer_.removed = [this](uintptr_t data) { const auto n = reinterpret_cast<Node*>(data); if (n) { nodes_.erase(n->id); delete n; } };
-    explorer_.canRename = [this](TreeItem item) { return item != rootItem_ && node(item) && !node(item)->unsupported && !renamePending_ && !pastePending_ && (!root_.wsl() || (connected_ && provider_->state() == ConnectionState::Ready)); };
+    explorer_.canCreate = [this](TreeItem item) { return canCreateItem(item); };
+    explorer_.createCommitted = [this](TreeItem item, const std::wstring& name, bool directory) { createItem(item, name, directory); };
+    explorer_.canRename = [this](TreeItem item) { return item != rootItem_ && node(item) && !node(item)->unsupported && !renamePending_ && !pastePending_ && !createPending_ && (!root_.wsl() || (connected_ && provider_->state() == ConnectionState::Ready)); };
     explorer_.renameRequested = [this](TreeItem item) { if (const auto n = node(item); n && item != rootItem_ && !renamePending_) explorer_.rename(item, n->path.filename().native()); };
     explorer_.renameCommitted = [this](TreeItem item, const std::wstring& name) { renameFile(item, name); };
     explorer_.canOpenWithDefaultApp = [this](TreeItem item) { const auto n = node(item); return n && !n->directory && !n->unsupported && !root_.wsl(); };
@@ -944,8 +949,41 @@ void ProjectRuntime::Impl::updateLabel(TreeItem item) {
 }
 bool ProjectRuntime::Impl::canPasteImage(TreeItem item) const {
     const auto n = node(item ? item : rootItem_);
-    if (!n || n->unsupported || pastePending_ || renamePending_ || (n->directory && n->reparse)) return false;
+    if (!n || n->unsupported || pastePending_ || createPending_ || renamePending_ || (n->directory && n->reparse)) return false;
     return !root_.wsl() || (connected_ && provider_->state() == ConnectionState::Ready);
+}
+bool ProjectRuntime::Impl::canCreateItem(TreeItem item) const {
+    const auto n = node(item);
+    return n && n->directory && canPasteImage(item);
+}
+void ProjectRuntime::Impl::createItem(TreeItem parent, const std::wstring& name, bool directory) {
+    if (!canCreateItem(parent)) return;
+    const auto title = directory ? L"Poppy — New Folder" : L"Poppy — New File";
+    std::wstring error = L"Enter a valid Linux filename (no /, NUL, . or ..; at most 255 UTF-8 bytes).";
+    if (!(root_.wsl() ? validPosixName(utf8(name)) : validFileName(name, error))) {
+        MessageBoxW(window_, error.c_str(), title, MB_OK | MB_ICONWARNING); return;
+    }
+    const auto folder = node(parent)->path, destination = folder / name;
+    createPending_ = true; status(directory ? L"Creating folder…" : L"Creating file…");
+    const auto generation = generation_; const auto provider = provider_;
+    worker_->submit(L"create-item", [this, provider, folder, destination, directory, generation] {
+        std::wstring error;
+        try { error = directory ? provider->createDirectory(destination) : provider->createFile(destination, {}); }
+        catch (const std::exception& failure) { error = wide(failure.what()); }
+        worker_->complete([this, folder, destination, directory, generation, error] {
+            createPending_ = false; if (generation != generation_) return;
+            if (!error.empty()) {
+                status(L"Create failed");
+                MessageBoxW(window_, (destination.native() + L"\n\n" + error).c_str(), directory ? L"Poppy — New Folder" : L"Poppy — New File", MB_OK | MB_ICONWARNING); return;
+            }
+            pendingTreeSelection_ = destination;
+            for (const auto& pair : nodes_) if (const auto n = node(pair.second); n && pathKey(n->path) == pathKey(folder)) { explorer_.expand(pair.second, true); requestDirectory(pair.second); break; }
+            refresh();
+            if (!directory) openFile(destination);
+            status(L"Created " + destination.filename().native());
+            if (owner_ && owner_->changed) owner_->changed();
+        });
+    });
 }
 void ProjectRuntime::Impl::pasteImage(TreeItem item) {
     if (!canPasteImage(item)) return;
@@ -978,7 +1016,7 @@ void ProjectRuntime::Impl::pasteImage(TreeItem item) {
     });
 }
 void ProjectRuntime::Impl::renameFile(TreeItem item, const std::wstring& name) {
-    const auto n = node(item); if (!n || n->unsupported || item == rootItem_ || renamePending_ || pastePending_) return;
+    const auto n = node(item); if (!n || n->unsupported || item == rootItem_ || renamePending_ || pastePending_ || createPending_) return;
     if (root_.wsl() && (!connected_ || provider_->state() != ConnectionState::Ready)) { status(L"Reconnect WSL before renaming."); return; }
     std::wstring error = L"Enter a valid Linux filename (no /, NUL, . or ..; at most 255 UTF-8 bytes).";
     if (!(root_.wsl() ? validPosixName(utf8(name)) : validFileName(name, error))) { MessageBoxW(window_, error.c_str(), L"Poppy — Rename", MB_OK | MB_ICONWARNING); return; }
@@ -1805,7 +1843,7 @@ void ProjectRuntime::shutdown() {
     if (impl_->worker_) impl_->worker_->stop();
     impl_->terminal_.stop();
 }
-bool ProjectRuntime::canClose() { if (impl_->renamePending_ || impl_->pastePending_) { impl_->worker_->drain(); impl_->worker_->dispatch(); } impl_->saveTab(); for (size_t i = 0; i < impl_->tabs_.size(); ++i) if (!impl_->confirmTab(i)) return false; return true; }
+bool ProjectRuntime::canClose() { if (impl_->renamePending_ || impl_->pastePending_ || impl_->createPending_) { impl_->worker_->drain(); impl_->worker_->dispatch(); } impl_->saveTab(); for (size_t i = 0; i < impl_->tabs_.size(); ++i) if (!impl_->confirmTab(i)) return false; return true; }
 void ProjectRuntime::revalidate() { PostMessageW(window(), WM_APP+13, 0, 0); }
 void ProjectRuntime::initialize(const ResourceId& path, const ProjectSession& state, bool saved) { if (saved) impl_->initialState_ = state; impl_->openFolder(path); }
 void ProjectRuntime::activate(bool active) {
@@ -1851,7 +1889,7 @@ void ProjectRuntime::releaseDocument() {
 }
 HWND ProjectRuntime::window() const { return impl_->window_; }
 bool ProjectRuntime::ready() const { return !impl_->root_.empty(); }
-bool ProjectRuntime::hasUnsaved() const { return impl_->renamePending_ || impl_->pastePending_ || std::any_of(impl_->tabs_.begin(), impl_->tabs_.end(), [](const Tab& tab) { return tab.buffer && (tab.buffer->dirty() || tab.buffer->saving); }); }
+bool ProjectRuntime::hasUnsaved() const { return impl_->renamePending_ || impl_->pastePending_ || impl_->createPending_ || std::any_of(impl_->tabs_.begin(), impl_->tabs_.end(), [](const Tab& tab) { return tab.buffer && (tab.buffer->dirty() || tab.buffer->saving); }); }
 std::wstring ProjectRuntime::connectionDescription() const {
     if (!impl_->root_.wsl()) return {};
     return impl_->connecting_ ? L"Connecting" : impl_->connected_ && impl_->provider_->state() == ConnectionState::Ready ? L"Connected" : impl_->connectionError_.empty() && impl_->provider_->error().empty() ? L"Disconnected" : L"Unavailable";

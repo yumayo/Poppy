@@ -112,6 +112,13 @@ void Tree::rename(TreeItem id, const std::wstring& name) {
     const auto extension = item(id)->expandable ? std::wstring::npos : name.find_last_of(L'.');
     SendMessageW(rename_, EM_SETSEL, 0, extension == std::wstring::npos || extension == 0 ? -1 : static_cast<LPARAM>(extension)); SetFocus(rename_);
 }
+void Tree::createItem(TreeItem parent, bool directory) {
+    if (!createCommitted || !canCreate || !canCreate(parent)) return;
+    rename(parent, L"");
+    if (!rename_) return;
+    creating_ = true; creatingDirectory_ = directory;
+    SendMessageW(rename_, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(directory ? L"New folder name" : L"New file name"));
+}
 void Tree::layoutRename() {
     if (!rename_) return;
     const int index = row(renaming_); if (index < top_ || index >= top_ + page()) { finishRename(false); return; }
@@ -122,9 +129,13 @@ void Tree::layoutRename() {
 void Tree::finishRename(bool commit) {
     if (!rename_) return;
     const auto id = renaming_; const auto edit = std::exchange(rename_, nullptr); renaming_ = 0;
+    const bool creating = std::exchange(creating_, false), directory = creatingDirectory_;
     wchar_t name[256]{}; GetWindowTextW(edit, name, 256);
     const bool focus = GetFocus() == edit; DestroyWindow(edit); if (focus) SetFocus(window_);
-    if (commit && item(id) && renameCommitted) renameCommitted(id, name);
+    if (commit && item(id)) {
+        if (creating) { if (createCommitted) createCommitted(id, name, directory); }
+        else if (renameCommitted) renameCommitted(id, name);
+    }
 }
 LRESULT CALLBACK Tree::renameProcedure(HWND window, UINT message, WPARAM a, LPARAM b, UINT_PTR, DWORD_PTR data) {
     auto& self = *reinterpret_cast<Tree*>(data);
@@ -217,7 +228,7 @@ LRESULT Tree::handle(UINT m, WPARAM a, LPARAM b) {
         return DefWindowProcW(window_, m, a, b);
     case WM_SIZE: changed(); return 0;
     case WM_SHOWWINDOW:
-        if (!a) { trackingMouse_ = false; hover({-1, -1}); }
+        if (!a) { finishRename(false); trackingMouse_ = false; hover({-1, -1}); }
         return DefWindowProcW(window_, m, a, b);
     case WM_NOTIFY: {
         const auto header = reinterpret_cast<NMHDR*>(b);
@@ -230,21 +241,28 @@ LRESULT Tree::handle(UINT m, WPARAM a, LPARAM b) {
     }
     case WM_COMMAND: if (LOWORD(a) == 1002 && HIWORD(a) == EN_KILLFOCUS) finishRename(false); return 0;
     case WM_CONTEXTMENU: {
-        if (!renameRequested && !openWithDefaultAppRequested && !pasteImageRequested) return 0;
+        if (!renameRequested && !openWithDefaultAppRequested && !pasteImageRequested && !createCommitted) return 0;
         POINT screen{GET_X_LPARAM(b), GET_Y_LPARAM(b)}; auto id = selection();
         if (screen.x == -1 && screen.y == -1) { screen = {indent_, (row(id) - top_ + 1) * rowHeight_}; ClientToScreen(window_, &screen); }
         else { auto point = screen; ScreenToClient(window_, &point); id = hit(point.y); if (id) select(id, false); }
         if (!id && !pasteImageRequested) return 0;
         const bool canOpen = id && openWithDefaultAppRequested && (!canOpenWithDefaultApp || canOpenWithDefaultApp(id));
-        if (!renameRequested && !canOpen && !pasteImageRequested) return 0;
+        const bool create = id && createCommitted && canCreate && canCreate(id);
+        if (!renameRequested && !canOpen && !pasteImageRequested && !create) return 0;
         HMENU menu = CreatePopupMenu(); if (!menu) return 0;
+        if (create) {
+            AppendMenuW(menu, MF_STRING, 4, L"New File…");
+            AppendMenuW(menu, MF_STRING, 5, L"New Folder…");
+            AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+        }
         if (canOpen) AppendMenuW(menu, MF_STRING, 2, L"デフォルトのアプリケーションで開く");
         if (id && renameRequested) AppendMenuW(menu, MF_STRING | (canRename && !canRename(id) ? MF_GRAYED : 0), 1, L"Rename\tF2");
         if (pasteImageRequested) AppendMenuW(menu, MF_STRING | (canPasteImage && !canPasteImage(id) ? MF_GRAYED : 0), 3, L"Paste Image\tCtrl+V");
         const auto command = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, screen.x, screen.y, 0, window_, nullptr); DestroyMenu(menu);
         if (command == 3 && pasteImageRequested && (!canPasteImage || canPasteImage(id))) { pasteImageRequested(id); return 0; }
         if (!item(id)) return 0;
-        if (command == 2 && openWithDefaultAppRequested && (!canOpenWithDefaultApp || canOpenWithDefaultApp(id))) openWithDefaultAppRequested(id);
+        if (command == 4 || command == 5) createItem(id, command == 5);
+        else if (command == 2 && openWithDefaultAppRequested && (!canOpenWithDefaultApp || canOpenWithDefaultApp(id))) openWithDefaultAppRequested(id);
         else if (command == 1 && renameRequested && (!canRename || canRename(id))) renameRequested(id);
         return 0;
     }

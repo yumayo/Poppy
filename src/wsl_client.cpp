@@ -153,7 +153,7 @@ void Connection::ensure() {
         if (field(hello.metadata, "protocolVersion") != std::to_string(protocolVersion) || field(hello.metadata, "helperVersion") != helperVersion || field(hello.metadata, "architecture") != "x86_64") throw std::runtime_error("Unsupported WSL helper protocol, version or architecture");
         number(hello.metadata, "uid");
         const auto capabilities = ',' + field(hello.metadata, "capabilities") + ',';
-        for (const auto& capability : {"list", "read", "save", "create", "rename", "index", "git", "inotify", "terminal", "search"}) if (capabilities.find(',' + std::string(capability) + ',') == capabilities.npos) throw std::runtime_error("The WSL helper is missing a required capability");
+        for (const auto& capability : {"list", "read", "save", "create", "mkdir", "rename", "index", "git", "inotify", "terminal", "search"}) if (capabilities.find(',' + std::string(capability) + ',') == capabilities.npos) throw std::runtime_error("The WSL helper is missing a required capability");
         const auto homePath = field(hello.metadata, "home");
         { std::lock_guard<std::mutex> stateLock(mutex_); shell_ = field(hello.metadata, "shell"); uid_ = field(hello.metadata, "uid"); helperPath_ = field(hello.metadata, "executable"); }
         if (homePath.empty() || homePath[0] != '/' || shell_.empty() || shell_[0] != '/' || helperPath_.empty() || helperPath_[0] != '/' || homePath.find('\0') != homePath.npos || shell_.find('\0') != shell_.npos || helperPath_.find('\0') != helperPath_.npos) throw std::runtime_error("Invalid WSL handshake paths");
@@ -246,6 +246,7 @@ public:
             call("createFile", path, {{"size", std::to_string(bytes.size())}}, &bytes); return {};
         } catch (const std::exception& error) { return wide(error.what()); }
     }
+    std::wstring createDirectory(const ResourceId& path) override { try { call("createDirectory", path); return {}; } catch (const std::exception& error) { return wide(error.what()); } }
     std::wstring renameResource(const ResourceId& source, const ResourceId& destination) override { try { const auto info = call("stat", source); call("renameResource", source, {{"name", destination.filename().u8string()}, {"version", field(info.metadata, "version")}}); return {}; } catch (const std::exception& error) { return wide(error.what()); } }
     FileIndex indexFiles(const ResourceId& root, const std::function<bool()>& cancelled) override {
         FileIndex index;

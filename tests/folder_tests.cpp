@@ -516,6 +516,57 @@ void wrappingTabTests(const fs::path& executable) {
     checkRows(5);
     clickTab(app, 0); waitLines(viewer, 100); clickTab(app, 4); waitLines(viewer, 104);
 }
+void createItemTests(const fs::path& executable) {
+    Fixture fixture; fs::create_directory(fixture.root / L"collapsed 日本語"); writeFile(fixture.root / L"collapsed 日本語" / L"existing.txt");
+    Application app(executable, fixture.root); const auto tree = app.tree();
+    waitFor([&] { return send(tree, treeGetCount) == 2; }, "Creation fixture did not load");
+    const auto root = nextItem(tree, TreeRelation::Root), folder = nextItem(tree, TreeRelation::Child, root);
+    const auto start = [&](TreeItem parent, bool directory, const wchar_t* name) {
+        send(tree, treeSelect, parent);
+        check(PostMessageW(tree, WM_CONTEXTMENU, reinterpret_cast<WPARAM>(tree), MAKELPARAM(-1, -1)), "Cannot open folder context menu");
+        const auto menuOpen = [&] { GUITHREADINFO info{}; info.cbSize = sizeof(info); check(GetGUIThreadInfo(app.process.dwThreadId, &info), "Cannot inspect creation menu"); return (info.flags & GUI_INMENUMODE) != 0; };
+        waitFor(menuOpen, "Folder context menu did not open");
+        PostMessageW(tree, WM_KEYDOWN, VK_HOME, 0);
+        if (directory) PostMessageW(tree, WM_KEYDOWN, VK_DOWN, 0);
+        PostMessageW(tree, WM_KEYDOWN, VK_RETURN, 0);
+        waitFor([&] { return !menuOpen(); }, "Folder context menu did not close");
+        HWND edit = nullptr;
+        waitFor([&] { edit = FindWindowExW(tree, nullptr, L"EDIT", nullptr); return edit != nullptr; }, "Creation did not show the name input");
+        check(SetWindowTextW(edit, name), "Cannot enter new item name"); return edit;
+    };
+    const auto fail = [&](bool directory, const wchar_t* name) {
+        const auto edit = start(root, directory, name);
+        PostMessageW(edit, WM_KEYDOWN, VK_RETURN, 0);
+        HWND dialog = nullptr; std::pair<DWORD, HWND*> context{app.process.dwProcessId, &dialog};
+        waitFor([&] { EnumWindows([](HWND window, LPARAM data) -> BOOL {
+            auto& context = *reinterpret_cast<std::pair<DWORD, HWND*>*>(data); DWORD pid = 0; GetWindowThreadProcessId(window, &pid);
+            wchar_t type[32]{}; GetClassNameW(window, type, 32);
+            if (pid == context.first && std::wstring(type) == L"#32770") { *context.second = window; return FALSE; } return TRUE;
+        }, reinterpret_cast<LPARAM>(&context)); return dialog != nullptr; }, "Invalid creation did not report an error");
+        send(dialog, WM_COMMAND, IDOK);
+    };
+    auto edit = start(folder, false, L"新規 ファイル.txt"); send(edit, WM_KEYDOWN, VK_RETURN);
+    const auto created = fixture.root / L"collapsed 日本語" / L"新規 ファイル.txt";
+    waitFor([&] { return fs::is_regular_file(created); }, "New File did not create the file inside a collapsed folder");
+    check(fs::file_size(created) == 0, "New File did not create an empty file");
+    waitFor([&] { return expanded(tree, folder) && send(tree, treeGetCount) == 4; }, "Creation did not expand and refresh the parent");
+    check(nextItem(tree, TreeRelation::Parent, static_cast<TreeItem>(send(tree, treeGetSelection))) == folder, "Created file was not selected");
+    check(visibleTabCount(app) == 1, "Created file did not open in the editor");
+    edit = start(folder, true, L"空 フォルダー"); send(edit, WM_KEYDOWN, VK_RETURN);
+    waitFor([&] { return fs::is_directory(created.parent_path() / L"空 フォルダー") && send(tree, treeGetCount) == 5; }, "New Folder did not create and display a folder");
+    check(visibleTabCount(app) == 1, "Creating a folder opened a file tab");
+    edit = start(root, true, L"cancelled"); send(edit, WM_KEYDOWN, VK_ESCAPE);
+    check(!fs::exists(fixture.root / L"cancelled"), "Escape created a folder");
+    start(root, false, L"focus-cancelled.txt"); click(tree, 30, 10);
+    check(!FindWindowExW(tree, nullptr, L"EDIT", nullptr) && !fs::exists(fixture.root / L"focus-cancelled.txt"), "Focus loss created a file");
+    expand(tree, root, false);
+    edit = start(root, false, L"root.txt"); send(edit, WM_KEYDOWN, VK_RETURN);
+    waitFor([&] { return fs::exists(fixture.root / L"root.txt") && expanded(tree, root); }, "Cannot create inside a collapsed project root");
+    fail(false, L"root.txt"); fail(true, L"root.txt"); fail(false, L"collapsed 日本語"); fail(true, L"collapsed 日本語");
+    fail(false, L"../escape.txt"); fail(true, L"CON"); fail(false, L"");
+    check(fs::file_size(fixture.root / L"root.txt") == 0 && fs::is_directory(created.parent_path()) && fs::exists(created), "Creation collision changed an existing item");
+    check(visibleTabCount(app) == 2, "Failed or cancelled creation changed file tabs");
+}
 void pasteImageTests(const fs::path& executable) {
     Fixture fixture; fs::create_directory(fixture.root/L"images"); writeFile(fixture.root/L"images"/L"existing.txt");
     Application app(executable,fixture.root); const auto tree = app.tree();
@@ -1369,7 +1420,7 @@ int wmain(int argc, wchar_t** argv) {
         check(argc == 2, "Pass the path to Poppy.exe");
         SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         for (const auto test : {folderTests, sidebarTests, treeInteractionTests, tabTests, pinnedTabTests,
-                tabDragTests, wrappingTabDragTests, wrappingTabTests, renameTests, pasteImageTests, splitPaneTests, quickOpenTests, fullSearchTests, gitSidebarTests, gitAutoRefreshTests, branchSidebarTests, multiRepositoryTests, sessionTests, multiProjectTests, terminalBackspaceTests}) {
+                tabDragTests, wrappingTabDragTests, wrappingTabTests, renameTests, createItemTests, pasteImageTests, splitPaneTests, quickOpenTests, fullSearchTests, gitSidebarTests, gitAutoRefreshTests, branchSidebarTests, multiRepositoryTests, sessionTests, multiProjectTests, terminalBackspaceTests}) {
             Fixture appData; AppDataEnvironment environment(appData.root);
             test(fs::absolute(argv[1]));
         }
