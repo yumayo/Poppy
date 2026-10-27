@@ -83,6 +83,9 @@ std::vector<std::string> gitStageArguments(const GitStatusEntry& entry, bool sta
 std::vector<std::string> gitStageAllArguments() {
     return {"git.exe", "--literal-pathspecs", "--no-optional-locks", "add", "--all", "--"};
 }
+std::vector<std::string> gitUnstageAllArguments() {
+    return {"git.exe", "--literal-pathspecs", "--no-optional-locks", "reset", "--quiet", "--"};
+}
 std::string untrackedPatch(const std::string& path, std::string_view text) {
     std::string patch = "diff --git a/" + path + " b/" + path + "\nnew file mode 100644\n";
     if (text.find('\0') != text.npos) return patch + "Binary file (untracked)\n";

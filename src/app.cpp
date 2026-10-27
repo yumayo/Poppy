@@ -394,9 +394,12 @@ void ProjectRuntime::Impl::create() {
         const auto n = changes_.item(item);
         if (!n || n->data >= gitChangeNodes_.size()) return L"";
         const auto& node = gitChangeNodes_[n->data];
-        return node.group && !node.staged && changes_.child(item) ? L"Stage All Changes" : L"";
+        return node.group && changes_.child(item) ? node.staged ? L"Unstage All Changes" : L"Stage All Changes" : L"";
     };
-    changes_.secondaryActionIcon = [](TreeItem) { return Renderer::Icon::StageChanges; };
+    changes_.secondaryActionIcon = [this](TreeItem item) {
+        const auto n = changes_.item(item);
+        return n && n->data < gitChangeNodes_.size() && gitChangeNodes_[n->data].staged ? Renderer::Icon::UnstageChanges : Renderer::Icon::StageChanges;
+    };
     changes_.secondaryActionClicked = [this](TreeItem item) { stageGitChanges(item, true); };
     changes_.expanded = [this](TreeItem item, bool value) {
         if (updatingGitFiles_) return;
@@ -729,12 +732,12 @@ void ProjectRuntime::Impl::stageGitChanges(TreeItem item, bool all) {
     if (node.repository >= git_->repositories.size()) return;
     const auto& repo = *git_->repositories[node.repository];
     if (!repo.error.empty()) return;
-    if (all) { if (!node.group || node.staged || !changes_.child(item)) return; }
+    if (all) { if (!node.group || !changes_.child(item)) return; }
     else if (node.directory || node.entry >= repo.entries.size()) return;
     const bool stage = !node.staged;
     std::vector<std::string> arguments;
     std::wstring name;
-    if (all) { arguments = gitStageAllArguments(); name = L"all changes in " + repositoryLabel(repo.root); }
+    if (all) { arguments = stage ? gitStageAllArguments() : gitUnstageAllArguments(); name = L"all changes in " + repositoryLabel(repo.root); }
     else {
         const auto& entry = repo.entries[node.entry];
         arguments = gitStageArguments({entry.path.lexically_relative(repo.root).generic_u8string(), entry.previousPath, entry.index, entry.worktree}, stage);

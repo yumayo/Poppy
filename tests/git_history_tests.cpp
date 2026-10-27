@@ -141,6 +141,14 @@ void multipleRepositories() {
     const auto clientStatus = parseGitStatus(git(client, {"status", "--porcelain=v1", "-z"}));
     check(clientStatus.size() == 2 && std::all_of(clientStatus.begin(), clientStatus.end(), [](const GitStatusEntry& entry) { return entry.staged() && !entry.changed(); }) &&
           !parseGitStatus(git(server, {"status", "--porcelain=v1", "-z"}))[0].staged(), "Stage All Changes missed client changes or staged a sibling repository");
+    git(server, gitStageAllArguments());
+    const auto serverIndex = git(server, {"ls-files", "--stage", "-z"});
+    git(client, gitUnstageAllArguments());
+    git(client, {"diff", "--cached", "--quiet"});
+    check(git(server, {"ls-files", "--stage", "-z"}) == serverIndex &&
+          parseGitStatus(git(server, {"status", "--porcelain=v1", "-z"}))[0].staged() &&
+          fixture.readFile("app/app-client/same.txt") == "client change\n" && fixture.readFile("app/app-client/new 日本語.txt") == "client addition\n",
+          "Unstage All Changes changed a sibling index or the selected repository's working files");
     fixture.git({"diff", "--cached", "--quiet"});
     const auto worktree = app / "worktree 日本語";
     git(client, {"worktree", "add", "--quiet", "--detach", worktree.string()});
@@ -230,6 +238,55 @@ void repositoryStageAll() {
           !fs::exists(repo.path / "deleted.txt") && !fs::exists(repo.path / "rename source.txt"), "Stage All Changes modified working files");
     repo.git({"diff", "--quiet"});
     repo.git(gitStageAllArguments());
+}
+void repositoryUnstageAll() {
+    Repository repo;
+    repo.git({"init", "--quiet", "--template=", "--initial-branch=main"});
+    repo.git({"config", "user.name", "Poppy Test"}); repo.git({"config", "user.email", "poppy@example.invalid"});
+    repo.git({"config", "core.autocrlf", "false"}); repo.git({"config", "commit.gpgsign", "false"});
+    repo.git({"config", "core.excludesFile", "/dev/null"});
+    repo.write(".gitignore", "ignored.txt\n"); repo.write("ignored.txt", "ignored\n");
+    for (const auto& path : {"src/日本語 [1].txt", "deleted.txt", "rename source.txt", "staged only.txt"}) repo.write(path, "initial\n");
+    repo.git(gitStageAllArguments());
+    const auto branch = repo.git({"symbolic-ref", "HEAD"});
+    repo.git(gitUnstageAllArguments());
+    auto entries = parseGitStatus(repo.git({"status", "--porcelain=v1", "-z", "--untracked-files=all"}));
+    check(repo.git({"ls-files", "--stage", "-z"}).empty() && entries.size() == 5 &&
+          std::all_of(entries.begin(), entries.end(), [](const GitStatusEntry& entry) { return entry.index == '?'; }) &&
+          repo.git({"symbolic-ref", "HEAD"}) == branch && repo.readFile("src/日本語 [1].txt") == "initial\n",
+          "Unstage All Changes before the first commit lost files or left entries staged");
+    repo.git(gitStageAllArguments()); repo.git({"commit", "-qm", "initial"});
+    const auto head = repo.hash(), committedIndex = repo.git({"ls-files", "--stage", "-z"});
+    repo.write("src/日本語 [1].txt", "staged\n"); repo.git({"add", "--", "src/日本語 [1].txt"});
+    repo.write("src/日本語 [1].txt", "working\n");
+    repo.write("staged only.txt", "already staged\n"); repo.git({"add", "--", "staged only.txt"});
+    fs::remove(repo.path / "deleted.txt"); repo.git({"add", "--", "deleted.txt"});
+    repo.git({"mv", "--", "rename source.txt", "renamed 日本語.txt"});
+    repo.write("nested/new [2].txt", "addition\n"); repo.git({"add", "--", "nested/new [2].txt"});
+    repo.write("untracked.txt", "untracked\n");
+    const auto workingFilesUnchanged = [&] {
+        return repo.readFile("src/日本語 [1].txt") == "working\n" && repo.readFile("staged only.txt") == "already staged\n" &&
+            repo.readFile("renamed 日本語.txt") == "initial\n" && repo.readFile("nested/new [2].txt") == "addition\n" &&
+            repo.readFile("untracked.txt") == "untracked\n" && repo.readFile("ignored.txt") == "ignored\n" &&
+            !fs::exists(repo.path / "deleted.txt") && !fs::exists(repo.path / "rename source.txt");
+    };
+    const auto index = repo.git({"ls-files", "--stage", "-z"});
+    repo.write(".git/index.lock", "busy\n");
+    bool failed = false;
+    try { repo.git(gitUnstageAllArguments()); } catch (const std::runtime_error&) { failed = true; }
+    fs::remove(repo.path / ".git/index.lock");
+    check(failed && repo.git({"ls-files", "--stage", "-z"}) == index && workingFilesUnchanged(),
+        "Unstage All Changes did not preserve the index and working files when the index was locked");
+    repo.git(gitUnstageAllArguments());
+    entries = parseGitStatus(repo.git({"status", "--porcelain=v1", "-z", "--untracked-files=all"}));
+    check(repo.git({"ls-files", "--stage", "-z"}) == committedIndex && entries.size() == 7 &&
+          std::all_of(entries.begin(), entries.end(), [](const GitStatusEntry& entry) { return !entry.staged() && entry.changed(); }) &&
+          repo.hash() == head && repo.git({"symbolic-ref", "HEAD"}) == branch && workingFilesUnchanged(),
+          "Unstage All Changes missed an index entry, moved HEAD or changed working files");
+    repo.git({"diff", "--cached", "--quiet"});
+    repo.git(gitUnstageAllArguments());
+    check(repo.git({"ls-files", "--stage", "-z"}) == committedIndex && workingFilesUnchanged(),
+        "Unstage All Changes changed files when the index was already clean");
 }
 void repositorySyntax() {
     Repository repo;
@@ -323,7 +380,7 @@ int main() {
     try {
         statusGroups(); records(); patchLists(); repositoryOwnership();
 #ifndef _WIN32
-        repositoryStaging(); repositoryStageAll(); repositorySyntax(); repositoryHistory(); multipleRepositories();
+        repositoryStaging(); repositoryStageAll(); repositoryUnstageAll(); repositorySyntax(); repositoryHistory(); multipleRepositories();
 #endif
         std::cout << "Git history tests passed.\n"; return 0;
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
