@@ -4,6 +4,7 @@
 #include "text.h"
 #include <algorithm>
 #include <chrono>
+#include <cerrno>
 #include <csignal>
 #include <deque>
 #include <filesystem>
@@ -13,6 +14,7 @@
 #include <poll.h>
 #include <set>
 #include <stdexcept>
+#include <system_error>
 #include <sys/stat.h>
 #include <sys/ioctl.h>
 #include <sys/wait.h>
@@ -29,7 +31,12 @@ struct Fixture {
     Fixture() { std::string name = (fs::current_path()/"Poppy WSL 日本語 ' $ XXXXXX").string(); const auto created = mkdtemp(name.data()); check(created != nullptr,"Cannot create helper fixture in the build directory"); root = created; }
     ~Fixture() { std::error_code error; fs::remove_all(root, error); }
 };
-void write(const fs::path& path, const std::string& bytes) { std::ofstream file(path, std::ios::binary); file.write(bytes.data(), static_cast<std::streamsize>(bytes.size())); check(static_cast<bool>(file), "Cannot write fixture"); }
+void write(const fs::path& path, const std::string& bytes) {
+    std::ofstream file(path, std::ios::binary);
+    if (!file) throw std::system_error(errno, std::generic_category(), "Cannot open fixture: " + path.string());
+    file.write(bytes.data(), static_cast<std::streamsize>(bytes.size())); file.close();
+    if (!file) throw std::system_error(errno ? errno : EIO, std::generic_category(), "Cannot write fixture: " + path.string());
+}
 std::string disk(const fs::path& path) { std::ifstream file(path, std::ios::binary); return std::string(std::istreambuf_iterator<char>(file), {}); }
 struct Result { Message metadata; std::vector<Message> entries; std::string bytes; bool last = false; };
 class Helper {
@@ -176,9 +183,17 @@ void installation(const std::string& executable) {
     { Helper helper(executable,userHome); helper.hello(); helper.eof(); }
     check(fs::exists(installed) && sha256(disk(installed)) == hash,"Bootstrap did not install the correct helper");
     const auto modified = fs::last_write_time(installed);
-    { Helper helper(executable,userHome); helper.hello(); helper.eof(); }
-    check(fs::last_write_time(installed) == modified,"Bootstrap failed to reuse a verified helper");
-    write(installed,"damaged helper");
+    {
+        Helper helper(executable,userHome); helper.hello();
+        check(fs::last_write_time(installed) == modified,"Bootstrap failed to reuse a verified helper");
+        // Linux rejects truncating an executable that is still mapped (ETXTBSY).
+        // Replace its directory entry instead, keeping this helper running to
+        // cover a damaged installation while another process uses the old inode.
+        const auto damaged = installed.parent_path()/"damaged-helper";
+        write(damaged,"damaged helper"); fs::permissions(damaged,fs::perms::owner_all);
+        fs::rename(damaged,installed);
+        helper.eof();
+    }
     { Helper helper(executable,userHome); helper.hello(); helper.eof(); }
     check(sha256(disk(installed)) == hash,"Bootstrap did not repair a checksum mismatch");
 }
