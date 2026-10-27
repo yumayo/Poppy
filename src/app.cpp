@@ -40,7 +40,7 @@ struct Node {
     bool unsupported = false; std::wstring label;
 };
 using DirectoryResult = ProviderListing;
-struct FileResult { std::shared_ptr<EditBuffer> buffer; std::shared_ptr<Document> document; std::wstring error; };
+struct FileResult { std::shared_ptr<EditBuffer> buffer; std::shared_ptr<Document> document; std::wstring error; std::shared_ptr<const ImagePreview> image; };
 struct Tab {
     ResourceId path; bool diff = false; Viewer::State fileView, diffView; bool pinned = false;
     std::shared_ptr<EditBuffer> buffer; int group = 0; bool displayed = false;
@@ -103,6 +103,11 @@ std::shared_ptr<FileResult> readDocument(ProjectProvider& provider, const Resour
     auto result = std::make_shared<FileResult>();
     auto file = provider.readFile(path);
     if (!file.error.empty()) { result->error = file.error; return result; }
+    if (isImageExtension(path.extension().native())) {
+        try { result->image = decodeImage(file.bytes); }
+        catch (const std::exception& error) { result->error = wide(error.what()); }
+        return result;
+    }
     auto bytes = std::move(file.bytes); auto buffer = std::make_shared<EditBuffer>(); auto document = std::shared_ptr<Document>(buffer, &buffer->document); std::string error;
     if (!decodeText(bytes, document->text, document->encoding, error)) { result->error = wide(error); return result; }
     if (static_cast<size_t>(std::count(document->text.begin(), document->text.end(), '\n')) >= maxLines) { result->error = L"This file exceeds the 1,000,000-line preview limit."; return result; }
@@ -1734,7 +1739,11 @@ void ProjectRuntime::Impl::loadTab(bool preserve, int group) {
             worker_->complete([this, group, result, path, serial, generation, preserve, state] {
                 if (generation != generation_ || serial != serial_[group]) return;
                 if (viewers_[group].buffer() && (viewers_[group].buffer()->dirty() || viewers_[group].buffer()->saving)) return;
-                if (result->document) {
+                if (result->image) {
+                    tabs_[groupTab(group)].buffer.reset();
+                    viewers_[group].showImage(result->image, path);
+                    status(std::to_wstring(result->image->width) + L" × " + std::to_wstring(result->image->height) + L" px  ·  READ ONLY  ·  F6: diff");
+                } else if (result->document) {
                     tabs_[groupTab(group)].buffer = result->buffer;
                     viewers_[group].edit(result->buffer, path, preserve); if (!preserve) viewers_[group].restore(state);
                     status(std::to_wstring(result->document->lines.size()) + L" lines  ·  Ctrl+S: save  ·  F6: diff");

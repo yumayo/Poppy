@@ -191,7 +191,29 @@ void Renderer::setDpi(UINT dpi) {
     // targets at 96 DPI avoids scaling it twice on per-monitor DPI changes.
 }
 void Renderer::discard() {
+    imageBitmap_.reset();
     brush_.reset(); target_ = nullptr; windowTarget_.reset(); bitmapTarget_.reset(); bitmap_ = nullptr;
+}
+void Renderer::setImage(std::shared_ptr<const ImagePreview> image) {
+    imageBitmap_.reset(); image_ = std::move(image);
+}
+bool Renderer::drawImage(const RECT& bounds, int checkerSize) {
+    if (!image_) return false;
+    if (empty(bounds)) return true;
+    if (!imageBitmap_) {
+        const auto properties = D2D1::BitmapProperties(D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED), 96.0f, 96.0f);
+        if (FAILED(target_->CreateBitmap(D2D1::SizeU(image_->width, image_->height), image_->pixels.data(), image_->width * 4, properties, imageBitmap_.put()))) return false;
+    }
+    const auto placement = fitImage(image_->width, image_->height, bounds.right - bounds.left, bounds.bottom - bounds.top);
+    const RECT destination{bounds.left + placement.x, bounds.top + placement.y,
+        bounds.left + placement.x + placement.width, bounds.top + placement.y + placement.height};
+    fill(destination, RGB(48, 53, 62));
+    const int tile = std::max(1, checkerSize);
+    for (int y = 0; y < placement.height; y += tile) for (int x = 0; x < placement.width; x += tile)
+        if ((x / tile + y / tile) % 2 == 0) fill({destination.left + x, destination.top + y,
+            destination.left + std::min(x + tile, placement.width), destination.top + std::min(y + tile, placement.height)}, RGB(68, 74, 84));
+    target_->DrawBitmap(imageBitmap_.get(), rectangle(destination), 1.0f, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+    return true;
 }
 bool Renderer::prepare(HRESULT result) {
     if (SUCCEEDED(result) && !brush_) result = target_->CreateSolidColorBrush(D2D1::ColorF(0.0f, 0.0f, 0.0f), brush_.put());

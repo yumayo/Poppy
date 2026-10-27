@@ -17,6 +17,7 @@ public:
     void setDpi(UINT dpi);
     void show(std::shared_ptr<const Document> document, const ResourceId& path, bool preserve = false);
     void edit(std::shared_ptr<EditBuffer> buffer, const ResourceId& path, bool preserve = false);
+    void showImage(std::shared_ptr<const ImagePreview> image, const ResourceId& path);
     std::shared_ptr<EditBuffer> buffer() const { return edit_; }
     std::function<void()> changed, save, focused, diffLayoutChanged;
     void showDiff(std::shared_ptr<const DiffDocument> document, const ResourceId& path, bool preserve = false, std::wstring title = {});
@@ -29,7 +30,7 @@ public:
     State state() const;
     void restore(const State& state);
     size_t documentBytes() const;
-    bool hasDocument() const { return document_ != nullptr; }
+    bool hasDocument() const { return document_ != nullptr || image_ != nullptr; }
     void find();
     void findNext(bool backwards = false);
     bool findKey(const MSG& message);
@@ -79,6 +80,7 @@ private:
     static constexpr UINT_PTR findTimer = 0x5057;
     bool caretVisible_ = false;
     std::shared_ptr<const Document> document_;
+    std::shared_ptr<const ImagePreview> image_;
     std::shared_ptr<EditBuffer> edit_;
     wchar_t highSurrogate_ = 0;
     std::shared_ptr<const DiffDocument> diff_;

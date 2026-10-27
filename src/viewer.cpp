@@ -31,6 +31,7 @@ void Viewer::setDpi(UINT dpi) {
     scrollbars(); findLayout(); caretPosition(); InvalidateRect(window_, nullptr, FALSE);
 }
 void Viewer::show(std::shared_ptr<const Document> d, const ResourceId& path, bool preserve) {
+    image_.reset(); renderer_.setImage({});
     const auto previous = preserve && document_ ? std::optional<State>(state()) : std::nullopt;
     edit_.reset(); highSurrogate_ = 0;
     diffLayout_ = {}; layoutDirty_ = true; caretTrailing_ = false;
@@ -45,6 +46,7 @@ void Viewer::edit(std::shared_ptr<EditBuffer> buffer, const ResourceId& path, bo
     edit_ = std::move(buffer); caretPosition();
 }
 void Viewer::showDiff(std::shared_ptr<const DiffDocument> d, const ResourceId& path, bool preserve, std::wstring title) {
+    image_.reset(); renderer_.setImage({});
     const auto previous = preserve && document_ ? std::optional<State>(state()) : std::nullopt;
     edit_.reset(); highSurrogate_ = 0;
     textLayout_ = {}; layoutDirty_ = true; caretTrailing_ = false;
@@ -56,11 +58,17 @@ void Viewer::showDiff(std::shared_ptr<const DiffDocument> d, const ResourceId& p
     if (previous) restore(*previous);
 }
 void Viewer::message(const std::wstring& text, const ResourceId& path) {
+    image_.reset(); renderer_.setImage({});
     findBar_.close(); KillTimer(window_, findTimer); search_.query("");
     edit_.reset(); highSurrogate_ = 0;
     textLayout_ = {}; diffLayout_ = {}; layoutDirty_ = true; caretTrailing_ = false;
     diff_.reset(); document_.reset(); path_ = path; title_.clear(); message_ = text; top_ = left_ = 0; anchor_ = caret_ = 0; after_ = false;
     scrollbars(); caretPosition(); InvalidateRect(window_, nullptr, FALSE);
+}
+void Viewer::showImage(std::shared_ptr<const ImagePreview> image, const ResourceId& path) {
+    message(L"", path);
+    image_ = std::move(image); renderer_.setImage(image_);
+    InvalidateRect(window_, nullptr, FALSE);
 }
 Viewer::State Viewer::state() const {
     if (wrapping() && diff_ && diffLayout_.rows()) {
@@ -399,9 +407,15 @@ void Viewer::paint() {
             dc.fill(button, inlineView == inlineView_ ? rgb(50, 70, 94) : background);
             dc.label(button, inlineView ? L"Inline" : L"Split", inlineView == inlineView_ ? foreground : muted, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
         }
-    } else dc.label(tag, document_ ? wide(document_->encoding) + (edit_ ? edit_->dirty() ? L"  ·  Modified" : L"  ·  Ctrl+S" : L"  ·  READ ONLY") : L"", muted, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+    } else dc.label(tag, image_ ? std::to_wstring(image_->width) + L" × " + std::to_wstring(image_->height) : document_ ? wide(document_->encoding) + (edit_ ? edit_->dirty() ? L"  ·  Modified" : L"  ·  Ctrl+S" : L"  ·  READ ONLY") : L"", muted, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
     dc.fill({0, header_ - 1, r.right, header_}, border);
-    if (!document_) {
+    if (image_) {
+        dc.fill({0, header_, r.right, r.bottom}, background);
+        const int margin = std::max(1, header_ / 3);
+        const RECT bounds{margin, header_ + margin, r.right - margin, r.bottom - margin};
+        if (!dc.drawImage(bounds, std::max(1, header_ / 4)))
+            dc.label(bounds, L"Image cannot be rendered on this device.", muted, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    } else if (!document_) {
         dc.fill({0, header_, r.right, r.bottom}, background);
         RECT text{32, header_ + 48, std::max<LONG>(32, r.right - 32), r.bottom};
         dc.label(text, message_, muted, DT_LEFT | DT_TOP | DT_WORDBREAK);
@@ -539,6 +553,7 @@ LRESULT Viewer::handle(UINT m, WPARAM a, LPARAM b) {
         return 0;
     case WM_DESTROY: KillTimer(window_, caretTimer); KillTimer(window_, findTimer); return 0;
     case WM_SETCURSOR:
+        if (image_ && LOWORD(b) == HTCLIENT) { SetCursor(LoadCursorW(nullptr, IDC_ARROW)); return TRUE; }
         if (diff_ && LOWORD(b) == HTCLIENT) {
             POINT point{}; GetCursorPos(&point); ScreenToClient(window_, &point);
             for (const bool inlineView : {false, true}) {
@@ -551,6 +566,7 @@ LRESULT Viewer::handle(UINT m, WPARAM a, LPARAM b) {
     case WM_LBUTTONDOWN: {
         SetFocus(window_);
         const POINT point{GET_X_LPARAM(b), GET_Y_LPARAM(b)};
+        if (image_) return 0;
         if (diff_) for (const bool inlineView : {false, true}) {
             const auto button = layoutButton(inlineView);
             if (PtInRect(&button, point)) { setDiffLayout(inlineView); return 0; }
@@ -625,6 +641,7 @@ LRESULT Viewer::handle(UINT m, WPARAM a, LPARAM b) {
         }
         break;
     case WM_CONTEXTMENU: {
+        if (image_) return 0;
         revealFind_ = false;
         HMENU menu = CreatePopupMenu(); AppendMenuW(menu, MF_STRING | (anchor_ == caret_ ? MF_GRAYED : 0), 1, L"Copy\tCtrl+C"); AppendMenuW(menu, MF_STRING, 2, L"Select all\tCtrl+A");
         if (edit_) { AppendMenuW(menu, MF_STRING, 3, L"Cut\tCtrl+X"); AppendMenuW(menu, MF_STRING, 4, L"Paste\tCtrl+V"); AppendMenuW(menu, MF_STRING, 5, L"Undo\tCtrl+Z"); AppendMenuW(menu, MF_STRING, 6, L"Redo\tCtrl+Y"); AppendMenuW(menu, MF_STRING, 7, L"Save\tCtrl+S"); }
@@ -643,5 +660,6 @@ LRESULT Viewer::handle(UINT m, WPARAM a, LPARAM b) {
 size_t poppy::Viewer::documentBytes() const {
     size_t bytes = textLayout_.bytes() + diffLayout_.bytes() + (document_ ? document_->text.capacity() + document_->lines.capacity() * sizeof(uint32_t) + document_->states.capacity() * sizeof(LexState) : 0);
     if (diff_) bytes += diff_->rows.capacity() * sizeof(DiffRow) + diff_->inlineOrder.capacity() * sizeof(uint32_t);
+    if (image_) bytes += image_->pixels.capacity() * 2; // CPU pixels and the device bitmap.
     return bytes;
 }
