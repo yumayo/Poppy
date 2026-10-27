@@ -100,6 +100,14 @@ std::vector<std::string> gitStashUnstagedArguments(const std::vector<GitStatusEn
     return {"git.exe", "--no-optional-locks", "-c", "submodule.recurse=false",
         "stash", "push", "--keep-index", "--include-untracked", "--message", "Poppy: unstaged changes", "--"};
 }
+std::vector<std::string> gitStashStagedArguments(const std::vector<GitStatusEntry>& entries) {
+    if (std::any_of(entries.begin(), entries.end(), [](const GitStatusEntry& entry) { return entry.conflicted(); }))
+        throw std::invalid_argument("Resolve merge conflicts before stashing staged changes.");
+    if (std::none_of(entries.begin(), entries.end(), [](const GitStatusEntry& entry) { return entry.staged(); })) return {};
+    // Git's staged-stash reverse patch needs full object IDs for binary files.
+    return {"git.exe", "--no-optional-locks", "-c", "submodule.recurse=false", "-c", "core.abbrev=no",
+        "stash", "push", "--staged", "--message", "Poppy: staged changes", "--"};
+}
 std::vector<std::vector<std::string>> gitDiscardAllArguments(const std::vector<GitStatusEntry>& entries) {
     if (std::any_of(entries.begin(), entries.end(), [](const GitStatusEntry& entry) { return entry.conflicted(); }))
         throw std::invalid_argument("Resolve merge conflicts before discarding all changes.");

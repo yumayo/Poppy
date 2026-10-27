@@ -112,6 +112,10 @@ struct Repository {
         const auto args = gitStashUnstagedArguments(parseGitStatus(git({"status", "--porcelain=v1", "-z", "--untracked-files=all"})));
         if (!args.empty()) git(args);
     }
+    void stashStaged() const {
+        const auto args = gitStashStagedArguments(parseGitStatus(git({"status", "--porcelain=v1", "-z", "--untracked-files=all"})));
+        if (!args.empty()) git(args);
+    }
 };
 void multipleRepositories() {
     Repository fixture;
@@ -167,6 +171,12 @@ void multipleRepositories() {
     check(fixture.readFile("app/app-client/same.txt") == "initial\n" &&
           fixture.readFile("app/app-server/same.txt") == "server working change\n" && git(server, {"ls-files", "--stage", "-z"}) == serverIndex &&
           git(server, {"stash", "list"}).empty(), "Stash Unstaged Changes affected a sibling repository");
+    fixture.write("app/app-client/same.txt", "stash staged client\n"); git(client, {"add", "same.txt"});
+    git(client, gitStashStagedArguments(parseGitStatus(git(client, {"status", "--porcelain=v1", "-z"}))));
+    git(client, {"diff", "--cached", "--quiet"});
+    check(fixture.readFile("app/app-client/same.txt") == "initial\n" &&
+          fixture.readFile("app/app-server/same.txt") == "server working change\n" && git(server, {"ls-files", "--stage", "-z"}) == serverIndex &&
+          git(server, {"stash", "list"}).empty(), "Stash Staged Changes affected a sibling repository");
     fixture.git({"diff", "--cached", "--quiet"});
     const auto worktree = app / "worktree 日本語";
     git(client, {"worktree", "add", "--quiet", "--detach", worktree.string()});
@@ -455,6 +465,72 @@ void repositoryStashUnstaged() {
           repo.readFile(untracked) == "untracked\n" && repo.git({"rev-parse", "refs/stash"}) == stash,
           "Stashing with conflicts changed files, the index or an existing stash");
 }
+void repositoryStashStaged() {
+    Repository repo;
+    repo.git({"init", "--quiet", "--template=", "--initial-branch=main"});
+    repo.git({"config", "user.name", "Poppy Test"}); repo.git({"config", "user.email", "poppy@example.invalid"});
+    repo.git({"config", "core.autocrlf", "false"}); repo.git({"config", "commit.gpgsign", "false"});
+    repo.git({"config", "core.excludesFile", "/dev/null"});
+    const std::string name = "partial 日本語 [1]'\n.txt", middle = "\n2\n3\n4\n5\n6\n7\n8\n9\n10\n11\n12\n";
+    const std::string original = "initial" + middle + "last\n", staged = "staged" + middle + "last\n";
+    repo.write(name, original); repo.git({"add", "."});
+    auto index = repo.git({"ls-files", "--stage", "-z"});
+    bool failed = false;
+    try { repo.stashStaged(); } catch (const std::runtime_error&) { failed = true; }
+    check(failed && repo.git({"ls-files", "--stage", "-z"}) == index && repo.readFile(name) == original && repo.git({"stash", "list"}).empty(),
+          "Stashing staged changes before the first commit modified files or the index");
+    repo.write(".gitignore", "ignored.txt\n");
+    for (const auto& file : {"deleted.txt", "rename source.txt", "unstaged.txt"}) repo.write(file, "initial\n");
+    repo.git({"add", "."}); repo.git({"commit", "-qm", "baseline"});
+    const auto head = repo.hash();
+    repo.write(name, staged); repo.write("added.txt", "added\n");
+    const std::string binary("\0\1\2", 3); repo.write("binary.dat", binary);
+    repo.git({"add", "."}); repo.git({"rm", "--", "deleted.txt"}); repo.git({"mv", "--", "rename source.txt", "renamed.txt"});
+    index = repo.git({"ls-files", "--stage", "-z"});
+    repo.write(name, "staged" + middle + "working\n"); repo.write("unstaged.txt", "working only\n");
+    repo.write("untracked.txt", "untracked\n"); repo.write("ignored.txt", "keep\n");
+    repo.git({"config", "core.abbrev", "4"});
+    repo.write(".git/index.lock", "locked\n"); failed = false;
+    try { repo.stashStaged(); } catch (const std::runtime_error&) { failed = true; }
+    fs::remove(repo.path / ".git/index.lock");
+    check(failed && repo.git({"ls-files", "--stage", "-z"}) == index && repo.git({"stash", "list"}).empty() &&
+          repo.readFile(name) == "staged" + middle + "working\n", "A locked index allowed staged stash to change files");
+    repo.stashStaged();
+    repo.git({"diff", "--cached", "--quiet"});
+    check(repo.hash() == head && repo.readFile(name) == "initial" + middle + "working\n" &&
+          repo.readFile("unstaged.txt") == "working only\n" && repo.readFile("untracked.txt") == "untracked\n" && repo.readFile("ignored.txt") == "keep\n" &&
+          !fs::exists(repo.path / "added.txt") && !fs::exists(repo.path / "binary.dat") && !fs::exists(repo.path / "renamed.txt") &&
+          repo.readFile("deleted.txt") == "initial\n" && repo.readFile("rename source.txt") == "initial\n",
+          "Stash Staged Changes retained index changes, moved HEAD or lost unstaged/untracked/ignored content");
+    repo.git({"diff", "--quiet", "stash@{0}^2", "stash@{0}", "--"});
+    check(repo.git({"show", "stash@{0}:" + name}) == staged && repo.git({"show", "stash@{0}:added.txt"}) == "added\n" &&
+          repo.git({"show", "stash@{0}:binary.dat"}) == binary && repo.git({"log", "-1", "--format=%s", "refs/stash"}).find("Poppy: staged changes") != std::string::npos,
+          "Staged stash did not save exactly the staged content and message");
+    const auto stash = repo.git({"rev-parse", "refs/stash"});
+    repo.stashStaged();
+    check(repo.git({"rev-parse", "refs/stash"}) == stash, "An unstaged-only worktree created a staged stash");
+    repo.git({"restore", "--worktree", "--", "."}); repo.git({"stash", "apply", "--index"});
+    check(repo.git({"ls-files", "--stage", "-z"}) == index && repo.readFile(name) == staged && repo.readFile("binary.dat") == binary &&
+          repo.readFile("renamed.txt") == "initial\n" && !fs::exists(repo.path / "deleted.txt"), "Staged stash could not restore the original index and files");
+    repo.git({"restore", "--source=HEAD", "--staged", "--worktree", "--", "."});
+    // Native --staged saves the stash first, then refuses to remove overlapping
+    // changes. The error must leave both the original index and working file.
+    repo.write(name, "overlap staged\n"); repo.git(gitStageArguments({name, {}, ' ', 'M'}, true)); repo.write(name, "overlap working\n");
+    index = repo.git({"ls-files", "--stage", "-z"}); failed = false;
+    try { repo.stashStaged(); } catch (const std::runtime_error&) { failed = true; }
+    check(failed && repo.git({"ls-files", "--stage", "-z"}) == index && repo.readFile(name) == "overlap working\n" &&
+          repo.git({"show", "stash@{0}:" + name}) == "overlap staged\n" && repo.readFile("untracked.txt") == "untracked\n",
+          "Overlapping changes were lost when Git could not remove the staged changes");
+    const auto saved = repo.git({"rev-parse", "refs/stash"});
+    repo.git({"restore", "--source=HEAD", "--staged", "--worktree", "--", "."});
+    repo.git({"checkout", "-qb", "topic"}); repo.write("deleted.txt", "topic\n"); repo.git({"add", "."}); repo.git({"commit", "-qm", "topic"});
+    repo.git({"checkout", "-q", "main"}); repo.write("deleted.txt", "main\n"); repo.git({"add", "."}); repo.git({"commit", "-qm", "main"});
+    try { repo.git({"merge", "topic"}); } catch (const std::runtime_error&) {}
+    const auto conflict = repo.readFile("deleted.txt"); index = repo.git({"ls-files", "--stage", "-z"}); failed = false;
+    try { repo.stashStaged(); } catch (const std::invalid_argument&) { failed = true; }
+    check(failed && repo.git({"ls-files", "--stage", "-z"}) == index && repo.readFile("deleted.txt") == conflict &&
+          repo.git({"rev-parse", "refs/stash"}) == saved, "Stashing staged changes with conflicts changed the index, files or stash");
+}
 void repositorySyntax() {
     Repository repo;
     repo.git({"init", "--quiet", "--template=", "--initial-branch=main"});
@@ -547,7 +623,7 @@ int main() {
     try {
         statusGroups(); records(); patchLists(); repositoryOwnership();
 #ifndef _WIN32
-        repositoryStaging(); repositoryStageAll(); repositoryUnstageAll(); repositoryDiscardAll(); repositoryStashUnstaged(); repositorySyntax(); repositoryHistory(); multipleRepositories();
+        repositoryStaging(); repositoryStageAll(); repositoryUnstageAll(); repositoryDiscardAll(); repositoryStashUnstaged(); repositoryStashStaged(); repositorySyntax(); repositoryHistory(); multipleRepositories();
 #endif
         std::cout << "Git history tests passed.\n"; return 0;
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
