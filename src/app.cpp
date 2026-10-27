@@ -238,6 +238,7 @@ private:
     void openContentResult(const ContentMatch& match, const std::string& query, bool matchCase);
     void applyContentResult(size_t index);
     void openWithDefaultApp(ResourceId path);
+    void revealInFileExplorer(ResourceId path);
     void saveTab();
     bool saveFile(size_t index, bool wait = false);
     bool confirmTab(size_t index);
@@ -364,6 +365,8 @@ void ProjectRuntime::Impl::create() {
     explorer_.renameCommitted = [this](TreeItem item, const std::wstring& name) { renameFile(item, name); };
     explorer_.canOpenWithDefaultApp = [this](TreeItem item) { const auto n = node(item); return n && !n->directory && !n->unsupported && !root_.wsl(); };
     explorer_.openWithDefaultAppRequested = [this](TreeItem item) { if (const auto n = node(item); n && !n->directory) openWithDefaultApp(n->path); };
+    explorer_.canRevealInFileExplorer = [this](TreeItem item) { const auto n = node(item); return n && !n->unsupported; };
+    explorer_.revealInFileExplorerRequested = [this](TreeItem item) { if (const auto n = node(item)) revealInFileExplorer(n->path); };
     explorer_.canPasteImage = [this](TreeItem item) { return canPasteImage(item) && clipboardHasImage(); };
     explorer_.pasteImageRequested = [this](TreeItem item) { pasteImage(item); };
     changes_.activated = [this](TreeItem item) { openGitFile(item); };
@@ -916,7 +919,29 @@ void ProjectRuntime::Impl::openWithDefaultApp(ResourceId resource) {
     execute.hwnd = window_; execute.lpFile = path.c_str(); execute.lpDirectory = directory.c_str(); execute.nShow = SW_SHOWNORMAL;
     if (!ShellExecuteExW(&execute)) {
         const auto error = winError();
-        MessageBoxW(window_, (path.native() + L"\n\n" + error).c_str(), L"Poppy — デフォルトのアプリケーションで開く", MB_OK | MB_ICONWARNING);
+        MessageBoxW(window_, (path.native() + L"\n\n" + error).c_str(), L"Poppy — Open with Default Application", MB_OK | MB_ICONWARNING);
+    }
+}
+void ProjectRuntime::Impl::revealInFileExplorer(ResourceId resource) {
+    if (resource.empty()) return;
+    auto path = resource.native();
+    if (resource.wsl()) {
+        // A POSIX backslash is part of a name, not a UNC path separator.
+        if (!resource.is_absolute() || path.find(L'\\') != path.npos) {
+            MessageBoxW(window_, L"This WSL path cannot be represented in File Explorer.", L"Poppy — Reveal in File Explorer", MB_OK | MB_ICONWARNING);
+            return;
+        }
+        std::replace(path.begin(), path.end(), L'/', L'\\');
+        path = L"\\\\wsl.localhost\\" + wide(resource.location().distro) + path;
+    }
+    PIDLIST_ABSOLUTE item = nullptr;
+    auto result = SHParseDisplayName(path.c_str(), nullptr, &item, 0, nullptr);
+    // Let the Windows shell open explorer.exe and select the item without
+    // passing filenames through Explorer's command-line parser.
+    if (SUCCEEDED(result)) result = SHOpenFolderAndSelectItems(item, 0, nullptr, 0);
+    CoTaskMemFree(item);
+    if (FAILED(result)) {
+        MessageBoxW(window_, (path + L"\n\n" + winError(static_cast<DWORD>(result))).c_str(), L"Poppy — Reveal in File Explorer", MB_OK | MB_ICONWARNING);
     }
 }
 void ProjectRuntime::Impl::status(std::wstring message) { status_ = std::move(message); RECT r{}; GetClientRect(window_, &r); r.top = r.bottom - footer_; InvalidateRect(window_, &r, FALSE); }
@@ -1493,7 +1518,10 @@ void ProjectRuntime::Impl::tabMenu(POINT screen) {
     HMENU menu = CreatePopupMenu();
     if (!menu) return;
     AppendMenuW(menu, MF_STRING, 1, pinned ? L"Unpin tab" : L"Pin tab");
-    if (!tabs_[index].allChanges && tabs_[index].diffKind != GitDiffKind::Commit) AppendMenuW(menu, MF_STRING, 3, L"デフォルトのアプリケーションで開く");
+    if (!tabs_[index].allChanges && tabs_[index].diffKind != GitDiffKind::Commit) {
+        AppendMenuW(menu, MF_STRING, 4, L"Reveal in File Explorer");
+        AppendMenuW(menu, MF_STRING, 3, L"Open with Default Application");
+    }
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING | (pinned ? MF_GRAYED : 0), 2, L"Close tab");
     const UINT command = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, screen.x, screen.y, 0, window_, nullptr);
@@ -1504,6 +1532,7 @@ void ProjectRuntime::Impl::tabMenu(POINT screen) {
         if (command == 1) toggleTabPin(index);
         else if (command == 2) closeTab(index);
         else if (command == 3) openWithDefaultApp(path);
+        else if (command == 4) revealInFileExplorer(path);
     }
 }
 void ProjectRuntime::Impl::loadTab(bool preserve, int group) {

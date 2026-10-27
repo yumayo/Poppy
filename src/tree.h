@@ -42,6 +42,8 @@ public:
     std::function<void(TreeItem, const std::wstring&)> renameCommitted;
     std::function<bool(TreeItem)> canOpenWithDefaultApp;
     std::function<void(TreeItem)> openWithDefaultAppRequested;
+    std::function<bool(TreeItem)> canRevealInFileExplorer;
+    std::function<void(TreeItem)> revealInFileExplorerRequested;
     std::function<bool(TreeItem)> canPasteImage;
     std::function<void(TreeItem)> pasteImageRequested;
     std::function<void(TreeItem)> activated;
