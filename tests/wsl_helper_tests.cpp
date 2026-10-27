@@ -147,6 +147,9 @@ void repositories(const std::string& executable) {
         auto result = helper.call("git", directory, std::move(message));
         check(number(result.metadata, "exitCode") == 0, result.bytes.c_str()); return result.bytes;
     };
+    git(fixture.root, {"init", "--quiet", "--template=", "--initial-branch=main"});
+    write(fixture.root / "unrelated.txt", "outside the opened folder\n");
+    check(helper.call("gitRepositories", app).entries.empty(), "WSL discovery included an ancestor repository");
     for (const auto& directory : {client, server}) {
         git(directory, {"init", "--quiet", "--template=", "--initial-branch=main"});
         git(directory, {"config", "user.name", "Poppy Test"}); git(directory, {"config", "user.email", "poppy@example.invalid"});

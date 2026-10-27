@@ -114,7 +114,11 @@ std::shared_ptr<GitResult> readGit(ProjectProvider& provider, const ResourceId& 
     auto root = provider.git({L"git.exe", L"--no-optional-locks", L"rev-parse", L"--show-toplevel"}, directory, cancelled);
     if (root.code) { if (root.code != 128 || root.output.find("not a git repository") == std::string::npos) result->error = root.error; return result; }
     if (directory.wsl() && !validUtf8(root.output)) { result->error = L"The Git repository root is not a UTF-8 path."; return result; }
-    result->root = directory.at(utf8(trimmed(root.output)));
+    const auto repository = directory.at(utf8(trimmed(root.output)));
+    // A removed/invalid .git candidate must not make Git walk up to an
+    // unrelated parent worktree. Reject it before reading branch or status.
+    if (!directory.contains(repository)) return result;
+    result->root = repository;
     auto branch = provider.git({L"git.exe", L"--no-optional-locks", L"symbolic-ref", L"--short", L"-q", L"HEAD"}, result->root, cancelled);
     if (branch.code == 0) result->branch = trimmed(branch.output);
     else {
@@ -136,11 +140,10 @@ std::shared_ptr<GitResult> readGit(ProjectProvider& provider, const ResourceId& 
 }
 std::shared_ptr<GitWorkspace> readGitWorkspace(ProjectProvider& provider, const ResourceId& directory, const std::atomic<bool>* cancelled) {
     auto result = std::make_shared<GitWorkspace>();
-    auto enclosing = readGit(provider, directory, cancelled);
     auto scan = provider.gitRepositories(directory, [cancelled] { return cancelled && *cancelled; });
     result->warning = wide(scan.error); result->truncated = scan.truncated;
-    if (!enclosing->root.empty()) { result->repositories.push_back(enclosing); result->roots.push_back(enclosing->root); }
-    else result->error = enclosing->error;
+    // Only .git candidates in the opened folder belong to this workspace.
+    // Running Git in the folder itself can resolve an ancestor outside it.
     for (const auto& candidate : scan.roots) {
         if (cancelled && *cancelled) return result;
         if (std::any_of(result->roots.begin(), result->roots.end(), [&](const ResourceId& root) { return pathKey(root) == pathKey(candidate); })) continue;

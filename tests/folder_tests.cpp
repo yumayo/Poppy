@@ -1097,7 +1097,9 @@ void multiRepositoryTests(const fs::path& executable) {
     const auto length = SearchPathW(nullptr, L"git.exe", nullptr, MAX_PATH, git, nullptr);
     if (!length || length >= MAX_PATH) { std::cout << "Multi-repository GUI tests skipped: Git for Windows is not on PATH.\n"; return; }
     Fixture fixture;
-    const auto client = fixture.root / L"app-client", server = fixture.root / L"app-server";
+    const auto workspace = fixture.root / L"app";
+    fs::create_directory(workspace);
+    const auto client = workspace / L"app-client", server = workspace / L"app-server";
     fs::create_directory(client); fs::create_directory(server);
     const auto runGit = [&](const fs::path& directory, const std::wstring& args, DWORD expected = 0) {
         std::wstring command = L"\"" + std::wstring(git) + L"\" " + args;
@@ -1108,6 +1110,9 @@ void multiRepositoryTests(const fs::path& executable) {
         DWORD code = 1; GetExitCodeProcess(process.hProcess, &code); CloseHandle(process.hProcess);
         check(wait == WAIT_OBJECT_0 && code == expected, "Multi-repository Git fixture command failed");
     };
+    // Match a multi-repository folder inside an unrelated ancestor worktree.
+    runGit(fixture.root, L"init --quiet --template= --initial-branch=main");
+    writeLines(fixture.root / L"unrelated.txt", 1);
     for (const auto& directory : {client, server}) {
         runGit(directory, L"init --quiet --template= --initial-branch=main");
         runGit(directory, L"config user.name PoppyTest"); runGit(directory, L"config user.email poppy@example.invalid");
@@ -1124,12 +1129,14 @@ void multiRepositoryTests(const fs::path& executable) {
         return count;
     };
     {
-        Application app(executable, fixture.root); app.tree();
+        Application app(executable, workspace); app.tree();
         const auto changes = GetDlgItem(app.window, 4), branches = GetDlgItem(app.window, 6);
         const auto viewer = FindWindowExW(app.window, nullptr, L"PoppyViewer", nullptr);
         send(GetDlgItem(app.window, 3), BM_CLICK);
-        const auto roots = [&](HWND tree) { const auto first = nextItem(tree, TreeRelation::Root); return first && nextItem(tree, TreeRelation::Next, first); };
+        const auto roots = [&](HWND tree) { return children(tree, 0) == 2; };
         waitFor([&] { return IsWindowVisible(changes) && roots(changes); }, "Source Control did not discover sibling repositories");
+        wchar_t title[128]{}; GetWindowTextW(GetDlgItem(app.window, 3), title, 128);
+        check(std::wstring(title) == L"Source Control (4)", "The badge counted changes outside the opened folder");
         const auto group = [&](TreeItem repo, bool staged) { const auto first = nextItem(changes, TreeRelation::Child, repo); return staged ? first : nextItem(changes, TreeRelation::Next, first); };
         auto clientRepo = nextItem(changes, TreeRelation::Root), serverRepo = nextItem(changes, TreeRelation::Next, clientRepo);
         check(children(changes, clientRepo) == 2 && children(changes, serverRepo) == 2, "Repositories did not get independent change groups");
@@ -1161,7 +1168,7 @@ void multiRepositoryTests(const fs::path& executable) {
         }
     }
     {
-        Application app(executable, fixture.root); app.tree();
+        Application app(executable, workspace); app.tree();
         waitLines(FindWindowExW(app.window, nullptr, L"PoppyViewer", nullptr), 3);
     }
 }
