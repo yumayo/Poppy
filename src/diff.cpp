@@ -23,6 +23,18 @@ bool hunk(std::string_view text, uint32_t& before, uint32_t& beforeCount, uint32
     return take(text, "@@ -") && range(text, before, beforeCount) && take(text, " +") &&
         range(text, after, afterCount) && take(text, " @@");
 }
+Language headerLanguage(std::string_view path) {
+    // Git quotes paths containing control characters, quotes or backslashes.
+    // Only the ASCII filename suffix is needed; escaped directory names can stay encoded.
+    if (path.size() >= 2 && path.front() == '"' && path.back() == '"') {
+        path.remove_prefix(1); path.remove_suffix(1);
+    } else if (!path.empty() && path.back() == '\t') path.remove_suffix(1);
+    const auto slash = path.find_last_of('/');
+    if (slash != path.npos) path.remove_prefix(slash + 1);
+    if (path == "CMakeLists.txt") return Language::Config;
+    const auto dot = path.find_last_of('.');
+    return dot == path.npos || dot == 0 ? Language::Plain : languageFor(std::string(path.substr(dot)));
+}
 }
 std::string_view DiffDocument::line(DiffLine source) const {
     return source.number ? patch.line(source.row).substr(1) : std::string_view{};
@@ -111,10 +123,18 @@ void indexDiff(DiffDocument& d, bool fileHeadings) {
         removed.clear(); added.clear();
     };
     uint32_t before = 0, beforeCount = 0, after = 0, afterCount = 0;
+    Language beforeLanguage = Language::Plain, afterLanguage = Language::Plain;
+    LexState beforeState = LexState::Normal, afterState = LexState::Normal;
     for (size_t row = 0; row < d.patch.lines.size(); ++row) {
         const auto text = d.patch.line(row);
         if (text.substr(0, 11) == "diff --git ") {
             flush(); beforeCount = afterCount = 0;
+            beforeLanguage = afterLanguage = Language::Plain;
+            beforeState = afterState = LexState::Normal;
+        }
+        if (!beforeCount && !afterCount) {
+            if (text.substr(0, 4) == "--- ") { beforeLanguage = headerLanguage(text.substr(4)); continue; }
+            if (text.substr(0, 4) == "+++ ") { afterLanguage = headerLanguage(text.substr(4)); continue; }
         }
         if (fileHeadings && ((!beforeCount && !afterCount) &&
             (text.substr(0, 11) == "diff --git " || text.substr(0, 7) == "Binary " || text.substr(0, 9) == "old mode " ||
@@ -128,13 +148,23 @@ void indexDiff(DiffDocument& d, bool fileHeadings) {
         if (text.substr(0, 3) == "@@ ") {
             flush();
             if (!hunk(text, before, beforeCount, after, afterCount)) beforeCount = afterCount = 0;
+            // Omitted source lines may change the lexer state. Never carry a
+            // comment or string across a hunk boundary whose text is unavailable.
+            beforeState = afterState = LexState::Normal;
             continue;
         }
         if ((!beforeCount && !afterCount) || text.empty() || text.front() == '\\') continue;
-        const DiffLine oldLine{static_cast<uint32_t>(row), before}, newLine{static_cast<uint32_t>(row), after};
-        if (text.front() == '-' && beforeCount) { removed.push_back(oldLine); ++before; --beforeCount; }
-        else if (text.front() == '+' && afterCount) { added.push_back(newLine); ++after; --afterCount; }
-        else if (text.front() == ' ' && beforeCount && afterCount) {
+        const DiffLine oldLine{static_cast<uint32_t>(row), before, beforeLanguage, beforeState},
+            newLine{static_cast<uint32_t>(row), after, afterLanguage, afterState};
+        const auto source = text.substr(1);
+        if (text.front() == '-' && beforeCount) {
+            lexLine(source, beforeLanguage, beforeState);
+            removed.push_back(oldLine); ++before; --beforeCount;
+        } else if (text.front() == '+' && afterCount) {
+            lexLine(source, afterLanguage, afterState);
+            added.push_back(newLine); ++after; --afterCount;
+        } else if (text.front() == ' ' && beforeCount && afterCount) {
+            lexLine(source, beforeLanguage, beforeState); lexLine(source, afterLanguage, afterState);
             flush(); d.inlineOrder.push_back(static_cast<uint32_t>(d.rows.size() * 2));
             d.rows.push_back({oldLine, newLine, false}); ++before; ++after; --beforeCount; --afterCount;
         } else { flush(); beforeCount = afterCount = 0; }

@@ -4,7 +4,12 @@
 
 namespace poppy {
 // A zero line number is an empty cell on that side of the comparison.
-struct DiffLine { uint32_t row = 0, number = 0; };
+struct DiffLine {
+    uint32_t row = 0, number = 0;
+    Language language = Language::Plain;
+    // Lexer state at the start of this source line, independently for each side.
+    LexState state = LexState::Normal;
+};
 struct DiffRow { DiffLine before, after; bool changed = false; uint32_t heading = 0; };
 struct DiffDocument {
     Document patch;

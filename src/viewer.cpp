@@ -459,7 +459,8 @@ void Viewer::paint() {
                 const size_t lineOffset = diff_ ? diff_->offset(source) : document_->lines[logicalRow];
                 line = line.substr(0, std::min(line.size(), maxLineColumns * 4));
                 tokens.clear();
-                if (!diff_) { LexState state = document_->states[logicalRow]; lexLine(line, document_->language, state, &tokens); }
+                LexState state = diff_ ? source.state : document_->states[logicalRow];
+                lexLine(line, diff_ ? source.language : document_->language, state, &tokens);
                 std::fill(cells.begin(), cells.end(), Cell{U' ', foreground, rowBackground, false});
                 const int firstColumn = wrapping() ? wrapped.column : left_;
                 int col = wrapping() ? wrapped.column : 0; size_t token = 0;

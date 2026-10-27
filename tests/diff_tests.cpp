@@ -1,14 +1,107 @@
 #include "diff.h"
 #include "diff_layout.h"
+#include "git_history.h"
 #include <cstdlib>
 #include <iostream>
 #include <stdexcept>
+#include <utility>
 
 using namespace poppy;
 namespace {
 void check(bool condition, const char* message) { if (!condition) throw std::runtime_error(message); }
 DiffDocument parse(std::string patch) {
     DiffDocument result; result.patch.text = std::move(patch); indexDiff(result); return result;
+}
+Style styleAt(const DiffDocument& diff, DiffLine source, size_t byte) {
+    auto state = source.state;
+    std::vector<Token> tokens;
+    lexLine(diff.line(source), source.language, state, &tokens);
+    for (const auto& token : tokens) if (token.begin <= byte && byte < token.end) return token.style;
+    return Style::Text;
+}
+void syntaxHighlighting() {
+    const auto diff = parse(
+        "diff --git a/file.CPP b/file.CPP\n--- a/file.CPP\n+++ b/file.CPP\n@@ -1,3 +1,4 @@\n"
+        " int unchanged = 1;\n-const char* value = \"before\"; // 古い\n"
+        "+const char* value = \"after\"; // 新しい\n+return 2;\n // tail\n");
+    for (const bool inlineView : {false, true}) for (size_t i = 0; i < diff.rowCount(inlineView); ++i) {
+        const auto row = diff.displayRow(i, inlineView);
+        for (const auto source : {row.before, row.after}) {
+            if (!source.number) continue;
+            const auto text = diff.line(source);
+            check(source.language == Language::CLike, "Every diff layout and side must retain its file's language");
+            if (text.substr(0, 2) == "//") check(styleAt(diff, source, 0) == Style::Comment, "Context comments lost their syntax style");
+            else check(styleAt(diff, source, 0) == Style::Keyword, "Diff prefixes must not shift keyword token offsets");
+            const auto quote = text.find('"'), comment = text.find("//"), digit = text.find_first_of("12");
+            if (quote != text.npos) check(styleAt(diff, source, quote + 1) == Style::String, "Changed strings lost their syntax style");
+            if (comment != text.npos) check(styleAt(diff, source, comment + 3) == Style::Comment, "UTF-8 comments lost their syntax style");
+            if (digit != text.npos) check(styleAt(diff, source, digit) == Style::Number, "Diff numbers lost their syntax style");
+        }
+    }
+    check(diff.selectedText(true, 0, diff.patch.text.size()) == "int unchanged = 1;\nconst char* value = \"after\"; // 新しい\nreturn 2;\n// tail\n",
+        "Syntax indexing must not alter copied source text");
+}
+void multilineSyntax() {
+    const auto diff = parse("--- a/file.cpp\n+++ b/file.cpp\n@@ -1,6 +1,6 @@\n"
+        " /* shared\n context\n-*/ int old = 1;\n+new comment\n int between = 2;\n-tail\n+*/ int fresh = 3;\n return 4;\n");
+    check(styleAt(diff, diff.rows[1].before, 0) == Style::Comment && styleAt(diff, diff.rows[1].after, 0) == Style::Comment,
+        "Multiline comments must continue on both sides");
+    check(styleAt(diff, diff.rows[2].before, 3) == Style::Keyword && styleAt(diff, diff.rows[2].after, 0) == Style::Comment,
+        "A removed comment terminator must affect only the original side");
+    check(styleAt(diff, diff.rows[3].before, 0) == Style::Keyword && styleAt(diff, diff.rows[3].after, 0) == Style::Comment,
+        "Shared context must retain independent before/after lexer states");
+    check(styleAt(diff, diff.rows[4].after, 3) == Style::Keyword && styleAt(diff, diff.rows[5].before, 0) == Style::Keyword &&
+        styleAt(diff, diff.rows[5].after, 0) == Style::Keyword, "Added comment terminators must restore subsequent keywords");
+    for (const auto& fixture : std::vector<std::pair<std::string, std::string>>{{"py", "\"\"\""}, {"ts", "`"}}) {
+        const auto strings = parse("--- a/file." + fixture.first + "\n+++ b/file." + fixture.first + "\n@@ -1,3 +1,3 @@\n-" +
+            fixture.second + "old\n+" + fixture.second + "new\n body\n " + fixture.second + "\n");
+        check(styleAt(strings, strings.rows[1].before, 0) == Style::String && styleAt(strings, strings.rows[1].after, 0) == Style::String,
+            "Python triple strings and C-like template literals must span diff lines");
+    }
+    const auto hunks = parse("--- a/file.cpp\n+++ b/file.cpp\n@@ -1 +1 @@\n-/* old\n+/* new\n"
+        "@@ -20 +20 @@\n-return 1;\n+return 2;\n");
+    check(styleAt(hunks, hunks.rows[1].before, 0) == Style::Keyword && styleAt(hunks, hunks.rows[1].after, 0) == Style::Keyword,
+        "Lexer state must not leak across omitted source ranges");
+}
+void syntaxLanguages() {
+    const std::vector<std::pair<std::string, Language>> files{
+        {"src/日本語.CPP", Language::CLike}, {"src/with spaces.py\t", Language::Python},
+        {"script.sh", Language::Shell}, {"data.json", Language::Json}, {"config.yaml", Language::Config},
+        {"dir/CMakeLists.txt", Language::Config}, {"unknown.xyz", Language::Plain}, {"no-extension", Language::Plain}, {".py", Language::Plain},
+        {"\"dir/quoted\\\"name.py\"", Language::Python}, {"\"dir/escaped\\tname.cpp\"", Language::CLike},
+        {"\"dir/\\346\\227\\245\\346\\234\\254.py\"", Language::Python}};
+    for (const auto& file : files) {
+        const auto diff = parse("--- " + file.first + "\n+++ " + file.first + "\n@@ -1 +1 @@\n-return \"日本語\" + 41\n+return \"日本語\" + 42\n");
+        const auto row = diff.rows[0];
+        for (const auto source : {row.before, row.after}) {
+            check(source.language == file.second, "Diff language detection lost a supported suffix or a quoted filename");
+            const auto text = diff.line(source);
+            const bool plain = file.second == Language::Plain;
+            check(styleAt(diff, source, 0) == (plain ? Style::Text : Style::Keyword) &&
+                styleAt(diff, source, 8) == (plain ? Style::Text : Style::String) &&
+                styleAt(diff, source, text.size() - 1) == (plain ? Style::Text : Style::Number),
+                "Diff languages must use the same token styles as normal documents");
+        }
+    }
+    const auto added = parse(untrackedPatch("new.py", "return 42\n"));
+    check(added.rows[0].after.language == Language::Python && styleAt(added, added.rows[0].after, 0) == Style::Keyword,
+        "Untracked files in All Changes must use their source language");
+    const auto deleted = parse("--- a/deleted.py\n+++ /dev/null\n@@ -1 +0,0 @@\n-return 42\n");
+    check(deleted.rows[0].before.language == Language::Python && styleAt(deleted, deleted.rows[0].before, 0) == Style::Keyword,
+        "Deleted files must use the original path rather than /dev/null");
+    auto combined = parse("diff --git a/one.cpp b/one.cpp\n--- a/one.cpp\n+++ b/one.cpp\n@@ -1 +1 @@\n-/* old\n+/* new\n" +
+        untrackedPatch("two.py", "return 42\n") + "diff --git a/plain b/plain\n@@ -1 +1 @@\n-before\n+after\n");
+    for (const bool headings : {false, true}) {
+        indexDiff(combined, headings);
+        for (const auto& row : combined.rows) {
+            if (combined.line(row.after) == "return 42") check(row.after.language == Language::Python && styleAt(combined, row.after, 0) == Style::Keyword,
+                "All Changes must reset the language and multiline state for each file");
+            if (combined.line(row.after) == "after") check(row.after.language == Language::Plain && row.after.state == LexState::Normal,
+                "A file without source headers must not inherit the preceding file's language");
+        }
+    }
+    combined.patch.text = "@@ -1 +1 @@\n-return 1\n+return 2\n"; indexDiff(combined);
+    check(styleAt(combined, combined.rows[0].after, 0) == Style::Text, "Reindexing retained a previous file's syntax metadata");
 }
 void alignment() {
     const auto diff = parse(
@@ -185,6 +278,6 @@ void wrapping() {
 }
 }
 int main() {
-    try { alignment(); additionsAndDeletions(); inlineLayout(); edgeCases(); viewPositions(); wrapping(); std::cout << "Diff tests passed.\n"; return EXIT_SUCCESS; }
+    try { syntaxHighlighting(); multilineSyntax(); syntaxLanguages(); alignment(); additionsAndDeletions(); inlineLayout(); edgeCases(); viewPositions(); wrapping(); std::cout << "Diff tests passed.\n"; return EXIT_SUCCESS; }
     catch (const std::exception& error) { std::cerr << error.what() << '\n'; return EXIT_FAILURE; }
 }

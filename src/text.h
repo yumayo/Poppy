@@ -5,7 +5,7 @@
 #include <vector>
 
 namespace poppy {
-enum class Language { Plain, CLike, Python, Shell, Json, Config, Diff };
+enum class Language : uint8_t { Plain, CLike, Python, Shell, Json, Config, Diff };
 enum class Style : uint8_t { Text, Keyword, String, Comment, Number, Removed };
 enum class LexState : uint8_t { Normal, BlockComment, TripleSingle, TripleDouble, Backtick };
 struct Token { size_t begin, end; Style style; };
