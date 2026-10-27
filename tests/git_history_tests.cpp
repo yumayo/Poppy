@@ -9,6 +9,7 @@
 #include <iterator>
 #include <set>
 #include <stdexcept>
+#include <utility>
 #ifndef _WIN32
 #include <sys/wait.h>
 #include <unistd.h>
@@ -188,6 +189,42 @@ void repositoryStaging() {
     check(!entry(file).staged() && entry(file).worktree == 'D' && entry(renamed).index == '?' &&
         !fs::exists(repo.path / file) && repo.readFile(renamed) == "initial\n", "Unstaging a rename left its source staged or changed working files");
 }
+void repositorySyntax() {
+    Repository repo;
+    repo.git({"init", "--quiet", "--template=", "--initial-branch=main"});
+    repo.git({"config", "user.name", "Poppy Test"}); repo.git({"config", "user.email", "poppy@example.invalid"});
+    repo.git({"config", "core.autocrlf", "false"}); repo.git({"config", "commit.gpgsign", "false"});
+    const std::vector<std::pair<std::string, Language>> files{
+        {"src/日本語.CPP", Language::CLike}, {"src/with spaces.py", Language::Python},
+        {"src/quoted\"name.py", Language::Python}, {"src/tab\tname.py", Language::Python},
+        {"dir/CMakeLists.txt", Language::Config}};
+    std::vector<std::string> add{"add", "--"};
+    for (const auto& file : files) add.push_back(file.first);
+    for (const auto& file : files) repo.write(file.first, "return 1\n");
+    repo.git(add); repo.git({"commit", "-qm", "syntax baseline"});
+    const auto revision = repo.hash();
+    for (const auto& file : files) repo.write(file.first, "return 2\n");
+    repo.git(add);
+    for (const auto& file : files) repo.write(file.first, "return 3\n");
+    for (const auto kind : {GitDiffKind::Changes, GitDiffKind::Staged, GitDiffKind::Commit}) {
+        for (const auto& file : files) {
+            DiffDocument diff;
+            diff.patch.text = repo.git(gitDiffArguments(kind, revision, file.first));
+            indexDiff(diff, true);
+            size_t sources = 0;
+            for (const auto& row : diff.rows) for (const auto source : {row.before, row.after}) {
+                if (!source.number) continue;
+                ++sources;
+                check(source.language == file.second, "Real Git patch headers lost a language or a quoted path suffix");
+                auto state = source.state; std::vector<Token> tokens;
+                lexLine(diff.line(source), source.language, state, &tokens);
+                check(!tokens.empty() && tokens.front().begin == 0 && tokens.front().style == Style::Keyword && tokens.back().style == Style::Number,
+                    "Working, staged and historical diffs must highlight source tokens without patch prefixes");
+            }
+            check(sources == (kind == GitDiffKind::Commit ? 1 : 2), "Syntax fixture lost original or modified source lines");
+        }
+    }
+}
 void repositoryHistory() {
     Repository repo;
     repo.git({"init", "--quiet", "--template=", "--initial-branch=main"});
@@ -244,7 +281,7 @@ int main() {
     try {
         statusGroups(); records(); patchLists(); repositoryOwnership();
 #ifndef _WIN32
-        repositoryStaging(); repositoryHistory(); multipleRepositories();
+        repositoryStaging(); repositorySyntax(); repositoryHistory(); multipleRepositories();
 #endif
         std::cout << "Git history tests passed.\n"; return 0;
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
