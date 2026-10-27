@@ -37,6 +37,7 @@ public:
     std::vector<std::pair<TreeItem, uintptr_t>> eraseChildren(TreeItem parent);
     std::vector<std::pair<TreeItem, uintptr_t>> clear();
     void sort(TreeItem parent, const std::function<bool(uintptr_t, uintptr_t)>& compare);
+    bool reparent(TreeItem item, TreeItem parent);
 private:
     bool descendant(TreeItem item, TreeItem ancestor) const;
     void eraseSubtree(TreeItem item, std::vector<std::pair<TreeItem, uintptr_t>>& removed);

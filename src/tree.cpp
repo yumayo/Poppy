@@ -4,6 +4,7 @@
 #include <commctrl.h>
 
 namespace poppy {
+namespace { constexpr UINT_PTR dragTimer = 2; }
 void Tree::create(HWND parent, HINSTANCE instance, const wchar_t* title, int id) {
     WNDCLASSW cls{}; cls.lpfnWndProc = procedure; cls.hInstance = instance; cls.lpszClassName = treeClassName;
     cls.hCursor = LoadCursorW(nullptr, IDC_ARROW); cls.style = CS_DBLCLKS;
@@ -38,6 +39,7 @@ void Tree::label(TreeItem id, std::wstring text, COLORREF color) {
 }
 void Tree::release(const std::vector<std::pair<TreeItem, uintptr_t>>& items) {
     for (const auto& pair : items) {
+        if (drag_ && (pair.first == drag_->source || pair.first == drag_->target)) endDrag();
         if (pair.first == renaming_) finishRename(false);
         if (pair.first == hotItem_) hover({-1, -1});
         widths_.erase(pair.first); if (removed) removed(pair.second);
@@ -108,6 +110,7 @@ void Tree::layout() {
     InvalidateRect(window_, nullptr, FALSE);
 }
 void Tree::rename(TreeItem id, const std::wstring& name) {
+    endDrag();
     finishRename(false); if (!item(id)) return;
     select(id, false); renaming_ = id;
     rename_ = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", name.c_str(), WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
@@ -153,6 +156,47 @@ LRESULT CALLBACK Tree::renameProcedure(HWND window, UINT message, WPARAM a, LPAR
     return DefSubclassProc(window, message, a, b);
 }
 void Tree::scroll(int vertical, int horizontal) { top_ += vertical; left_ += horizontal; changed(); }
+void Tree::updateDrag(POINT point) {
+    if (!drag_) return;
+    auto& drag = *drag_; drag.point = point;
+    if (!drag.active) {
+        if (std::abs(point.x - drag.origin.x) < GetSystemMetricsForDpi(SM_CXDRAG, dpi_) &&
+            std::abs(point.y - drag.origin.y) < GetSystemMetricsForDpi(SM_CYDRAG, dpi_)) return;
+        drag.active = true; SendMessageW(actionTips_, TTM_POP, 0, 0);
+        SetTimer(window_, dragTimer, 80, nullptr);
+    }
+    const auto content = Scrollbars::contentRect(window_);
+    auto target = PtInRect(&content, point) ? hit(point.y) : 0;
+    // Empty space below the rows belongs to the project root.
+    if (!target && PtInRect(&content, point)) target = child();
+    if (!canDrag || !canDrag(drag.source) || !canDrop || !canDrop(drag.source, target)) target = 0;
+    if (target != drag.target) { drag.target = target; drag.hoverTime = GetTickCount64(); }
+    SetCursor(LoadCursorW(nullptr, target ? IDC_SIZEALL : IDC_NO));
+    InvalidateRect(window_, nullptr, FALSE);
+}
+void Tree::tickDrag() {
+    if (!drag_ || !drag_->active) return;
+    const auto point = drag_->point; const auto content = Scrollbars::contentRect(window_);
+    if (PtInRect(&content, point)) {
+        const int edge = std::min(rowHeight_, static_cast<int>(content.bottom) / 3);
+        if (point.y < edge) scroll(-1);
+        else if (point.y >= content.bottom - edge) scroll(1);
+    }
+    updateDrag(point);
+    if (!drag_ || !drag_->target || GetTickCount64() - drag_->hoverTime < 600) return;
+    const auto target = drag_->target; const auto node = item(target);
+    if (node && !node->expanded) { expand(target, true); updateDrag(point); }
+}
+void Tree::endDrag(bool drop) {
+    if (!drag_) return;
+    const auto drag = *drag_; drag_.reset(); KillTimer(window_, dragTimer);
+    if (GetCapture() == window_) ReleaseCapture();
+    SetCursor(LoadCursorW(nullptr, IDC_ARROW)); InvalidateRect(window_, nullptr, FALSE);
+    if (!drop || !item(drag.source)) return;
+    if (!drag.active) { select(drag.source); return; }
+    if (drag.target && canDrag && canDrag(drag.source) && canDrop && canDrop(drag.source, drag.target) && moveCommitted)
+        moveCommitted(drag.source, drag.target);
+}
 const std::function<std::wstring(TreeItem)>& Tree::actionLabelFor(unsigned slot) const {
     return slot == 3 ? quaternaryActionLabel : slot == 2 ? tertiaryActionLabel : slot == 1 ? secondaryActionLabel : actionLabel;
 }
@@ -198,6 +242,10 @@ void Tree::paint() {
             renderer_.fill({0, y, r.right, y + rowHeight_}, focus ? RGB(50, 70, 94) : RGB(40, 47, 58));
             if (focus) renderer_.fill({0, y, MulDiv(2, dpi_, 96), y + rowHeight_}, accent);
         }
+        if (drag_ && drag_->active && drag_->target == row.item) {
+            renderer_.fill({0, y, r.right, y + rowHeight_}, RGB(50, 70, 94));
+            renderer_.fill({0, y, MulDiv(3, dpi_, 96), y + rowHeight_}, accent);
+        }
         if (node->expandable) {
             const float cx = static_cast<float>(x + indent_ / 2), cy = static_cast<float>(y + rowHeight_ / 2);
             const float stroke = static_cast<float>(std::max(1, MulDiv(1, dpi_, 96)));
@@ -232,6 +280,15 @@ LRESULT CALLBACK Tree::procedure(HWND w, UINT m, WPARAM a, LPARAM b) {
     return self ? self->handle(m, a, b) : DefWindowProcW(w, m, a, b);
 }
 LRESULT Tree::handle(UINT m, WPARAM a, LPARAM b) {
+    // A file drag owns capture; scrollbar hit testing must not consume its release.
+    if (drag_) {
+        if (m == WM_SETCURSOR && drag_->active) { SetCursor(LoadCursorW(nullptr, drag_->target ? IDC_SIZEALL : IDC_NO)); return TRUE; }
+        if (m == WM_MOUSEMOVE) { updateDrag({GET_X_LPARAM(b), GET_Y_LPARAM(b)}); return 0; }
+        if (m == WM_LBUTTONUP) { if (drag_->active) updateDrag({GET_X_LPARAM(b), GET_Y_LPARAM(b)}); endDrag(true); return 0; }
+        if (m == WM_CANCELMODE || m == WM_CAPTURECHANGED || m == WM_KILLFOCUS || m == WM_RBUTTONDOWN || m == WM_DESTROY ||
+            (m == WM_KEYDOWN && a == VK_ESCAPE)) { endDrag(); if (m == WM_KEYDOWN) return 0; }
+        if (m == WM_KEYDOWN || m == WM_CHAR || m == WM_CONTEXTMENU) return 0;
+    }
     if (m == WM_MOUSEMOVE) {
         if (!trackingMouse_) { TRACKMOUSEEVENT track{sizeof(track), TME_LEAVE, window_, 0}; TrackMouseEvent(&track); trackingMouse_ = true; }
         hover({GET_X_LPARAM(b), GET_Y_LPARAM(b)});
@@ -239,6 +296,7 @@ LRESULT Tree::handle(UINT m, WPARAM a, LPARAM b) {
     LRESULT result = 0;
     if (scrollbars_.handle(window_, m, a, b, result)) return result;
     switch (m) {
+    case WM_TIMER: if (a == dragTimer) tickDrag(); return 0;
     case WM_PAINT: paint(); return 0;
     case WM_ERASEBKGND: return 1;
     case WM_SETCURSOR:
@@ -253,7 +311,7 @@ LRESULT Tree::handle(UINT m, WPARAM a, LPARAM b) {
         return DefWindowProcW(window_, m, a, b);
     case WM_SIZE: changed(); return 0;
     case WM_SHOWWINDOW:
-        if (!a) { finishRename(false); trackingMouse_ = false; hover({-1, -1}); }
+        if (!a) { endDrag(); finishRename(false); trackingMouse_ = false; hover({-1, -1}); }
         return DefWindowProcW(window_, m, a, b);
     case WM_NOTIFY: {
         const auto header = reinterpret_cast<NMHDR*>(b);
@@ -315,7 +373,11 @@ LRESULT Tree::handle(UINT m, WPARAM a, LPARAM b) {
         const auto& row = model_.visible()[static_cast<size_t>(this->row(id))];
         const int x = GET_X_LPARAM(b) + left_, edge = static_cast<int>(row.depth) * indent_;
         if (item(id)->expandable && x >= edge && x < edge + indent_) expand(id, !item(id)->expanded);
-        else select(id);
+        else if (canDrag && canDrag(id)) {
+            select(id, false);
+            drag_ = Drag{id, 0, {GET_X_LPARAM(b), GET_Y_LPARAM(b)}, {GET_X_LPARAM(b), GET_Y_LPARAM(b)}};
+            SetCapture(window_);
+        } else select(id);
         return 0;
     }
     case WM_LBUTTONDBLCLK: {

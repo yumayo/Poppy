@@ -195,6 +195,46 @@ void files(const std::string& executable) {
     write(fixture.root/"notify","external update"); check(helper.event(),"inotify did not request a refresh");
     helper.eof();
 }
+void moving(const std::string& executable) {
+    Fixture fixture;
+    const auto source = fixture.root / "source", target = fixture.root / "target 日本語";
+    fs::create_directories(source / "folder" / "nested"); fs::create_directory(target);
+    const std::string name = "file 日本語 \\ '$.txt", bytes = "unsaved baseline\r\n";
+    write(source / name, bytes); write(target / name, "collision");
+    write(source / "folder" / "nested" / "child.txt", "child");
+    Helper helper(executable); helper.hello(); helper.call("connect", fixture.root);
+    auto move = [&](const fs::path& from, const fs::path& parent, bool success = true, std::string expectedVersion = {}) {
+        if (expectedVersion.empty()) expectedVersion = version(helper.call("stat", from));
+        helper.call("renameResource", from, {{"name", from.filename().string()}, {"parent", parent.string()}, {"version", expectedVersion}}, nullptr, success);
+    };
+    move(source / name, target, false);
+    check(disk(source / name) == bytes && disk(target / name) == "collision", "Move overwrote an existing file or removed its source");
+    fs::remove(target / name);
+    move(source / name, target, false, "stale-version");
+    move(source / name, fixture.root / "missing", false);
+    move(source / name, "relative", false);
+    const auto link = fixture.root / "target-link"; fs::create_directory_symlink(target, link);
+    move(source / name, link, false);
+    check(disk(source / name) == bytes && !fs::exists(target / name), "Failed move changed the source or followed a destination link");
+    chmod((source / name).c_str(), 0751);
+    move(source / name, target);
+    struct stat mode{}; stat((target / name).c_str(), &mode);
+    check(!fs::exists(source / name) && disk(target / name) == bytes && (mode.st_mode & 0777) == 0751,
+        "File move changed its name, bytes or permissions");
+    // The new version can be used to save after the path change.
+    const auto baseline = helper.call("readFile", target / name); const std::string edited = "edited after moving\n";
+    helper.call("saveFile", target / name, {{"version", version(baseline)}, {"size", std::to_string(edited.size())}}, &edited);
+    check(disk(target / name) == edited, "Cannot save a moved file");
+    move(source / "folder", source / "folder" / "nested", false);
+    fs::create_directory(target / "folder"); move(source / "folder", target, false);
+    check(disk(source / "folder" / "nested" / "child.txt") == "child" && fs::is_empty(target / "folder"),
+        "Folder collision or descendant move changed the source");
+    fs::remove(target / "folder"); move(source / "folder", target);
+    check(!fs::exists(source / "folder") && disk(target / "folder" / "nested" / "child.txt") == "child", "Folder move lost descendants");
+    move(target / "folder", fixture.root);
+    check(disk(fixture.root / "folder" / "nested" / "child.txt") == "child", "Cannot move a folder back to the project root");
+    helper.eof();
+}
 void repositories(const std::string& executable) {
     Fixture fixture;
     const auto app = fixture.root / "app", client = app / "app-client", server = app / "app-server";
@@ -392,6 +432,6 @@ void terminals(const std::string& executable) {
 }
 int main(int argc,char** argv) {
     signal(SIGPIPE,SIG_IGN);
-    try { check(argc == 2,"Expected helper executable argument"); const std::string executable = argv[1]; installation(executable); creation(executable); files(executable); repositories(executable); protocolFailures(executable); gitAndCancellation(executable); contentSearch(executable); terminals(executable); std::cout << "WSL helper integration tests passed\n"; }
+    try { check(argc == 2,"Expected helper executable argument"); const std::string executable = argv[1]; installation(executable); creation(executable); files(executable); moving(executable); repositories(executable); protocolFailures(executable); gitAndCancellation(executable); contentSearch(executable); terminals(executable); std::cout << "WSL helper integration tests passed\n"; }
     catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
 }

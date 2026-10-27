@@ -250,7 +250,14 @@ public:
         try { call("createDirectory", path, {{"allowExisting", allowExisting ? "1" : "0"}}); return {}; }
         catch (const std::exception& error) { return wide(error.what()); }
     }
-    std::wstring renameResource(const ResourceId& source, const ResourceId& destination) override { try { const auto info = call("stat", source); call("renameResource", source, {{"name", destination.filename().u8string()}, {"version", field(info.metadata, "version")}}); return {}; } catch (const std::exception& error) { return wide(error.what()); } }
+    std::wstring renameResource(const ResourceId& source, const ResourceId& destination) override {
+        try {
+            if (!source.sameAuthority(destination)) return L"Cannot move between WSL connections.";
+            const auto info = call("stat", source);
+            call("renameResource", source, {{"name", destination.filename().u8string()}, {"parent", destination.parent_path().u8string()}, {"version", field(info.metadata, "version")}});
+            return {};
+        } catch (const std::exception& error) { return wide(error.what()); }
+    }
     FileIndex indexFiles(const ResourceId& root, const std::function<bool()>& cancelled) override {
         FileIndex index;
         try { const auto response = call("indexFiles", root, {}, nullptr, cancelled, 60000); for (const auto& entry : response.entries) { const auto relative = root.at(field(entry, "path")).lexically_relative(root).u8string(); addIndexedFile(index, relative); } if (field(response.metadata, "truncated") == "1") index.error = "WSL file list reached its 200,000-file or 50,000-directory limit."; std::sort(index.files.begin(), index.files.end(), [](const IndexedFile& a, const IndexedFile& b) { return a.relative < b.relative; }); } catch (const std::exception& error) { index.error = error.what(); } return index;

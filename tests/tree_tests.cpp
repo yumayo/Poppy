@@ -78,6 +78,36 @@ void largeAndDeepTrees() {
     check(tree.selection() == top && tree.visible().size() == 1, "Deep-tree collapse failed");
     check(tree.erase(top).size() == 10000 && tree.size() == 0, "Deep-tree removal failed");
 }
+void movingSubtrees() {
+    TreeModel tree;
+    const auto root = tree.insert(0, L"root", true, 0, 0);
+    const auto source = tree.insert(root, L"source", true, 1, 0);
+    const auto target = tree.insert(root, L"target", true, 2, 0);
+    const auto first = tree.insert(source, L"first", false, 3, 0);
+    const auto directory = tree.insert(source, L"日本語 folder", true, 4, 0);
+    const auto last = tree.insert(source, L"last", false, 5, 0);
+    const auto nested = tree.insert(directory, L"nested.txt", false, 6, 0);
+    const auto existing = tree.insert(target, L"existing", false, 7, 0);
+    tree.expand(root, true); tree.expand(source, true); tree.expand(directory, true); tree.expand(target, true);
+    tree.select(nested);
+    check(!tree.reparent(root, target) && !tree.reparent(source, directory) && !tree.reparent(source, source) &&
+        !tree.reparent(directory, source) && !tree.reparent(directory, first) && !tree.reparent(99999, target) && !tree.reparent(directory, 99999),
+        "An invalid move changed the hierarchy");
+    check(tree.reparent(directory, target), "Could not move a folder to another parent");
+    check(tree.parent(directory) == target && tree.parent(nested) == directory && tree.selection() == nested &&
+        tree.get(directory)->expanded && tree.get(nested)->data == 6 && tree.size() == 8,
+        "Moving a folder lost its descendants, expansion, selection or data");
+    check(tree.child(source) == first && tree.next(first) == last && !tree.next(last) &&
+        tree.next(existing) == directory && !tree.next(directory), "Moving a middle sibling broke traversal");
+    check(tree.visible().size() == 8 && tree.visible().back().item == nested && tree.visible().back().depth == 3,
+        "Moving did not rebuild visible rows and depths");
+    check(tree.reparent(first, target) && tree.child(source) == last && tree.reparent(last, target) && !tree.child(source),
+        "Moving first and last siblings left stale links");
+    check(tree.reparent(directory, root) && tree.visible().back().item == nested && tree.visible().back().depth == 2,
+        "Moving to the root folder lost the subtree");
+    check(tree.erase(target).size() == 4 && tree.get(nested) && tree.selection() == nested,
+        "Removing the old parent removed a moved subtree");
+}
 void gitChangeLayouts() {
     const std::vector<std::wstring> paths{L"z.txt", L"src/z.cpp", L"src/nested/same.cpp", L"src/A.cpp",
         L"docs/same.cpp", L"docs/日本語 file.txt", L"a.txt"};
@@ -121,6 +151,6 @@ void gitChangeLayouts() {
 }
 }
 int main() {
-    try { hierarchy(); orderingAndRemoval(); largeAndDeepTrees(); gitChangeLayouts(); std::cout << "Tree model tests passed.\n"; return 0; }
+    try { hierarchy(); orderingAndRemoval(); largeAndDeepTrees(); movingSubtrees(); gitChangeLayouts(); std::cout << "Tree model tests passed.\n"; return 0; }
     catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
 }
