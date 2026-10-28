@@ -1,9 +1,14 @@
 #pragma once
 #include <array>
 #include <cstdint>
+#include <deque>
+#include <functional>
+#include <mutex>
 #include <optional>
+#include <set>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace poppy {
@@ -13,6 +18,21 @@ struct AiEvent {
     std::optional<AiState> state;
     bool onlyIfActive = false;
     std::optional<std::string> activity;
+};
+// Bounded in-process delivery from pipe readers to the UI. IDs live only as
+// long as their owning terminal; removing one also drops its queued events.
+class AiEventQueue {
+public:
+    explicit AiEventQueue(std::function<void()> notify = {}) : notify_(std::move(notify)) {}
+    void add(const std::string& id);
+    void remove(const std::string& id);
+    bool publish(const std::string& id, bool activity, std::string_view body);
+    std::vector<AiEvent> drain();
+private:
+    std::function<void()> notify_;
+    std::mutex mutex_;
+    std::set<std::string> ids_;
+    std::deque<AiEvent> events_;
 };
 enum class AiSource { None, Hook, Process };
 enum class AiConfidence { Unknown, Confirmed };

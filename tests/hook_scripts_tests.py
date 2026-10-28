@@ -5,10 +5,9 @@ import importlib.util
 import json
 import os
 from pathlib import Path
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import queue
 import shlex
-import shutil
+import socket
 import subprocess
 import tempfile
 import threading
@@ -27,40 +26,34 @@ def module(name):
 sender = module("poppy_status")
 
 
-@unittest.skipUnless(shutil.which("curl"), "Poppy's hook sender requires curl")
 class HookDeliveryTests(unittest.TestCase):
     def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix="poppy-hook-socket-")
+        self.addCleanup(self.temp.cleanup)
         self.requests = queue.Queue()
-        requests = self.requests
-
-        class Receiver(BaseHTTPRequestHandler):
-            def receive(self):
-                body = self.rfile.read(int(self.headers["Content-Length"]))
-                requests.put((self.command, self.path, json.loads(body)))
-                self.send_response(204)
-                self.end_headers()
-
-            do_POST = do_PUT = receive
-
-            def log_message(self, *_):
-                pass
-
-        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Receiver)
-        self.thread = threading.Thread(target=self.server.serve_forever, kwargs={"poll_interval": 0.05})
+        self.server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.filename = str(Path(self.temp.name) / "events.sock")
+        self.server.bind(self.filename); self.server.listen(4); self.server.settimeout(0.05)
+        self.stopping = threading.Event()
+        def receive():
+            while not self.stopping.is_set():
+                try:
+                    connection, _ = self.server.accept()
+                except socket.timeout:
+                    continue
+                with connection:
+                    connection.settimeout(2)
+                    with connection.makefile("rb") as stream:
+                        event = json.loads(stream.readline(16385))
+                    self.requests.put((event["type"], json.loads(event["body"])))
+                    connection.sendall(b"OK\n")
+        self.thread = threading.Thread(target=receive)
         self.thread.start()
-        self.environment = {
-            **os.environ,
-            "POPPY_EVENTS_URL": f"http://127.0.0.1:{self.server.server_port}/",
-            "POPPY_SESSION_ID": "0123456789abcdef0123456789abcdef",
-            "NO_PROXY": "127.0.0.1",
-            "no_proxy": "127.0.0.1",
-        }
-        self.environment.pop("AICONTAINER_EVENT_SOCKET", None)
+        self.environment = {**os.environ, "AICONTAINER_EVENT_SOCKET": self.filename}
 
     def tearDown(self):
-        self.server.shutdown()
-        self.thread.join()
-        self.server.server_close()
+        self.stopping.set(); self.thread.join(timeout=3); self.server.close()
+        self.assertFalse(self.thread.is_alive(), "Hook test receiver did not stop")
 
     def invoke(self, command, data, environment=None):
         subprocess.run(
@@ -79,16 +72,16 @@ class HookDeliveryTests(unittest.TestCase):
             transcript.write_text(json.dumps({
                 "type": "assistant", "message": {"role": "assistant", "content": "設定を確認しています。"},
             }), encoding="utf-8")
-            for name, data, method, endpoint, payload in (
-                ("UserPromptSubmit", {}, "POST", "status", {"status": "running"}),
-                ("PostToolUse", {}, "POST", "status", {"status": "running", "onlyIfActive": True}),
-                ("PreToolUse", {"transcript_path": str(transcript)}, "PUT", "activity", {"activityText": "設定を確認しています。"}),
-                ("Stop", {"last_assistant_message": "完了しました。"}, "POST", "status", {"status": "completed", "activityText": "完了しました。"}),
+            for name, data, endpoint, payload in (
+                ("UserPromptSubmit", {}, "status", {"status": "running"}),
+                ("PostToolUse", {}, "status", {"status": "running", "onlyIfActive": True}),
+                ("PreToolUse", {"transcript_path": str(transcript)}, "activity", {"activityText": "設定を確認しています。"}),
+                ("Stop", {"last_assistant_message": "完了しました。"}, "status", {"status": "completed", "activityText": "完了しました。"}),
             ):
                 with self.subTest(tool=tool, event=name):
                     self.invoke(hooks[name][0]["hooks"][0]["command"], data)
                     self.assertEqual(self.requests.get(timeout=1), (
-                        method, f"/tasks/sessions/{self.environment['POPPY_SESSION_ID']}/{endpoint}", payload,
+                        endpoint, payload,
                     ))
 
     def test_codex_hooks_deliver_to_poppy(self):
@@ -97,14 +90,22 @@ class HookDeliveryTests(unittest.TestCase):
     def test_claude_hooks_deliver_to_poppy(self):
         self.check_tool("claude")
 
-    def test_missing_poppy_environment_does_not_send(self):
+    def test_missing_socket_does_not_send(self):
         command = shlex.join([sys.executable, str(SCRIPTS / "poppy_status.py"), "running"])
-        for name in ("POPPY_EVENTS_URL", "POPPY_SESSION_ID"):
-            with self.subTest(missing=name):
-                environment = self.environment.copy()
-                del environment[name]
-                self.invoke(command, {}, environment)
-                self.assertTrue(self.requests.empty())
+        environment = self.environment.copy()
+        del environment["AICONTAINER_EVENT_SOCKET"]
+        self.invoke(command, {}, environment)
+        self.assertTrue(self.requests.empty())
+
+    def test_retired_http_settings_do_not_enable_delivery(self):
+        environment = self.environment.copy()
+        del environment["AICONTAINER_EVENT_SOCKET"]
+        environment.update(POPPY_EVENTS_URL="http://127.0.0.1:1", POPPY_SESSION_ID="0" * 32)
+        result = subprocess.run([sys.executable, str(SCRIPTS / "poppy_status.py"), "running"],
+                                input="{}", text=True, env=environment, capture_output=True, timeout=3)
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout + result.stderr, "")
+        self.assertTrue(self.requests.empty())
 
 
 class SenderTests(unittest.TestCase):

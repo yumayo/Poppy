@@ -2,7 +2,7 @@
 
 WSLにDocker Engineをインストールし、普段どおり`aicontainer`で起動する構成に対応します。PoppyのWSLターミナルからなら、**`.aicontainer`への`POPPY_EVENTS_URL`・`POPPY_SESSION_ID`と、Poppy通知専用の`allow-ip`は不要です。** CLI別hookの導入は引き続き必要です。
 
-通知は`hook → マウントされたUnixソケット → WSLヘルパー → 匿名パイプ → Poppy`を通ります。通知用のHTTP通信はなく、通知先のセッションIDはPoppy側で保持します。対話ターミナルの標準入出力とファイル操作の接続には通知を混ぜません。wslc / WSL ContainersはPoppyのサポート対象外です。
+通知は`hook → マウントされたUnixソケット → WSLヘルパー → 匿名パイプ → Poppy`を通ります。Poppyは通知用のTCP/HTTPポートを開きません。通知先のセッションIDはPoppy側で保持します。対話ターミナルの標準入出力とファイル操作の接続には通知を混ぜません。wslc / WSL ContainersはPoppyのサポート対象外です。
 
 ## 起動と更新
 
@@ -21,7 +21,7 @@ PoppyはターミナルごとのUnixソケットをシェル起動前に開き�
 
 Poppy本体と同じ場所にリリースの`wsl/`フォルダーを配置してください。Poppy更新後はWSLターミナルも開き直します。ai-container側をコピーして利用している場合は、そのコピーも更新してください。Dockerデーモンは、起動元のWSLと同じソケットの実体を参照できる必要があります。リモートDockerへの転送は対象外です。
 
-「＋」の右クリックにある`New Codex (WSL)` / `New Claude Code (WSL)`はWSLへ直接インストールしたCLIを起動します。AIコンテナを使う場合は、通常のWSLシェルで上記の`aicontainer`コマンドを実行してください。
+WSLプロジェクトでは「＋」の右クリックにある`New Codex (ai-container)` / `New Claude Code (ai-container)`でも起動できます。WSLユーザーのBash起動設定から`aicontainer`を読み込み、通常と同じコンテナを起動します。Windowsプロジェクトでは通常のシェルだけを提供します。
 
 ## hookの導入・解除
 
@@ -45,11 +45,13 @@ python3 /path/to/ai/scripts/uninstall-hooks.py claude
 
 解除は`hooks/poppy/poppy_status.py`の通知コマンドだけを除去し、他のhookと設定を残します。
 
-## Windows上のCLIと従来のHTTP通知
+## 旧通知設定の削除
 
-Windows上のターミナルは、引き続きPoppyが自動設定する`POPPY_EVENTS_URL`・`POPPY_SESSION_ID`でHTTP通知できます。既定の受信口は`0.0.0.0:5010`、Windowsからの宛先は`http://127.0.0.1:5010`です。必要に応じて`POPPY_HOOK_BIND`・`POPPY_HOOK_PORT`・`POPPY_HOOK_HOST`で変更できます。
+HTTP通知とWindows上のCLI向け通知は廃止しました。`.aicontainer`に残っている`env=POPPY_EVENTS_URL=...`・`env=POPPY_SESSION_ID`と、Poppy通知のためだけに追加した`allow-ip`は削除できます。`POPPY_HOOK_BIND`・`POPPY_HOOK_PORT`・`POPPY_HOOK_HOST`も使用しません。
 
-ソケットが設定されていない起動経路では、既存のHTTP通知も使用できます。その場合のみ、コンテナから到達できるWindowsのIPv4、通信許可、通知IDの引き継ぎが必要です。ソケットが設定されていればHTTP設定より優先し、送信失敗時にHTTPへ再送しません。通知失敗でAIの処理を停止しません。
+更新後はPoppyとWSLターミナルを開き直してください。起動中の旧Poppyの待受は、旧プロセスを終了するまで残ります。
+
+ソケットが設定されていない環境では通知せず、AIの処理は継続します。ソケットへの送信失敗でもAIの処理を停止しません。HTTPへの切り替えはありません。
 
 ## 所有範囲と上限
 
@@ -61,7 +63,7 @@ Windows上のターミナルは、引き続きPoppyが自動設定する`POPPY_E
 
 ## 検証
 
-- `python3 tests/hook_scripts_tests.py`: 従来のHTTP通知とhookの導入・解除。
+- `python3 tests/hook_scripts_tests.py`: Unixソケット通知、旧HTTP設定の無効化、hookの導入・解除。
 - `python3 tests/hook_relay_tests.py`: ビルド済みの実WSLヘルパーと導入済みhookをUnixソケット・匿名パイプで接続。別のビルドを使う場合は`POPPY_TEST_WSL_HELPER=/path/to/poppy-wsl-helper`を指定。
 - ai-containerの`python3 -m unittest discover -s test -p test_aicontainer_dns.py`: Dockerモックで通常起動時のソケット自動マウントとパスの引用を検証。
 

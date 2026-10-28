@@ -76,7 +76,7 @@ private:
     HINSTANCE instance_ = nullptr;
     Renderer renderer_;
     QuickOpen recent_;
-    HookServer hooks_;
+    AiEventQueue events_{[this] { PostMessageW(window_, wmAiEvent, 0, 0); }};
     std::unique_ptr<Worker> storageWorker_;
     // This connection is created, used and destroyed on storageWorker_ only.
     std::unique_ptr<Storage> storage_;
@@ -128,7 +128,6 @@ void Workspace::create(){
     const BOOL dark=TRUE;DwmSetWindowAttribute(window_,20,&dark,sizeof(dark));
     tooltips_=CreateWindowExW(WS_EX_TOPMOST,TOOLTIPS_CLASSW,nullptr,WS_POPUP|TTS_ALWAYSTIP|TTS_NOPREFIX,CW_USEDEFAULT,CW_USEDEFAULT,CW_USEDEFAULT,CW_USEDEFAULT,window_,nullptr,instance_,nullptr);
     SendMessageW(tooltips_,TTM_SETMAXTIPWIDTH,0,700);
-    hooks_.start(window_);
     storageWorker_=std::make_unique<Worker>(window_);
     storageWorker_->submit(L"load-app",[this]{
         AppSession state;std::vector<std::string> history;std::string error;
@@ -250,7 +249,7 @@ void Workspace::open(ResourceId path,bool shouldSelect){
             remember(resolved);
         }
     };
-    project.runtime->create(window_,instance_,&hooks_);project.runtime->setDpi(dpi_);
+    project.runtime->create(window_,instance_,&events_);project.runtime->setDpi(dpi_);
     const auto id=project.id;projects_.push_back(std::move(project));
     if(shouldSelect)select(projects_.size()-1);else layout();
     storageWorker_->submit(L"load:"+std::to_wstring(id),[this,id,path,key]{
@@ -465,7 +464,7 @@ case WM_GETMINMAXINFO:reinterpret_cast<MINMAXINFO*>(b)->ptMinTrackSize={px(900),
 case WM_DPICHANGED:{endProjectDrag();dpi_=HIWORD(a);renderer_.setDpi(dpi_);recent_.setDpi(dpi_);for(auto& project:projects_)project.runtime->setDpi(dpi_);const auto rect=reinterpret_cast<RECT*>(b);SetWindowPos(window_,nullptr,rect->left,rect->top,rect->right-rect->left,rect->bottom-rect->top,SWP_NOZORDER|SWP_NOACTIVATE);layout();return 0;}
 case wmWork:storageWorker_->dispatch();return 0;
 case WM_APP + 21:{ const auto project = find(static_cast<uint64_t>(a)); if (!project || project->runtime->hasUnsaved()) return 0; const bool active = project == &projects_[active_]; const auto index = static_cast<size_t>(project - projects_.data()); close(index); if (active) for (size_t i = 0; i < projects_.size(); ++i) if (projects_[i].id == static_cast<uint64_t>(b)) { select(i); break; } return 0; }
-case wmAiEvent:for(const auto& event:hooks_.drain())for(auto& project:projects_)if(project.runtime->apply(event))break;return 0;
+case wmAiEvent:for(const auto& event:events_.drain())for(auto& project:projects_)if(project.runtime->apply(event))break;return 0;
 case WM_TIMER:if(a==77)Terminal::pump();else tick();return 0;
 case WM_ACTIVATE:if(LOWORD(a)==WA_INACTIVE)endProjectDrag();else if(!projects_.empty())PostMessageW(projects_[active_].runtime->window(),WM_APP+12,0,0);return 0;
 case WM_SETFOCUS:if(!projects_.empty())projects_[active_].runtime->activate(true);return 0;
@@ -486,7 +485,7 @@ case WM_COPYDATA:{const auto data=reinterpret_cast<COPYDATASTRUCT*>(b);if(data->
 case WM_QUERYENDSESSION:if(!closing_){for(auto& project:projects_)if(!project.runtime->canClose())return FALSE;saveAll();}return TRUE;
 case WM_ENDSESSION:if(a&&!closing_){closing_=true;saveAll();for(auto& project:projects_)project.runtime->shutdown();DestroyWindow(window_);}return 0;
 case WM_CLOSE:if(closing_)return 0;for(auto& project:projects_)if(!project.runtime->canClose())return 0;closing_=true;saveAll();for(auto& project:projects_)project.runtime->shutdown();if(!storageError_.empty()){MessageBoxW(window_,(L"Some state could not be saved.\n\n"+storageError_).c_str(),L"Poppy",MB_OK|MB_ICONWARNING);}closing_=true;DestroyWindow(window_);return 0;
-case WM_DESTROY:KillTimer(window_,1);hooks_.stop();projects_.clear();storageWorker_->submit(L"release-storage",[this]{storage_.reset();});storageWorker_->drain();storageWorker_->stop();PostQuitMessage(0);return 0;
+case WM_DESTROY:KillTimer(window_,1);projects_.clear();storageWorker_->submit(L"release-storage",[this]{storage_.reset();});storageWorker_->drain();storageWorker_->stop();PostQuitMessage(0);return 0;
 }return DefWindowProcW(window_,m,a,b);}
 }
 }

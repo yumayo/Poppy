@@ -1,7 +1,7 @@
 #pragma once
 #include "render.h"
 #include "session.h"
-#include "hook_server.h"
+#include "ai_status_win.h"
 #include <memory>
 
 namespace poppy {
@@ -11,7 +11,7 @@ class ProjectRuntime {
 public:
     ProjectRuntime();
     ~ProjectRuntime();
-    void create(HWND parent, HINSTANCE instance, HookServer* hooks);
+    void create(HWND parent, HINSTANCE instance, AiEventQueue* hooks);
     void initialize(const ResourceId& path, const ProjectSession& state, bool saved);
     void activate(bool active);
     void shutdown();

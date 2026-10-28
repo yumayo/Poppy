@@ -2050,7 +2050,7 @@ ProjectRuntime::~ProjectRuntime() {
     shutdown();
     if (impl_->window_ && IsWindow(impl_->window_)) DestroyWindow(impl_->window_);
 }
-void ProjectRuntime::create(HWND parent, HINSTANCE instance, HookServer* hooks) {
+void ProjectRuntime::create(HWND parent, HINSTANCE instance, AiEventQueue* hooks) {
     impl_->instance_ = instance;
     WNDCLASSW cls{}; cls.lpfnWndProc = Impl::procedure; cls.hInstance = instance; cls.lpszClassName = L"PoppyProject"; cls.hCursor = LoadCursorW(nullptr, IDC_ARROW); RegisterClassW(&cls);
     impl_->window_ = CreateWindowExW(0, cls.lpszClassName, L"Project", WS_CHILD | WS_CLIPCHILDREN | WS_CLIPSIBLINGS, 0, 0, 0, 0, parent, nullptr, instance, impl_.get());

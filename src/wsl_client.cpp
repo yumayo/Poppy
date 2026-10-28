@@ -208,7 +208,14 @@ Response Connection::call(Message message, const std::string* bytes, const std::
 }
 std::vector<std::wstring> Connection::terminal(const ResourceId& path, const std::string& token, const std::wstring& tool) const {
     std::lock_guard<std::mutex> lock(mutex_); if (state_ != ConnectionState::Ready) throw std::runtime_error("Reconnect the WSL project before starting a terminal");
-    auto args = command(); args.insert(args.end(), {wide(helperPath_), L"--terminal", wide(path.u8string()), wide(token), tool.empty() ? wide(shell_) : tool}); if (tool.empty()) args.push_back(L"-l"); return args;
+    auto args = command(); args.insert(args.end(), {wide(helperPath_), L"--terminal", wide(path.u8string()), wide(token)});
+    if (tool.empty()) args.insert(args.end(), {wide(shell_), L"-l"});
+    else {
+        if (tool != L"codex" && tool != L"claude") throw std::runtime_error("Unsupported AI container tool");
+        // aicontainer is a Bash function installed in the user's shell startup.
+        args.insert(args.end(), {L"/bin/bash", L"-lic", L"aicontainer " + tool});
+    }
+    return args;
 }
 std::vector<std::wstring> Connection::terminalEvents() const {
     std::lock_guard<std::mutex> lock(mutex_);
