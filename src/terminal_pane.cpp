@@ -29,21 +29,20 @@ void TerminalPane::add(SavedTerminal configuration) {
         if (found != sessions_.end()) { active_ = static_cast<size_t>(found - sessions_.begin()); acknowledge(); InvalidateRect(window_, nullptr, FALSE); }
     };
     session->terminal->starting = [this,ptr] {
-        ptr->ai = {}; ptr->notificationId = newSessionId();
-        if (hooks_) hooks_->add(ptr->notificationId);
+        ptr->ai = {};
         std::string eventSocket;
         if (directory_.wsl()) {
+            ptr->notificationId = newSessionId();
+            if (events_) events_->add(ptr->notificationId);
             ptr->wslToken = newSessionId();
             ptr->terminal->setCommand(provider_->terminalCommand(directory_.at(ptr->configuration.directory), ptr->wslToken, ptr->wslTool));
-            const auto id = ptr->notificationId; const auto hooks = hooks_;
+            const auto id = ptr->notificationId; const auto hooks = events_;
             if (hooks) eventSocket = ptr->events.start(provider_->terminalEventsCommand(), [hooks, id](const wsl::Message& message) {
                 const auto kind = wsl::field(message, "type");
                 if (message.size() == 2 && (kind == "status" || kind == "activity")) hooks->publish(id, kind == "activity", wsl::field(message, "body"));
             });
         }
-        ptr->terminal->setEnvironment({{L"POPPY_EVENTS_URL", hooks_ ? wide(hooks_->url()) : L""},
-            {L"POPPY_SESSION_ID", hooks_ ? wide(ptr->notificationId) : L""},
-            {L"AICONTAINER_EVENT_SOCKET", wide(eventSocket)}});
+        ptr->terminal->setEnvironment({{L"AICONTAINER_EVENT_SOCKET", wide(eventSocket)}});
         if (changed) changed();
     };
     session->terminal->stopping = [this, ptr] {
@@ -55,7 +54,7 @@ void TerminalPane::add(SavedTerminal configuration) {
     session->terminal->ended = [this,ptr] {
         ptr->events.stop();
         const bool registered = !ptr->notificationId.empty();
-        if (hooks_ && registered) hooks_->remove(ptr->notificationId);
+        if (events_ && registered) events_->remove(ptr->notificationId);
         ptr->notificationId.clear();
         if (ptr->ai.detected && ptr->ai.state != AiState::Unknown) { ptr->ai.state = AiState::Unknown; ptr->ai.source = AiSource::Process; ptr->ai.confidence = AiConfidence::Unknown; ptr->ai.changedAt = GetTickCount64(); ptr->ai.activity.clear(); ptr->ai.unread = false; }
         if (registered) { InvalidateRect(window_, nullptr, FALSE); if (changed) changed(); }
@@ -113,7 +112,6 @@ std::wstring TerminalPane::description() const {
         text+=s->notificationId.empty()?L" · not connected":s->ai.hookObserved?L" · hook / confirmed":L" · awaiting hook";
         if(!s->ai.activity.empty())text+=L"\n  "+wide(s->ai.activity);
     }
-    if(hooks_ && !hooks_->error().empty())text+=L"\n"+hooks_->error();
     return text;
 }
 void TerminalPane::select(size_t index) {
@@ -252,21 +250,18 @@ void TerminalPane::menu(size_t index,POINT point){
     }
 }
 void TerminalPane::addAi(const std::wstring& tool) {
-    if (directory_.wsl()) {
-        if (!provider_ || provider_->state() != ConnectionState::Ready) { MessageBoxW(GetAncestor(window_, GA_ROOT), L"Reconnect the WSL project before starting an AI CLI.", L"Poppy", MB_OK | MB_ICONINFORMATION); return; }
-        const int group = active().configuration.group;
-        add({"", utf8(tool == L"codex" ? L"Codex" : L"Claude"), directory_.u8string(), group});
-        active().wslTool = tool; active().terminal->launch(); SetFocus(window()); return;
-    }
+    if (!directory_.wsl()) return;
+    if (!provider_ || provider_->state() != ConnectionState::Ready) { MessageBoxW(GetAncestor(window_, GA_ROOT), L"Reconnect the WSL project before starting an AI container.", L"Poppy", MB_OK | MB_ICONINFORMATION); return; }
     const int group = active().configuration.group;
     add({"", utf8(tool == L"codex" ? L"Codex" : L"Claude"), directory_.u8string(), group});
-    wchar_t system[MAX_PATH]{}; GetSystemDirectoryW(system, MAX_PATH);
-    active().terminal->setCommand({std::wstring(system) + L"\\WindowsPowerShell\\v1.0\\powershell.exe",
-        L"-NoLogo", L"-NoProfile", L"-Command", tool});
-    active().terminal->launch(); SetFocus(window());
+    active().wslTool = tool; active().terminal->launch(); SetFocus(window());
 }
 void TerminalPane::addMenu(POINT point) {
-    HMENU menu = CreatePopupMenu(); AppendMenuW(menu, MF_STRING, 1, L"New shell"); AppendMenuW(menu, MF_STRING, 2, directory_.wsl() ? L"New Codex (WSL)" : L"New Codex"); AppendMenuW(menu, MF_STRING, 3, directory_.wsl() ? L"New Claude Code (WSL)" : L"New Claude Code");
+    HMENU menu = CreatePopupMenu(); AppendMenuW(menu, MF_STRING, 1, L"New shell");
+    if (directory_.wsl()) {
+        AppendMenuW(menu, MF_STRING, 2, L"New Codex (ai-container)");
+        AppendMenuW(menu, MF_STRING, 3, L"New Claude Code (ai-container)");
+    }
     const auto command = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, point.x, point.y, 0, window_, nullptr); DestroyMenu(menu);
     if (command == 1) { const int group = active().configuration.group; add({"", "Shell", directory_.u8string(), group}); SetFocus(window()); }
     else if (command == 2 || command == 3) addAi(command == 2 ? L"codex" : L"claude");

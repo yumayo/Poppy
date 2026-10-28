@@ -1,5 +1,7 @@
 #include "ai_status.h"
 #include <iostream>
+#include <atomic>
+#include <thread>
 #include <stdexcept>
 
 using namespace poppy;
@@ -43,6 +45,36 @@ void aggregation(){
     check(summarizeAi({complete,running,paused}).state==AiState::Running,"Completed/interrupted masked a running AI");
     check(summarizeAi({complete,paused}).state==AiState::Paused,"Completion masked interruption");
 }
+void delivery(){
+    const std::string other="fedcba9876543210fedcba9876543210";
+    std::atomic<unsigned> wakeups{0};
+    AiEventQueue queue([&]{++wakeups;});
+    check(!queue.publish(id,false,R"({"status":"running"})") && !wakeups,"Unregistered terminal accepted a notification");
+    queue.add(id); queue.add(other);
+    check(queue.publish(other,false,R"({"status":"waiting"})"),"Second terminal notification failed");
+    check(queue.publish(id,false,R"({"status":"running"})"),"First terminal notification failed");
+    const auto routed=queue.drain();
+    check(routed.size()==2 && routed[0].sessionId==other && routed[1].sessionId==id && wakeups==2,"Notification routing or UI wakeups changed");
+    check(queue.publish(id,true,R"({"activityText":"日本語"})"),"Unicode activity rejected");
+    const auto activity=queue.drain();
+    check(activity.size()==1 && !activity[0].state && activity[0].activity=="日本語","Activity altered state or lost Unicode");
+    const auto before=wakeups.load();
+    check(!queue.publish(id,false,R"({"status":"bad"})") && wakeups==before,"Invalid notification woke the UI");
+    for(unsigned i=0;i<1024;++i) check(queue.publish(id,false,R"({"status":"running"})"),"Queue filled below its budget");
+    check(!queue.publish(id,false,R"({"status":"running"})"),"Unbounded notification queue");
+    queue.remove(id);
+    check(queue.drain().empty(),"Closed terminal retained queued notifications");
+    check(!queue.publish(id,false,R"({"status":"completed"})"),"Late notification for a closed terminal accepted");
+    check(queue.publish(other,false,R"({"status":"running"})"),"Closing one terminal removed another registration");
+    queue.drain(); queue.add(id);
+    std::atomic<bool> accepted{true};
+    auto send=[&](const std::string& target){for(unsigned i=0;i<500;++i) if(!queue.publish(target,false,R"({"status":"running"})")) accepted=false;};
+    std::thread first(send,id),second(send,other); first.join(); second.join();
+    const auto concurrent=queue.drain(); unsigned a=0,b=0;
+    for(const auto& item:concurrent){if(item.sessionId==id) ++a; else if(item.sessionId==other) ++b;}
+    check(accepted && a==500 && b==500,"Concurrent pipe readers lost or mixed notifications");
+}
+
 void validation(){
     for(const auto body:{"{}","[]",R"({"status":"failed"})",R"({"status":"running","status":"completed"})",R"({"status":"running","onlyIfActive":"true"})",R"({"status":"waiting","activityText":3})",R"({"status":"running"}garbage)",R"({"status":"running","activityText":"\ud800"})",R"({"status":"running","activityText":"\uDC00"})",R"({"status":"running","x":{}})"})check(!parseAiEvent(id,false,body),"Malformed/unsupported hook accepted");
     check(!parseAiEvent("ABC",false,R"({"status":"running"})"),"Unregistered ID syntax accepted");
@@ -55,4 +87,4 @@ void validation(){
     check(parseAiEvent(id,false,"{\"status\":\"running\",\"activityText\":"+jsonString("quotes \" slash \\ newline\n")+"}").has_value(),"Escaped JSON was rejected");
 }
 }
-int main(){try{transitions();aggregation();validation();std::cout<<"AI status tests passed\n";}catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}
+int main(){try{transitions();aggregation();validation();delivery();std::cout<<"AI status tests passed\n";}catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}

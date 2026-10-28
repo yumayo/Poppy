@@ -147,6 +147,26 @@ std::optional<AiEvent> parseAiEvent(std::string_view id, bool activityOnly, std:
         return event;
     } catch (const std::exception&) { return {}; }
 }
+void AiEventQueue::add(const std::string& id) { std::lock_guard<std::mutex> lock(mutex_); ids_.insert(id); }
+void AiEventQueue::remove(const std::string& id) {
+    std::lock_guard<std::mutex> lock(mutex_); ids_.erase(id);
+    events_.erase(std::remove_if(events_.begin(), events_.end(), [&](const AiEvent& event) { return event.sessionId == id; }), events_.end());
+}
+bool AiEventQueue::publish(const std::string& id, bool activity, std::string_view body) {
+    const auto event = parseAiEvent(id, activity, body); if (!event) return false;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!ids_.count(id) || events_.size() >= 1024) return false;
+        events_.push_back(*event);
+    }
+    if (notify_) notify_();
+    return true;
+}
+std::vector<AiEvent> AiEventQueue::drain() {
+    std::lock_guard<std::mutex> lock(mutex_); std::vector<AiEvent> result;
+    while (!events_.empty()) { result.push_back(std::move(events_.front())); events_.pop_front(); }
+    return result;
+}
 std::string jsonString(std::string_view text) {
     std::string result = "\""; constexpr char hex[] = "0123456789abcdef";
     for (unsigned char ch : text) {

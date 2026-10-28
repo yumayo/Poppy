@@ -7,7 +7,6 @@ from pathlib import Path
 import re
 import select
 import socket
-import subprocess
 import sys
 import time
 
@@ -179,14 +178,9 @@ def main():
         print("Poppy: timeout must be between 1 and 5 seconds", file=sys.stderr)
         return 2
 
-    # 起動プロファイルのソケットを優先する。通知IDはWindows側だけが保持する。
+    # 通知経路は起動元が自動設定するUnixソケットだけを使う。
     relay = os.environ.get("AICONTAINER_EVENT_SOCKET", "")
-    url = os.environ.get("POPPY_EVENTS_URL", "")
-    session_id = os.environ.get("POPPY_SESSION_ID", "")
-    if not relay and (not url or not session_id):
-        return 0
-    if not relay and not re.fullmatch(r"[a-f0-9]{32}", session_id):
-        print("Poppy: invalid session ID", file=sys.stderr)
+    if not relay:
         return 0
 
     try:
@@ -199,23 +193,11 @@ def main():
     payload = build_payload(action, data)
     if not payload:
         return 0
-    method, endpoint = ("PUT", "activity") if action == "activity" else ("POST", "status")
-    if relay:
-        try:
-            send_relay(relay, endpoint, payload, timeout)
-        except (OSError, ValueError):
-            print("Poppy: 通知リレーへ送信できませんでした。Poppyの起動アダプターを確認してください。", file=sys.stderr)
-        return 0
+    endpoint = "activity" if action == "activity" else "status"
     try:
-        subprocess.run([
-            "curl", "--silent", "--show-error", "--fail", "--connect-timeout", "2", "--max-time", timeout,
-            "--output", "/dev/null", "--request", method,
-            "--header", "Content-Type: application/json",
-            "--data", json.dumps(payload, ensure_ascii=True, separators=(",", ":")),
-            f"{url.rstrip('/')}/tasks/sessions/{session_id}/{endpoint}",
-        ], check=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
-    except (OSError, subprocess.SubprocessError):
-        print("Poppy: 状態を通知できませんでした。接続先と通知用の環境変数を確認してください。", file=sys.stderr)
+        send_relay(relay, endpoint, payload, timeout)
+    except (OSError, ValueError):
+        print("Poppy: 通知リレーへ送信できませんでした。PoppyのWSLターミナルを開き直してください。", file=sys.stderr)
     return 0
 
 

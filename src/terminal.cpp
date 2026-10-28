@@ -86,14 +86,25 @@ bool Terminal::start() {
         FreeEnvironmentStringsW(block);
     }
     for (const auto& value : environment_) inherited[value.first] = value.second;
-    if (!environment_.empty()) {
-        auto& wslenv = inherited[L"WSLENV"];
-        for (const auto name : {L"POPPY_EVENTS_URL", L"POPPY_SESSION_ID", L"AICONTAINER_EVENT_SOCKET"}) {
-            bool found = false;
-            for (size_t p = 0; p < wslenv.size();) { const auto end = wslenv.find(L':', p); const auto token = wslenv.substr(p, end == std::wstring::npos ? end : end-p); if (token.substr(0,token.find(L'/')) == name) found = true; if (end == std::wstring::npos) break; p = end+1; }
-            if (!found) { if (!wslenv.empty()) wslenv += L':'; wslenv += name; }
+    // Strip retired HTTP settings even if Poppy inherited them from an old shell.
+    inherited.erase(L"POPPY_EVENTS_URL"); inherited.erase(L"POPPY_SESSION_ID");
+    const auto previous = inherited[L"WSLENV"]; std::wstring wslenv;
+    for (size_t p = 0; p < previous.size();) {
+        const auto end = previous.find(L':', p);
+        const auto token = previous.substr(p, end == std::wstring::npos ? end : end-p);
+        const auto name = token.substr(0, token.find(L'/'));
+        if (name != L"POPPY_EVENTS_URL" && name != L"POPPY_SESSION_ID" && name != L"AICONTAINER_EVENT_SOCKET" && !token.empty()) {
+            if (!wslenv.empty()) wslenv += L':';
+            wslenv += token;
         }
+        if (end == std::wstring::npos) break;
+        p = end + 1;
     }
+    if (!inherited[L"AICONTAINER_EVENT_SOCKET"].empty()) {
+        if (!wslenv.empty()) wslenv += L':';
+        wslenv += L"AICONTAINER_EVENT_SOCKET/u";
+    }
+    inherited[L"WSLENV"] = std::move(wslenv);
     std::vector<wchar_t> environment;
     for (const auto& value : inherited) { const auto entry = value.first + L"=" + value.second; environment.insert(environment.end(),entry.begin(),entry.end()); environment.push_back(0); }
     environment.push_back(0);

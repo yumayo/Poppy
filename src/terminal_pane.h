@@ -1,6 +1,6 @@
 #pragma once
 #include "terminal.h"
-#include "hook_server.h"
+#include "ai_status_win.h"
 #include "hook_pipe.h"
 #include "session.h"
 #include "project_provider.h"
@@ -29,7 +29,7 @@ public:
     void setProvider(std::shared_ptr<ProjectProvider> provider) { provider_ = std::move(provider); }
     void restore(const ProjectSession& state);
     void snapshot(ProjectSession& state) const;
-    void connect(HookServer* hooks) { hooks_ = hooks; }
+    void connect(AiEventQueue* hooks) { events_ = hooks; }
     bool apply(const AiEvent& event);
     void acknowledge();
     void focusAttention();
@@ -76,7 +76,7 @@ private:
     std::shared_ptr<ProjectProvider> provider_;
     std::vector<std::unique_ptr<TerminalSession>> sessions_;
     size_t active_ = 0;
-    HookServer* hooks_ = nullptr;
+    AiEventQueue* events_ = nullptr;
     std::wstring tooltipText_;
 };
 }
