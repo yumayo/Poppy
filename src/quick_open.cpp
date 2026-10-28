@@ -217,7 +217,7 @@ void QuickOpen::paint() {
         const auto message = projectMode_ ? (projects_.empty() ? L"No recent projects. Open a folder with Ctrl+O." : L"No matching projects.") : root_.empty() ? L"Open a folder with Ctrl+O to search files." : !index_ ? L"Loading file list…" : loading_ ? L"Searching…" : !result_.error.empty() ? L"Cannot search this folder. Press F5 to retry." : L"No matching files.";
         renderer_.label({px(20), px(86), rect.right - px(20), px(130)}, message, muted);
     }
-    const auto hint = indexing_ ? L"Updating file list…" : result_.resultsLimited ? L"Top 100 matches · Type to narrow the results" : L"↑↓ Select    Enter Open    Esc Close";
+    const std::wstring hint = indexing_ ? L"Updating file list…" : !result_.error.empty() ? wide(result_.error) + L" · F5: retry" : result_.resultsLimited ? L"Top 100 matches · Type to narrow the results" : L"↑↓ Select    Enter Open    Esc Close";
     renderer_.label({px(16), rect.bottom - px(28), rect.right - px(16), rect.bottom}, hint, muted);
 }
 LRESULT CALLBACK QuickOpen::procedure(HWND window, UINT message, WPARAM a, LPARAM b) {

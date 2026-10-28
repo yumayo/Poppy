@@ -1872,7 +1872,7 @@ void ProjectRuntime::Impl::pollWatch() {
         const auto revision = provider_->revision();
         if (revision != providerRevision_) {
             providerRevision_ = revision;
-            if (connected_ && provider_->state() != ConnectionState::Ready) { connected_ = false; ++generation_; ++serial_[0]; ++serial_[1]; status(L"WSL disconnected. Your edits have been kept. Use F5 to reconnect."); if (owner_ && owner_->changed) owner_->changed(); }
+            if (connected_ && provider_->state() != ConnectionState::Ready) { connected_ = false; ++generation_; ++serial_[0]; ++serial_[1]; connectionError_ = provider_->error(); status(L"WSL disconnected. " + connectionError_ + L" Your edits have been kept. Use F5 to reconnect."); if (owner_ && owner_->changed) owner_->changed(); }
             else if (connected_) { if (!dirty_) dirtySince_ = now; dirty_ = fileDirty_ = filesDirty_ = true; lastEvent_ = now; }
         }
     }

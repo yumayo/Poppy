@@ -98,8 +98,27 @@ void completeFileList() {
     check(last.matches.size() == 1 && last.matches[0].relative == "z-last.txt", "Filtering stopped at 50,000 entries");
     check(searchFiles(index, "").matches.size() == 100, "The display limit should not limit the cached file list");
 }
+void boundedRemoteIndex() {
+    FileIndex index;
+    check(addIndexedFile(index, u8"資料/A\\B.cpp"), "Remote index rejected a valid path");
+    check(index.files[0].relative == u8"資料/A\\B.cpp" && index.files[0].normalized == U"資料/a/b.cpp",
+        "Remote indexing changed the original Linux path or search normalization");
+    const auto bytes = index.storageBytes;
+    check(bytes > sizeof(IndexedFile), "Remote index did not account for retained strings");
+    check(!addIndexedFile(index, "another.txt", bytes) && index.files.size() == 1 && index.storageBytes == bytes && !index.error.empty(),
+        "Memory-limited indexing lost existing files, retained excess data or failed to report the limit");
+    check(searchFiles(index, "A\\B").matches.size() == 1 && !searchFiles(index, "A\\B").error.empty(),
+        "A limited remote index must remain searchable with its limit reported");
+    FileIndex countLimited;
+    check(addIndexedFile(countLimited, "first.txt", 4096, 2) && addIndexedFile(countLimited, "second.txt", 4096, 2) &&
+        !addIndexedFile(countLimited, "third.txt", 4096, 2) && countLimited.files.size() == 2,
+        "Remote file-count limit was not enforced at the boundary");
+    FileIndex empty;
+    check(!addIndexedFile(empty, "file.txt", 0) && empty.files.empty() && empty.storageBytes == 0,
+        "A zero memory budget retained an entry or underflowed");
+}
 }
 int main() {
-    try { matching(); traversal(); cachedFilteringAndRefresh(); limitsAndCancellation(); completeFileList(); std::cout << "File search tests passed.\n"; return 0; }
+    try { matching(); traversal(); cachedFilteringAndRefresh(); limitsAndCancellation(); completeFileList(); boundedRemoteIndex(); std::cout << "File search tests passed.\n"; return 0; }
     catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
 }
