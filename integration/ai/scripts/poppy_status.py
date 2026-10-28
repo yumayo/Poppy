@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import re
 import select
+import socket
 import subprocess
 import sys
 import time
@@ -14,6 +15,33 @@ MAX_INPUT_BYTES = 1024 * 1024
 MAX_TRANSCRIPT_BYTES = 512 * 1024
 MAX_TEXT_LENGTH = 120
 ACTIONS = ("running", "waiting", "interrupted", "completed", "none", "resume", "tool-failed", "activity")
+
+
+def send_relay(filename, kind, payload, timeout):
+    message = json.dumps({"type": kind, "body": json.dumps(payload, ensure_ascii=False, separators=(",", ":"))},
+                         ensure_ascii=False, separators=(",", ":")).encode("utf-8") + b"\n"
+    if len(message) > 16384:
+        raise ValueError("notification is too large")
+    deadline = time.monotonic() + float(timeout)
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+        def remaining_timeout():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("notification relay timed out")
+            connection.settimeout(remaining)
+        remaining_timeout()
+        connection.connect(filename)
+        remaining_timeout()
+        connection.sendall(message)
+        reply = bytearray()
+        while b"\n" not in reply and len(reply) < 16:
+            remaining_timeout()
+            chunk = connection.recv(16 - len(reply))
+            if not chunk:
+                break
+            reply.extend(chunk)
+        if reply != b"OK\n":
+            raise OSError("notification relay did not accept the event")
 
 
 def read_hook_input():
@@ -151,12 +179,13 @@ def main():
         print("Poppy: timeout must be between 1 and 5 seconds", file=sys.stderr)
         return 2
 
-    # Poppyの通知先と端末IDがなければ、フック入力も読まずに終了する。
+    # 起動プロファイルのソケットを優先する。通知IDはWindows側だけが保持する。
+    relay = os.environ.get("AICONTAINER_EVENT_SOCKET", "")
     url = os.environ.get("POPPY_EVENTS_URL", "")
     session_id = os.environ.get("POPPY_SESSION_ID", "")
-    if not url or not session_id:
+    if not relay and (not url or not session_id):
         return 0
-    if not re.fullmatch(r"[a-f0-9]{32}", session_id):
+    if not relay and not re.fullmatch(r"[a-f0-9]{32}", session_id):
         print("Poppy: invalid session ID", file=sys.stderr)
         return 0
 
@@ -171,6 +200,12 @@ def main():
     if not payload:
         return 0
     method, endpoint = ("PUT", "activity") if action == "activity" else ("POST", "status")
+    if relay:
+        try:
+            send_relay(relay, endpoint, payload, timeout)
+        except (OSError, ValueError):
+            print("Poppy: 通知リレーへ送信できませんでした。Poppyの起動アダプターを確認してください。", file=sys.stderr)
+        return 0
     try:
         subprocess.run([
             "curl", "--silent", "--show-error", "--fail", "--connect-timeout", "2", "--max-time", timeout,

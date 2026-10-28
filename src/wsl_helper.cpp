@@ -1,5 +1,6 @@
 #include "git_repositories.h"
 #include "wsl_protocol.h"
+#include "wsl_events.h"
 #include "content_search_protocol.h"
 #include "resource.h"
 #include "text.h"
@@ -504,6 +505,7 @@ void Server::run() {
 int main(int argc, char** argv) {
     try {
         if (argc == 2 && std::string(argv[1]) == "--stdio") { poppy::wsl::Server server; server.run(); return 0; }
+        if (argc == 2 && std::string(argv[1]) == "--events") return poppy::wsl::serveTerminalEvents();
         if (argc == 3 && std::string(argv[1]) == "--stop-terminal") return poppy::wsl::stopTerminal(argv[2]) ? 0 : 1;
         if (argc >= 5 && std::string(argv[1]) == "--terminal") return poppy::wsl::terminal(argc, argv);
         std::cerr << "Usage: poppy-wsl-helper --stdio\n"; return 2;

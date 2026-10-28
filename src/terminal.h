@@ -11,11 +11,9 @@ public:
     void setDirectory(const fs::path& directory);
     bool receive();
     static void pump();
-    void trackContainer(const std::string& id);
     void setCommand(std::vector<std::wstring> command) { command_ = std::move(command); }
     void setDisplayDirectory(std::wstring label) { displayDirectory_ = std::move(label); }
     bool launch() { return start(); }
-    bool cleanupUnconfirmed() const { return unconfirmed_ && WaitForSingleObject(unconfirmed_.value, 0) == WAIT_OBJECT_0; }
     void stop();
     void setEnvironment(std::vector<std::pair<std::wstring, std::wstring>> values) { environment_ = std::move(values); }
     std::function<void()> starting, ended, focused, stopping;
@@ -46,7 +44,6 @@ private:
     TerminalDisplay display_;
     HPCON console_ = nullptr;
     Handle input_, output_, process_, job_;
-    Handle stopRequest_, launching_, cleaned_, unconfirmed_;
     std::vector<std::wstring> command_;
     std::atomic<bool> stopping_{false};
     NativeThread reader_, writer_;

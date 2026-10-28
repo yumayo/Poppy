@@ -1,6 +1,7 @@
 #pragma once
 #include "terminal.h"
 #include "hook_server.h"
+#include "hook_pipe.h"
 #include "session.h"
 #include "project_provider.h"
 #include <memory>
@@ -12,6 +13,7 @@ struct TerminalSession {
     ~TerminalSession() { if (terminal) { terminal->stop(); terminal->starting = {}; terminal->ended = {}; terminal->stopping = {}; } }
     SavedTerminal configuration;
     std::unique_ptr<Terminal> terminal;
+    HookPipe events;
     std::string notificationId;
     AiStatus ai;
     std::string wslToken;
