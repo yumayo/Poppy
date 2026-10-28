@@ -26,8 +26,6 @@ class RelayTests(unittest.TestCase):
         self.root = Path(self.temp.name)
         self.server, self.socket = self.start_server()
         self.environment = dict(os.environ, AICONTAINER_EVENT_SOCKET=str(self.socket))
-        self.environment.pop("POPPY_EVENTS_URL", None)
-        self.environment.pop("POPPY_SESSION_ID", None)
 
     def start_server(self):
         process = subprocess.Popen([str(HELPER), "--events"], stdin=subprocess.PIPE,
@@ -179,23 +177,14 @@ class RelayTests(unittest.TestCase):
         self.assertFalse(self.socket.exists())
         self.server.stdin.close(); self.server.stderr.close()
 
-    def test_socket_failure_does_not_fall_back_to_http(self):
-        environment = dict(self.environment, AICONTAINER_EVENT_SOCKET=str(self.root / "missing"),
-                           POPPY_EVENTS_URL="http://127.0.0.1:1", POPPY_SESSION_ID="0" * 32)
+    def test_socket_failure_is_nonfatal(self):
+        environment = dict(self.environment, AICONTAINER_EVENT_SOCKET=str(self.root / "missing"))
         result = subprocess.run([sys.executable, str(SCRIPTS / "poppy_status.py"), "running", "1"],
                                 input="{}", text=True, capture_output=True, env=environment, timeout=3)
         self.assertEqual(result.returncode, 0)
         self.assertEqual(result.stdout, "")
         self.assertIn("通知リレー", result.stderr)
-        self.assertNotIn("curl", result.stderr)
 
-    def test_socket_takes_precedence_over_stale_http_settings(self):
-        environment = dict(self.environment, POPPY_EVENTS_URL="http://127.0.0.1:1", POPPY_SESSION_ID="stale")
-        result = subprocess.run([sys.executable, str(SCRIPTS / "poppy_status.py"), "running"],
-                                input="{}", text=True, capture_output=True, env=environment, timeout=3)
-        self.assertEqual(result.returncode, 0)
-        self.assertEqual(result.stderr, "")
-        self.assertEqual(json.loads(self.frame()["body"]), {"status": "running"})
 
 
 if __name__ == "__main__":

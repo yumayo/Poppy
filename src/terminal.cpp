@@ -86,14 +86,13 @@ bool Terminal::start() {
         FreeEnvironmentStringsW(block);
     }
     for (const auto& value : environment_) inherited[value.first] = value.second;
-    // Strip retired HTTP settings even if Poppy inherited them from an old shell.
-    inherited.erase(L"POPPY_EVENTS_URL"); inherited.erase(L"POPPY_SESSION_ID");
+    // Replace the socket entry so its Linux path is passed without translation.
     const auto previous = inherited[L"WSLENV"]; std::wstring wslenv;
     for (size_t p = 0; p < previous.size();) {
         const auto end = previous.find(L':', p);
         const auto token = previous.substr(p, end == std::wstring::npos ? end : end-p);
         const auto name = token.substr(0, token.find(L'/'));
-        if (name != L"POPPY_EVENTS_URL" && name != L"POPPY_SESSION_ID" && name != L"AICONTAINER_EVENT_SOCKET" && !token.empty()) {
+        if (name != L"AICONTAINER_EVENT_SOCKET" && !token.empty()) {
             if (!wslenv.empty()) wslenv += L':';
             wslenv += token;
         }
