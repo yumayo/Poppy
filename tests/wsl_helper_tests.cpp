@@ -148,6 +148,37 @@ void creation(const std::string& executable) {
     for (const auto& entry : fs::directory_iterator(folder)) check(entry.path() == file, "Failed creation left a temporary file");
     helper.eof();
 }
+void batchedListings(const std::string& executable) {
+    Fixture fixture;
+    const auto empty = fixture.root / "empty", small = fixture.root / "small";
+    fs::create_directory(empty); fs::create_directory(small);
+    const auto unusual = small / "日本🙂 quote\" back\\slash\n.txt";
+    write(unusual, "responsive");
+    std::set<std::string> rootPaths{empty.string(), small.string()}, indexedPaths{unusual.string()};
+    for (int i = 0; i < 600; ++i) {
+        const auto path = fixture.root / ("entry-" + std::to_string(i) + '-' + std::string(120, 'x') + ".txt");
+        write(path, "file"); rootPaths.insert(path.string()); indexedPaths.insert(path.string());
+    }
+    Helper helper(executable); helper.hello(); helper.call("connect", fixture.root);
+    check(helper.call("listDirectory", empty).entries.empty(), "An empty listing did not complete");
+    const auto single = helper.call("listDirectory", small);
+    check(single.entries.size() == 1 && field(single.entries[0], "path") == unusual.string(),
+        "A short listing tail was delayed, lost or changed an escaped name");
+    const auto listed = helper.call("listDirectory", fixture.root);
+    std::set<std::string> paths;
+    for (const auto& entry : listed.entries) paths.insert(field(entry, "path"));
+    check(paths == rootPaths && listed.entries.size() == rootPaths.size(), "Batched directory listing lost or duplicated entries");
+    const auto index = helper.request({{"op", "indexFiles"}, {"path", fixture.root.string()}});
+    const auto read = helper.request({{"op", "readFile"}, {"path", unusual.string()}});
+    check(helper.wait(read).bytes == "responsive", "Listing batches corrupted a concurrent binary file response");
+    const auto indexed = helper.wait(index); paths.clear();
+    for (const auto& entry : indexed.entries) paths.insert(field(entry, "path"));
+    check(paths == indexedPaths && indexed.entries.size() == indexedPaths.size(),
+        "Batched recursive indexing lost entries or crossed response IDs");
+    helper.call("listDirectory", fixture.root / "missing", {}, nullptr, false);
+    check(helper.call("readFile", unusual).bytes == "responsive", "A listing error broke the shared connection");
+    helper.eof();
+}
 void files(const std::string& executable) {
     Fixture fixture; const auto a = fixture.root/"A.cpp", b = fixture.root/"a.cpp", unusual = fixture.root/"quote' $ \\ file.cpp";
     write(a,"upper"); write(b,"lower"); write(unusual,"日本語\r\n"); write(fixture.root/"empty","");
@@ -436,6 +467,6 @@ void terminals(const std::string& executable) {
 }
 int main(int argc,char** argv) {
     signal(SIGPIPE,SIG_IGN);
-    try { check(argc == 2,"Expected helper executable argument"); const std::string executable = argv[1]; installation(executable); creation(executable); files(executable); moving(executable); repositories(executable); protocolFailures(executable); gitAndCancellation(executable); contentSearch(executable); terminals(executable); std::cout << "WSL helper integration tests passed\n"; }
+    try { check(argc == 2,"Expected helper executable argument"); const std::string executable = argv[1]; installation(executable); creation(executable); batchedListings(executable); files(executable); moving(executable); repositories(executable); protocolFailures(executable); gitAndCancellation(executable); contentSearch(executable); terminals(executable); std::cout << "WSL helper integration tests passed\n"; }
     catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
 }

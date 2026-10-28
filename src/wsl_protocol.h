@@ -4,12 +4,14 @@
 #include <map>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace poppy::wsl {
 constexpr unsigned protocolVersion = 1;
 constexpr const char* helperVersion = "6";
 constexpr size_t maxControl = 64 * 1024, maxChunk = 256 * 1024, maxFrame = 1024 * 1024;
+constexpr size_t maxOutputBatch = 64 * 1024;
 // Flat JSON control messages. Lists are streamed as individual control frames;
 // bodies use binary frames, never JSON strings or base64.
 using Message = std::map<std::string, std::string>;
@@ -19,6 +21,17 @@ uint64_t number(const Message& message, const std::string& field);
 std::string field(const Message& message, const std::string& name);
 struct Frame { uint8_t kind = 1; std::string payload; };
 std::string encodeFrame(const Frame& frame);
+// Coalesce complete encoded frames. flush() sends a final partial batch;
+// a valid frame larger than the batching target is sent on its own.
+class FrameBatch {
+public:
+    explicit FrameBatch(std::function<void(std::string_view)> write) : write_(std::move(write)) {}
+    void append(const Frame& frame);
+    void flush();
+private:
+    std::function<void(std::string_view)> write_;
+    std::string pending_;
+};
 class FrameReader {
 public:
     void feed(std::string_view bytes, const std::function<void(Frame)>& receive);

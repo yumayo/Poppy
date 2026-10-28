@@ -70,6 +70,18 @@ std::string encodeFrame(const Frame& frame) {
     if ((frame.kind != 1 && frame.kind != 2) || frame.payload.size() > (frame.kind == 1 ? maxControl : maxChunk + 17)) invalid();
     std::string out; put(out, frame.payload.size() + 1, 4); out += static_cast<char>(frame.kind); out += frame.payload; return out;
 }
+void FrameBatch::append(const Frame& frame) {
+    const auto bytes = encodeFrame(frame);
+    if (bytes.size() > maxOutputBatch) { flush(); write_(bytes); return; }
+    if (pending_.size() > maxOutputBatch - bytes.size()) flush();
+    pending_ += bytes;
+    if (pending_.size() == maxOutputBatch) flush();
+}
+void FrameBatch::flush() {
+    if (pending_.empty()) return;
+    write_(pending_);
+    pending_.clear();
+}
 void FrameReader::feed(std::string_view bytes, const std::function<void(Frame)>& receive) {
     while (!bytes.empty()) {
         const size_t needed = size_ ? size_ : 4;

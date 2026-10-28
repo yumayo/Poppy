@@ -168,15 +168,20 @@ Snapshot read(const std::string& p, const std::atomic<bool>* cancelled = nullptr
     result.version = sha256(stamp(result.info) + ':' + stamp(link) + ':' + result.target + ':' + sha256(result.bytes));
     return result;
 }
-struct Request { Message message; std::string bytes; std::atomic<bool> cancelled{false}; size_t size = 0; bool uploaded = false; };
+struct Request {
+    explicit Request(std::function<void(std::string_view)> write) : replies(std::move(write)) {}
+    Message message; std::string bytes; std::atomic<bool> cancelled{false}; size_t size = 0; bool uploaded = false;
+    FrameBatch replies;
+};
 class Server {
 public:
     ~Server();
     void run();
 private:
-    void output(Frame frame);
+    void output(Frame frame) { writeOutput(encodeFrame(frame)); }
+    void writeOutput(std::string_view bytes);
     void send(const Message& m) { output({1, encodeMessage(m)}); }
-    void reply(const Request& request, Message m);
+    void reply(Request& request, Message m);
     void body(const Request& request, const std::string& bytes);
     void accept(Frame frame);
     void execute(const std::shared_ptr<Request>& request);
@@ -213,8 +218,8 @@ Server::~Server() {
     if (searchWorker_.joinable()) searchWorker_.join();
     if (watcher_.joinable()) watcher_.join();
 }
-void Server::output(Frame frame) {
-    const auto bytes = encodeFrame(frame); std::lock_guard<std::mutex> lock(outputMutex_); size_t offset = 0;
+void Server::writeOutput(std::string_view bytes) {
+    std::lock_guard<std::mutex> lock(outputMutex_); size_t offset = 0;
     const auto deadline = Clock::now() + std::chrono::seconds(5);
     auto broken = [&] { std::lock_guard<std::mutex> lock(mutex_); for (const auto pid : gitChildren_) kill(-pid, SIGKILL); _exit(2); };
     while (offset < bytes.size()) {
@@ -226,9 +231,16 @@ void Server::output(Frame frame) {
         if (count < 0) { if (errno == EINTR || errno == EAGAIN) continue; broken(); } offset += static_cast<size_t>(count);
     }
 }
-void Server::reply(const Request& request, Message message) {
+void Server::reply(Request& request, Message message) {
     for (const auto& key : {"id", "projectId", "generation"}) message[key] = field(request.message, key);
-    send(message);
+    const Frame frame{1, encodeMessage(message)};
+    if (field(message, "entry") == "1") request.replies.append(frame);
+    else {
+        // Flush partial listings before completion, errors or a body header.
+        // Each request owns its buffer; unrelated control replies stay immediate.
+        request.replies.flush();
+        output(frame);
+    }
 }
 void Server::body(const Request& request, const std::string& bytes) {
     size_t offset = 0;
@@ -252,7 +264,7 @@ void Server::accept(Frame frame) {
     if (field(m, "projectId").empty() || field(m, "projectId").size() > 128) throw std::runtime_error("Invalid project ID");
     number(m, "generation");
     if (requests_.count(id) || requests_.size() >= 128) throw std::runtime_error("WSL request queue is full or ID is reused");
-    auto r = std::make_shared<Request>(); r->message = std::move(m); requests_[id] = r;
+    auto r = std::make_shared<Request>([this](std::string_view bytes) { writeOutput(bytes); }); r->message = std::move(m); requests_[id] = r;
     if (op == "saveFile" || op == "createFile" || op == "searchContent") {
         if (upload_) throw std::runtime_error("Concurrent upload is unsupported");
         r->size = number(r->message, "size"); if (r->size > maxFileBytes || uploadBytes_ + r->size > 64 * 1024 * 1024) throw std::runtime_error("Save exceeds the file or upload queue limit"); uploadBytes_ += r->size; upload_ = r;
@@ -464,6 +476,8 @@ void Server::execute(const std::shared_ptr<Request>& r) {
             const auto options = contentSearchOptions(r->message, r->bytes);
             const auto summary = searchContents(std::filesystem::u8path(path(r->message)), options, [&](std::vector<ContentMatch> batch) {
                 for (const auto& match : batch) { if (r->cancelled || stopping_) return false; reply(*r, contentMatchMessage(match)); }
+                // Keep incremental search results visible even for sparse matches.
+                r->replies.flush();
                 return true;
             }, [&] { return r->cancelled.load() || stopping_.load(); });
             reply(*r, contentSummaryMessage(summary));

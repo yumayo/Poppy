@@ -88,5 +88,67 @@ void protocol() {
     check(sha256("abc") == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad", "SHA-256 abc vector failed");
     check(sha256(std::string(1000000,'a')) == "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0", "SHA-256 long vector failed");
 }
+void frameBatching() {
+    using namespace poppy::wsl;
+    std::vector<std::string> writes;
+    FrameBatch batch([&](std::string_view bytes) { writes.emplace_back(bytes); });
+    batch.flush(); check(writes.empty(), "An empty batch wrote to the pipe");
+    const std::string name = u8"資料/日本🙂\"\\\n" + std::string(120, 'x');
+    std::string expected;
+    constexpr size_t count = 2000;
+    for (size_t i = 0; i < count; ++i) {
+        const Frame frame{1, encodeMessage({{"id", std::to_string(i)}, {"name", name}, {"entry", "1"}})};
+        expected += encodeFrame(frame); batch.append(frame);
+    }
+    batch.flush();
+    check(writes.size() > 1 && writes.size() < count / 10, "Small frames were not coalesced into bounded batches");
+    std::string actual; size_t received = 0;
+    for (const auto& bytes : writes) {
+        check(bytes.size() <= maxOutputBatch, "A batch exceeded its encoded byte budget");
+        actual += bytes; FrameReader reader;
+        for (size_t at = 0; at < bytes.size(); at += 13) {
+            reader.feed(std::string_view(bytes).substr(at, 13), [&](Frame frame) {
+                const auto message = decodeMessage(frame.payload);
+                check(number(message, "id") == received++ && field(message, "name") == name,
+                    "Batched partial pipe reads changed frame order, Unicode or escaped names");
+            });
+        }
+        reader.finish(); // Each output batch ends at a complete frame boundary.
+    }
+    check(actual == expected && received == count, "Batching lost, duplicated or changed frames");
+    const auto sent = writes.size(); batch.flush();
+    check(writes.size() == sent, "Flushing an already sent tail duplicated frames");
+    std::cout << "WSL batching: " << count << " entry frames in " << sent << " output batches\n";
 }
-int main() { try { commandLines(); resources(); protocol(); std::cout << "WSL command line, resource and protocol tests passed\n"; } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; } }
+void frameBatchBoundaries() {
+    using namespace poppy::wsl;
+    auto control = [](size_t payloadBytes) {
+        const auto overhead = encodeMessage({{"text", ""}}).size();
+        return Frame{1, encodeMessage({{"text", std::string(payloadBytes - overhead, 'x')}})};
+    };
+    std::vector<std::string> writes;
+    FrameBatch batch([&](std::string_view bytes) { writes.emplace_back(bytes); });
+    batch.append(control(maxOutputBatch - 5));
+    check(writes.size() == 1 && writes[0].size() == maxOutputBatch, "An exact-size batch was not flushed");
+    const Frame small{1, encodeMessage({{"text", u8"日本語\"\\\n"}})};
+    const auto bytes = encodeFrame(small);
+    writes.clear();
+    batch.append(small); batch.append(control(maxOutputBatch - bytes.size() - 5));
+    check(writes.size() == 1 && writes[0].size() == maxOutputBatch,
+        "Escaped JSON and framing bytes were not counted at the exact boundary");
+    writes.clear();
+    batch.append(small); batch.append(control(maxOutputBatch - bytes.size() - 4));
+    check(writes.size() == 1 && writes[0] == bytes, "A frame was split instead of flushing the previous batch");
+    batch.flush();
+    check(writes.size() == 2 && writes[1].size() <= maxOutputBatch, "A partial final batch was lost");
+    writes.clear();
+    // The existing 64 KiB JSON limit excludes its five framing bytes.
+    batch.append(small); batch.append(control(maxControl)); batch.flush();
+    check(writes.size() == 2 && writes[0] == bytes && writes[1].size() == maxControl + 5,
+        "A valid single frame larger than the batch target was split or rejected");
+    writes.clear(); batch.append(small);
+    rejects([&] { batch.append({1, std::string(maxControl + 1, 'x')}); }); batch.flush();
+    check(writes.size() == 1 && writes[0] == bytes, "An invalid frame corrupted a pending batch");
+}
+}
+int main() { try { commandLines(); resources(); protocol(); frameBatching(); frameBatchBoundaries(); std::cout << "WSL command line, resource and protocol tests passed\n"; } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; } }
