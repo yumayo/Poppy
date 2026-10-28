@@ -33,6 +33,7 @@ public:
     std::wstring error() const { std::lock_guard<std::mutex> lock(mutex_); return error_; }
     uint64_t revision() const { return revision_; }
     std::vector<std::wstring> terminal(const ResourceId& path, const std::string& token, const std::wstring& tool) const;
+    std::vector<std::wstring> terminalEvents() const;
     bool stopTerminal(const std::string& token) const;
 private:
     void start();
@@ -209,6 +210,11 @@ std::vector<std::wstring> Connection::terminal(const ResourceId& path, const std
     std::lock_guard<std::mutex> lock(mutex_); if (state_ != ConnectionState::Ready) throw std::runtime_error("Reconnect the WSL project before starting a terminal");
     auto args = command(); args.insert(args.end(), {wide(helperPath_), L"--terminal", wide(path.u8string()), wide(token), tool.empty() ? wide(shell_) : tool}); if (tool.empty()) args.push_back(L"-l"); return args;
 }
+std::vector<std::wstring> Connection::terminalEvents() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (state_ != ConnectionState::Ready) throw std::runtime_error("Reconnect the WSL project before starting notifications");
+    auto args = command(); args.insert(args.end(), {wide(helperPath_), L"--events"}); return args;
+}
 bool Connection::stopTerminal(const std::string& token) const {
     std::vector<std::wstring> args;
     { std::lock_guard<std::mutex> lock(mutex_); if (helperPath_.empty() || helperPath_[0] != '/') return false; args = command(); args.insert(args.end(), {wide(helperPath_), L"--stop-terminal", wide(token)}); }
@@ -318,6 +324,7 @@ public:
     void expectIdentity(std::string uid) override { expectedUid_ = std::move(uid); }
     std::string identity() const override { std::lock_guard<std::mutex> lock(connection_->mutex_); return connection_->uid_; }
     std::vector<std::wstring> terminalCommand(const ResourceId& path, const std::string& token, const std::wstring& tool) const override { if (state() != ConnectionState::Ready) throw std::runtime_error("Reconnect the WSL project before starting a terminal"); return connection_->terminal(path, token, tool); }
+    std::vector<std::wstring> terminalEventsCommand() const override { return connection_->terminalEvents(); }
     bool stopTerminal(const std::string& token) const override { return connection_->stopTerminal(token); }
 private:
     Response call(const std::string& op, const ResourceId& path, Message extra = {}, const std::string* bytes = nullptr, const std::function<bool()>& cancelled = {}, DWORD timeout = 10000,

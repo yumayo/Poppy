@@ -15,15 +15,6 @@ Terminal::~Terminal() {
     liveTerminals.erase(std::remove(liveTerminals.begin(), liveTerminals.end(), this), liveTerminals.end());
     if (liveTerminals.empty() && pumpTimerRoot) { KillTimer(pumpTimerRoot, 77); pumpTimerRoot = nullptr; }
 }
-void Terminal::trackContainer(const std::string& id) {
-    const auto prefix = L"Local\\Poppy." + wide(id);
-    stopRequest_.reset(CreateEventW(nullptr, TRUE, FALSE, (prefix+L".stop").c_str()));
-    launching_.reset(CreateEventW(nullptr, TRUE, FALSE, (prefix+L".launching").c_str()));
-    cleaned_.reset(CreateEventW(nullptr, TRUE, FALSE, (prefix+L".cleaned").c_str()));
-    unconfirmed_.reset(CreateEventW(nullptr, TRUE, FALSE, (prefix+L".unconfirmed").c_str()));
-    if (!stopRequest_ || !launching_ || !cleaned_ || !unconfirmed_) throw std::runtime_error("Cannot create container lifecycle events");
-}
-
 void Terminal::create(HWND parent, HINSTANCE instance) {
     liveTerminals.push_back(this);
     WNDCLASSW cls{}; cls.lpfnWndProc = procedure; cls.hInstance = instance; cls.lpszClassName = L"PoppyTerminal"; cls.hCursor = LoadCursorW(nullptr, IDC_IBEAM); RegisterClassW(&cls);
@@ -45,14 +36,14 @@ bool Terminal::start() {
     std::error_code directoryError;
     if (directory_.empty() || !fs::is_directory(directory_, directoryError)) { error_ = L"Project folder is missing. Restore the folder before starting a shell."; return false; }
     try { if (starting) starting(); }
-    catch (const std::exception& failure) { error_ = wide(failure.what()); return false; }
+    catch (const std::exception& failure) { error_ = wide(failure.what()); stop(); return false; }
     error_.clear(); model_ = TerminalModel(model_.columns(), model_.rows()); model_.reply = [this](std::string s) { send(std::move(s), false); };
     scroll_ = 0; anchor_ = caret_ = -1;
     endedNotified_ = false;
     display_ = TerminalDisplay{}; display_.update(model_, scroll_, GetTickCount64(), false, true);
     scrollbars();
     HANDLE read = nullptr, write = nullptr;
-    if (!CreatePipe(&read, &write, nullptr, 0)) { error_ = winError(); return false; }
+    if (!CreatePipe(&read, &write, nullptr, 0)) { error_ = winError(); stop(); return false; }
     Handle childInput(read); input_.reset(write);
     if (!CreatePipe(&read, &write, nullptr, 0)) { error_ = winError(); stop(); return false; }
     output_.reset(read); Handle childOutput(write);
@@ -97,7 +88,7 @@ bool Terminal::start() {
     for (const auto& value : environment_) inherited[value.first] = value.second;
     if (!environment_.empty()) {
         auto& wslenv = inherited[L"WSLENV"];
-        for (const auto name : {L"POPPY_EVENTS_URL", L"POPPY_SESSION_ID"}) {
+        for (const auto name : {L"POPPY_EVENTS_URL", L"POPPY_SESSION_ID", L"AICONTAINER_EVENT_SOCKET"}) {
             bool found = false;
             for (size_t p = 0; p < wslenv.size();) { const auto end = wslenv.find(L':', p); const auto token = wslenv.substr(p, end == std::wstring::npos ? end : end-p); if (token.substr(0,token.find(L'/')) == name) found = true; if (end == std::wstring::npos) break; p = end+1; }
             if (!found) { if (!wslenv.empty()) wslenv += L':'; wslenv += name; }
@@ -130,13 +121,6 @@ bool Terminal::start() {
 }
 void Terminal::stop() {
     if (stopping) stopping();
-    bool unknownCleanup = cleanupUnconfirmed();
-    if (launching_ && WaitForSingleObject(launching_.value, 0) == WAIT_OBJECT_0) {
-        SetEvent(stopRequest_.value);
-        unknownCleanup = WaitForSingleObject(cleaned_.value, 15000) != WAIT_OBJECT_0;
-    }
-    if (unknownCleanup && window_) MessageBoxW(GetAncestor(window_, GA_ROOT), L"Container cleanup could not be confirmed. The launch profile is retained under .poppy-runtime. Check the host launcher's output before removing its resources.", L"Poppy — cleanup unconfirmed", MB_OK | MB_ICONWARNING);
-    stopRequest_.reset(); launching_.reset(); cleaned_.reset(); unconfirmed_.reset();
     if (ended) ended();
     if (window_) KillTimer(window_, 2);
     stopping_ = true; condition_.notify_all();

@@ -51,6 +51,12 @@ std::vector<AiEvent> HookServer::drain() {
     while (!events_.empty()) { if (ids_.count(events_.front().sessionId)) result.push_back(std::move(events_.front())); events_.pop_front(); }
     return result;
 }
+bool HookServer::publish(const std::string& id, bool activity, std::string_view body) {
+    const auto event = parseAiEvent(id, activity, body); if (!event) return false;
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!ids_.count(id) || events_.size() >= 1024) return false;
+    events_.push_back(*event); PostMessageW(target_, wmAiEvent, 0, 0); return true;
+}
 void HookServer::serve() {
     struct Client { SOCKET socket; std::string bytes; ULONGLONG deadline; };
     std::vector<Client> clients;

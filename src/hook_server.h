@@ -15,6 +15,7 @@ public:
     void stop();
     void add(const std::string& id);
     void remove(const std::string& id);
+    bool publish(const std::string& id, bool activity, std::string_view body);
     std::vector<AiEvent> drain();
     const std::string& url() const { return url_; }
     const std::wstring& error() const { return error_; }

@@ -55,6 +55,7 @@ class HookDeliveryTests(unittest.TestCase):
             "NO_PROXY": "127.0.0.1",
             "no_proxy": "127.0.0.1",
         }
+        self.environment.pop("AICONTAINER_EVENT_SOCKET", None)
 
     def tearDown(self):
         self.server.shutdown()
