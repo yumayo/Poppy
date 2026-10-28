@@ -512,7 +512,7 @@ case WM_COPYDATA:{
     try{
         const auto options=parseStartupCommandLine(text);
         if(pendingProjects_.size()+options.projects.size()>1000)return FALSE;
-        for(const auto& project:options.projects)if(!fs::path(project).is_absolute())return FALSE;
+        for(const auto& project:options.projects)if(!isAbsoluteStartupProjectPath(project))return FALSE;
         // Acknowledge promptly; loading projects and restoring focus run later
         // in our own message loop, outside the sender's synchronous request.
         if(!PostMessageW(window_,wmStartup,0,0))return FALSE;
@@ -535,10 +535,15 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,PWSTR,int show){
         auto options=poppy::parseStartupCommandLine(GetCommandLineW());
         // Resolve against the launching process's working directory before IPC.
         for(auto& project:options.projects){
-            const auto path=poppy::fs::absolute(poppy::fs::path(project)).lexically_normal().make_preferred();
-            std::error_code error;
-            if(!poppy::fs::is_directory(path,error))throw std::runtime_error("The project directory does not exist or cannot be accessed: "+path.u8string());
-            project=path.native();
+            project=poppy::resolveStartupProjectPath(project);
+            // Query the original UNC spelling directly, without another
+            // std::filesystem interpretation of its root.
+            const DWORD attributes=GetFileAttributesW(project.c_str());
+            if(attributes==INVALID_FILE_ATTRIBUTES){
+                const auto error=GetLastError();
+                throw std::runtime_error("The project directory does not exist or cannot be accessed: "+poppy::utf8(project)+"\n\n"+poppy::utf8(poppy::winError(error)));
+            }
+            if(!(attributes&FILE_ATTRIBUTE_DIRECTORY))throw std::runtime_error("The project path is not a directory: "+poppy::utf8(project));
         }
         poppy::SingleInstance singleInstance(poppy::stateDirectory());
         if(singleInstance.acquireOrForward(options)){poppy::Workspace workspace;result=workspace.run(instance,show,options,singleInstance);}

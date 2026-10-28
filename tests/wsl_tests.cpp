@@ -32,6 +32,8 @@ void commandLines() {
         LocalFree(decoded); check(same, "Windows argument decoding changed a path, script or empty argument");
     };
     checkArguments(list); checkArguments(connect); checkArguments(terminal);
+    checkArguments({L"Poppy.exe", L"--project", L"\\\\wsl.localhost\\Ubuntu-22.04\\home\\user\\project",
+        L"--project=\\\\wsl$\\Ubuntu\\home\\user\\日本語 project"});
     checkArguments({L"C:\\Program Files\\Poppy\\Poppy.exe", L"", L"C:\\space path\\", L"/tmp/back\\slash", L"/tmp/a\"b", L"/tmp/a;b&$(pwd)'", L"line1\nline2"});
 #endif
 }
