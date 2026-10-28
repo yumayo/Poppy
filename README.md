@@ -30,7 +30,7 @@ make artifact
 `make artifact`は`dev`を起動した後、`docker compose exec -T dev /usr/local/bin/poppy-build`を実行します。Docker内でLinux用のコアテストを実行した後、MinGW-w64でWindows x64向けReleaseビルドを行い、`out/docker/Poppy.exe`に出力します。ビルド終了後もコンテナは起動したままです。C++とwinpthreadsのランタイムは静的リンクします。生成した実行ファイルをWindows上で起動してください。
 
 ```powershell
-.\out\docker\Poppy.exe "C:\work\project"
+.\out\docker\Poppy.exe --project "C:\work\project"
 ```
 
 初回のイメージ作成にはDocker HubとDebianパッケージ配布元への接続が必要です。イメージ作成後のテスト・コンパイルは、外部接続できない内部ネットワーク（`internal: true`）で実行します。ソースを読み取り専用でマウントし、中間生成物はComposeの`build-cache`ボリューム、完成した実行ファイルはホストの`out/docker`に保存します。並列コンパイル数は既定で2、`POPPY_BUILD_JOBS`環境変数で変更できます。
@@ -82,10 +82,27 @@ Visual Studio 2022の「C++によるデスクトップ開発」、Windows SDK、
 cmake -S . -B out -A x64 -DBUILD_TESTING=ON
 cmake --build out --config Release
 ctest --test-dir out -C Release --output-on-failure
-.\out\Release\Poppy.exe "C:\work\project"
+.\out\Release\Poppy.exe --project "C:\work\project"
 ```
 
-フォルダー指定を省略すると開いていたプロジェクト一覧と選択を復元します。初回起動時は空のウィンドウが開きます。コマンドラインでフォルダーを指定した場合は、そのプロジェクトを優先します。Release版はCRTとSQLiteを静的リンクし、通常のコード表示とシェルには`Poppy.exe`を使います。ai-containerの起動アダプターを使う場合は、同じ場所の`ai/`フォルダーも配布します。通常利用にVisual StudioやCMakeは必要ありません。
+フォルダー指定を省略すると開いていたプロジェクト一覧と選択を復元します。初回起動時は空のウィンドウが開きます。コマンドラインでフォルダーを指定した場合は、そのプロジェクトを優先します。起動済みの場合は既存のPoppyへ引数を渡し、ウィンドウを手前に表示します。Release版はCRTとSQLiteを静的リンクし、通常のコード表示とシェルには`Poppy.exe`を使います。ai-containerの起動アダプターを使う場合は、同じ場所の`ai/`フォルダーも配布します。通常利用にVisual StudioやCMakeは必要ありません。
+
+### 起動引数
+
+キーと値を `--project "ディレクトリ"` または `--project="ディレクトリ"` の形式で指定すると、Projectsへ追加して選択します。`--project` は繰り返し指定でき、最後に指定したプロジェクトを選択します。
+
+```powershell
+.\Poppy.exe --project "C:\work\project"
+.\Poppy.exe --project="C:\work\project"
+.\Poppy.exe --project "C:\work\first" --project "C:\work\second"
+.\Poppy.exe --project ".\relative project"
+```
+
+同じWindowsセッション・保存先でPoppyが起動していれば、そのプロセスのProjectsへ追加し、呼び出したプロセスは終了します。既に開いているフォルダーは重複追加せず、その項目へ切り替えます。最小化していれば復帰します。引数なしで再起動した場合も既存のウィンドウを表示します。Poppyが起動していない場合は、保存済みプロジェクトを復元したうえで指定フォルダーを追加します。起動中の復元処理と重なった追加要求も保持します。
+
+空白・日本語を含むパスは引用符で囲んでください。相対パスは呼び出し元のカレントディレクトリを基準に解決します。WindowsのフォルダーとWSLのUNCパス（例: `\\wsl.localhost\Ubuntu\home\user\project`）を指定できます。存在しないフォルダー、ファイル、空の値、未知の引数はエラーになります。従来の `Poppy.exe "C:\work\project"` も1フォルダーに限り利用できます。
+
+起動済みプロセスが応答しない場合はエラーを表示します。通常の起動時と同じWindowsユーザー・権限で呼び出してください。
 
 ### コアテストだけを直接実行
 
@@ -295,6 +312,8 @@ Windowsで`BUILD_TESTING=ON`にしてビルドすると、`ctest`で`tests/folde
 タブのドラッグについては、幅の異なるタブの前後移動、行の空白部分へのドロップ、複数段をまたぐ移動、ドラッグ中の段送り、固定タブ・通常タブそれぞれの並び替えと行の分離を検証します。Esc・キャプチャ喪失・領域外でのキャンセル、移動後の表示位置の保持、再起動後の順序・選択・固定状態の復元も対象です。
 
 GUIテストは一時フォルダーを `APPDATA` に設定し、通常利用の保存状態に影響させません。再起動後の前回プロジェクト・タブ・表示位置・ツリー展開・ペイン配置の復元、削除されたファイルの除外、ルートを折りたたんだ状態の保持も検証します。Git for WindowsがPATHにある場合は、一時リポジトリでGitのTree／Listの切り替え、同名ファイルの表示、更新後の折りたたみ状態、再起動後の表示形式の復元も検証します。
+
+`tests/startup_options_tests.cpp`は起動引数の2形式、複数指定、従来形式、空・未知・不完全な引数の拒否をLinuxとWindowsで検証します。`tests/single_instance_tests.cpp`はWindows上で、既存プロセスへの追加、重複防止、呼び出し元を基準とした相対パス、最小化からの復帰、保存先の分離、追加後の再起動と保存済みプロジェクトの保持、不正な要求の拒否、3プロセスの同時起動を検証します。後者の実行にはWindowsのデスクトップ環境が必要です。
 
 Projectsのドラッグは、前後と先頭・末尾への移動、移動しないクリック、上下端の自動スクロール、Esc・キャプチャ喪失・領域外でのキャンセル、選択・本文の表示位置・実行中ターミナルの保持、再起動後の順序と選択の復元を`tests/folder_tests.cpp`で検証します。このGUIテストの実行にはWindowsのデスクトップ環境が必要です。
 
