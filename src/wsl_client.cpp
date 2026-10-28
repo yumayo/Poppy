@@ -183,6 +183,7 @@ void Connection::received(Frame frame) {
 }
 Response Connection::call(Message message, const std::string* bytes, const std::function<bool()>& cancelled, DWORD timeout,
     std::function<void(const Message&)> receive) {
+    const bool search = field(message, "op") == "searchContent";
     const auto id = nextId_++; message["id"] = std::to_string(id); auto pending = std::make_shared<Pending>(); pending->project = field(message, "projectId"); pending->generation = field(message, "generation");
     pending->receive = std::move(receive);
     const auto deadline = GetTickCount64() + timeout;
@@ -193,9 +194,9 @@ Response Connection::call(Message message, const std::string* bytes, const std::
         std::unique_lock<std::mutex> lock(mutex_);
         while (!pending->done && !stopping_) {
             condition_.wait_for(lock, std::chrono::milliseconds(30));
-            searchTimedOut = pending->receive && GetTickCount64() > deadline;
+            searchTimedOut = search && GetTickCount64() > deadline;
             if (!cancelling && ((cancelled && cancelled()) || searchTimedOut)) { cancelling = true; cancelledAt = GetTickCount64(); lock.unlock(); send({1, encodeMessage({{"op", "cancel"}, {"id", std::to_string(nextId_++)}, {"target", std::to_string(id)}})}); lock.lock(); }
-            if ((!pending->receive && GetTickCount64() > deadline) || (cancelling && GetTickCount64() - cancelledAt > 2000)) { lock.unlock(); fail(L"WSL operation timed out. Reconnect and verify the file before retrying a save or rename."); lock.lock(); break; }
+            if ((!search && GetTickCount64() > deadline) || (cancelling && GetTickCount64() - cancelledAt > 2000)) { lock.unlock(); fail(L"WSL operation timed out. Reconnect and verify the file before retrying a save or rename."); lock.lock(); break; }
         }
         if (!pending->done) throw std::runtime_error("WSL connection closed; operation outcome may be unknown");
         responseBytes_ -= pending->entryBytes + pending->response.bytes.size(); auto response = std::move(pending->response); pending_.erase(id); lock.unlock();
@@ -259,8 +260,31 @@ public:
         } catch (const std::exception& error) { return wide(error.what()); }
     }
     FileIndex indexFiles(const ResourceId& root, const std::function<bool()>& cancelled) override {
-        FileIndex index;
-        try { const auto response = call("indexFiles", root, {}, nullptr, cancelled, 60000); for (const auto& entry : response.entries) { const auto relative = root.at(field(entry, "path")).lexically_relative(root).u8string(); addIndexedFile(index, relative); } if (field(response.metadata, "truncated") == "1") index.error = "WSL file list reached its 200,000-file or 50,000-directory limit."; std::sort(index.files.begin(), index.files.end(), [](const IndexedFile& a, const IndexedFile& b) { return a.relative < b.relative; }); } catch (const std::exception& error) { index.error = error.what(); } return index;
+        struct Delivery { std::mutex mutex; FileIndex index; bool limited = false, finished = false; };
+        auto delivery = std::make_shared<Delivery>();
+        std::string error;
+        try {
+            // Convert each entry immediately. Retaining every JSON map before
+            // building the index multiplied memory and exhausted the shared
+            // connection receive budget, disconnecting unrelated projects.
+            const auto response = call("indexFiles", root, {}, nullptr, cancelled, 60000,
+                [delivery, root](const Message& entry) {
+                    std::lock_guard<std::mutex> lock(delivery->mutex);
+                    if (delivery->finished || delivery->limited) return;
+                    const auto path = root.at(field(entry, "path"));
+                    if (!root.contains(path) || root == path) throw std::runtime_error("Invalid WSL indexed path");
+                    delivery->limited = !addIndexedFile(delivery->index, path.lexically_relative(root).u8string());
+                });
+            if (field(response.metadata, "truncated") == "1") error = "WSL file list reached its 200,000-file or 50,000-directory limit.";
+        } catch (const std::exception& failure) { error = failure.what(); }
+        // A failed connection may wake call() while its reader is delivering
+        // an entry. Freeze the collector before returning the snapshot.
+        std::lock_guard<std::mutex> lock(delivery->mutex);
+        delivery->finished = true;
+        auto index = std::move(delivery->index);
+        if (index.error.empty()) index.error = std::move(error);
+        std::sort(index.files.begin(), index.files.end(), [](const IndexedFile& a, const IndexedFile& b) { return a.relative < b.relative; });
+        return index;
     }
     ContentSearchSummary searchContent(const ResourceId& root, const ContentSearchOptions& options,
         const ContentPublish& publish, const std::function<bool()>& cancelled) override {

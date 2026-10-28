@@ -366,11 +366,15 @@ void gitAndCancellation(const std::string& executable) {
         helper.eof();
     }
     const auto bin = fixture.root/"bin"; fs::create_directory(bin);
-    write(bin/"git","#!/bin/sh\nif [ \"$1\" = slow ]; then sleep 60 & echo $! > \"$2\"; wait; else shift; printf '%s\\0' \"$@\"; fi\n"); chmod((bin/"git").c_str(),0700);
+    write(bin/"git","#!/bin/sh\nif [ \"$1\" = slow ]; then sleep 60 & echo $! > \"$2\"; wait; elif [ \"$1\" = large ]; then head -c 4194305 /dev/zero; else shift; printf '%s\\0' \"$@\"; fi\n"); chmod((bin/"git").c_str(),0700);
     const auto inherited = getenv("PATH"); const std::string previous = inherited ? inherited : ""; setenv("PATH",(bin.string()+":/usr/bin:/bin").c_str(),1); Helper helper(executable); setenv("PATH",previous.c_str(),1); helper.hello();
     const std::string argument = "日本語 '\" $() \\ path";
     auto response = helper.call("git",fixture.root,{{"argc","2"},{"arg0","arguments"},{"arg1",argument}}); check(response.bytes == argument+'\0',"Git arguments were interpreted by a shell");
     const auto pidFile = fixture.root/"git-child"; write(fixture.root/"readable","responsive");
+    const auto oversized = helper.call("git",fixture.root,{{"argc","1"},{"arg0","large"}},nullptr,false);
+    check(field(oversized.metadata,"error") == "Git output exceeds the 4 MiB limit" &&
+        helper.call("readFile",fixture.root/"readable").bytes == "responsive",
+        "Oversized Git output disconnected the helper or failed to report its limit");
     const auto slow = helper.request({{"op","git"},{"path",fixture.root.string()},{"argc","2"},{"arg0","slow"},{"arg1",pidFile.string()}});
     const auto deadline = std::chrono::steady_clock::now()+std::chrono::seconds(3); while (!fs::exists(pidFile) && std::chrono::steady_clock::now() < deadline) std::this_thread::sleep_for(std::chrono::milliseconds(10)); check(fs::exists(pidFile),"Slow Git fixture did not start");
     check(helper.call("readFile",fixture.root/"readable").bytes == "responsive","Git blocked file/control requests");

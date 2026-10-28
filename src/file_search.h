@@ -11,6 +11,7 @@ struct IndexedFile { std::string relative; std::u32string normalized; };
 struct FileIndex {
     std::vector<IndexedFile> files;
     std::string error;
+    size_t storageBytes = 0;
 };
 struct FileSearchResult {
     std::vector<FileMatch> matches;
@@ -22,7 +23,10 @@ struct FileSearchResult {
 int fileSearchScore(std::string_view relative, std::string_view query);
 // Collect every regular file once, excluding .git and links/junctions.
 FileIndex indexFiles(const std::filesystem::path& root, const std::function<bool()>& cancelled = {});
-void addIndexedFile(FileIndex& index, std::string relative);
+// Bound retained remote entries, including UTF-32 names and vector growth.
+// A full index keeps its existing files and reports an error without throwing.
+bool addIndexedFile(FileIndex& index, std::string relative,
+    size_t byteLimit = 64 * 1024 * 1024, size_t fileLimit = 200000);
 // Filter an immutable snapshot without filesystem access. Paths are normalized
 // while indexing; queries only retain the best results in a bounded heap.
 FileSearchResult searchFiles(const FileIndex& index, std::string_view query,

@@ -50,9 +50,18 @@ int scorePath(std::u32string_view path, std::u32string_view query) {
 int fileSearchScore(std::string_view relative, std::string_view query) {
     return scorePath(normalized(relative), normalized(query));
 }
-void addIndexedFile(FileIndex& index, std::string relative) {
+bool addIndexedFile(FileIndex& index, std::string relative, size_t byteLimit, size_t fileLimit) {
     auto name = normalized(relative);
+    // Account for string allocations and both vector buffers during growth.
+    const size_t bytes = 3 * sizeof(IndexedFile) + relative.capacity() + 1 +
+        (name.capacity() + 1) * sizeof(char32_t);
+    if (index.files.size() >= fileLimit || index.storageBytes > byteLimit || bytes > byteLimit - index.storageBytes) {
+        index.error = "File list reached its file-count or memory limit.";
+        return false;
+    }
     index.files.push_back({std::move(relative), std::move(name)});
+    index.storageBytes += bytes;
+    return true;
 }
 FileIndex indexFiles(const std::filesystem::path& root, const std::function<bool()>& cancelled) {
     namespace fs = std::filesystem;
