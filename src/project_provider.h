@@ -43,6 +43,9 @@ public:
     virtual bool stopTerminal(const std::string&) const { return true; }
 };
 std::shared_ptr<ProjectProvider> createProjectProvider(const ResourceId& root);
+struct WslEventLaunch { std::vector<std::wstring> command; std::string input; };
+// Standalone relay for PowerShell -> plain wsl, using the default distribution.
+WslEventLaunch defaultWslTerminalEvents();
 std::vector<std::string> installedWslDistributions();
 std::wstring wslExecutable();
 std::filesystem::path windowsProcessDirectory();

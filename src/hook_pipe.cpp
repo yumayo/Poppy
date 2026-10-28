@@ -4,7 +4,7 @@
 #include <stdexcept>
 
 namespace poppy {
-std::string HookPipe::start(const std::vector<std::wstring>& command, std::function<void(const wsl::Message&)> receive) {
+std::string HookPipe::start(const std::vector<std::wstring>& command, std::function<void(const wsl::Message&)> receive, std::string input) {
     stop();
     try {
         if (command.empty()) throw std::runtime_error("WSL notifications are unavailable");
@@ -31,6 +31,15 @@ std::string HookPipe::start(const std::vector<std::wstring>& command, std::funct
         process_.reset(pi.hProcess); Handle thread(pi.hThread);
         if (!AssignProcessToJobObject(job_.value, process_.value)) { TerminateProcess(process_.value, 1); throw std::runtime_error("Cannot track WSL notifications"); }
         ResumeThread(thread.value); childInput.reset(); childOutput.reset();
+        stopping_ = false;
+        if (!input.empty()) uploader_.start([this, bytes = std::move(input)] {
+            size_t offset = 0;
+            while (offset < bytes.size() && !stopping_) {
+                DWORD count = 0;
+                if (!WriteFile(input_.value, bytes.data() + offset, static_cast<DWORD>(std::min<size_t>(bytes.size() - offset, wsl::maxChunk)), &count, nullptr) || !count) return;
+                offset += count;
+            }
+        });
         wsl::FrameReader frames; std::string socket;
         const auto deadline = GetTickCount64() + 5000;
         while (socket.empty()) {
@@ -69,7 +78,14 @@ std::string HookPipe::start(const std::vector<std::wstring>& command, std::funct
     } catch (...) { stop(); throw; }
 }
 void HookPipe::stop() {
-    stopping_ = true; input_.reset();
+    stopping_ = true;
+    if (uploader_.joinable()) {
+        while (WaitForSingleObject(uploader_.native_handle(), 0) == WAIT_TIMEOUT) {
+            CancelSynchronousIo(uploader_.native_handle()); WaitForSingleObject(uploader_.native_handle(), 10);
+        }
+        uploader_.join();
+    }
+    input_.reset();
     reader_.join();
     if (process_ && WaitForSingleObject(process_.value, 2000) != WAIT_OBJECT_0 && job_) TerminateJobObject(job_.value, 1);
     process_.reset(); output_.reset(); job_.reset(); running_ = false;
