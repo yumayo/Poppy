@@ -70,7 +70,7 @@ Windowsで直接ビルドする場合は、Linux x86_64環境で先に`poppy-wsl
 
 WSLプロジェクトのターミナルの「＋」を右クリックすると、`aicontainer codex` / `aicontainer claude`でAIコンテナを起動できます。起動にはWSL内のDocker Engineと、Bashの起動設定から読み込まれる`aicontainer`が必要です。通常のWSLシェルから手動で同じコマンドを実行することもできます。Windows上のCLIの直接起動は提供しません。
 
-PoppyはWSLシェルの起動前に端末ごとの通知用Unixソケットを用意し、`AICONTAINER_EVENT_SOCKET`を`WSLENV`で自動設定します。通常の`aicontainer`がソケットをAIコンテナへマウントし、hookからの通知は専用の匿名パイプでPoppyへ届きます。HTTP受信口や通知用TCPポートはありません。通知IDとURLを環境変数で渡す設定や、Poppy通知用のIP許可は不要です。[AI連携](../integration/ai/README.md)も参照してください。
+PoppyはWSLシェルの起動前に端末ごとの通知用Unixソケットを用意し、`AICONTAINER_EVENT_SOCKET`を`WSLENV`で自動設定します。通常の`aicontainer`がソケットをAIコンテナへマウントし、hookからの通知は専用の匿名パイプでPoppyへ届きます。HTTP受信口や通知用TCPポートはありません。通知IDとURLを環境変数で渡す設定や、Poppy通知用のIP許可は不要です。WindowsプロジェクトでPowerShellから`wsl`へ入る場合も、PowerShell起動時に既定WSL内で専用の通知ヘルパーを準備し、同じソケットのパスを引き継ぎます。別ディストリビューション・別Linuxユーザーには対象のWSLプロジェクトから直接起動してください。[AI連携](../integration/ai/README.md)も参照してください。
 
 ## 検証範囲
 

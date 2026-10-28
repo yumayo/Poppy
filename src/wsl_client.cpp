@@ -12,6 +12,14 @@
 namespace poppy {
 namespace {
 using namespace wsl;
+std::string bundledWslHelper() {
+    std::wstring executable(32768, 0); const auto count = GetModuleFileNameW(nullptr, executable.data(), static_cast<DWORD>(executable.size())); if (!count || count >= executable.size()) throw std::runtime_error("Cannot locate Poppy's WSL helper"); executable.resize(count);
+    const auto helper = fs::path(executable).parent_path() / L"wsl" / L"poppy-wsl-helper";
+    std::ifstream file(helper, std::ios::binary | std::ios::ate); if (!file) throw std::runtime_error("The Linux helper is missing. Place the release's wsl folder beside Poppy.exe.");
+    const auto length = file.tellg(); if (length <= 0 || length > 32 * 1024 * 1024) throw std::runtime_error("Invalid Linux helper size");
+    std::string binary(static_cast<size_t>(length), 0); file.seekg(0); if (!file.read(binary.data(), static_cast<std::streamsize>(binary.size()))) throw std::runtime_error("Cannot read Linux helper");
+    return binary;
+}
 struct Response { Message metadata; std::vector<Message> entries; std::string bytes; };
 struct Pending {
     Response response;
@@ -83,12 +91,7 @@ void Connection::stop() {
 }
 void Connection::reconnect() { std::lock_guard<std::mutex> lock(startMutex_); if (state_ == ConnectionState::Unavailable || state_ == ConnectionState::Disconnected) { stop(); state_ = ConnectionState::Disconnected; } }
 void Connection::start() {
-    std::wstring executable(32768, 0); const auto count = GetModuleFileNameW(nullptr, executable.data(), static_cast<DWORD>(executable.size())); if (!count || count >= executable.size()) throw std::runtime_error("Cannot locate Poppy's WSL helper"); executable.resize(count);
-    const auto helper = fs::path(executable).parent_path() / L"wsl" / L"poppy-wsl-helper";
-    std::ifstream file(helper, std::ios::binary | std::ios::ate); if (!file) throw std::runtime_error("The Linux helper is missing. Place the release's wsl folder beside Poppy.exe.");
-    const auto length = file.tellg(); if (length <= 0 || length > 32 * 1024 * 1024) throw std::runtime_error("Invalid Linux helper size");
-    std::string binary(static_cast<size_t>(length), 0); file.seekg(0); if (!file.read(binary.data(), static_cast<std::streamsize>(binary.size()))) throw std::runtime_error("Cannot read Linux helper");
-    const auto hash = sha256(binary);
+    const auto binary = bundledWslHelper(); const auto hash = sha256(binary);
     const auto distributions = installedWslDistributions();
     if (std::find(distributions.begin(), distributions.end(), location_.distro) == distributions.end()) throw std::runtime_error("The WSL distribution is no longer registered: " + location_.distro);
     auto args = command(); args.insert(args.end(), {L"/bin/sh", L"-c", wide(bootstrap), L"poppy-bootstrap", wide(helperVersion), wide(hash), std::to_wstring(binary.size())});
@@ -345,6 +348,12 @@ private:
     std::atomic<uint64_t> generation_{1};
     std::atomic<ConnectionState> projectState_{ConnectionState::Disconnected};
 };
+}
+WslEventLaunch defaultWslTerminalEvents() {
+    WslEventLaunch launch; launch.input = bundledWslHelper();
+    launch.command = {wslExecutable(), L"--exec", L"/bin/sh", L"-c", wide(wsl::bootstrap),
+        L"poppy-bootstrap", wide(wsl::helperVersion), wide(wsl::sha256(launch.input)), std::to_wstring(launch.input.size()), L"--events"};
+    return launch;
 }
 std::shared_ptr<ProjectProvider> createWslProvider(const ResourceId& root) {
     static std::mutex mutex; static std::map<std::string, std::weak_ptr<Connection>> connections;

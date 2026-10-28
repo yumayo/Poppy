@@ -3,6 +3,8 @@
 namespace poppy::wsl {
 // Fixed program; distribution, version, hash and size are separate arguments.
 inline constexpr const char* bootstrap = R"SH(set -eu
+poppy_mode="${4:---stdio}"
+case "$poppy_mode" in --stdio|--events) ;; *) echo 'Unsupported Poppy helper mode' >&2; exit 1 ;; esac
 [ "$(uname -m)" = x86_64 ] || { echo 'Poppy supports Linux x86_64 only' >&2; exit 1; }
 umask 077
 base="$HOME"
@@ -33,6 +35,6 @@ else
   mv -f -- "$temporary" "$target"
   trap - EXIT HUP INT TERM
 fi
-exec "$target" --stdio
+exec "$target" "$poppy_mode"
 )SH";
 }

@@ -2,9 +2,11 @@
 import sys
 sys.dont_write_bytecode = True
 import json
+import hashlib
 import os
 from pathlib import Path
 import select
+import re
 import shlex
 import socket
 import struct
@@ -27,10 +29,32 @@ class RelayTests(unittest.TestCase):
         self.server, self.socket = self.start_server()
         self.environment = dict(os.environ, AICONTAINER_EVENT_SOCKET=str(self.socket))
 
-    def start_server(self):
-        process = subprocess.Popen([str(HELPER), "--events"], stdin=subprocess.PIPE,
-                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0)
+    def start_server(self, bootstrap_home=None):
+        command = [str(HELPER), "--events"]
+        environment = None
+        binary = b""
+        if bootstrap_home is not None:
+            binary = HELPER.read_bytes()
+            script = (ROOT / "src/wsl_bootstrap.h").read_text().split('R"SH(', 1)[1].split(')SH"', 1)[0]
+            version = re.search(r'helperVersion = "([^"]+)"', (ROOT / "src/wsl_protocol.h").read_text()).group(1)
+            command = ["/bin/sh", "-c", script, "poppy-bootstrap", version,
+                       hashlib.sha256(binary).hexdigest(), str(len(binary)), "--events"]
+            environment = dict(os.environ, HOME=str(bootstrap_home))
+        process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                   stderr=subprocess.PIPE, bufsize=0, env=environment)
         self.addCleanup(self.stop, process)
+        if binary:
+            os.set_blocking(process.stdin.fileno(), False)
+            offset = 0
+            deadline = time.monotonic() + 5
+            while offset < len(binary):
+                self.assertTrue(select.select([], [process.stdin], [], max(0, deadline - time.monotonic()))[1],
+                                "Notification helper upload timed out")
+                try:
+                    offset += os.write(process.stdin.fileno(), binary[offset:offset + 65536])
+                except BlockingIOError:
+                    continue
+            os.set_blocking(process.stdin.fileno(), True)
         name = Path(self.frame(process)["socket"])
         return process, name
 
@@ -108,6 +132,34 @@ class RelayTests(unittest.TestCase):
         self.stop(self.server)
         self.assertFalse(self.socket.exists())
         self.assertFalse(self.socket.parent.exists())
+
+    def test_bootstrap_installs_and_reuses_standalone_notification_helper(self):
+        home = self.root / "home 日本語 ' $"
+        home.mkdir()
+        modified = None
+        for _ in range(2):
+            process, filename = self.start_server(home)
+            installed = list(home.glob(".local/share/yumayo/Poppy/helpers/*/poppy-wsl-helper"))
+            self.assertEqual(len(installed), 1)
+            self.assertEqual(installed[0].read_bytes(), HELPER.read_bytes())
+            if modified is not None:
+                self.assertEqual(installed[0].stat().st_mtime_ns, modified)
+            modified = installed[0].stat().st_mtime_ns
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+                connection.settimeout(3); connection.connect(str(filename)); connection.sendall(self.valid())
+                self.assertEqual(connection.recv(16), b"OK\n")
+            self.assertEqual(json.loads(self.frame(process)["body"]), {"status": "running"})
+            self.stop(process)
+            self.assertFalse(filename.exists())
+            self.assertFalse(filename.parent.exists())
+
+    def test_bootstrap_rejects_unsupported_mode_before_creating_files(self):
+        script = (ROOT / "src/wsl_bootstrap.h").read_text().split('R"SH(', 1)[1].split(')SH"', 1)[0]
+        result = subprocess.run(["/bin/sh", "-c", script, "poppy-bootstrap", "test", "test", "0", "--unsupported"],
+                                env=dict(os.environ, HOME=str(self.root)), input=b"", capture_output=True, timeout=3)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(b"Unsupported Poppy helper mode", result.stderr)
+        self.assertFalse((self.root / ".local").exists())
 
     def test_invalid_and_oversized_events_leave_relay_usable(self):
         oversized = json.dumps({"type": "status", "body": json.dumps({"status": "running", "pad": "x" * 8192})}).encode() + b"\n"

@@ -14,7 +14,7 @@
 
 AI通知は登録済みの通知IDだけを、プロセス内の`AiEventQueue`へ最大1,024件保持する。IDを解除すると配送待ちも除去する。パイプの読み取りスレッドからUIへメッセージを送り、表示を更新する。`activityText`は最大512 Unicode文字で検証し、永続化しない。TCP/HTTP受信サーバーやWinsock依存は持たない。
 
-WSLターミナルの通知は、各TerminalSessionが所有するHookPipeと専用WSLヘルパーで受け取る。CLIやシェルの起動前にUnixソケットを開き、`AICONTAINER_EVENT_SOCKET`を自動設定する。通常の`aicontainer`がソケットだけをコンテナへ渡し、hookからの通知を匿名パイプでPoppyへ返す。通知IDはコンテナへ渡さず、Windows側のセッション所有者で付与して通知キューへ配送する。対話PTY・ファイル操作の接続とは独立し、wslc・起動プロファイル・コンテナからのIP通信は使用しない。標準入力のEOFまたは出力切断でリレーとソケットを終了する。
+WSLターミナルの通知は、各TerminalSessionが所有するHookPipeと専用WSLヘルパーで受け取る。CLIやシェルの起動前にUnixソケットを開き、`AICONTAINER_EVENT_SOCKET`を自動設定する。通常の`aicontainer`がソケットだけをコンテナへ渡し、hookからの通知を匿名パイプでPoppyへ返す。通知IDはコンテナへ渡さず、Windows側のセッション所有者で付与して通知キューへ配送する。対話PTY・ファイル操作の接続とは独立し、wslc・起動プロファイル・コンテナからのIP通信は使用しない。標準入力のEOFまたは出力切断でリレーとソケットを終了する。WindowsプロジェクトのPowerShellも、既定WSLに単独の通知ヘルパーをブートストラップし、後から入力される`wsl`へソケットを引き継ぐ。ヘルパーの転送は専用スレッドで行い、開始待ちの期限と終了時のI/O取消しを設ける。WSLを起動できない場合は理由を保持し、PowerShell自体は起動する。
 
 ## 検証範囲
 
@@ -24,9 +24,9 @@ Windowsで実行するテストには、A→B→C→AでのノードID・本文�
 
 実CLIのhook発火、Windowsの`wsl.exe`とWSLENVによる自動設定、実Dockerのソケットマウントは実機確認が必要。導入方法は [AI連携手順](../integration/ai/README.md) を参照。
 
-HTTP廃止後の検証は既存のCTest 17対象、hookの11テスト、実WSLリレーの9テストと、Windows版のクロスビルドを対象にする。
+HTTP廃止後の検証は既存のCTest 17対象、hookの11テスト、実WSLリレーの11テストと、Windows版のクロスビルドを対象にする。
 
-通知リレーは、ビルド済みのWSLヘルパーと導入済みのCodex・Claude hookをUnixソケットと匿名パイプで検証する。Poppy用変数なしの通知、Unicode、不正データ、件数・バイト数上限、読み取りが遅い場合の復帰、分割送信、端末間の独立性、切断時の後始末を対象にする。ai-container側では通常の`aicontainer`によるソケットの自動マウントと複雑なパスの引用をDockerモックで検証する。
+通知リレーは、ビルド済みのWSLヘルパーと導入済みのCodex・Claude hookをUnixソケットと匿名パイプで検証する。Poppy用変数なしの通知、Unicode、不正データ、件数・バイト数上限、読み取りが遅い場合の復帰、分割送信、端末間の独立性、切断時の後始末、単独ヘルパーの初回配置・再利用・不正な起動モードの拒否を対象にする。ai-container側では通常の`aicontainer`によるソケットの自動マウントと複雑なパスの引用をDockerモックで検証する。
 
 ## Windowsでの追加確認
 

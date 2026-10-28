@@ -29,18 +29,27 @@ void TerminalPane::add(SavedTerminal configuration) {
         if (found != sessions_.end()) { active_ = static_cast<size_t>(found - sessions_.begin()); acknowledge(); InvalidateRect(window_, nullptr, FALSE); }
     };
     session->terminal->starting = [this,ptr] {
-        ptr->ai = {};
+        ptr->ai = {}; ptr->notificationError.clear();
         std::string eventSocket;
         if (directory_.wsl()) {
-            ptr->notificationId = newSessionId();
-            if (events_) events_->add(ptr->notificationId);
             ptr->wslToken = newSessionId();
             ptr->terminal->setCommand(provider_->terminalCommand(directory_.at(ptr->configuration.directory), ptr->wslToken, ptr->wslTool));
+        }
+        if (events_) {
+            ptr->notificationId = newSessionId(); events_->add(ptr->notificationId);
             const auto id = ptr->notificationId; const auto hooks = events_;
-            if (hooks) eventSocket = ptr->events.start(provider_->terminalEventsCommand(), [hooks, id](const wsl::Message& message) {
-                const auto kind = wsl::field(message, "type");
-                if (message.size() == 2 && (kind == "status" || kind == "activity")) hooks->publish(id, kind == "activity", wsl::field(message, "body"));
-            });
+            try {
+                auto launch = directory_.wsl() ? WslEventLaunch{provider_->terminalEventsCommand(), {}} : defaultWslTerminalEvents();
+                eventSocket = ptr->events.start(launch.command, [hooks, id](const wsl::Message& message) {
+                    const auto kind = wsl::field(message, "type");
+                    if (message.size() == 2 && (kind == "status" || kind == "activity")) hooks->publish(id, kind == "activity", wsl::field(message, "body"));
+                }, std::move(launch.input));
+            } catch (const std::exception& failure) {
+                events_->remove(id); ptr->notificationId.clear();
+                if (directory_.wsl()) throw;
+                // A missing WSL installation must not prevent a PowerShell session.
+                ptr->notificationError = wide(failure.what());
+            }
         }
         ptr->terminal->setEnvironment({{L"AICONTAINER_EVENT_SOCKET", wide(eventSocket)}});
         if (changed) changed();
@@ -108,7 +117,8 @@ std::wstring TerminalPane::description() const {
     for(const auto& s:sessions_) {
         text+=L"\n"+wide(s->configuration.name)+L": "+wide(aiStateName(s->ai.state));
         if(s->ai.changedAt) text+=L" · "+std::to_wstring((GetTickCount64()-s->ai.changedAt)/1000)+L"s ago";
-        if (s->terminal->running() && !s->wslToken.empty() && !s->events.running()) text += L" · notification relay disconnected";
+        if (s->terminal->running() && !s->notificationError.empty()) text += L" · notifications unavailable: " + s->notificationError;
+        else if (s->terminal->running() && !s->notificationId.empty() && !s->events.running()) text += L" · notification relay disconnected";
         text+=s->notificationId.empty()?L" · not connected":s->ai.hookObserved?L" · hook / confirmed":L" · awaiting hook";
         if(!s->ai.activity.empty())text+=L"\n  "+wide(s->ai.activity);
     }

@@ -15,6 +15,7 @@ struct TerminalSession {
     std::unique_ptr<Terminal> terminal;
     HookPipe events;
     std::string notificationId;
+    std::wstring notificationError;
     AiStatus ai;
     std::string wslToken;
     std::wstring wslTool;
