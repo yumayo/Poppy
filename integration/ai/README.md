@@ -1,6 +1,6 @@
 # Poppyとai-containerの接続
 
-WSLにDocker Engineをインストールし、普段どおり`aicontainer`で起動する構成に対応します。PoppyのWSLターミナルからなら、**`.aicontainer`への`POPPY_EVENTS_URL`・`POPPY_SESSION_ID`と、Poppy通知専用の`allow-ip`は不要です。** CLI別hookの導入は引き続き必要です。
+WSLにDocker Engineをインストールし、普段どおり`aicontainer`で起動する構成に対応します。PoppyのWSLターミナルからなら、**`.aicontainer`への通知用設定や、Poppy通知専用の`allow-ip`は不要です。** CLI別hookの導入は引き続き必要です。
 
 通知は`hook → マウントされたUnixソケット → WSLヘルパー → 匿名パイプ → Poppy`を通ります。Poppyは通知用のTCP/HTTPポートを開きません。通知先のセッションIDはPoppy側で保持します。対話ターミナルの標準入出力とファイル操作の接続には通知を混ぜません。wslc / WSL ContainersはPoppyのサポート対象外です。
 
@@ -47,7 +47,7 @@ python3 /path/to/ai/scripts/uninstall-hooks.py claude
 
 ## 旧通知設定の削除
 
-HTTP通知とWindows上のCLI向け通知は廃止しました。`.aicontainer`に残っている`env=POPPY_EVENTS_URL=...`・`env=POPPY_SESSION_ID`と、Poppy通知のためだけに追加した`allow-ip`は削除できます。`POPPY_HOOK_BIND`・`POPPY_HOOK_PORT`・`POPPY_HOOK_HOST`も使用しません。
+HTTP通知とWindows上のCLI向け通知は廃止しました。`.aicontainer`に残っている旧通知用の環境変数と、Poppy通知のためだけに追加した`allow-ip`は削除できます。
 
 更新後はPoppyとWSLターミナルを開き直してください。起動中の旧Poppyの待受は、旧プロセスを終了するまで残ります。
 
@@ -63,7 +63,7 @@ HTTP通知とWindows上のCLI向け通知は廃止しました。`.aicontainer`�
 
 ## 検証
 
-- `python3 tests/hook_scripts_tests.py`: Unixソケット通知、旧HTTP設定の無効化、hookの導入・解除。
+- `python3 tests/hook_scripts_tests.py`: Unixソケット通知、ソケット未設定時の動作、hookの導入・解除。
 - `python3 tests/hook_relay_tests.py`: ビルド済みの実WSLヘルパーと導入済みhookをUnixソケット・匿名パイプで接続。別のビルドを使う場合は`POPPY_TEST_WSL_HELPER=/path/to/poppy-wsl-helper`を指定。
 - ai-containerの`python3 -m unittest discover -s test -p test_aicontainer_dns.py`: Dockerモックで通常起動時のソケット自動マウントとパスの引用を検証。
 

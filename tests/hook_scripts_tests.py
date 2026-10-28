@@ -97,15 +97,6 @@ class HookDeliveryTests(unittest.TestCase):
         self.invoke(command, {}, environment)
         self.assertTrue(self.requests.empty())
 
-    def test_retired_http_settings_do_not_enable_delivery(self):
-        environment = self.environment.copy()
-        del environment["AICONTAINER_EVENT_SOCKET"]
-        environment.update(POPPY_EVENTS_URL="http://127.0.0.1:1", POPPY_SESSION_ID="0" * 32)
-        result = subprocess.run([sys.executable, str(SCRIPTS / "poppy_status.py"), "running"],
-                                input="{}", text=True, env=environment, capture_output=True, timeout=3)
-        self.assertEqual(result.returncode, 0)
-        self.assertEqual(result.stdout + result.stderr, "")
-        self.assertTrue(self.requests.empty())
 
 
 class SenderTests(unittest.TestCase):
