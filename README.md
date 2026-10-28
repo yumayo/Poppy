@@ -96,6 +96,7 @@ ctest --test-dir out -C Release --output-on-failure
 .\Poppy.exe --project="C:\work\project"
 .\Poppy.exe --project "C:\work\first" --project "C:\work\second"
 .\Poppy.exe --project ".\relative project"
+.\Poppy.exe --project "\\wsl.localhost\Ubuntu\home\user\project"
 ```
 
 同じWindowsセッション・保存先でPoppyが起動していれば、そのプロセスのProjectsへ追加し、呼び出したプロセスは終了します。既に開いているフォルダーは重複追加せず、その項目へ切り替えます。最小化していれば復帰します。引数なしで再起動した場合も既存のウィンドウを表示します。Poppyが起動していない場合は、保存済みプロジェクトを復元したうえで指定フォルダーを追加します。起動中の復元処理と重なった追加要求も保持します。
@@ -313,7 +314,7 @@ Windowsで`BUILD_TESTING=ON`にしてビルドすると、`ctest`で`tests/folde
 
 GUIテストは一時フォルダーを `APPDATA` に設定し、通常利用の保存状態に影響させません。再起動後の前回プロジェクト・タブ・表示位置・ツリー展開・ペイン配置の復元、削除されたファイルの除外、ルートを折りたたんだ状態の保持も検証します。Git for WindowsがPATHにある場合は、一時リポジトリでGitのTree／Listの切り替え、同名ファイルの表示、更新後の折りたたみ状態、再起動後の表示形式の復元も検証します。
 
-`tests/startup_options_tests.cpp`は起動引数の2形式、複数指定、従来形式、空・未知・不完全な引数の拒否をLinuxとWindowsで検証します。`tests/single_instance_tests.cpp`はWindows上で、既存プロセスへの追加、重複防止、呼び出し元を基準とした相対パス、最小化からの復帰、保存先の分離、追加後の再起動と保存済みプロジェクトの保持、不正な要求の拒否、3プロセスの同時起動を検証します。後者の実行にはWindowsのデスクトップ環境が必要です。
+`tests/startup_options_tests.cpp`は起動引数の2形式、複数指定、従来形式、空・未知・不完全な引数の拒否に加え、WSLのUNCパスをドライブ付きのパスへ変えずに保持すること、起動済みプロセスへの転送で絶対パスとして受け付けること、ローカルの相対パスの解決をLinuxとWindowsで検証します。`tests/single_instance_tests.cpp`はWindows上で、既存プロセスへの追加、重複防止、呼び出し元を基準とした相対パス、最小化からの復帰、保存先の分離、追加後の再起動と保存済みプロジェクトの保持、不正な要求の拒否、3プロセスの同時起動を検証します。後者の実行にはWindowsのデスクトップ環境が必要です。
 
 Projectsのドラッグは、前後と先頭・末尾への移動、移動しないクリック、上下端の自動スクロール、Esc・キャプチャ喪失・領域外でのキャンセル、選択・本文の表示位置・実行中ターミナルの保持、再起動後の順序と選択の復元を`tests/folder_tests.cpp`で検証します。このGUIテストの実行にはWindowsのデスクトップ環境が必要です。
 

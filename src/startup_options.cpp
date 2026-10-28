@@ -1,4 +1,5 @@
 #include "startup_options.h"
+#include "resource.h"
 #include <stdexcept>
 #include <utility>
 
@@ -25,5 +26,17 @@ StartupOptions parseStartupOptions(const std::vector<std::wstring>& arguments) {
         result.projects.push_back(std::move(project));
     }
     return result;
+}
+std::wstring resolveStartupProjectPath(std::wstring_view project) {
+    const auto text = resourceUtf8(project);
+    // MinGW can treat a UNC root as drive-relative when making it absolute.
+    // Detect WSL before that step, also preserving Linux symlink/.. semantics.
+    if (wslUncLocation(text)) return std::wstring(project);
+    const auto path = std::filesystem::absolute(std::filesystem::u8path(text)).lexically_normal().make_preferred();
+    return resourceWide(path.u8string());
+}
+bool isAbsoluteStartupProjectPath(std::wstring_view project) {
+    const auto text = resourceUtf8(project);
+    return wslUncLocation(text).has_value() || std::filesystem::u8path(text).is_absolute();
 }
 }
