@@ -946,7 +946,13 @@ void treeInteractionTests(const fs::path& executable) {
     send(tree, WM_KEYDOWN, VK_LEFT);
     check(static_cast<TreeItem>(send(tree, treeGetSelection)) == directory, "Left arrow did not move to the parent");
     send(tree, WM_KEYDOWN, VK_LEFT);
-    check(!expanded(tree, directory) && send(tree, treeGetCount) == 123, "Collapsing the custom tree retained child nodes");
+    check(!expanded(tree, directory) && send(tree, treeGetCount) == 124 && nextItem(tree, TreeRelation::Child, directory) == nested,
+          "Collapsing a loaded folder discarded its cached children");
+    check(send(tree, treeGetRow, nested) == -1, "A cached child remained visible after collapsing its parent");
+    send(tree, WM_KEYDOWN, VK_RIGHT);
+    check(expanded(tree, directory) && nextItem(tree, TreeRelation::Child, directory) == nested,
+          "Reopening an unchanged folder did not reuse its children immediately");
+    send(tree, WM_KEYDOWN, VK_LEFT);
     send(tree, WM_KEYDOWN, VK_END);
     check(scrollInfo(tree).nPos > 0, "End did not scroll the selection into view");
     send(tree, WM_KEYDOWN, VK_HOME);
@@ -977,16 +983,18 @@ void treeInteractionTests(const fs::path& executable) {
     click(tree, arrowX, y);
     waitFor([&] { return expanded(tree, directory) && nextItem(tree, TreeRelation::Child, directory); }, "Clicking the arrow did not expand the custom tree");
     click(tree, arrowX, y);
-    check(!expanded(tree, directory) && !nextItem(tree, TreeRelation::Child, directory), "Clicking the arrow did not collapse and release children");
+    check(!expanded(tree, directory) && nextItem(tree, TreeRelation::Child, directory) == nested,
+          "Clicking the arrow did not collapse and retain cached children");
     // Real rapid clicks arrive as DOWN/UP/DBLCLK/UP, not two DOWN/UP pairs.
-    // Check each press without waiting for the asynchronous folder listing.
+    // Check each press while the loaded children stay cached.
     bool open = false;
     for (const auto message : {WM_LBUTTONDOWN, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONDBLCLK}) {
         send(tree, message, MK_LBUTTON, MAKELPARAM(arrowX, y));
         send(tree, WM_LBUTTONUP, 0, MAKELPARAM(arrowX, y));
         open = !open;
         check(expanded(tree, directory) == open, "Rapid arrow clicks skipped an expand/collapse press");
-        if (!open) check(!nextItem(tree, TreeRelation::Child, directory), "Rapid collapse retained child nodes");
+        check(nextItem(tree, TreeRelation::Child, directory) == nested, "Rapid toggling discarded cached children");
+        if (!open) check(send(tree, treeGetRow, nested) == -1, "Rapid collapse left a child visible");
     }
     const int labelX = MulDiv(50, GetDpiForWindow(app.window), 96);
     for (const bool expected : {true, false}) {
@@ -1019,16 +1027,21 @@ void folderTests(const fs::path& executable) {
             expand(tree, nestedItem);
             waitFor([&] { return expanded(tree, nestedItem) && nextItem(tree, TreeRelation::Child, nestedItem); },
                     "Expanding a directory did not display its files");
+            const auto child = nextItem(tree, TreeRelation::Child, nestedItem);
             expand(tree, nestedItem, false);
-            check(!expanded(tree, nestedItem) && !nextItem(tree, TreeRelation::Child, nestedItem),
-                  "Collapsing a directory did not release its children");
+            check(!expanded(tree, nestedItem) && nextItem(tree, TreeRelation::Child, nestedItem) == child,
+                  "Collapsing a directory discarded its cached children");
         }
+        writeFile(nested / L"added while collapsed.txt");
+        check(PostMessageW(app.window, WM_KEYDOWN, VK_F5, 0) != FALSE, "Could not invalidate a collapsed folder");
+        expand(tree, nestedItem);
+        waitFor([&] { return nextItem(tree, TreeRelation::Next, nextItem(tree, TreeRelation::Child, nestedItem)) != 0; },
+                "Reopening a changed cached folder did not display the added file");
         expand(tree, emptyItem);
-        // Both enumerations use the same worker. Waiting for the next one
-        // ensures the empty-directory result was applied before adding a file.
+        // Watch notifications and F5 must also invalidate an empty folder.
         expand(tree, nestedItem);
         waitFor([&] { return expanded(tree, nestedItem) && nextItem(tree, TreeRelation::Child, nestedItem); },
-                "The directory worker did not finish enumerating the empty folder");
+                "The cached directory did not reopen");
         writeFile(empty / L"new file.txt");
         check(PostMessageW(app.window, WM_KEYDOWN, VK_F5, 0) != FALSE, "Could not request a refresh");
         waitFor([&] { return expanded(tree, emptyItem) && nextItem(tree, TreeRelation::Child, emptyItem); },

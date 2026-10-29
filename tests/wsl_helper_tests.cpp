@@ -65,7 +65,7 @@ public:
             const auto pending = std::find_if(deferred_.begin(), deferred_.end(), [id](const Frame& f) { return f.kind == 1 ? number(decodeMessage(f.payload),"id") == id : decodeChunk(f).id == id; });
             if (pending != deferred_.end()) { frame = std::move(*pending); deferred_.erase(pending); } else frame = next(deadline);
             if (frame.kind == 1) {
-                auto message = decodeMessage(frame.payload); if (!field(message,"event").empty()) { ++events_; continue; }
+                auto message = decodeMessage(frame.payload); if (!field(message,"event").empty()) { events_.push_back(std::move(message)); continue; }
                 if (number(message,"id") != id) { deferred_.push_back(std::move(frame)); continue; }
                 check(field(message,"projectId") == "fixture" && field(message,"generation") == "7","Helper response crossed projects/generations");
                 if (field(message,"entry") == "1") result.entries.push_back(std::move(message));
@@ -79,10 +79,31 @@ public:
     Result call(const std::string& op, const fs::path& path, Message extra = {}, const std::string* bytes = nullptr, bool success = true) { extra["op"] = op; extra["path"] = path.string(); return wait(request(std::move(extra),bytes), success); }
     void hello() { check(field(wait(request({{"op","hello"},{"protocolVersion","1"}})).metadata,"architecture") == "x86_64","Unexpected helper architecture"); }
     bool event() {
-        if (events_) return true;
+        for (const auto& event : events_) if (field(event, "event") == "rescanRequired") return true;
         const auto deadline = std::chrono::steady_clock::now()+std::chrono::seconds(3);
         while (std::chrono::steady_clock::now() < deadline) { auto f = next(deadline); if (f.kind == 1 && field(decodeMessage(f.payload),"event") == "rescanRequired") return true; }
         return false;
+    }
+    std::vector<Message> takeEvents(std::chrono::milliseconds duration) {
+        auto result = std::exchange(events_, {});
+        const auto deadline = std::chrono::steady_clock::now() + duration;
+        for (;;) {
+            while (!frames_.empty()) {
+                auto frame = std::move(frames_.front()); frames_.pop_front();
+                if (frame.kind == 1) {
+                    auto message = decodeMessage(frame.payload);
+                    if (!field(message, "event").empty()) { result.push_back(std::move(message)); continue; }
+                }
+                deferred_.push_back(std::move(frame));
+            }
+            const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now()).count();
+            if (remaining <= 0) return result;
+            pollfd fd{output_, POLLIN, 0}; check(poll(&fd, 1, static_cast<int>(std::min<int64_t>(remaining, 100))) >= 0, "Cannot poll helper events");
+            if (fd.revents & (POLLIN | POLLHUP)) {
+                char bytes[65536]; const auto count = ::read(output_, bytes, sizeof(bytes)); check(count > 0, "Helper disconnected while watching");
+                reader_.feed(std::string_view(bytes, static_cast<size_t>(count)), [&](Frame frame) { frames_.push_back(std::move(frame)); });
+            }
+        }
     }
     void eof() {
         close(input_); input_ = -1; const auto deadline = std::chrono::steady_clock::now()+std::chrono::seconds(3); int status = 0;
@@ -99,9 +120,60 @@ private:
         return next(deadline);
     }
     pid_t child_ = -1; int input_ = -1, output_ = -1; uint64_t next_ = 1;
-    FrameReader reader_; std::deque<Frame> frames_, deferred_; size_t events_ = 0;
+    FrameReader reader_; std::deque<Frame> frames_, deferred_; std::vector<Message> events_;
 };
 std::string version(const Result& result) { return field(result.metadata,"version"); }
+void watching(const std::string& executable) {
+    using namespace std::chrono_literals;
+    Fixture fixture; const auto project = fixture.root / "nested", git = project / ".git";
+    fs::create_directories(git / "refs" / "heads"); fs::create_directory(git / "objects");
+    const auto file = project / "file.txt"; write(file, "original");
+    Helper helper(executable); helper.hello(); helper.call("connect", fixture.root);
+    helper.call("gitRepositories", fixture.root); helper.call("indexFiles", fixture.root);
+    helper.takeEvents(200ms);
+    helper.call("listDirectory", project); helper.call("indexFiles", fixture.root);
+    helper.call("gitRepositories", fixture.root); helper.call("readFile", file);
+    check(helper.takeEvents(200ms).empty(), "Read-only operations generated change notifications");
+    write(git / "index.lock", "lock"); fs::remove(git / "index.lock");
+    write(git / "FETCH_HEAD", "fetch"); write(git / "objects" / "temporary", "object");
+    write(git / "refs" / "heads" / "main.lock", "lock"); fs::remove(git / "refs" / "heads" / "main.lock");
+    check(helper.takeEvents(200ms).empty(), "Git bookkeeping caused a refresh loop");
+    write(git / "index", "index");
+    auto events = helper.takeEvents(300ms); check(!events.empty(), "Git index update was lost");
+    for (const auto& event : events) check(field(event, "path") == project.string() && field(event, "files") == "0" && field(event, "content") == "0", "Git update invalidated file lists or documents");
+    write(file, "edited"); events = helper.takeEvents(300ms); check(!events.empty(), "Content update was lost");
+    for (const auto& event : events) check(field(event, "path") == file.string() && field(event, "files") == "0" && field(event, "content") == "1", "Content update requested a new file index");
+    const auto added = project / "added.txt"; write(added, "new"); events = helper.takeEvents(300ms);
+    check(std::any_of(events.begin(), events.end(), [&](const Message& event) { return field(event, "path") == added.string() && field(event, "files") == "1"; }), "An added file did not invalidate the index");
+    // A worktree's Git directory may be outside the worktree and lack a .git
+    // component. Notify its owning worktree, including shared Git directories.
+    const auto worktree = fixture.root / "worktree", metadata = fixture.root / "metadata";
+    fs::create_directory(worktree); fs::create_directories(metadata / "refs" / "heads");
+    write(worktree / ".git", "gitdir: " + metadata.string() + '\n');
+    helper.call("gitRepositories", fixture.root); helper.takeEvents(200ms);
+    write(metadata / "index.lock", "lock"); fs::remove(metadata / "index.lock");
+    check(helper.takeEvents(200ms).empty(), "External worktree locks triggered a refresh");
+    write(metadata / "index", "index"); events = helper.takeEvents(300ms);
+    check(std::any_of(events.begin(), events.end(), [&](const Message& event) { return field(event, "path") == worktree.string() && field(event, "files") == "0" && field(event, "content") == "0"; }), "An external Git directory did not notify its worktree");
+    Fixture external;
+    write(external.root / "target", "target"); fs::create_symlink(external.root / "target", project / "link.txt");
+    helper.call("readFile", project / "link.txt"); helper.takeEvents(200ms);
+    write(external.root / "target", "edited target"); events = helper.takeEvents(300ms);
+    check(std::any_of(events.begin(), events.end(), [&](const Message& event) { return field(event, "path") == (project / "link.txt").string() && field(event, "content") == "1"; }), "A symlink target update did not notify the opened logical path");
+    helper.eof();
+}
+void watchLimitIdle(const std::string& executable) {
+    using namespace std::chrono_literals;
+    Fixture fixture;
+    for (int i = 0; i < 8193; ++i) fs::create_directory(fixture.root / ("directory-" + std::to_string(i)));
+    write(fixture.root / "file", "readable");
+    Helper helper(executable); helper.hello(); helper.call("connect", fixture.root); helper.call("indexFiles", fixture.root);
+    const auto events = helper.takeEvents(2300ms);
+    check(std::count_if(events.begin(), events.end(), [](const Message& event) { return field(event, "event") == "watchLimited"; }) == 1, "Missing one-time watch-limit notification");
+    check(std::none_of(events.begin(), events.end(), [](const Message& event) { return field(event, "event") == "rescanRequired"; }), "An unchanged workspace rescanned periodically after reaching the watch limit");
+    check(helper.call("readFile", fixture.root / "file").bytes == "readable", "Watch limit disconnected the project");
+    helper.eof();
+}
 void creation(const std::string& executable) {
     Fixture fixture; Helper helper(executable); helper.hello(); helper.call("connect", fixture.root);
     const auto folder = fixture.root / "新規 フォルダー", file = folder / "空のファイル.txt";
@@ -467,6 +539,6 @@ void terminals(const std::string& executable) {
 }
 int main(int argc,char** argv) {
     signal(SIGPIPE,SIG_IGN);
-    try { check(argc == 2,"Expected helper executable argument"); const std::string executable = argv[1]; installation(executable); creation(executable); batchedListings(executable); files(executable); moving(executable); repositories(executable); protocolFailures(executable); gitAndCancellation(executable); contentSearch(executable); terminals(executable); std::cout << "WSL helper integration tests passed\n"; }
+    try { check(argc == 2,"Expected helper executable argument"); const std::string executable = argv[1]; installation(executable); watching(executable); watchLimitIdle(executable); creation(executable); batchedListings(executable); files(executable); moving(executable); repositories(executable); protocolFailures(executable); gitAndCancellation(executable); contentSearch(executable); terminals(executable); std::cout << "WSL helper integration tests passed\n"; }
     catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
 }

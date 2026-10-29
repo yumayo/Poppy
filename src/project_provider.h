@@ -12,9 +12,13 @@ struct ProviderListing { std::vector<ProviderEntry> entries; std::wstring error;
 struct ProviderFile { std::string bytes, version; std::wstring error; };
 struct ProviderSave { std::string version; std::wstring error; };
 enum class ConnectionState { Disconnected, Connecting, Ready, Unavailable };
+struct ProviderChanges {
+    bool changed = false, files = false, allContent = false, watchLimited = false;
+    std::vector<ResourceId> contentPaths;
+};
 
-// Methods run on the existing I/O/Git/index workers. State and revision are
-// nonblocking snapshots that may be queried by the UI.
+// I/O methods run on the existing workers. The UI polls state and drains
+// coalesced changes without performing filesystem I/O.
 class ProjectProvider {
 public:
     virtual ~ProjectProvider() = default;
@@ -35,6 +39,7 @@ public:
     virtual ConnectionState state() const { return ConnectionState::Ready; }
     virtual std::wstring error() const { return {}; }
     virtual uint64_t revision() const { return 0; }
+    virtual ProviderChanges takeChanges() { return {}; }
     virtual void reconnect() {}
     virtual void expectIdentity(std::string) {}
     virtual std::string identity() const { return {}; }

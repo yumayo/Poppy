@@ -1,6 +1,7 @@
 #include "git_repositories.h"
 #include "wsl_protocol.h"
 #include "wsl_events.h"
+#include "file_changes.h"
 #include "content_search_protocol.h"
 #include "resource.h"
 #include "text.h"
@@ -187,7 +188,7 @@ private:
     void accept(Frame frame);
     void execute(const std::shared_ptr<Request>& request);
     void worker(bool search = false);
-    void watch(const std::string& p);
+    void watch(const std::string& p, const std::string& gitRoot = {}, const std::string& gitRelative = {});
     void watchGit(const std::string& directory);
     void events();
     void save(Request& request);
@@ -205,8 +206,11 @@ private:
     std::thread searchWorker_;
     std::thread watcher_;
     Fd notify_{inotify_init1(IN_NONBLOCK | IN_CLOEXEC)};
-    std::set<std::string> watched_;
-    std::map<int,std::string> watchPaths_;
+    struct WatchPath { std::string path, gitRelative; std::set<std::string> gitRoots; };
+    std::map<std::string, int> watched_;
+    std::map<int, WatchPath> watchPaths_;
+    std::map<std::string, std::set<std::string>> readAliases_;
+    size_t readAliasCount_ = 0;
     bool watchLimited_ = false, drvfs_ = false;
     bool hello_ = false;
     size_t uploadBytes_ = 0;
@@ -271,34 +275,74 @@ void Server::accept(Frame frame) {
         r->size = number(r->message, "size"); if (r->size > maxFileBytes || uploadBytes_ + r->size > 64 * 1024 * 1024) throw std::runtime_error("Save exceeds the file or upload queue limit"); uploadBytes_ += r->size; upload_ = r;
     } else { queue_.push_back(r); condition_.notify_all(); }
 }
-void Server::watch(const std::string& p) {
+void Server::watch(const std::string& p, const std::string& gitRoot, const std::string& gitRelative) {
     std::lock_guard<std::mutex> lock(watchMutex_);
-    if (watched_.count(p)) return;
+    const auto found = watched_.find(p);
+    if (found != watched_.end()) {
+        if (!gitRoot.empty()) { auto& entry = watchPaths_[found->second]; entry.gitRelative = gitRelative; entry.gitRoots.insert(gitRoot); }
+        return;
+    }
     if (p.rfind("/mnt/", 0) == 0) drvfs_ = true;
     if (watchPaths_.size() >= 8192 || notify_.value < 0) { watchLimited_ = true; return; }
     const auto wd = inotify_add_watch(notify_.value, p.c_str(), IN_CREATE | IN_DELETE | IN_MOVED_FROM | IN_MOVED_TO | IN_MODIFY | IN_ATTRIB | IN_DELETE_SELF | IN_MOVE_SELF | IN_ONLYDIR | IN_DONT_FOLLOW);
     if (wd < 0) { watchLimited_ = true; return; }
-    const auto existing = watchPaths_.find(wd); if (existing != watchPaths_.end()) watched_.erase(existing->second);
-    watchPaths_[wd] = p; watched_.insert(p);
+    auto& entry = watchPaths_[wd];
+    if (!entry.path.empty()) watched_.erase(entry.path);
+    entry.path = p;
+    if (!gitRoot.empty()) { entry.gitRelative = gitRelative; entry.gitRoots.insert(gitRoot); }
+    watched_[p] = wd;
 }
 void Server::watchGit(const std::string& directory) {
     const auto p = directory + "/.git"; auto gitDirectory = p; struct stat gitInfo{};
     if (!lstat(p.c_str(), &gitInfo) && S_ISREG(gitInfo.st_mode)) { std::ifstream pointer(p); std::string line; std::getline(pointer,line); if (line.rfind("gitdir: ",0) == 0) { auto target = std::filesystem::path(line.substr(8)); gitDirectory = (target.is_absolute() ? target : std::filesystem::path(directory)/target).lexically_normal().string(); } }
-    watch(gitDirectory);
+    watch(gitDirectory, directory, ".git");
     std::ifstream common(gitDirectory+"/commondir"); std::string shared;
-    if (std::getline(common,shared) && !shared.empty()) { const auto target = std::filesystem::path(shared); gitDirectory = (target.is_absolute() ? target : std::filesystem::path(gitDirectory)/target).lexically_normal().string(); watch(gitDirectory); }
+    if (std::getline(common,shared) && !shared.empty()) { const auto target = std::filesystem::path(shared); gitDirectory = (target.is_absolute() ? target : std::filesystem::path(gitDirectory)/target).lexically_normal().string(); watch(gitDirectory, directory, ".git"); }
     struct stat refs{};
-    if (!lstat((gitDirectory+"/refs").c_str(),&refs) && S_ISDIR(refs.st_mode)) watch(gitDirectory+"/refs");
-    if (!lstat((gitDirectory+"/refs/heads").c_str(),&refs) && S_ISDIR(refs.st_mode)) watch(gitDirectory+"/refs/heads");
+    if (!lstat((gitDirectory+"/refs").c_str(),&refs) && S_ISDIR(refs.st_mode)) watch(gitDirectory+"/refs", directory, ".git/refs");
+    if (!lstat((gitDirectory+"/refs/heads").c_str(),&refs) && S_ISDIR(refs.st_mode)) watch(gitDirectory+"/refs/heads", directory, ".git/refs/heads");
 }
 void Server::events() {
-    auto lastFallback = Clock::now(); alignas(inotify_event) char bytes[65536];
+    alignas(inotify_event) char bytes[65536]; bool warned = false;
     while (!stopping_) {
-        pollfd fd{notify_.value, POLLIN, 0}; poll(&fd, 1, 100); bool changed = false;
-        if (fd.revents & POLLIN) { for (;;) { const auto count = ::read(notify_.value, bytes, sizeof(bytes)); if (count <= 0) break; changed = true; for (size_t i = 0; i + sizeof(inotify_event) <= static_cast<size_t>(count);) { const auto event = reinterpret_cast<const inotify_event*>(bytes + i); if (event->mask & IN_IGNORED) { std::lock_guard<std::mutex> lock(watchMutex_); watchLimited_ = true; const auto found = watchPaths_.find(event->wd); if (found != watchPaths_.end()) { watched_.erase(found->second); watchPaths_.erase(found); } } i += sizeof(inotify_event) + event->len; } } }
-        bool fallback = false; { std::lock_guard<std::mutex> lock(watchMutex_); fallback = watchLimited_ || drvfs_; }
-        if (fallback && Clock::now() - lastFallback >= std::chrono::seconds(2)) { changed = true; lastFallback = Clock::now(); }
-        if (changed && !stopping_) send({{"event", "rescanRequired"}});
+        pollfd fd{notify_.value, POLLIN, 0}; poll(&fd, 1, 100);
+        std::map<std::string, poppy::FileChange> changes; bool overflow = false;
+        auto record = [&](const std::string& p, poppy::FileChange change) {
+            if (!change.relevant || overflow) return;
+            if (!validUtf8(p)) { changes.clear(); overflow = true; return; }
+            if (changes.size() >= 256 && !changes.count(p)) { changes.clear(); overflow = true; return; }
+            auto& value = changes[p]; value.relevant = true; value.files |= change.files; value.content |= change.content;
+        };
+        if (fd.revents & POLLIN) for (;;) {
+            const auto count = ::read(notify_.value, bytes, sizeof(bytes)); if (count <= 0) break;
+            for (size_t i = 0; i + sizeof(inotify_event) <= static_cast<size_t>(count);) {
+                const auto event = reinterpret_cast<const inotify_event*>(bytes + i); i += sizeof(inotify_event) + event->len;
+                if (event->mask & IN_Q_OVERFLOW) { overflow = true; changes.clear(); }
+                std::lock_guard<std::mutex> lock(watchMutex_);
+                const auto found = watchPaths_.find(event->wd); if (found == watchPaths_.end()) continue;
+                const auto& entry = found->second;
+                if (event->mask & IN_IGNORED) { watched_.erase(entry.path); watchPaths_.erase(found); continue; }
+                const bool topology = event->mask & (IN_CREATE | IN_DELETE | IN_MOVED_FROM | IN_MOVED_TO | IN_DELETE_SELF | IN_MOVE_SELF);
+                const std::string name = event->len ? event->name : "";
+                const auto p = entry.path + (name.empty() ? "" : "/" + name);
+                if (entry.gitRoots.empty()) record(p, poppy::classifyFileChange(p, topology));
+                else {
+                    const auto change = poppy::classifyFileChange(entry.gitRelative + (name.empty() ? "" : "/" + name), topology);
+                    for (const auto& root : entry.gitRoots) record(root, {change.relevant, false, false});
+                }
+                // Reads through a file symlink watch the real parent. Route
+                // subsequent target changes back to the opened logical path.
+                const auto aliases = readAliases_.find(p);
+                if (aliases != readAliases_.end()) for (const auto& alias : aliases->second) record(alias, {true, topology, true});
+            }
+        }
+        bool limited = false; { std::lock_guard<std::mutex> lock(watchMutex_); limited = watchLimited_ || drvfs_; }
+        // Missing watches are not evidence of a change. Repeated unconditional
+        // rescans keep large workspaces permanently busy and retransfer indexes.
+        if (limited && !warned && !stopping_) { send({{"event", "watchLimited"}}); warned = true; }
+        if (overflow && !stopping_) send({{"event", "rescanRequired"}, {"files", "1"}, {"content", "1"}});
+        for (const auto& change : changes) if (!stopping_ && validUtf8(change.first))
+            send({{"event", "rescanRequired"}, {"path", change.first}, {"files", change.second.files ? "1" : "0"}, {"content", change.second.content ? "1" : "0"}});
     }
 }
 void Server::save(Request& request) {
@@ -404,6 +448,11 @@ void Server::execute(const std::shared_ptr<Request>& r) {
             reply(*r, {{"version", stamp(info)}, {"directory", S_ISDIR(info.st_mode) ? "1" : "0"}, {"link", S_ISLNK(info.st_mode) ? "1" : "0"}, {"done", "1"}});
         } else if (op == "readFile") {
             const auto p = path(r->message); const auto snapshot = read(p, &r->cancelled); watch(std::filesystem::path(snapshot.target).parent_path().string());
+            if (snapshot.target != p) {
+                std::lock_guard<std::mutex> lock(watchMutex_);
+                if (readAliasCount_ < 8192) { if (readAliases_[snapshot.target].insert(p).second) ++readAliasCount_; }
+                else watchLimited_ = true;
+            }
             reply(*r, {{"body", "1"}, {"size", std::to_string(snapshot.bytes.size())}, {"version", snapshot.version}}); body(*r, snapshot.bytes); reply(*r, {{"done", "1"}});
         } else if (op == "saveFile") save(*r);
         else if (op == "createFile") create(*r);
