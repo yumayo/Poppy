@@ -9,7 +9,7 @@ void Tree::create(HWND parent, HINSTANCE instance, const wchar_t* title, int id)
     WNDCLASSW cls{}; cls.lpfnWndProc = procedure; cls.hInstance = instance; cls.lpszClassName = treeClassName;
     cls.hCursor = LoadCursorW(nullptr, IDC_ARROW); cls.style = CS_DBLCLKS;
     RegisterClassW(&cls);
-    window_ = CreateWindowExW(0, treeClassName, title, WS_CHILD | WS_TABSTOP | WS_VSCROLL | WS_HSCROLL,
+    window_ = CreateWindowExW(0, treeClassName, title, WS_CHILD | WS_CLIPCHILDREN | WS_TABSTOP | WS_VSCROLL | WS_HSCROLL,
         0, 0, 0, 0, parent, reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), instance, this);
     actionTips_ = CreateWindowExW(WS_EX_TOPMOST, TOOLTIPS_CLASSW, nullptr, WS_POPUP | TTS_ALWAYSTIP | TTS_NOPREFIX,
         CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, window_, nullptr, instance, nullptr);
@@ -21,7 +21,7 @@ void Tree::create(HWND parent, HINSTANCE instance, const wchar_t* title, int id)
 }
 void Tree::setDpi(UINT dpi, int rowHeight) {
     const UINT previous = dpi_;
-    dpi_ = dpi; renderer_.setDpi(dpi);
+    dpi_ = dpi; renderer_.setDpi(dpi); renameInput_.setDpi(dpi);
     rowHeight_ = std::max(renderer_.textHeight(), MulDiv(rowHeight, dpi, 96));
     indent_ = MulDiv(18, dpi, 96); left_ = MulDiv(left_, dpi, previous);
     widths_.clear(); changed();
@@ -112,12 +112,19 @@ void Tree::layout() {
 void Tree::rename(TreeItem id, const std::wstring& name) {
     endDrag();
     finishRename(false); if (!item(id)) return;
-    select(id, false); renaming_ = id;
-    rename_ = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", name.c_str(), WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
-        0, 0, 0, 0, window_, reinterpret_cast<HMENU>(1002), reinterpret_cast<HINSTANCE>(GetWindowLongPtrW(window_, GWLP_HINSTANCE)), nullptr);
+    select(id, false);
+    const int index = row(id); if (index < 0) return;
+    renaming_ = id;
+    const auto& value = model_.visible()[static_cast<size_t>(index)];
+    const int textLeft = static_cast<int>(value.depth + 1) * indent_ + MulDiv(5, dpi_, 96);
+    const auto content = Scrollbars::contentRect(window_);
+    if (textLeft < left_ || textLeft - left_ > content.right - MulDiv(80, dpi_, 96)) {
+        left_ = std::max(0, textLeft - MulDiv(5, dpi_, 96)); changed();
+    }
+    renameInput_.finished = [this](bool commit) { finishRename(commit); };
+    rename_ = renameInput_.create(window_, reinterpret_cast<HINSTANCE>(GetWindowLongPtrW(window_, GWLP_HINSTANCE)), name, item(id)->color);
     if (!rename_) { renaming_ = 0; return; }
-    SetWindowSubclass(rename_, renameProcedure, 1, reinterpret_cast<DWORD_PTR>(this));
-    SendMessageW(rename_, EM_SETLIMITTEXT, 255, 0); layoutRename();
+    SendMessageW(rename_, EM_SETLIMITTEXT, 255, 0); layoutRename(); if (!rename_) return;
     const auto extension = item(id)->expandable ? std::wstring::npos : name.find_last_of(L'.');
     SendMessageW(rename_, EM_SETSEL, 0, extension == std::wstring::npos || extension == 0 ? -1 : static_cast<LPARAM>(extension)); SetFocus(rename_);
 }
@@ -133,27 +140,21 @@ void Tree::layoutRename() {
     if (!rename_) return;
     const int index = row(renaming_); if (index < top_ || index >= top_ + page()) { finishRename(false); return; }
     const auto& value = model_.visible()[static_cast<size_t>(index)]; const auto r = Scrollbars::contentRect(window_);
-    const int left = std::clamp(static_cast<int>(value.depth + 1) * indent_ - left_, 0, static_cast<int>(std::max(0L, r.right - MulDiv(80, dpi_, 96))));
+    const int left = std::max(0, static_cast<int>(value.depth + 1) * indent_ + MulDiv(5, dpi_, 96) - left_);
+    if (left >= r.right) { finishRename(false); return; }
     SetWindowPos(rename_, HWND_TOP, left, (index - top_) * rowHeight_, std::max(0L, r.right - left), rowHeight_, SWP_NOACTIVATE | SWP_SHOWWINDOW);
 }
 void Tree::finishRename(bool commit) {
     if (!rename_) return;
     const auto id = renaming_; const auto edit = std::exchange(rename_, nullptr); renaming_ = 0;
     const bool creating = std::exchange(creating_, false), directory = creatingDirectory_;
-    std::wstring name(static_cast<size_t>(GetWindowTextLengthW(edit)) + 1, L'\0');
-    const auto length = GetWindowTextW(edit, name.data(), static_cast<int>(name.size())); name.resize(static_cast<size_t>(length));
+    const auto name = renameInput_.text();
     const bool focus = GetFocus() == edit; DestroyWindow(edit); if (focus) SetFocus(window_);
+    InvalidateRect(window_, nullptr, FALSE);
     if (commit && item(id)) {
         if (creating) { if (createCommitted) createCommitted(id, name, directory); }
         else if (renameCommitted) renameCommitted(id, name);
     }
-}
-LRESULT CALLBACK Tree::renameProcedure(HWND window, UINT message, WPARAM a, LPARAM b, UINT_PTR, DWORD_PTR data) {
-    auto& self = *reinterpret_cast<Tree*>(data);
-    if (message == WM_KEYDOWN && (a == VK_RETURN || a == VK_ESCAPE)) { self.finishRename(a == VK_RETURN); return 0; }
-    if (message == WM_GETDLGCODE) return DLGC_WANTALLKEYS;
-    if (message == WM_NCDESTROY) RemoveWindowSubclass(window, renameProcedure, 1);
-    return DefSubclassProc(window, message, a, b);
 }
 void Tree::scroll(int vertical, int horizontal) { top_ += vertical; left_ += horizontal; changed(); }
 void Tree::updateDrag(POINT point) {
@@ -232,7 +233,7 @@ void Tree::paint() {
     const auto r = Scrollbars::contentRect(window_);
     renderer_.fill(r, panel);
     const auto& rows = model_.visible();
-    const bool focus = GetFocus() == window_;
+    const bool focus = GetFocus() == window_ || (rename_ && GetFocus() == rename_);
     const int padding = MulDiv(5, dpi_, 96), arrow = MulDiv(4, dpi_, 96);
     for (int index = top_; index < static_cast<int>(rows.size()) && (index - top_) * rowHeight_ < r.bottom; ++index) {
         const auto& row = rows[index]; const auto node = item(row.item);
@@ -262,7 +263,7 @@ void Tree::paint() {
             const auto bounds = actionBounds(row.item, slot);
             if (bounds.right) action = bounds;
         }
-        renderer_.label({x + indent_ + padding, y, action.right ? action.left - padding : std::max<LONG>(r.right, x + indent_ + widths_[row.item] + padding), y + rowHeight_},
+        if (row.item != renaming_) renderer_.label({x + indent_ + padding, y, action.right ? action.left - padding : std::max<LONG>(r.right, x + indent_ + widths_[row.item] + padding), y + rowHeight_},
             node->text, node->color, DT_LEFT | DT_VCENTER | DT_SINGLELINE | (action.right ? DT_END_ELLIPSIS : 0));
         for (const unsigned slot : {0u, 1u, 2u, 3u}) if (actionVisible(row.item, slot)) {
             const auto bounds = actionBounds(row.item, slot);
@@ -324,7 +325,7 @@ LRESULT Tree::handle(UINT m, WPARAM a, LPARAM b) {
         }
         return 0;
     }
-    case WM_COMMAND: if (LOWORD(a) == 1002 && HIWORD(a) == EN_KILLFOCUS) finishRename(false); return 0;
+    case WM_DESTROY: endDrag(); finishRename(false); renderer_.discard(); return 0;
     case WM_CONTEXTMENU: {
         if (!renameRequested && !openWithDefaultAppRequested && !revealInFileExplorerRequested && !pasteImageRequested && !createCommitted) return 0;
         POINT screen{GET_X_LPARAM(b), GET_Y_LPARAM(b)}; auto id = selection();

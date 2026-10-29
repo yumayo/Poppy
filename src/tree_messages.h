@@ -4,6 +4,7 @@
 
 namespace poppy {
 inline constexpr wchar_t treeClassName[] = L"PoppyTree";
+inline constexpr wchar_t treeInputClassName[] = L"PoppyTreeInput";
 // Scalar-only messages also allow out-of-process GUI tests to inspect and
 // select items without passing pointers across process boundaries.
 enum class TreeRelation { Root, Child, Next, Parent };

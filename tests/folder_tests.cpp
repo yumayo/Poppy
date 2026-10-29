@@ -568,7 +568,7 @@ void createItemTests(const fs::path& executable) {
         PostMessageW(tree, WM_KEYDOWN, VK_RETURN, 0);
         waitFor([&] { return !menuOpen(); }, "Folder context menu did not close");
         HWND edit = nullptr;
-        waitFor([&] { edit = FindWindowExW(tree, nullptr, L"EDIT", nullptr); return edit != nullptr; }, "Creation did not show the name input");
+        waitFor([&] { edit = FindWindowExW(tree, nullptr, treeInputClassName, nullptr); return edit != nullptr; }, "Creation did not show the name input");
         check(SetWindowTextW(edit, name), "Cannot enter new item name"); return edit;
     };
     const auto fail = [&](bool directory, const wchar_t* name) {
@@ -595,7 +595,7 @@ void createItemTests(const fs::path& executable) {
     edit = start(root, true, L"cancelled"); send(edit, WM_KEYDOWN, VK_ESCAPE);
     check(!fs::exists(fixture.root / L"cancelled"), "Escape created a folder");
     start(root, false, L"focus-cancelled.txt"); click(tree, 30, 10);
-    check(!FindWindowExW(tree, nullptr, L"EDIT", nullptr) && !fs::exists(fixture.root / L"focus-cancelled.txt"), "Focus loss created a file");
+    check(!FindWindowExW(tree, nullptr, treeInputClassName, nullptr) && !fs::exists(fixture.root / L"focus-cancelled.txt"), "Focus loss created a file");
     expand(tree, root, false);
     edit = start(root, false, L"root.txt"); send(edit, WM_KEYDOWN, VK_RETURN);
     waitFor([&] { return fs::exists(fixture.root / L"root.txt") && expanded(tree, root); }, "Cannot create inside a collapsed project root");
@@ -624,7 +624,7 @@ void newFileShortcutTests(const fs::path& executable) {
         BYTE keys[256]{}; keys[VK_CONTROL] = keys[VK_LCONTROL] = 0x80;
         check(SetKeyboardState(keys) && PostMessageW(target, WM_KEYDOWN, 'N', 0), "Cannot post Ctrl+N");
         HWND edit = nullptr;
-        waitFor([&] { edit = FindWindowExW(tree, nullptr, L"EDIT", nullptr); return edit != nullptr; }, "Ctrl+N did not show the path input");
+        waitFor([&] { edit = FindWindowExW(tree, nullptr, treeInputClassName, nullptr); return edit != nullptr; }, "Ctrl+N did not show the path input");
         check(IsWindowVisible(tree) && SetWindowTextW(edit, name.c_str()), "Ctrl+N did not reveal Explorer or accept the path");
         return edit;
     };
@@ -652,9 +652,9 @@ void newFileShortcutTests(const fs::path& executable) {
     const auto terminal = FindWindowExW(terminalPane, nullptr, L"PoppyTerminal", nullptr);
     check(terminal != nullptr, "Shortcut terminal is missing");
     edit = start(terminal, L"cancelled/path.txt"); send(edit, WM_KEYDOWN, VK_ESCAPE);
-    check(!fs::exists(fixture.root / L"cancelled") && !FindWindowExW(tree, nullptr, L"EDIT", nullptr), "Escape created intermediate folders");
+    check(!fs::exists(fixture.root / L"cancelled") && !FindWindowExW(tree, nullptr, treeInputClassName, nullptr), "Escape created intermediate folders");
     edit = start(viewer, L"focus-cancelled/path.txt"); click(tree, 30, 10);
-    check(!fs::exists(fixture.root / L"focus-cancelled") && !FindWindowExW(tree, nullptr, L"EDIT", nullptr), "Focus loss created intermediate folders");
+    check(!fs::exists(fixture.root / L"focus-cancelled") && !FindWindowExW(tree, nullptr, treeInputClassName, nullptr), "Focus loss created intermediate folders");
     // The full input, not only one 255-character component, reaches creation.
     const auto longPath = std::wstring(130, L'a') + L"/" + std::wstring(130, L'b') + L"/long.txt";
     edit = start(terminal, longPath);
@@ -705,17 +705,17 @@ void renameTests(const fs::path& executable) {
         const auto first=nextItem(tree,TreeRelation::Child,nextItem(tree,TreeRelation::Root));
         send(tree,treeSelect,first);waitLines(viewer,120);
         send(viewer,WM_CHAR,'\r');waitLines(viewer,121);
-        send(tree,WM_KEYDOWN,VK_F2);const auto edit=FindWindowExW(tree,nullptr,L"EDIT",nullptr);
+        send(tree,WM_KEYDOWN,VK_F2);const auto edit=FindWindowExW(tree,nullptr,treeInputClassName,nullptr);
         check(edit!=nullptr,"F2 did not open a filename editor");
         check(SetWindowTextW(edit,L"修正.py"),"Could not enter a Unicode filename");
         send(edit,WM_KEYDOWN,VK_RETURN);
         waitFor([&]{return fs::exists(fixture.root/L"修正.py")&&!fs::exists(fixture.root/L"a.txt");},"Rename did not move the file");
         waitLines(viewer,121);send(viewer,WM_KEYDOWN,VK_BACK);waitLines(viewer,120);
         check(visibleTabCount(app)==1,"Rename duplicated or closed the open tab");
-        send(tree,WM_KEYDOWN,VK_F2);const auto cancel=FindWindowExW(tree,nullptr,L"EDIT",nullptr);
+        send(tree,WM_KEYDOWN,VK_F2);const auto cancel=FindWindowExW(tree,nullptr,treeInputClassName,nullptr);
         check(cancel!=nullptr,"Second rename editor was missing");SetWindowTextW(cancel,L"cancelled.txt");send(cancel,WM_KEYDOWN,VK_ESCAPE);
         check(!fs::exists(fixture.root/L"cancelled.txt")&&fs::exists(fixture.root/L"修正.py"),"Escape committed a rename");
-        send(tree,WM_KEYDOWN,VK_F2);const auto collision=FindWindowExW(tree,nullptr,L"EDIT",nullptr);SetWindowTextW(collision,L"b.txt");send(collision,WM_KEYDOWN,VK_RETURN);
+        send(tree,WM_KEYDOWN,VK_F2);const auto collision=FindWindowExW(tree,nullptr,treeInputClassName,nullptr);SetWindowTextW(collision,L"b.txt");send(collision,WM_KEYDOWN,VK_RETURN);
         HWND dialog=nullptr; std::pair<DWORD,HWND*> dialogContext{app.process.dwProcessId,&dialog};
         waitFor([&]{EnumWindows([](HWND window,LPARAM data)->BOOL{auto& context=*reinterpret_cast<std::pair<DWORD,HWND*>*>(data);DWORD pid=0;GetWindowThreadProcessId(window,&pid);wchar_t name[32]{};GetClassNameW(window,name,32);if(pid==context.first&&std::wstring(name)==L"#32770"){*context.second=window;return FALSE;}return TRUE;},reinterpret_cast<LPARAM>(&dialogContext));return dialog!=nullptr;},"Filename collision did not report an error");
         send(dialog,WM_COMMAND,IDOK);

@@ -1,6 +1,7 @@
 #pragma once
 #include "scrollbars.h"
 #include "tree_messages.h"
+#include "tree_input.h"
 #include <optional>
 
 namespace poppy {
@@ -70,7 +71,6 @@ public:
     bool hoverActionsOnly = false;
 private:
     static LRESULT CALLBACK procedure(HWND, UINT, WPARAM, LPARAM);
-    static LRESULT CALLBACK renameProcedure(HWND, UINT, WPARAM, LPARAM, UINT_PTR, DWORD_PTR);
     void finishRename(bool commit);
     void updateDrag(POINT point);
     void tickDrag();
@@ -92,6 +92,7 @@ private:
     int page() const;
     HWND window_ = nullptr;
     HWND rename_ = nullptr;
+    TreeInput renameInput_;
     HWND actionTips_ = nullptr;
     TreeItem hotItem_ = 0;
     bool trackingMouse_ = false;

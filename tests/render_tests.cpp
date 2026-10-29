@@ -2,6 +2,7 @@
 #include "quick_open.h"
 #include "viewer.h"
 #include "status_bar.h"
+#include "tree.h"
 #include <commctrl.h>
 #include <algorithm>
 #include <fstream>
@@ -76,6 +77,77 @@ struct Bitmap {
     }
 };
 void finish(Renderer& renderer) { check(SUCCEEDED(renderer.end()), "Direct2D drawing failed"); }
+void inlineTreeInput() {
+    INITCOMMONCONTROLSEX controls{sizeof(controls), ICC_WIN95_CLASSES}; InitCommonControlsEx(&controls);
+    const auto instance = GetModuleHandleW(nullptr);
+    Tree tree;
+    const auto parent = CreateWindowExW(0, L"STATIC", L"Inline rename test", WS_POPUP | WS_CLIPCHILDREN, 0, 0, 640, 320, nullptr, nullptr, instance, nullptr);
+    check(parent != nullptr, "Cannot create the inline rename test window");
+    struct WindowOwner { HWND value; ~WindowOwner() { DestroyWindow(value); } } owner{parent};
+    tree.create(parent, instance, L"EXPLORER", 1);
+    SetWindowPos(tree.window(), nullptr, 0, 0, 640, 320, SWP_NOZORDER | SWP_SHOWWINDOW); ShowWindow(parent, SW_SHOWNOACTIVATE);
+    const auto root = tree.insert(0, L"project", true, 0);
+    const auto file = tree.insert(root, L"sample.txt", false, 0, accent); tree.expand(root, true);
+    std::wstring committed; tree.renameCommitted = [&](TreeItem id, const std::wstring& text) { check(id == file, "Rename committed another row"); committed = text; };
+    const auto editor = [&] { return FindWindowExW(tree.window(), nullptr, treeInputClassName, nullptr); };
+    const auto text = [](HWND window) { std::wstring value(static_cast<size_t>(GetWindowTextLengthW(window)) + 1, L'\0'); value.resize(GetWindowTextW(window, value.data(), static_cast<int>(value.size()))); return value; };
+    for (const auto dpi : {96u, 144u, 192u}) {
+        tree.setDpi(dpi); tree.rename(file, L"sample.txt"); const auto input = editor();
+        check(input && !FindWindowExW(tree.window(), nullptr, L"EDIT", nullptr), "Rename still uses a standard Windows input");
+        check(!(GetWindowLongPtrW(input, GWL_EXSTYLE) & WS_EX_CLIENTEDGE) && !(GetWindowLongPtrW(input, GWL_STYLE) & WS_BORDER), "Rename has an input frame");
+        RECT bounds{}; GetWindowRect(input, &bounds); MapWindowPoints(nullptr, tree.window(), reinterpret_cast<POINT*>(&bounds), 2);
+        const auto height = SendMessageW(tree.window(), treeGetRowHeight, 0, 0);
+        check(bounds.left == 2 * MulDiv(18, dpi, 96) + MulDiv(5, dpi, 96) && bounds.top == height && bounds.bottom == 2 * height, "Rename moved the filename or its baseline");
+        check(SendMessageW(input, EM_GETSEL, 0, 0) == MAKELRESULT(0, 6), "Rename did not select only the filename stem");
+        SendMessageW(input, WM_CHAR, L'名', 0); check(text(input) == L"名.txt", "Typing did not replace the selected stem");
+        SendMessageW(input, WM_UNDO, 0, 0); check(text(input) == L"sample.txt", "Undo did not restore the filename");
+        SendMessageW(input, EM_SETSEL, 0, 6);
+        SendMessageW(input, WM_CHAR, 0xd83d, 0); SendMessageW(input, WM_CHAR, 0xde42, 0);
+        check(text(input) == L"\U0001f642.txt", "Rename split a surrogate pair");
+        SendMessageW(input, WM_KEYDOWN, VK_BACK, 0); check(text(input) == L".txt", "Backspace split a surrogate pair");
+        check(copyText(input, L"変更 名"), "Cannot seed the rename clipboard");
+        SendMessageW(input, WM_PASTE, 0, 0); check(text(input) == L"変更 名.txt", "Rename did not paste clipboard text");
+        SendMessageW(input, WM_IME_STARTCOMPOSITION, 0, 0); SendMessageW(input, WM_KEYDOWN, VK_RETURN, 0);
+        check(editor() == input && committed.empty(), "IME Enter committed a rename before composition ended");
+        SendMessageW(input, WM_IME_ENDCOMPOSITION, 0, 0);
+        tree.setDpi(dpi == 192 ? 96 : 192);
+        check(editor() == input && text(input) == L"変更 名.txt", "DPI change lost the rename input");
+        SetWindowPos(tree.window(), nullptr, 0, 0, 400, 320, SWP_NOZORDER);
+        GetWindowRect(input, &bounds); MapWindowPoints(nullptr, tree.window(), reinterpret_cast<POINT*>(&bounds), 2);
+        check(bounds.right <= 400 && bounds.right > bounds.left, "Rename did not follow the sidebar resize");
+        SendMessageW(input, WM_KEYDOWN, VK_RETURN, 0);
+        check(!editor() && committed == L"変更 名.txt", "Enter did not commit the inline name"); committed.clear();
+        tree.rename(file, L"sample.txt"); SendMessageW(editor(), WM_KEYDOWN, VK_ESCAPE, 0);
+        check(!editor() && committed.empty(), "Escape committed the inline name");
+        tree.rename(file, L"sample.txt"); SetFocus(parent);
+        check(!editor() && committed.empty(), "Losing focus did not cancel the inline name");
+        tree.rename(file, L"sample.txt"); tree.expand(root, false);
+        check(!editor() && committed.empty(), "Collapsing a folder left its hidden rename active"); tree.expand(root, true);
+        SetWindowPos(tree.window(), nullptr, 0, 0, 640, 320, SWP_NOZORDER);
+    }
+    // Pixel-for-pixel comparison verifies font, baseline, text color, clipping,
+    // and the unframed row background at each supported display scale.
+    for (const auto dpi : {96u, 144u, 192u}) {
+        TreeInput input; input.setDpi(dpi);
+        const std::wstring name = L"日本語 sample \U0001f642.txt";
+        const auto window = input.create(parent, instance, name, accent);
+        SetFocus(parent);
+        Renderer actual, expected; actual.setDpi(dpi); expected.setDpi(dpi);
+        Bitmap pixels, reference;
+        const RECT row{0, 0, Bitmap::width, MulDiv(26, dpi, 96)};
+        check(actual.begin(pixels.bitmap.get()), "Cannot render the inline name"); actual.fill(pixels.bounds(), panel); input.draw(actual, row); finish(actual); pixels.read();
+        check(expected.begin(reference.bitmap.get()), "Cannot render the reference tree label"); expected.fill(reference.bounds(), panel); expected.fill(row, RGB(50, 70, 94)); expected.label(row, name, accent, DT_LEFT | DT_VCENTER | DT_SINGLELINE); finish(expected); reference.read();
+        check(pixels.pixels == reference.pixels, "Inline rename changed the tree font or row background");
+        SetWindowPos(window, nullptr, 0, 0, row.right, row.bottom, SWP_NOZORDER);
+        const auto longName = std::wstring(220, L'w') + L".txt";
+        SetWindowTextW(window, longName.c_str()); SendMessageW(window, EM_SETSEL, 0, 220); SendMessageW(window, WM_CHAR, L'名', 0);
+        check(input.text() == L"名.txt", "Replacing a long selected filename lost its extension");
+        check(actual.begin(pixels.bitmap.get()), "Cannot render the shortened filename"); actual.fill(pixels.bounds(), panel); input.draw(actual, row); finish(actual); pixels.read();
+        check(expected.begin(reference.bitmap.get()), "Cannot render the shortened reference"); expected.fill(reference.bounds(), panel); expected.fill(row, RGB(50, 70, 94)); expected.label(row, L"名.txt", accent, DT_LEFT | DT_VCENTER | DT_SINGLELINE); finish(expected); reference.read();
+        check(pixels.pixels == reference.pixels, "Shortening the filename left its first characters scrolled out of view");
+        DestroyWindow(window);
+    }
+}
 void drawCells(Renderer& renderer, Bitmap& bitmap, const std::vector<Cell>& cells, int cw, int ch) {
     check(renderer.begin(bitmap.bitmap.get()), "Could not bind Direct2D to the WIC bitmap");
     renderer.fill(bitmap.bounds(), background);
@@ -848,7 +920,7 @@ int main() {
     int result = 0;
     try {
         initializeRendering();
-        statusBarLimits(); cellPositions(); colorsAndClipping(); imagePreviews(); smoothIcons(); windowTargets(); editorCaret(); editorWrapping(); diffWrapping(); documentFind(); horizontalWheelScrolling(); continuousViewerScrolling(); themedScrollbars(); quickOpenStability();
+        statusBarLimits(); inlineTreeInput(); cellPositions(); colorsAndClipping(); imagePreviews(); smoothIcons(); windowTargets(); editorCaret(); editorWrapping(); diffWrapping(); documentFind(); horizontalWheelScrolling(); continuousViewerScrolling(); themedScrollbars(); quickOpenStability();
         std::cout << "Direct2D rendering tests passed\n";
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; result = 1; }
     if (SUCCEEDED(com)) CoUninitialize();
