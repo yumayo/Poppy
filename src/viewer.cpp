@@ -35,40 +35,52 @@ void Viewer::show(std::shared_ptr<const Document> d, const ResourceId& path, boo
     const auto previous = preserve && document_ ? std::optional<State>(state()) : std::nullopt;
     edit_.reset(); highSurrogate_ = 0;
     diffLayout_ = {}; layoutDirty_ = true; caretTrailing_ = false;
-    diff_.reset(); document_ = std::move(d); path_ = path; message_.clear(); title_.clear();
+    diff_.reset(); document_ = std::move(d); path_ = path; message_.clear();
     if (!preserve) { top_ = left_ = 0; anchor_ = caret_ = 0; after_ = false; }
     else { anchor_ = std::min(anchor_, document_->text.size()); caret_ = std::min(caret_, document_->text.size()); }
     scrollbars(); findLayout(); requestFind(false, false, false); caretPosition(); InvalidateRect(window_, nullptr, FALSE);
     if (previous) restore(*previous);
+    if (statusChanged) statusChanged();
 }
 void Viewer::edit(std::shared_ptr<EditBuffer> buffer, const ResourceId& path, bool preserve) {
     show(std::shared_ptr<const Document>(buffer, &buffer->document), path, preserve);
     edit_ = std::move(buffer); caretPosition();
 }
-void Viewer::showDiff(std::shared_ptr<const DiffDocument> d, const ResourceId& path, bool preserve, std::wstring title) {
+void Viewer::showDiff(std::shared_ptr<const DiffDocument> d, const ResourceId& path, bool preserve) {
     image_.reset(); renderer_.setImage({});
     const auto previous = preserve && document_ ? std::optional<State>(state()) : std::nullopt;
     edit_.reset(); highSurrogate_ = 0;
     textLayout_ = {}; layoutDirty_ = true; caretTrailing_ = false;
     // Share the patch snapshot; both panes only keep references to its lines.
-    document_ = std::shared_ptr<const Document>(d, &d->patch); diff_ = std::move(d); path_ = path; message_.clear(); title_ = std::move(title);
+    document_ = std::shared_ptr<const Document>(d, &d->patch); diff_ = std::move(d); path_ = path; message_.clear();
     if (!preserve) { top_ = left_ = 0; anchor_ = caret_ = 0; after_ = false; }
     else { anchor_ = std::min(anchor_, document_->text.size()); caret_ = std::min(caret_, document_->text.size()); }
     scrollbars(); findLayout(); requestFind(false, false, false); caretPosition(); InvalidateRect(window_, nullptr, FALSE);
     if (previous) restore(*previous);
+    if (statusChanged) statusChanged();
 }
 void Viewer::message(const std::wstring& text, const ResourceId& path) {
     image_.reset(); renderer_.setImage({});
     findBar_.close(); KillTimer(window_, findTimer); search_.query("");
     edit_.reset(); highSurrogate_ = 0;
     textLayout_ = {}; diffLayout_ = {}; layoutDirty_ = true; caretTrailing_ = false;
-    diff_.reset(); document_.reset(); path_ = path; title_.clear(); message_ = text; top_ = left_ = 0; anchor_ = caret_ = 0; after_ = false;
+    diff_.reset(); document_.reset(); path_ = path; message_ = text; top_ = left_ = 0; anchor_ = caret_ = 0; after_ = false;
     scrollbars(); caretPosition(); InvalidateRect(window_, nullptr, FALSE);
+    if (statusChanged) statusChanged();
 }
 void Viewer::showImage(std::shared_ptr<const ImagePreview> image, const ResourceId& path) {
     message(L"", path);
     image_ = std::move(image); renderer_.setImage(image_);
     InvalidateRect(window_, nullptr, FALSE);
+    if (statusChanged) statusChanged();
+}
+std::wstring Viewer::textStatus() const {
+    if (image_) return std::to_wstring(image_->width) + L" × " + std::to_wstring(image_->height) + L" px";
+    // A Git patch does not describe the source files' encoding or line endings.
+    if (!document_ || diff_) return {};
+    const auto newline = document_->text.find('\n');
+    const bool crlf = newline != std::string::npos && newline > 0 && document_->text[newline - 1] == '\r';
+    return wide(document_->encoding) + (crlf ? L"  ·  CRLF" : L"  ·  LF");
 }
 Viewer::State Viewer::state() const {
     if (wrapping() && diff_ && diffLayout_.rows()) {
@@ -130,10 +142,12 @@ void Viewer::setDiffLayout(bool inlineView) {
     if (diffLayoutChanged) diffLayoutChanged();
 }
 RECT Viewer::layoutButton(bool inlineView) const {
+    if (!stickyFile()) return {};
     const auto rect = Scrollbars::contentRect(window_);
-    const int width = header_ * 2, right = static_cast<int>(rect.right) - header_ / 3;
-    return {right - width * (inlineView ? 1 : 2), header_ / 6,
-        right - (inlineView ? 0 : width), header_ - header_ / 6};
+    const int right = std::max(0, static_cast<int>(rect.right) - header_ / 3);
+    const int width = std::min(header_ * 2, right / 2), top = contentTop();
+    return {right - width * (inlineView ? 1 : 2), top,
+        right - (inlineView ? 0 : width), top + cellHeight_};
 }
 int Viewer::visibleRows() const { const auto r = Scrollbars::contentRect(window_); return std::max(1, (static_cast<int>(r.bottom) - contentTop()) / cellHeight_); }
 void Viewer::scrollbars() {
@@ -227,7 +241,7 @@ void Viewer::copy() {
     else copyText(window_, wide(std::string_view(document_->text).substr(start, end - start)));
 }
 void Viewer::findLayout() {
-    if (findBar_.window()) findBar_.layout(header_ + (diff_ ? header_ : 0), Scrollbars::contentRect(window_).right, header_);
+    if (findBar_.window()) findBar_.layout(diff_ ? header_ : 0, Scrollbars::contentRect(window_).right, header_);
 }
 void Viewer::find() {
     if (!document_) return;
@@ -359,7 +373,7 @@ void Viewer::caretPosition(bool reveal) {
         if (context) { COMPOSITIONFORM form{}; form.dwStyle = CFS_POINT; form.ptCurrentPos = point; ImmSetCompositionWindow(context, &form); CANDIDATEFORM candidate{}; candidate.dwStyle = CFS_CANDIDATEPOS; candidate.ptCurrentPos = {point.x, point.y + cellHeight_}; ImmSetCandidateWindow(context, &candidate); ImmReleaseContext(window_, context); }
     }
 }
-void Viewer::edited() { layoutDirty_ = true; caretTrailing_ = false; requestFind(false, false, false); scrollbars(); caretPosition(true); InvalidateRect(window_, nullptr, FALSE); if (changed) changed(); }
+void Viewer::edited() { layoutDirty_ = true; caretTrailing_ = false; requestFind(false, false, false); scrollbars(); caretPosition(true); InvalidateRect(window_, nullptr, FALSE); if (changed) changed(); if (statusChanged) statusChanged(); }
 void Viewer::replace(std::string text) {
     if (!edit_) return;
     std::string normalized; const auto newline = edit_->newline();
@@ -398,40 +412,27 @@ void Viewer::paint() {
     Renderer::Paint paint(renderer_, window_); if (!paint) return;
     auto& dc = renderer_; dc.font(Renderer::Font::Ui);
     const auto r = Scrollbars::contentRect(window_);
-    RECT header{0, 0, r.right, header_}; dc.fill(header, panel);
-    const LONG titleRight = diff_ ? layoutButton(false).left - 14 : r.right - 175;
-    RECT title{14, 0, std::max<LONG>(14, titleRight), header_};
-    dc.label(title, !title_.empty() ? title_ : path_.empty() ? L"POPPY" : path_.filename().native(), foreground);
-    RECT tag{std::max<LONG>(14, r.right - 175), 0, r.right - 12, header_};
-    if (diff_) {
-        for (const bool inlineView : {false, true}) {
-            const auto button = layoutButton(inlineView);
-            dc.fill(button, inlineView == inlineView_ ? rgb(50, 70, 94) : background);
-            dc.label(button, inlineView ? L"Inline" : L"Split", inlineView == inlineView_ ? foreground : muted, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-        }
-    } else dc.label(tag, image_ ? std::to_wstring(image_->width) + L" × " + std::to_wstring(image_->height) : document_ ? wide(document_->encoding) + (edit_ ? edit_->dirty() ? L"  ·  Modified" : L"  ·  Ctrl+S" : L"  ·  READ ONLY") : L"", muted, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
-    dc.fill({0, header_ - 1, r.right, header_}, border);
     if (image_) {
-        dc.fill({0, header_, r.right, r.bottom}, background);
+        dc.fill(r, background);
         const int margin = std::max(1, header_ / 3);
-        const RECT bounds{margin, header_ + margin, r.right - margin, r.bottom - margin};
+        const RECT bounds{margin, margin, r.right - margin, r.bottom - margin};
         if (!dc.drawImage(bounds, std::max(1, header_ / 4)))
             dc.label(bounds, L"Image cannot be rendered on this device.", muted, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     } else if (!document_) {
-        dc.fill({0, header_, r.right, r.bottom}, background);
-        RECT text{32, header_ + 48, std::max<LONG>(32, r.right - 32), r.bottom};
+        dc.fill(r, background);
+        RECT text{32, 48, std::max<LONG>(32, r.right - 32), r.bottom};
         dc.label(text, message_, muted, DT_LEFT | DT_TOP | DT_WORDBREAK);
     } else {
         const int body = contentTop(), middle = static_cast<int>(r.right) / 2;
         if (diff_) {
-            const int diffBottom = header_ * 2;
-            dc.fill({0, header_, r.right, diffBottom}, panel);
+            const int diffBottom = header_;
+            dc.fill({0, 0, r.right, diffBottom}, panel);
             if (inlineView_) {
-                dc.label({0, header_, gutter_ - 14, diffBottom}, L"Before", muted, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
-                dc.label({gutter_, header_, 2 * gutter_ - 14, diffBottom}, L"After", muted, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+                dc.label({0, 0, gutter_ - 14, diffBottom}, L"Before", muted, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+                dc.label({gutter_, 0, 2 * gutter_ - 14, diffBottom}, L"After", muted, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
             } else {
-                dc.label({14, header_, middle, diffBottom}, L"Before", muted);
-                dc.label({middle + 14, header_, r.right, diffBottom}, L"After", muted);
+                dc.label({14, 0, middle, diffBottom}, L"Before", muted);
+                dc.label({middle + 14, 0, r.right, diffBottom}, L"After", muted);
             }
             dc.fill({0, diffBottom - 1, r.right, diffBottom}, border);
         }
@@ -525,7 +526,12 @@ void Viewer::paint() {
                 // wrapping and horizontal scrolling, above all source cells.
                 const int bottom = std::min(body + cellHeight_, static_cast<int>(r.bottom));
                 dc.fill({0, body, r.right, bottom}, panel);
-                dc.label({14, body, r.right - 12, bottom}, wide(file->path), accent);
+                dc.label({14, body, std::max(14L, layoutButton(false).left - 12), bottom}, wide(file->path), accent);
+                for (const bool inlineView : {false, true}) {
+                    const auto button = layoutButton(inlineView);
+                    dc.fill(button, inlineView == inlineView_ ? rgb(50, 70, 94) : background);
+                    dc.label(button, inlineView ? L"Inline" : L"Split", inlineView == inlineView_ ? foreground : muted, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+                }
                 dc.fill({0, bottom - 1, r.right, bottom}, border);
             }
         }

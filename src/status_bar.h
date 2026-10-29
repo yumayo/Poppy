@@ -8,6 +8,7 @@ public:
     void create(HWND parent, HINSTANCE instance);
     void setDpi(UINT dpi);
     void message(std::wstring text);
+    void editor(std::wstring text);
     void update(std::wstring git, std::vector<LimitStatus> limits);
     HWND window() const { return window_; }
 private:
@@ -20,7 +21,7 @@ private:
     HWND window_ = nullptr, tooltips_ = nullptr;
     Renderer renderer_;
     UINT dpi_ = 96;
-    std::wstring git_, message_, tipText_;
+    std::wstring git_, message_, editor_, tipText_;
     std::vector<LimitStatus> limits_;
     std::vector<Part> parts_;
     RECT gitBounds_{}, messageBounds_{};

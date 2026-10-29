@@ -487,6 +487,7 @@ void ProjectRuntime::Impl::create() {
         view.changed = [this] { saveTab(); updateTabs(false); if (activeSidebar_ == Sidebar::Search) searchPane_.refresh(); if (owner_ && owner_->changed) owner_->changed(); };
         view.save = [this, group] { saveFile(groupTab(group)); };
         view.diffLayoutChanged = [this, group] { viewers_[1 - group].setDiffLayout(viewers_[group].diffInline()); };
+        view.statusChanged = [this] { statusDirty_ = true; };
         view.focused = [this, group] { focusedGroup_ = group; if (groupTab(group) < tabs_.size()) activeTab_ = groupTab(group); updateTabs(false); };
     }
     terminal_.create(window_, instance_);
@@ -1176,6 +1177,7 @@ void ProjectRuntime::Impl::updateStatusBar() {
         if (root_.wsl()) { limits.push_back(watchLimitStatus(watchUsage_)); limits.push_back(fileLimitStatus(quickOpen_.index(), quickOpen_.indexing())); }
         limits.push_back(treeLimitStatus(nodes_.size(), maxTreeNodes, maxEntries, partialFolders_));
     }
+    statusBar_.editor(viewer().textStatus());
     statusBar_.update(gitLabel, std::move(limits)); statusBar_.message(status_);
 }
 void ProjectRuntime::Impl::chooseFolder() {
@@ -1636,6 +1638,7 @@ void ProjectRuntime::Impl::endTabDrag(bool drop) {
     layout();
 }
 void ProjectRuntime::Impl::updateTabs(bool reveal) {
+    statusDirty_ = true;
     if (reveal) { layout(true); return; }
     for (size_t i = 0; i < tabTools_; ++i) { TOOLINFOW tip{}; tip.cbSize = sizeof(tip); tip.hwnd = window_; tip.uId = 100 + i; SendMessageW(tooltips_, TTM_DELTOOLW, 0, reinterpret_cast<LPARAM>(&tip)); }
     visibleTabs_.clear();
@@ -1846,8 +1849,8 @@ void ProjectRuntime::Impl::loadTab(bool preserve, int group) {
     if (!repo || !repo->error.empty() || (!tab.gitRoot.empty() && pathKey(repo->root) != pathKey(tab.gitRoot))) { viewers_[group].message(L"Git repository unavailable for this file. Press F5 to refresh.", path); return; }
     const auto root = tab.gitRoot.empty() ? repo->root : tab.gitRoot;
     const auto kind = tab.diffKind; const auto revision = tab.revision; const auto allChanges = tab.allChanges;
-    const auto title = tabTitle(tab); const auto roots = git_->roots;
-    gitWorker_->submit(L"diff:" + std::to_wstring(group), [this, group, serial, generation, path, root, preserve, state, kind, revision, allChanges, title, roots] {
+    const auto roots = git_->roots;
+    gitWorker_->submit(L"diff:" + std::to_wstring(group), [this, group, serial, generation, path, root, preserve, state, kind, revision, allChanges, roots] {
         constexpr size_t maxPatchBytes = 4 * 1024 * 1024;
         const auto relative = allChanges ? std::string{} : path.lexically_relative(root).generic_u8string();
         auto readDiff = [&](GitDiffKind scope) { return provider_->git(gitArguments(gitDiffArguments(scope, revision, relative)), root, gitWorker_->cancellation()); };
@@ -1879,14 +1882,14 @@ void ProjectRuntime::Impl::loadTab(bool preserve, int group) {
         }
         auto doc = std::make_shared<DiffDocument>();
         if (result.code == 0 && static_cast<size_t>(std::count(result.output.begin(), result.output.end(), '\n')) >= maxLines) { result.code = 1; result.error = L"Diff exceeds the 1,000,000-line preview limit."; }
-        if (result.code == 0) { doc->patch.text = std::move(result.output); indexDiff(*doc, allChanges || kind != GitDiffKind::Automatic); }
+        if (result.code == 0) { doc->patch.text = std::move(result.output); indexDiff(*doc, true); }
         const auto error = result.error; const auto code = result.code;
-        gitWorker_->complete([this, group, serial, generation, path, doc, code, error, scope, preserve, state, kind, allChanges, title] {
+        gitWorker_->complete([this, group, serial, generation, path, doc, code, error, scope, preserve, state, allChanges] {
             if (generation != generation_ || serial != serial_[group]) return;
             if (code) viewers_[group].message(error, path);
             else if (doc->patch.text.empty()) viewers_[group].message(L"No changes to display.", path);
             else if (doc->rows.empty()) viewers_[group].message(L"No text changes to display.", path);
-            else { viewers_[group].showDiff(doc, path, preserve, kind == GitDiffKind::Automatic ? L"" : title); if (!preserve) viewers_[group].restore(state); }
+            else { viewers_[group].showDiff(doc, path, preserve); if (!preserve) viewers_[group].restore(state); }
             status((scope == GitDiffKind::Commit ? L"Commit diff" : scope == GitDiffKind::Staged ? L"Staged diff" : L"Working tree diff") +
                 std::wstring(allChanges ? L" · All changes" : L"") + L" · F7: split / inline");
         });

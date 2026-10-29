@@ -20,7 +20,7 @@ void statusBarLimits() {
     const auto instance = GetModuleHandleW(nullptr);
     const auto parent = CreateWindowExW(0, L"STATIC", L"Status bar test", WS_POPUP | WS_CLIPCHILDREN, 0, 0, 1400, 200, nullptr, nullptr, instance, nullptr);
     check(parent != nullptr, "Cannot create status bar test parent");
-    StatusBar bar; bar.create(parent, instance); bar.message(L"Ready");
+    StatusBar bar; bar.create(parent, instance); bar.message(L"Ready"); bar.editor(L"UTF-8  ·  CRLF");
     FileIndex index; index.files.resize(1234); index.storageBytes = 1024 * 1024;
     const auto watch = watchLimitStatus(WatchUsage{1234, 262144, 524288, false, {}});
     bar.update(L"main", {watch, fileLimitStatus(&index, false), treeLimitStatus(1234, 50000, 10000)});
@@ -39,7 +39,7 @@ void statusBarLimits() {
             const int scaledWidth = MulDiv(width, dpi, 96), height = MulDiv(26, dpi, 96);
             SetWindowPos(bar.window(), nullptr, 0, 0, scaledWidth, height, SWP_NOZORDER | SWP_NOACTIVATE);
             const auto count = SendMessageW(tooltip, TTM_GETTOOLCOUNT, 0, 0);
-            bool hasWatch = false, hasOverflow = false; std::vector<RECT> bounds;
+            bool hasWatch = false, hasOverflow = false, hasEditor = false; std::vector<RECT> bounds;
             for (LRESULT i = 0; i < count; ++i) {
                 TOOLINFOW tool{}; tool.cbSize = sizeof(tool);
                 check(SendMessageW(tooltip, TTM_ENUMTOOLSW, i, reinterpret_cast<LPARAM>(&tool)) != FALSE, "Cannot read status bar hover bounds");
@@ -51,11 +51,16 @@ void statusBarLimits() {
                 const std::wstring tip = display.lpszText ? display.lpszText : L"";
                 hasWatch |= tip.find(L"WSL directory watches") != tip.npos;
                 hasOverflow |= tip.find(L"Files 1,234/200,000") != tip.npos && tip.find(L"WSL file list") != tip.npos;
+                hasEditor |= tip == L"UTF-8  ·  CRLF";
             }
             check(hasWatch, "Narrowing the status bar lost watch-limit explanations");
+            check(hasEditor, "Resizing or changing DPI lost the editor format status");
             if (width == 420) check(hasOverflow, "Hidden limit counters were not exposed in the Limits tooltip");
         }
     }
+    const auto withEditor = SendMessageW(tooltip, TTM_GETTOOLCOUNT, 0, 0);
+    bar.editor(L"");
+    check(SendMessageW(tooltip, TTM_GETTOOLCOUNT, 0, 0) == withEditor - 1, "Clearing editor status retained its tooltip");
     DestroyWindow(parent);
 }
 // WIC provides inspectable Direct2D pixels without a DC or GDI bitmap.
@@ -239,6 +244,7 @@ void imagePreviews() {
     viewer.edit(buffer, L"before.txt"); viewer.find();
     viewer.showImage(image, ResourceId(fs::path(L"preview.png")));
     check(viewer.hasDocument() && !viewer.buffer(), "Image did not replace the editable document");
+    check(viewer.textStatus() == L"2 × 1 px", "Image status retained the previous text encoding");
     SendMessageW(viewer.window(), WM_CHAR, 'x', 0); viewer.find();
     check(!viewer.buffer() && viewer.state().caret == 0, "Image accepted text editing or selection");
     viewer.setDpi(192); SetWindowPos(viewer.window(), nullptr, 0, 0, 90, 90, SWP_NOZORDER);
@@ -330,6 +336,7 @@ void editorCaret() {
         return info.rcCaret;
     };
     const auto initial = caret();
+    check(initial.top == 0 && viewer.textStatus() == L"UTF-8  ·  LF", "The removed header still occupies editor space or empty-file status is wrong");
     const LONG height = initial.bottom - initial.top;
     for (int row = 1; row <= 4; ++row) {
         SendMessageW(window, WM_CHAR, '\r', 0);
@@ -379,6 +386,16 @@ void editorCaret() {
     GUITHREADINFO info{}; info.cbSize = sizeof(info);
     check(GetGUIThreadInfo(GetCurrentThreadId(), &info) && info.hwndCaret != window,
         "A read-only viewer retained the editor caret");
+    auto crlf = std::make_shared<EditBuffer>();
+    crlf->document.text = "first\r\nsecond\n"; crlf->document.encoding = "UTF-16 LE";
+    indexDocument(crlf->document); crlf->initialize(crlf->document.text);
+    int updates = 0; viewer.statusChanged = [&] { ++updates; };
+    viewer.edit(crlf, L"crlf.txt");
+    check(viewer.textStatus() == L"UTF-16 LE  ·  CRLF", "Status did not use the source encoding and first line ending");
+    viewer.restore({0, 0, 5, 7}); SetFocus(window); SendMessageW(window, WM_KEYDOWN, VK_DELETE, 0);
+    check(viewer.textStatus() == L"UTF-16 LE  ·  LF" && updates >= 2, "Editing the first newline did not refresh line-ending status");
+    viewer.message(L"Loading");
+    check(viewer.textStatus().empty(), "A loading message retained the previous file format");
 }
 void editorWrapping() {
     Viewer viewer;
@@ -404,16 +421,16 @@ void editorWrapping() {
     const auto original = buffer->document.text;
     check(viewer.wordWrap() && !(GetWindowLongPtrW(window, GWL_STYLE) & WS_HSCROLL), "Wrapping is not enabled by default or left a horizontal scrollbar");
     SendMessageW(window, WM_KEYDOWN, VK_END, 0);
-    check(viewer.state().caret == static_cast<size_t>(columns) && caret().top == 34, "End did not stop at the end of the first wrapped row");
+    check(viewer.state().caret == static_cast<size_t>(columns) && caret().top == 0, "End did not stop at the end of the first wrapped row");
     SendMessageW(window, WM_KEYDOWN, VK_DOWN, 0);
-    check(viewer.state().caret == static_cast<size_t>(columns * 2) && caret().top == 34 + height, "Down did not preserve the trailing column on the next wrapped row");
+    check(viewer.state().caret == static_cast<size_t>(columns * 2) && caret().top == height, "Down did not preserve the trailing column on the next wrapped row");
     SendMessageW(window, WM_KEYDOWN, VK_UP, 0);
-    check(viewer.state().caret == static_cast<size_t>(columns) && caret().top == 34, "Up skipped a wrapped row");
+    check(viewer.state().caret == static_cast<size_t>(columns) && caret().top == 0, "Up skipped a wrapped row");
     SendMessageW(window, WM_KEYDOWN, VK_RIGHT, 0);
-    check(viewer.state().caret == static_cast<size_t>(columns + 1) && caret().left == 70 + cell && caret().top == 34 + height, "Right did not cross a wrapping boundary");
+    check(viewer.state().caret == static_cast<size_t>(columns + 1) && caret().left == 70 + cell && caret().top == height, "Right did not cross a wrapping boundary");
     SendMessageW(window, WM_KEYDOWN, VK_HOME, 0);
     check(viewer.state().caret == static_cast<size_t>(columns) && caret().left == 70, "Home did not move to the start of a continuation");
-    const auto point = [&](int column, int row) { return MAKELPARAM(70 + column * cell, 34 + row * height + height / 2); };
+    const auto point = [&](int column, int row) { return MAKELPARAM(70 + column * cell, row * height + height / 2); };
     SendMessageW(window, WM_LBUTTONDOWN, MK_LBUTTON, point(3, 2));
     SendMessageW(window, WM_MOUSEMOVE, MK_LBUTTON, point(5, 3));
     SendMessageW(window, WM_LBUTTONUP, 0, point(5, 3));
@@ -424,7 +441,7 @@ void editorWrapping() {
     check(buffer->undo(anchor, insertion) && buffer->document.text == original, "Undo did not restore the wrapped selection");
     viewer.edit(buffer, L"wrapped.txt");
     check(viewer.selectSearch(1500, 1506, "needle", true), "Could not navigate to a match deep in a wrapped logical line");
-    check(viewer.state().wrapOffset > 0 && caret().top >= 34 && caret().bottom <= Scrollbars::contentRect(window).bottom, "A match in a continuation was not revealed");
+    check(viewer.state().wrapOffset > 0 && caret().top >= 0 && caret().bottom <= Scrollbars::contentRect(window).bottom, "A match in a continuation was not revealed");
     const auto saved = viewer.state();
     MoveWindow(window, 0, 0, 360, 360, FALSE);
     TextLayout layout; layout.build(buffer->document, (Scrollbars::contentRect(window).right - 70 - 2) / cell);
@@ -455,12 +472,13 @@ void diffWrapping() {
     diff->patch.text = "diff --git a/file b/file\n@@ -1,32 +1,32 @@\n-" + std::string(2000, 'r') + "\n+short\n";
     for (int i = 0; i < 31; ++i) diff->patch.text += " context\n";
     indexDiff(*diff, true); viewer.showDiff(diff, L"wrapped.diff");
+    check(viewer.textStatus().empty(), "Diff status incorrectly describes the patch as the source file encoding");
     const auto original = diff->patch.text;
     const size_t before = diff->offset(diff->rows[1].before), after = diff->offset(diff->rows[1].after);
     const auto info = [&] { SCROLLINFO value{sizeof(value), SIF_ALL, 0, 0, 0, 0, 0}; GetScrollInfo(window, SB_VERT, &value); return value; };
     const int columns = (Scrollbars::contentRect(window).right - 140 - 2) / cell;
     check(viewer.wordWrap() && !(GetWindowLongPtrW(window, GWL_STYLE) & WS_HSCROLL), "Inline diffs did not inherit word wrapping");
-    const auto point = [&](int column, int row) { return MAKELPARAM(140 + column * cell, 68 + row * height + height / 2); };
+    const auto point = [&](int column, int row) { return MAKELPARAM(140 + column * cell, 34 + row * height + height / 2); };
     SendMessageW(window, WM_LBUTTONDOWN, MK_LBUTTON, point(3, 2));
     SendMessageW(window, WM_MOUSEMOVE, MK_LBUTTON, point(5, 3));
     SendMessageW(window, WM_LBUTTONUP, 0, point(5, 3));
@@ -482,12 +500,12 @@ void diffWrapping() {
     // The top source row extends beyond the right side. Clicking that padding
     // maps to the right line's end while the viewport retains the longer side.
     const int right = Scrollbars::contentRect(window).right / 2 + 1;
-    SendMessageW(window, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(right + 70, 68 + height / 2));
-    SendMessageW(window, WM_LBUTTONUP, 0, MAKELPARAM(right + 70, 68 + height / 2));
+    SendMessageW(window, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(right + 70, 34 + height / 2));
+    SendMessageW(window, WM_LBUTTONUP, 0, MAKELPARAM(right + 70, 34 + height / 2));
     check(viewer.state().anchor == saved.anchor && viewer.state().caret == saved.caret && GetCapture() != window,
         "Clicking the sticky filename must not select the hidden source row");
-    SendMessageW(window, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(right + 70, 68 + height + height / 2));
-    SendMessageW(window, WM_LBUTTONUP, 0, MAKELPARAM(right + 70, 68 + height + height / 2));
+    SendMessageW(window, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(right + 70, 34 + height + height / 2));
+    SendMessageW(window, WM_LBUTTONUP, 0, MAKELPARAM(right + 70, 34 + height + height / 2));
     const auto padded = viewer.state(); const int splitTop = info().nPos;
     check(padded.after && padded.caret == after + 5 && padded.wrapOffset > 0, "Split padding did not map to the shorter side's end");
     viewer.restore({}); viewer.restore(padded);
@@ -505,7 +523,26 @@ void diffWrapping() {
         viewer.setWordWrap(true); SendMessageW(window, WM_PAINT, 0, 0);
         check(!(GetWindowLongPtrW(window, GWL_STYLE) & WS_HSCROLL), "Enabling wrapping left a diff horizontal scrollbar");
     }
-    viewer.setDpi(144); SendMessageW(window, WM_PAINT, 0, 0);
+    for (const UINT dpi : {96u, 144u, 192u}) {
+        viewer.setDpi(dpi); metrics.setDpi(dpi);
+        MoveWindow(window, 0, 0, MulDiv(420, dpi, 96), MulDiv(360, dpi, 96), FALSE);
+        for (const bool withFind : {false, true}) {
+            if (withFind) viewer.find();
+            const int header = MulDiv(34, dpi, 96), rowHeight = metrics.textHeight() + MulDiv(3, dpi, 96);
+            for (const bool inlineView : {false, true}) {
+                const int rightEdge = Scrollbars::contentRect(window).right - header / 3;
+                const int x = rightEdge - header * (inlineView ? 1 : 3);
+                const auto selection = viewer.state();
+                const auto point = MAKELPARAM(x, header * (withFind ? 2 : 1) + rowHeight / 2);
+                SendMessageW(window, WM_LBUTTONDOWN, MK_LBUTTON, point);
+                SendMessageW(window, WM_LBUTTONUP, 0, point);
+                check(viewer.diffInline() == inlineView && GetCapture() != window && viewer.state().anchor == selection.anchor && viewer.state().caret == selection.caret,
+                    "Sticky diff layout buttons lost their hit targets or changed selection after scrolling, resizing, DPI or search");
+            }
+            if (withFind) SendMessageW(window, WM_KEYDOWN, VK_ESCAPE, 0);
+        }
+        SendMessageW(window, WM_PAINT, 0, 0);
+    }
     check(diff->patch.text == original && viewer.state().caret == padded.caret, "Diff wrapping changed the patch or selection");
     viewer.showDiff(std::make_shared<DiffDocument>(), L"empty.diff"); SendMessageW(window, WM_PAINT, 0, 0);
     check(info().nMax == 0, "An empty diff retained wrapped rows");

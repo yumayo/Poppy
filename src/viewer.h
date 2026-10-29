@@ -19,8 +19,9 @@ public:
     void edit(std::shared_ptr<EditBuffer> buffer, const ResourceId& path, bool preserve = false);
     void showImage(std::shared_ptr<const ImagePreview> image, const ResourceId& path);
     std::shared_ptr<EditBuffer> buffer() const { return edit_; }
-    std::function<void()> changed, save, focused, diffLayoutChanged;
-    void showDiff(std::shared_ptr<const DiffDocument> document, const ResourceId& path, bool preserve = false, std::wstring title = {});
+    std::function<void()> changed, save, focused, diffLayoutChanged, statusChanged;
+    std::wstring textStatus() const;
+    void showDiff(std::shared_ptr<const DiffDocument> document, const ResourceId& path, bool preserve = false);
     void toggleDiffLayout();
     void setDiffLayout(bool inlineView);
     bool diffInline() const { return inlineView_; }
@@ -62,7 +63,7 @@ private:
     size_t diffRow(size_t visualRow) const { return wrapping() ? diffLayout_.row(visualRow).row : visualRow; }
     const DiffFile* stickyFile() const { return diff_ ? diff_->fileForRow(diffRow(static_cast<size_t>(top_)), inlineView_) : nullptr; }
     int textGutter() const { return diff_ && inlineView_ ? 2 * gutter_ : gutter_; }
-    int contentTop() const { return header_ + (diff_ ? header_ : 0) + (findBar_.visible() ? header_ : 0); }
+    int contentTop() const { return (diff_ ? header_ : 0) + (findBar_.visible() ? header_ : 0); }
     size_t rowCount() const { return diff_ ? wrapping() ? diffLayout_.rows() : diff_->rowCount(inlineView_) : wrapping() ? textLayout_.rows() : document_->lines.size(); }
     HWND window_ = nullptr;
     Renderer renderer_;
@@ -86,7 +87,6 @@ private:
     wchar_t highSurrogate_ = 0;
     std::shared_ptr<const DiffDocument> diff_;
     ResourceId path_;
-    std::wstring title_;
     std::wstring message_ = L"Open a folder to start\n\nSelect a file on the left. Run your AI CLI in the terminal below.";
 };
 }

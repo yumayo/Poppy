@@ -17,6 +17,10 @@ void StatusBar::message(std::wstring text) {
     if (text == message_) return;
     message_ = std::move(text); if (window_) InvalidateRect(window_, nullptr, FALSE);
 }
+void StatusBar::editor(std::wstring text) {
+    if (text == editor_) return;
+    editor_ = std::move(text); layout();
+}
 void StatusBar::update(std::wstring git, std::vector<LimitStatus> limits) {
     if (git_ == git && limits_ == limits) return;
     git_ = std::move(git); limits_ = std::move(limits); layout();
@@ -25,9 +29,10 @@ void StatusBar::layout() {
     if (!window_) return;
     RECT client{}; GetClientRect(window_, &client);
     const int padding = px(10), gap = px(12), overflowWidth = renderer_.textWidth(L"Limits") + 2 * padding;
+    const int editorWidth = editor_.empty() ? 0 : renderer_.textWidth(editor_) + 2 * padding;
     // Preserve room for Git and operation messages. Less important counters
     // move into a Limits tooltip when the window is narrow.
-    const int budget = std::max(0L, client.right - px(320));
+    const int budget = std::max(0L, client.right - px(320) - editorWidth);
     int used = 0; size_t visible = 0;
     for (size_t i = 0; i < limits_.size(); ++i) {
         const int width = renderer_.textWidth(limits_[i].text) + 2 * padding;
@@ -40,6 +45,10 @@ void StatusBar::layout() {
     }
     parts_.clear();
     int edge = std::max(0L, client.right - padding);
+    if (!editor_.empty()) {
+        const int left = std::max(0, edge - editorWidth);
+        parts_.push_back({{left, 0, edge, client.bottom}, editor_, editor_, false}); edge = left;
+    }
     if (visible < limits_.size()) {
         std::wstring tip; bool warning = false;
         for (size_t i = visible; i < limits_.size(); ++i) { if (!tip.empty()) tip += L"\n\n"; tip += limits_[i].text + L"\n" + limits_[i].tooltip; warning |= limits_[i].warning; }
