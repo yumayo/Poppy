@@ -178,6 +178,7 @@ struct Request {
 };
 class Server {
 public:
+    Server();
     ~Server();
     void run();
 private:
@@ -206,6 +207,7 @@ private:
     std::vector<std::thread> workers_;
     std::thread searchWorker_;
     std::thread watcher_;
+    poppy::WatchUsage watchBudget_;
     Fd notify_{inotify_init1(IN_NONBLOCK | IN_CLOEXEC)};
     struct WatchPath { std::string path, gitRelative; std::set<std::string> gitRoots; };
     std::map<std::string, int> watched_;
@@ -217,6 +219,10 @@ private:
     bool hello_ = false;
     size_t uploadBytes_ = 0;
 };
+Server::Server() {
+    std::ifstream systemLimit("/proc/sys/fs/inotify/max_user_watches");
+    watchBudget_ = readWatchBudget(systemLimit);
+}
 Server::~Server() {
     stopping_ = true;
     { std::lock_guard<std::mutex> lock(mutex_); for (auto& item : requests_) item.second->cancelled = true; queue_.clear(); searches_.clear(); }
@@ -285,7 +291,7 @@ void Server::watch(const std::string& p, const std::string& gitRoot, const std::
         return;
     }
     if (p.rfind("/mnt/", 0) == 0) drvfs_ = true;
-    if (watchPaths_.size() >= maxDirectoryWatches || notify_.value < 0) { watchLimited_ = true; watchReason_ = watchPaths_.size() >= maxDirectoryWatches ? "poppyLimit" : "watchFailed"; return; }
+    if (watchPaths_.size() >= watchBudget_.limit || notify_.value < 0) { watchLimited_ = true; watchReason_ = watchPaths_.size() >= watchBudget_.limit ? "poppyLimit" : "watchFailed"; return; }
     const auto wd = inotify_add_watch(notify_.value, p.c_str(), IN_CREATE | IN_DELETE | IN_MOVED_FROM | IN_MOVED_TO | IN_MODIFY | IN_ATTRIB | IN_DELETE_SELF | IN_MOVE_SELF | IN_ONLYDIR | IN_DONT_FOLLOW);
     if (wd < 0) { watchLimited_ = true; watchReason_ = errno == ENOSPC ? "systemLimit" : "watchFailed"; return; }
     auto& entry = watchPaths_[wd];
@@ -306,7 +312,6 @@ void Server::watchGit(const std::string& directory) {
 }
 void Server::events() {
     alignas(inotify_event) char bytes[65536]; bool warned = false;
-    uint64_t systemLimit = 0; std::ifstream("/proc/sys/fs/inotify/max_user_watches") >> systemLimit;
     std::optional<poppy::WatchUsage> previousUsage;
     auto reportedAt = Clock::now() - std::chrono::seconds(1);
     while (!stopping_) {
@@ -342,7 +347,7 @@ void Server::events() {
             }
         }
         poppy::WatchUsage usage;
-        { std::lock_guard<std::mutex> lock(watchMutex_); usage = {watchPaths_.size(), maxDirectoryWatches, systemLimit, watchLimited_ || drvfs_, watchLimited_ ? watchReason_ : drvfs_ ? "drvfs" : ""}; }
+        { std::lock_guard<std::mutex> lock(watchMutex_); usage = {watchPaths_.size(), watchBudget_.limit, watchBudget_.systemLimit, watchLimited_ || drvfs_, watchLimited_ ? watchReason_ : drvfs_ ? "drvfs" : ""}; }
         // Missing watches are not evidence of a change. Repeated unconditional
         // rescans keep large workspaces permanently busy and retransfer indexes.
         if (usage.limited && !warned && !stopping_) { send({{"event", "watchLimited"}}); warned = true; }

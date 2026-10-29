@@ -21,7 +21,7 @@ void statusBarLimits() {
     check(parent != nullptr, "Cannot create status bar test parent");
     StatusBar bar; bar.create(parent, instance); bar.message(L"Ready");
     FileIndex index; index.files.resize(1234); index.storageBytes = 1024 * 1024;
-    const auto watch = watchLimitStatus(WatchUsage{1234, 65536, 524288, false, {}});
+    const auto watch = watchLimitStatus(WatchUsage{1234, 262144, 524288, false, {}});
     bar.update(L"main", {watch, fileLimitStatus(&index, false), treeLimitStatus(1234, 50000, 10000)});
     HWND tooltip = nullptr;
     struct Context { HWND owner; HWND* tooltip; } context{bar.window(), &tooltip};

@@ -1,8 +1,25 @@
 #include "limit_status.h"
 #include "resource.h"
 #include "wsl_protocol.h"
+#include <charconv>
+#include <istream>
 
 namespace poppy {
+WatchUsage readWatchBudget(std::istream& input) {
+    WatchUsage usage{0, wsl::fallbackDirectoryWatches, 0, false, {}};
+    std::string value, extra;
+    if (!(input >> value) || (input >> extra)) return usage;
+    uint64_t systemLimit = 0;
+    const auto parsed = std::from_chars(value.data(), value.data() + value.size(), systemLimit);
+    if (parsed.ec != std::errc{} || parsed.ptr != value.data() + value.size()) return usage;
+    usage.systemLimit = systemLimit; usage.limit = systemLimit / 2;
+    return usage;
+}
+bool validWatchUsage(const WatchUsage& usage) {
+    if (usage.count > usage.limit) return false;
+    if (usage.systemLimit) return usage.limit == usage.systemLimit / 2;
+    return usage.limit == 0 || usage.limit == wsl::fallbackDirectoryWatches;
+}
 std::wstring groupedCount(uint64_t value) {
     auto text = std::to_wstring(value);
     for (size_t offset = text.size(); offset > 3;) { offset -= 3; text.insert(offset, 1, L','); }
@@ -17,11 +34,14 @@ std::wstring mib(size_t bytes) {
 }
 LimitStatus watchLimitStatus(const std::optional<WatchUsage>& usage) {
     LimitStatus result;
-    result.text = L"Watch " + (usage ? ratio(usage->count, usage->limit) : L"—/" + groupedCount(wsl::maxDirectoryWatches));
+    result.text = L"Watch " + (usage ? ratio(usage->count, usage->limit) : L"—/—");
     result.tooltip = L"WSL directory watches\n";
-    if (!usage) { result.tooltip += L"Connect to WSL to see the current count."; return result; }
+    if (!usage) { result.tooltip += L"Connect to WSL to see the current count and limit."; return result; }
     result.tooltip += ratio(usage->count, usage->limit) + L" directories registered.\nShared by all projects in this WSL distribution using the same connection user.";
-    if (usage->systemLimit) result.tooltip += L"\nLinux user watch limit: " + groupedCount(usage->systemLimit) + L" (shared with other applications).";
+    if (usage->systemLimit || !usage->limit) {
+        result.tooltip += L"\nLinux user watch limit: " + groupedCount(usage->systemLimit) + L" (shared with other applications).";
+        result.tooltip += L"\nPoppy's limit is half the Linux user watch limit read at helper startup. Restart Poppy after changing that setting.";
+    } else result.tooltip += L"\nThe Linux user watch limit could not be read at helper startup. Using the fallback limit of " + groupedCount(wsl::fallbackDirectoryWatches) + L" directories.";
     result.warning = usage->limited || usage->count >= usage->limit;
     if (usage->limited) {
         result.text += L" !";

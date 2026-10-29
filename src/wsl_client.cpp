@@ -177,7 +177,7 @@ void Connection::received(Frame frame) {
         const auto event = field(message, "event");
         if (event == "watchUsage") {
             WatchUsage usage{number(message, "count"), number(message, "limit"), number(message, "systemLimit"), field(message, "limited") == "1", field(message, "reason")};
-            if (usage.limit != maxDirectoryWatches || usage.count > usage.limit) throw std::runtime_error("Invalid WSL watch count");
+            if (!validWatchUsage(usage)) throw std::runtime_error("Invalid WSL watch count");
             watchUsage_ = std::move(usage); return;
         }
         if (event == "watchLimited") {

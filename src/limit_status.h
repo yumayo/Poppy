@@ -1,6 +1,7 @@
 #pragma once
 #include "file_search.h"
 #include <cstdint>
+#include <iosfwd>
 #include <optional>
 #include <string>
 
@@ -18,6 +19,8 @@ struct LimitStatus {
     bool warning = false;
     bool operator==(const LimitStatus& other) const { return text == other.text && tooltip == other.tooltip && warning == other.warning; }
 };
+WatchUsage readWatchBudget(std::istream& systemLimit);
+bool validWatchUsage(const WatchUsage& usage);
 std::wstring groupedCount(uint64_t value);
 LimitStatus watchLimitStatus(const std::optional<WatchUsage>& usage);
 LimitStatus fileLimitStatus(const FileIndex* index, bool updating);
