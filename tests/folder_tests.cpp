@@ -35,6 +35,22 @@ LRESULT send(HWND window, UINT message, WPARAM a = 0, LPARAM b = 0) {
 TreeItem nextItem(HWND tree, TreeRelation relation, TreeItem item = 0) {
     return static_cast<TreeItem>(send(tree, treeGetNext, static_cast<WPARAM>(relation), static_cast<LPARAM>(item)));
 }
+// The current branch is first, with staged/working groups before its commits.
+TreeItem gitGroup(HWND tree, bool staged, TreeItem repository = 0) {
+    const auto branch = repository ? nextItem(tree, TreeRelation::Child, repository) : nextItem(tree, TreeRelation::Root);
+    if (!branch) return 0;
+    const auto first = nextItem(tree, TreeRelation::Child, branch);
+    return staged ? first : nextItem(tree, TreeRelation::Next, first);
+}
+size_t subtreeCount(HWND tree, TreeItem item) {
+    if (!item) return 0;
+    size_t count = 1;
+    for (auto child = nextItem(tree, TreeRelation::Child, item); child; child = nextItem(tree, TreeRelation::Next, child)) count += subtreeCount(tree, child);
+    return count;
+}
+size_t gitChangeCount(HWND tree) {
+    return subtreeCount(tree, gitGroup(tree, true)) + subtreeCount(tree, gitGroup(tree, false));
+}
 bool expanded(HWND tree, TreeItem item) {
     return send(tree, treeGetExpanded, static_cast<WPARAM>(item)) != 0;
 }
@@ -1178,15 +1194,15 @@ void gitSidebarTests(const fs::path& executable) {
         Application app(executable, fixture.root); app.tree();
         const auto changes = GetDlgItem(app.window, 4), viewer = FindWindowExW(app.window, nullptr, L"PoppyViewer", nullptr);
         send(GetDlgItem(app.window, 3), BM_CLICK);
-        waitFor([&] { return IsWindowVisible(changes) && send(changes, treeGetCount) == 8; }, "Default Git Tree did not load all untracked files");
+        waitFor([&] { return IsWindowVisible(changes) && gitChangeCount(changes) == 8; }, "Default Git Tree did not load all untracked files");
         const auto px = [dpi = GetDpiForWindow(app.window)](int value) { return MulDiv(value, dpi, 96); };
         const auto view = [&](bool tree) {
             const auto rect = bounds(app.window, changes);
             click(app.window, rect.left + (rect.right - rect.left) * (tree ? 1 : 3) / 4, rect.top - px(14));
-            check(send(changes, treeGetCount) == (tree ? 8 : 5), "Git layout toggle did not rebuild the hierarchy");
+            check(gitChangeCount(changes) == (tree ? 8 : 5), "Git layout toggle did not rebuild the hierarchy");
         };
         view(false); view(true);
-        auto group = nextItem(changes, TreeRelation::Next, nextItem(changes, TreeRelation::Root));
+        auto group = gitGroup(changes, false);
         auto docs = nextItem(changes, TreeRelation::Child, group), src = nextItem(changes, TreeRelation::Next, docs);
         check(expanded(changes, docs) && expanded(changes, src), "Git folders did not start expanded");
         send(changes, treeSelect, docs);
@@ -1195,12 +1211,12 @@ void gitSidebarTests(const fs::path& executable) {
         expand(changes, src, false);
         check(!expanded(changes, src), "A Git folder did not collapse");
         view(false); view(true);
-        group = nextItem(changes, TreeRelation::Next, nextItem(changes, TreeRelation::Root));
+        group = gitGroup(changes, false);
         docs = nextItem(changes, TreeRelation::Child, group); src = nextItem(changes, TreeRelation::Next, docs);
         check(!expanded(changes, src), "Changing layouts forgot a collapsed Git folder");
         check(PostMessageW(app.window, WM_KEYDOWN, VK_F5, 0) != FALSE, "Could not refresh Git changes");
-        waitFor([&] { return nextItem(changes, TreeRelation::Next, nextItem(changes, TreeRelation::Root)) != group; }, "Git changes did not refresh");
-        group = nextItem(changes, TreeRelation::Next, nextItem(changes, TreeRelation::Root));
+        waitFor([&] { return gitGroup(changes, false) != group; }, "Git changes did not refresh");
+        group = gitGroup(changes, false);
         docs = nextItem(changes, TreeRelation::Child, group); src = nextItem(changes, TreeRelation::Next, docs);
         check(!expanded(changes, src), "Refreshing forgot a collapsed Git folder");
         expand(changes, src);
@@ -1214,14 +1230,14 @@ void gitSidebarTests(const fs::path& executable) {
     {
         Application app(executable, fixture.root); app.tree();
         const auto changes = GetDlgItem(app.window, 4);
-        waitFor([&] { return IsWindowVisible(changes) && send(changes, treeGetCount) == 8; }, "Restart lost the Git Tree layout");
+        waitFor([&] { return IsWindowVisible(changes) && gitChangeCount(changes) == 8; }, "Restart lost the Git Tree layout");
         const auto rect = bounds(app.window, changes);
         click(app.window, rect.left + (rect.right - rect.left) * 3 / 4, rect.top - MulDiv(14, GetDpiForWindow(app.window), 96));
     }
     {
         Application app(executable, fixture.root); app.tree();
         const auto changes = GetDlgItem(app.window, 4);
-        waitFor([&] { return IsWindowVisible(changes) && send(changes, treeGetCount) == 5; }, "Restart lost the Git List layout");
+        waitFor([&] { return IsWindowVisible(changes) && gitChangeCount(changes) == 5; }, "Restart lost the Git List layout");
     }
 }
 void gitAutoRefreshTests(const fs::path& executable) {
@@ -1247,7 +1263,7 @@ void gitAutoRefreshTests(const fs::path& executable) {
     Application app(executable, fixture.root); app.tree();
     const auto changes = GetDlgItem(app.window, 4), button = GetDlgItem(app.window, 3);
     const auto group = [&](bool staged) {
-        const auto first = nextItem(changes, TreeRelation::Root);
+        const auto first = gitGroup(changes, true);
         return staged ? first : nextItem(changes, TreeRelation::Next, first);
     };
     const auto firstFile = [&](bool staged) {
@@ -1263,7 +1279,7 @@ void gitAutoRefreshTests(const fs::path& executable) {
         check(item != 0, "The Git file action is missing its file");
         RECT rect{}; GetClientRect(changes, &rect);
         const int height = static_cast<int>(send(changes, treeGetRowHeight));
-        const int y = static_cast<int>(send(changes, treeGetRow, item)) * height + height / 2;
+        const int y = (static_cast<int>(send(changes, treeGetRow, item)) - scrollInfo(changes).nPos) * height + height / 2;
         const int x = rect.right - MulDiv(18, GetDpiForWindow(app.window), 96);
         send(changes, WM_MOUSEMOVE, 0, MAKELPARAM(x, y));
         click(changes, x, y);
@@ -1274,41 +1290,41 @@ void gitAutoRefreshTests(const fs::path& executable) {
         return title == (count ? L"Source Control (" + std::to_wstring(count) + L")" : std::wstring(L"Source Control"));
     };
     send(button, BM_CLICK);
-    waitFor([&] { return badge(0) && send(changes, treeGetCount) == 2 && !IsWindowVisible(changes); }, "Clean repository did not hide the badge and change list");
+    waitFor([&] { return badge(0) && gitChangeCount(changes) == 2 && IsWindowVisible(changes); }, "Clean repository did not retain its branch and history without a badge");
     send(GetDlgItem(app.window, 2), BM_CLICK);
     writeLines(fixture.root / L"tracked.txt", 210);
-    waitFor([&] { return badge(1) && send(changes, treeGetCount) == 3; }, "External edits did not update the hidden Source Control list and badge");
+    waitFor([&] { return badge(1) && gitChangeCount(changes) == 3; }, "External edits did not update the hidden Source Control list and badge");
     send(button, BM_CLICK);
     waitFor([&] { return IsWindowVisible(changes); }, "Source Control did not show external edits");
     clickAction(firstFile(false));
-    waitFor([&] { return nextItem(changes, TreeRelation::Child, nextItem(changes, TreeRelation::Root)) != 0; }, "Staging did not automatically update Source Control");
+    waitFor([&] { return nextItem(changes, TreeRelation::Child, gitGroup(changes, true)) != 0; }, "Staging did not automatically update Source Control");
     clickAction(firstFile(true));
-    waitFor([&] { return badge(1) && !firstFile(true) && firstFile(false) && send(changes, treeGetCount) == 3; }, "The minus icon did not move the file back to Changes");
+    waitFor([&] { return badge(1) && !firstFile(true) && firstFile(false) && gitChangeCount(changes) == 3; }, "The minus icon did not move the file back to Changes");
     clickAction(firstFile(false));
-    waitFor([&] { return firstFile(true) && !firstFile(false) && send(changes, treeGetCount) == 3; }, "The plus icon did not move the file to Staged Changes");
+    waitFor([&] { return firstFile(true) && !firstFile(false) && gitChangeCount(changes) == 3; }, "The plus icon did not move the file to Staged Changes");
     writeLines(fixture.root / L"tracked.txt", 220);
-    waitFor([&] { return badge(1) && send(changes, treeGetCount) == 4; }, "A partially staged file was not refreshed or was counted twice");
+    waitFor([&] { return badge(1) && gitChangeCount(changes) == 4; }, "A partially staged file was not refreshed or was counted twice");
     clickAction(firstFile(false));
-    waitFor([&] { return badge(1) && firstFile(true) && !firstFile(false) && send(changes, treeGetCount) == 3; }, "Staging a partially staged file did not update both groups");
+    waitFor([&] { return badge(1) && firstFile(true) && !firstFile(false) && gitChangeCount(changes) == 3; }, "Staging a partially staged file did not update both groups");
     clickAction(firstFile(true));
-    waitFor([&] { return badge(1) && !firstFile(true) && firstFile(false) && send(changes, treeGetCount) == 3; }, "Unstaging did not preserve the changed file and badge");
+    waitFor([&] { return badge(1) && !firstFile(true) && firstFile(false) && gitChangeCount(changes) == 3; }, "Unstaging did not preserve the changed file and badge");
     runGit(L"reset --hard -q HEAD");
-    waitFor([&] { return badge(0) && !IsWindowVisible(changes); }, "Reverting changes did not remove the badge");
+    waitFor([&] { return badge(0) && IsWindowVisible(changes) && gitChangeCount(changes) == 2; }, "Reverting changes did not remove the badge");
     fs::create_directory(fixture.root / L"nested 日本語");
     writeFile(fixture.root / L"nested 日本語" / L"added.txt");
-    waitFor([&] { return badge(1) && IsWindowVisible(changes) && send(changes, treeGetCount) == 4; }, "Creating an untracked file did not update Source Control");
+    waitFor([&] { return badge(1) && IsWindowVisible(changes) && gitChangeCount(changes) == 4; }, "Creating an untracked file did not update Source Control");
     fs::remove(fixture.root / L"tracked.txt");
-    waitFor([&] { return badge(2) && send(changes, treeGetCount) == 5; }, "Deleting a tracked file did not add to the pending file count");
+    waitFor([&] { return badge(2) && gitChangeCount(changes) == 5; }, "Deleting a tracked file did not add to the pending file count");
     writeLines(fixture.root / L"tracked.txt", 200);
-    waitFor([&] { return badge(1) && send(changes, treeGetCount) == 4; }, "Restoring a tracked file did not update the pending file count");
+    waitFor([&] { return badge(1) && gitChangeCount(changes) == 4; }, "Restoring a tracked file did not update the pending file count");
     clickAction(firstFile(false));
     waitFor([&] { return badge(1) && firstFile(true) && !firstFile(false); }, "The plus icon did not stage a nested untracked file");
     clickAction(firstFile(true));
     waitFor([&] { return badge(1) && !firstFile(true) && firstFile(false); }, "The minus icon did not preserve a nested untracked file");
     fs::rename(fixture.root / L"nested 日本語" / L"added.txt", fixture.root / L"moved.txt");
-    waitFor([&] { return badge(1) && send(changes, treeGetCount) == 3; }, "Renaming an untracked file did not update Source Control");
+    waitFor([&] { return badge(1) && gitChangeCount(changes) == 3; }, "Renaming an untracked file did not update Source Control");
     fs::remove(fixture.root / L"moved.txt");
-    waitFor([&] { return badge(0) && !IsWindowVisible(changes); }, "Deleting the last untracked file did not clear Source Control");
+    waitFor([&] { return badge(0) && IsWindowVisible(changes) && gitChangeCount(changes) == 2; }, "Deleting the last untracked file did not clear Source Control");
 }
 void branchSidebarTests(const fs::path& executable) {
     wchar_t git[MAX_PATH]{};
@@ -1339,38 +1355,43 @@ void branchSidebarTests(const fs::path& executable) {
     for (int i = 0; i < 50; ++i) runGit(L"commit --allow-empty -qm history");
     write(L"src/file.txt", "committed\n"); fs::remove(fixture.root / L"deleted.txt");
     runGit(L"add -A"); runGit(L"commit -qm latest");
+    runGit(L"branch alternate"); runGit(L"update-ref refs/remotes/origin/remote HEAD");
     write(L"src/file.txt", "staged\n"); runGit(L"add .");
     write(L"src/file.txt", "working\n"); write(L"untracked.txt", "untracked\n");
     {
         Application app(executable, fixture.root); app.tree();
-        const auto changes = GetDlgItem(app.window, 4), branches = GetDlgItem(app.window, 6);
+        const auto changes = GetDlgItem(app.window, 4), branches = changes;
         const auto viewer = FindWindowExW(app.window, nullptr, L"PoppyViewer", nullptr);
         send(GetDlgItem(app.window, 3), BM_CLICK);
-        waitFor([&] { return IsWindowVisible(changes) && send(changes, treeGetCount) == 5; }, "Source Control did not separate partially staged changes");
-        const auto staged = nextItem(changes, TreeRelation::Root), working = nextItem(changes, TreeRelation::Next, staged);
+        waitFor([&] { return IsWindowVisible(changes) && gitGroup(changes, false); }, "Source Control did not load the current branch");
+        const auto pane = bounds(app.window, changes);
+        click(app.window, pane.left + (pane.right - pane.left) * 3 / 4, pane.top - MulDiv(14, GetDpiForWindow(app.window), 96));
+        waitFor([&] { return gitChangeCount(changes) == 5; }, "Source Control did not separate partially staged changes");
+        check(!GetDlgItem(app.window, 5) && !GetDlgItem(app.window, 6), "The separate Branch button or pane still exists");
+        const auto staged = gitGroup(changes, true), working = nextItem(changes, TreeRelation::Next, staged);
         check(children(changes, staged) == 1 && children(changes, working) == 2, "Staged and unstaged groups contain the wrong files");
         send(changes, treeSelect, staged); send(changes, WM_KEYDOWN, VK_F4); waitLines(viewer, 1);
         const auto rect = bounds(app.window, changes);
         const int height = static_cast<int>(send(changes, treeGetRowHeight));
         const int row = static_cast<int>(send(changes, treeGetRow, working));
-        click(changes, rect.right - rect.left - MulDiv(18, GetDpiForWindow(app.window), 96), row * height + height / 2);
+        click(changes, rect.right - rect.left - MulDiv(18, GetDpiForWindow(app.window), 96), (row - scrollInfo(changes).nPos) * height + height / 2);
         waitLines(viewer, 4);
         // The group keeps its diff action and adds Stage All Changes beside it,
         // including when its file list is collapsed.
         expand(changes, working, false);
         const int stageX = rect.right - rect.left - MulDiv(46, GetDpiForWindow(app.window), 96);
-        send(changes, WM_MOUSEMOVE, 0, MAKELPARAM(stageX, row * height + height / 2));
-        click(changes, stageX, row * height + height / 2);
+        send(changes, WM_MOUSEMOVE, 0, MAKELPARAM(stageX, (row - scrollInfo(changes).nPos) * height + height / 2));
+        click(changes, stageX, (row - scrollInfo(changes).nPos) * height + height / 2);
         send(changes, WM_MOUSELEAVE);
         waitFor([&] {
-            const auto first = nextItem(changes, TreeRelation::Root), second = nextItem(changes, TreeRelation::Next, first);
+            const auto first = gitGroup(changes, true), second = nextItem(changes, TreeRelation::Next, first);
             return children(changes, first) == 2 && children(changes, second) == 0;
         }, "Stage All Changes did not stage partially staged and untracked files from a collapsed group");
         waitLines(viewer, 0);
         runGit(L"diff --quiet");
-        const auto stagedAll = nextItem(changes, TreeRelation::Root);
+        const auto stagedAll = gitGroup(changes, true);
         const int stagedRow = static_cast<int>(send(changes, treeGetRow, stagedAll));
-        const int stagedY = stagedRow * height + height / 2;
+        const int stagedY = (stagedRow - scrollInfo(changes).nPos) * height + height / 2;
         // Open All Changes remains the rightmost action on Staged Changes.
         click(changes, rect.right - rect.left - MulDiv(18, GetDpiForWindow(app.window), 96), stagedY);
         waitLines(viewer, 4);
@@ -1378,7 +1399,7 @@ void branchSidebarTests(const fs::path& executable) {
         send(changes, WM_MOUSEMOVE, 0, MAKELPARAM(stageX, stagedY));
         click(changes, stageX, stagedY); send(changes, WM_MOUSELEAVE);
         waitFor([&] {
-            const auto first = nextItem(changes, TreeRelation::Root), second = nextItem(changes, TreeRelation::Next, first);
+            const auto first = gitGroup(changes, true), second = nextItem(changes, TreeRelation::Next, first);
             return children(changes, first) == 0 && children(changes, second) == 2;
         }, "Unstage All Changes did not clear the index from a collapsed Staged Changes group");
         waitLines(viewer, 0);
@@ -1389,19 +1410,19 @@ void branchSidebarTests(const fs::path& executable) {
         write(L"src/file.txt", "discard this\n");
         write(L".git/info/exclude", "ignored.txt\n"); write(L"ignored.txt", "keep\n");
         waitFor([&] {
-            const auto first = nextItem(changes, TreeRelation::Root), second = nextItem(changes, TreeRelation::Next, first);
+            const auto first = gitGroup(changes, true), second = nextItem(changes, TreeRelation::Next, first);
             return children(changes, first) == 1 && children(changes, second) == 2;
         }, "Discard fixture did not show partially staged and untracked changes");
-        auto discardWorking = nextItem(changes, TreeRelation::Next, nextItem(changes, TreeRelation::Root));
+        auto discardWorking = gitGroup(changes, false);
         send(changes, treeSelect, discardWorking); send(changes, WM_KEYDOWN, VK_F4); waitLines(viewer, 4);
         discardGroup(app, changes, discardWorking, IDCANCEL);
         check(fs::exists(fixture.root / L"untracked.txt") && fs::file_size(fixture.root / L"src/file.txt") == 13,
               "Cancelling discard changed working files");
         waitLines(viewer, 4);
-        discardWorking = nextItem(changes, TreeRelation::Next, nextItem(changes, TreeRelation::Root));
+        discardWorking = gitGroup(changes, false);
         discardGroup(app, changes, discardWorking, IDOK);
         waitFor([&] {
-            const auto first = nextItem(changes, TreeRelation::Root), second = nextItem(changes, TreeRelation::Next, first);
+            const auto first = gitGroup(changes, true), second = nextItem(changes, TreeRelation::Next, first);
             return children(changes, first) == 1 && children(changes, second) == 0 && !fs::exists(fixture.root / L"untracked.txt");
         }, "Discard did not preserve Staged Changes or clear Changes");
         waitLines(viewer, 0);
@@ -1412,10 +1433,10 @@ void branchSidebarTests(const fs::path& executable) {
         check(std::wstring(badge) == L"Source Control (1)", "Discard did not update the badge");
         write(L"src/file.txt", "stash working\n"); write(L"stash 日本語.txt", "stash untracked\n");
         waitFor([&] {
-            const auto first = nextItem(changes, TreeRelation::Root), second = nextItem(changes, TreeRelation::Next, first);
+            const auto first = gitGroup(changes, true), second = nextItem(changes, TreeRelation::Next, first);
             return children(changes, first) == 1 && children(changes, second) == 2;
         }, "Stash fixture did not show partially staged and untracked changes");
-        const auto stashWorking = nextItem(changes, TreeRelation::Next, nextItem(changes, TreeRelation::Root));
+        const auto stashWorking = gitGroup(changes, false);
         send(changes, treeSelect, stashWorking); send(changes, WM_KEYDOWN, VK_F4); waitLines(viewer, 4);
         expand(changes, stashWorking, false);
         // Stash is the fourth action, to the left of discard, stage and diff.
@@ -1423,7 +1444,7 @@ void branchSidebarTests(const fs::path& executable) {
         const int stashY = static_cast<int>(send(changes, treeGetRow, stashWorking)) * height + height / 2;
         send(changes, WM_MOUSEMOVE, 0, MAKELPARAM(stashX, stashY)); click(changes, stashX, stashY); send(changes, WM_MOUSELEAVE);
         waitFor([&] {
-            const auto first = nextItem(changes, TreeRelation::Root), second = nextItem(changes, TreeRelation::Next, first);
+            const auto first = gitGroup(changes, true), second = nextItem(changes, TreeRelation::Next, first);
             return children(changes, first) == 1 && children(changes, second) == 0 && !fs::exists(fixture.root / L"stash 日本語.txt");
         }, "Stash Unstaged Changes did not preserve Staged Changes or clear a collapsed Changes group");
         waitLines(viewer, 0);
@@ -1434,21 +1455,21 @@ void branchSidebarTests(const fs::path& executable) {
         check(std::wstring(badge) == L"Source Control (1)", "Stash did not update the badge");
         write(L"keep untracked.txt", "keep\n");
         waitFor([&] {
-            const auto first = nextItem(changes, TreeRelation::Root), second = nextItem(changes, TreeRelation::Next, first);
+            const auto first = gitGroup(changes, true), second = nextItem(changes, TreeRelation::Next, first);
             return children(changes, first) == 1 && children(changes, second) == 1;
         }, "Staged stash fixture did not show staged and untracked changes");
-        const auto stashStaged = nextItem(changes, TreeRelation::Root);
+        const auto stashStaged = gitGroup(changes, true);
         // Diff and Unstage All Changes retain their positions beside stash.
         click(changes, rect.right - rect.left - MulDiv(18, GetDpiForWindow(app.window), 96),
-              static_cast<int>(send(changes, treeGetRow, stashStaged)) * height + height / 2);
+              (static_cast<int>(send(changes, treeGetRow, stashStaged)) - scrollInfo(changes).nPos) * height + height / 2);
         waitLines(viewer, 1);
         expand(changes, stashStaged, false);
         const int stagedStashX = rect.right - rect.left - MulDiv(74, GetDpiForWindow(app.window), 96);
-        const int stagedStashY = static_cast<int>(send(changes, treeGetRow, stashStaged)) * height + height / 2;
+        const int stagedStashY = (static_cast<int>(send(changes, treeGetRow, stashStaged)) - scrollInfo(changes).nPos) * height + height / 2;
         send(changes, WM_MOUSEMOVE, 0, MAKELPARAM(stagedStashX, stagedStashY));
         click(changes, stagedStashX, stagedStashY); send(changes, WM_MOUSELEAVE);
         waitFor([&] {
-            const auto first = nextItem(changes, TreeRelation::Root), second = nextItem(changes, TreeRelation::Next, first);
+            const auto first = gitGroup(changes, true), second = nextItem(changes, TreeRelation::Next, first);
             return children(changes, first) == 0 && children(changes, second) == 1;
         }, "Stash Staged Changes did not clear a collapsed Staged Changes group or kept the wrong Changes");
         waitLines(viewer, 0);
@@ -1457,29 +1478,52 @@ void branchSidebarTests(const fs::path& executable) {
               fs::exists(fixture.root / L"ignored.txt"), "Staged stash did not restore HEAD content or lost untracked/ignored files");
         GetWindowTextW(GetDlgItem(app.window, 3), badge, 128);
         check(std::wstring(badge) == L"Source Control (1)", "Staged stash did not update the badge");
-        send(GetDlgItem(app.window, 5), BM_CLICK);
-        waitFor([&] { return IsWindowVisible(branches) && children(branches, nextItem(branches, TreeRelation::Root)) == 51; }, "Branch did not load 50 commits and a load-more row");
-        check(!IsWindowVisible(changes), "Branch did not hide Source Control");
-        const auto branch = nextItem(branches, TreeRelation::Root), latest = nextItem(branches, TreeRelation::Child, branch);
+        waitFor([&] { return IsWindowVisible(branches) && children(branches, nextItem(branches, TreeRelation::Root)) == 53; }, "Branch did not load 50 commits and a load-more row");
+        check(IsWindowVisible(changes), "Source Control hid its combined branch and change list");
+        check(children(branches, 0) == 3, "Source Control did not list local and remote branches");
+        const auto branch = nextItem(branches, TreeRelation::Root), latest = nextItem(branches, TreeRelation::Next, gitGroup(branches, false));
+        check(nextItem(branches, TreeRelation::Parent, gitGroup(branches, true)) == branch, "Working changes are not inside the current branch");
         auto more = latest;
         for (int i = 0; i < 50; ++i) more = nextItem(branches, TreeRelation::Next, more);
         check(more != 0, "The 51st row is missing");
         send(branches, treeSelect, more);
-        waitFor([&] { return children(branches, branch) == 52; }, "Clicking the 51st row did not append the remaining commits");
+        waitFor([&] { return children(branches, branch) == 54; }, "Clicking the 51st row did not append the remaining commits");
         auto rootCommit = latest;
         while (const auto next = nextItem(branches, TreeRelation::Next, rootCommit)) rootCommit = next;
+        click(app.window, pane.left + (pane.right - pane.left) / 4, pane.top - MulDiv(14, GetDpiForWindow(app.window), 96));
         send(branches, treeSelect, latest);
         waitFor([&] { return children(branches, latest) == 2; }, "Opening a commit did not build its changed-file tree");
         const auto directory = nextItem(branches, TreeRelation::Child, latest), file = nextItem(branches, TreeRelation::Child, directory);
         check(file != 0, "Commit files are missing their folder hierarchy");
         send(branches, treeSelect, file); waitLines(viewer, 1);
+        click(app.window, pane.left + (pane.right - pane.left) * 3 / 4, pane.top - MulDiv(14, GetDpiForWindow(app.window), 96));
+        check(children(branches, latest) == 2 && !nextItem(branches, TreeRelation::Child, nextItem(branches, TreeRelation::Child, latest)), "List did not flatten loaded commit files");
+        send(branches, WM_KEYDOWN, VK_RETURN); waitLines(viewer, 1);
+        click(app.window, pane.left + (pane.right - pane.left) / 4, pane.top - MulDiv(14, GetDpiForWindow(app.window), 96));
+        check(children(branches, nextItem(branches, TreeRelation::Child, latest)) == 1, "Tree did not restore loaded commit folders");
         send(branches, treeSelect, latest); send(branches, WM_KEYDOWN, VK_F4); waitLines(viewer, 4);
         send(branches, treeSelect, rootCommit); send(branches, WM_KEYDOWN, VK_F4); waitLines(viewer, 5);
+        const auto oldWorking = gitGroup(branches, false);
+        PostMessageW(app.window, WM_KEYDOWN, VK_F5, 0);
+        waitFor([&] { return gitGroup(branches, false) != oldWorking; }, "Source Control did not refresh working changes");
+        check(children(branches, branch) == 54 && children(branches, latest) == 2, "Refreshing working changes discarded loaded history");
+        runGit(L"switch --quiet alternate");
+        waitFor([&] {
+            const auto current = nextItem(branches, TreeRelation::Root);
+            return current != branch && gitGroup(branches, false) && children(branches, branch) == 52;
+        }, "Switching branches did not move both working groups off the previous branch");
+        const auto alternate = nextItem(branches, TreeRelation::Root);
+        runGit(L"checkout --detach --quiet");
+        waitFor([&] {
+            const auto current = nextItem(branches, TreeRelation::Root);
+            return current != alternate && children(branches, 0) == 4 && gitGroup(branches, false) &&
+                nextItem(branches, TreeRelation::Parent, gitGroup(branches, true)) == current;
+        }, "Detached HEAD did not get working groups above its history");
     }
     {
         Application app(executable, fixture.root); app.tree();
-        const auto branches = GetDlgItem(app.window, 6), viewer = FindWindowExW(app.window, nullptr, L"PoppyViewer", nullptr);
-        waitFor([&] { return IsWindowVisible(branches); }, "Restart did not restore the Branch page");
+        const auto branches = GetDlgItem(app.window, 4), viewer = FindWindowExW(app.window, nullptr, L"PoppyViewer", nullptr);
+        waitFor([&] { return IsWindowVisible(branches); }, "Restart did not restore Source Control");
         waitLines(viewer, 5);
     }
 }
@@ -1521,16 +1565,16 @@ void multiRepositoryTests(const fs::path& executable) {
     };
     {
         Application app(executable, workspace); app.tree();
-        const auto changes = GetDlgItem(app.window, 4), branches = GetDlgItem(app.window, 6);
+        const auto changes = GetDlgItem(app.window, 4), branches = changes;
         const auto viewer = FindWindowExW(app.window, nullptr, L"PoppyViewer", nullptr);
         send(GetDlgItem(app.window, 3), BM_CLICK);
         const auto roots = [&](HWND tree) { return children(tree, 0) == 2; };
         waitFor([&] { return IsWindowVisible(changes) && roots(changes); }, "Source Control did not discover sibling repositories");
         wchar_t title[128]{}; GetWindowTextW(GetDlgItem(app.window, 3), title, 128);
         check(std::wstring(title) == L"Source Control (4)", "The badge counted changes outside the opened folder");
-        const auto group = [&](TreeItem repo, bool staged) { const auto first = nextItem(changes, TreeRelation::Child, repo); return staged ? first : nextItem(changes, TreeRelation::Next, first); };
+        const auto group = [&](TreeItem repo, bool staged) { return gitGroup(changes, staged, repo); };
         auto clientRepo = nextItem(changes, TreeRelation::Root), serverRepo = nextItem(changes, TreeRelation::Next, clientRepo);
-        check(children(changes, clientRepo) == 2 && children(changes, serverRepo) == 2, "Repositories did not get independent change groups");
+        waitFor([&] { return group(clientRepo, false) && group(serverRepo, false); }, "Repositories did not get independent change groups inside their current branches");
         for (const auto repo : {clientRepo, serverRepo}) {
             const auto tracked = nextItem(changes, TreeRelation::Child, group(repo, false));
             send(changes, treeSelect, nextItem(changes, TreeRelation::Next, tracked));
@@ -1547,7 +1591,7 @@ void multiRepositoryTests(const fs::path& executable) {
         RECT changesRect{}; GetClientRect(changes, &changesRect);
         const int height = static_cast<int>(send(changes, treeGetRowHeight));
         const int row = static_cast<int>(send(changes, treeGetRow, group(clientRepo, false)));
-        const int x = changesRect.right - MulDiv(46, GetDpiForWindow(app.window), 96), y = row * height + height / 2;
+        const int x = changesRect.right - MulDiv(46, GetDpiForWindow(app.window), 96), y = (row - scrollInfo(changes).nPos) * height + height / 2;
         send(changes, WM_MOUSEMOVE, 0, MAKELPARAM(x, y)); click(changes, x, y); send(changes, WM_MOUSELEAVE);
         waitFor([&] {
             clientRepo = nextItem(changes, TreeRelation::Root); serverRepo = nextItem(changes, TreeRelation::Next, clientRepo);
@@ -1564,7 +1608,7 @@ void multiRepositoryTests(const fs::path& executable) {
         const auto stagedClient = group(clientRepo, true);
         expand(changes, stagedClient, false);
         const int unstageRow = static_cast<int>(send(changes, treeGetRow, stagedClient));
-        const int unstageY = unstageRow * height + height / 2;
+        const int unstageY = (unstageRow - scrollInfo(changes).nPos) * height + height / 2;
         send(changes, WM_MOUSEMOVE, 0, MAKELPARAM(x, unstageY)); click(changes, x, unstageY); send(changes, WM_MOUSELEAVE);
         waitFor([&] {
             clientRepo = nextItem(changes, TreeRelation::Root); serverRepo = nextItem(changes, TreeRelation::Next, clientRepo);
@@ -1580,13 +1624,12 @@ void multiRepositoryTests(const fs::path& executable) {
                 children(changes, group(serverRepo, false)) == 1;
         }, "Discard All Changes affected a sibling repository or retained Changes");
         runGit(client, L"diff --quiet"); runGit(server, L"diff --cached --quiet", 1);
-        send(GetDlgItem(app.window, 5), BM_CLICK);
         waitFor([&] { return IsWindowVisible(branches) && roots(branches); }, "Branch did not discover sibling repositories");
         const auto clientBranchRepo = nextItem(branches, TreeRelation::Root), serverBranchRepo = nextItem(branches, TreeRelation::Next, clientBranchRepo);
         for (const auto repo : {clientBranchRepo, serverBranchRepo}) {
             const auto branch = nextItem(branches, TreeRelation::Child, repo);
-            waitFor([&] { return children(branches, branch) == 2; }, "A repository's main branch did not load its history");
-            const auto latest = nextItem(branches, TreeRelation::Child, branch), commit = nextItem(branches, TreeRelation::Next, latest);
+            waitFor([&] { return children(branches, branch) == 4; }, "A repository's main branch did not load its history");
+            const auto latest = nextItem(branches, TreeRelation::Next, gitGroup(branches, false, repo)), commit = nextItem(branches, TreeRelation::Next, latest);
             expand(branches, commit);
             waitFor([&] { return children(branches, commit) == 2; }, "A repository's commit did not load its files");
             const auto extra = nextItem(branches, TreeRelation::Child, commit);
