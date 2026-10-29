@@ -109,6 +109,57 @@ void terminalTests() {
     check(bounded.historySize() <= 1000, "history line budget enforced across resizes");
     check(sizeof(Cell) <= 16, "cell memory budget");
 }
+void terminalTitleTests() {
+    TerminalModel terminal(12, 3), other;
+    check(terminal.title().empty(), "terminal starts without a process title");
+    terminal.feed("abc\x1b]0;PowerShell\a");
+    check(terminal.title() == "PowerShell", "OSC 0 sets the title without a reply handler");
+    terminal.feed("\x1b]2;Codex; project\x1b\\");
+    check(terminal.title() == "Codex; project", "OSC 2 accepts ST and semicolons in titles");
+    check(line(terminal, 0) == "abc" && terminal.cursorX() == 3 && terminal.cursorY() == 0,
+          "title changes do not print text or move the cursor");
+    check(other.title().empty(), "terminal titles are isolated between sessions");
+
+    terminal.feed("\x1b]2;日本");
+    check(terminal.title() == "Codex; project", "unfinished OSC does not change the title");
+    terminal.feed("語 😀\x1b");
+    check(terminal.title() == "Codex; project", "split ST waits for its final byte");
+    terminal.feed("\\");
+    check(terminal.title() == "日本語 😀", "split OSC preserves Unicode titles");
+    const std::string bytewise = "\x1b]0;分割 😀\x1b\\";
+    for (const char c : bytewise) terminal.feed(std::string_view(&c, 1));
+    check(terminal.title() == "分割 😀", "OSC and UTF-8 can be split at every byte");
+
+    std::string response;
+    terminal.reply = [&](std::string bytes) { response += bytes; };
+    terminal.feed("\x1b]1;icon only\a\x1b]8;;https://example.test\x1b\\\x1b]52;c;aGVsbG8=\a");
+    check(terminal.title() == "分割 😀" && response.empty(), "unrelated OSC commands do not change the title or reply");
+    terminal.feed("\x1b]11;?\a");
+    check(response == "\x1b]11;rgb:1616/1919/1f1f\x1b\\" && terminal.title() == "分割 😀",
+          "theme queries still work after title updates");
+
+    terminal.feed("\x1b]2;\a");
+    check(terminal.title().empty(), "an empty title clears the process title");
+    terminal.feed("\x1b]0;\x1b\\");
+    check(terminal.title().empty(), "OSC 0 can also clear the title");
+    terminal.feed("\x1b]2;line\n\t\r\x7f\xc2\x85title\a");
+    check(terminal.title() == "linetitle", "control characters are removed from titles");
+    terminal.feed("\x1b]2;bad\xe3\x81\a");
+    check(terminal.title() == "bad\xef\xbf\xbd\xef\xbf\xbd", "incomplete UTF-8 is replaced when OSC terminates");
+
+    const std::string longest(254, 'x');
+    terminal.feed("\x1b]2;" + longest + "\a");
+    check(terminal.title() == longest, "OSC title at the sequence size limit is accepted");
+    terminal.feed("\x1b]2;" + std::string(255, 'y') + "\aZ");
+    check(terminal.title() == longest && line(terminal, 0) == "abcZ", "oversized OSC is discarded through BEL");
+    terminal.feed("\x1b]0;" + std::string(4096, 'z') + "0;forged\x1b");
+    terminal.feed("\\Q");
+    check(terminal.title() == longest && line(terminal, 0) == "abcZQ", "oversized split OSC is discarded through ST");
+    terminal.feed("\x1b]2;recovered\a");
+    check(terminal.title() == "recovered", "title parser recovers after oversized OSC");
+    terminal.feed("\x1b" "c");
+    check(terminal.title().empty(), "terminal reset clears the previous process title");
+}
 void terminalDisplayTests() {
     TerminalModel query(4, 2); std::string response;
     query.reply = [&](std::string bytes) { response += bytes; };
@@ -256,6 +307,6 @@ void terminalCopyTests() {
 }
 }
 int main() {
-    try { textTests(); terminalTests(); terminalDisplayTests(); terminalInputTests(); terminalScrollTests(); terminalCopyTests(); std::cout << "Text and terminal core tests passed.\n"; return EXIT_SUCCESS; }
+    try { textTests(); terminalTests(); terminalTitleTests(); terminalDisplayTests(); terminalInputTests(); terminalScrollTests(); terminalCopyTests(); std::cout << "Text and terminal core tests passed.\n"; return EXIT_SUCCESS; }
     catch (const std::exception& error) { std::cerr << error.what() << '\n'; return EXIT_FAILURE; }
 }

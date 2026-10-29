@@ -25,6 +25,7 @@ void TerminalModel::reset() {
     fg_ = foreground; bg_ = background; inverse_ = bold_ = alternate_ = false;
     cursorVisible_ = autoWrap_ = true; bracketedPaste_ = applicationCursor_ = origin_ = false;
     synchronizedOutput_ = false;
+    title_.clear();
     top_ = 0; bottom_ = rows_ - 1;
     normal_ = {}; alternateScreen_ = {};
     normal_.cells.assign(rows_, std::vector<Cell>(columns_));
@@ -200,8 +201,18 @@ void TerminalModel::csi(char command) {
     }
 }
 void TerminalModel::osc() {
+    if (oscOverflow_) return;
+    if (sequence_.compare(0, 2, "0;") == 0 || sequence_.compare(0, 2, "2;") == 0) {
+        std::string title;
+        for (size_t p = 2; p < sequence_.size();) {
+            const auto scalar = decodeUtf8(sequence_, p);
+            if (scalar >= 0x20 && !(scalar >= 0x7f && scalar <= 0x9f)) appendUtf8(title, scalar);
+        }
+        title_ = std::move(title);
+        return;
+    }
     if (!reply) return;
-    // Theme queries only. Title, hyperlinks and clipboard commands have no side effects.
+    // Hyperlinks and clipboard commands have no side effects.
     if (sequence_ == "10;?") reply("\x1b]10;rgb:d3d3/dada/e3e3\x1b\\");
     else if (sequence_ == "11;?") reply("\x1b]11;rgb:1616/1919/1f1f\x1b\\");
 }
@@ -216,7 +227,7 @@ void TerminalModel::feed(std::string_view bytes) {
             if (c == 0x1b) parse_ = parse_ == Parse::Osc ? Parse::OscEscape : Parse::DiscardEscape;
             else if (c == 7 && parse_ == Parse::Osc) { osc(); parse_ = Parse::Text; }
             else if (parse_ == Parse::Osc && sequence_.size() < 256) sequence_ += static_cast<char>(c);
-            else if (parse_ == Parse::Osc) sequence_ = "!overflow";
+            else if (parse_ == Parse::Osc) oscOverflow_ = true;
             continue;
         }
         if (parse_ == Parse::OscEscape || parse_ == Parse::DiscardEscape) {
@@ -231,7 +242,7 @@ void TerminalModel::feed(std::string_view bytes) {
             ++p; parse_ = Parse::Text;
             auto& s = active();
             if (c == '[') { sequence_.clear(); parse_ = Parse::Csi; }
-            else if (c == ']') { sequence_.clear(); parse_ = Parse::Osc; }
+            else if (c == ']') { sequence_.clear(); oscOverflow_ = false; parse_ = Parse::Osc; }
             else if (c == 'P' || c == '_' || c == '^' || c == 'X') parse_ = Parse::Discard;
             else if (c == '(' || c == ')' || c == '*' || c == '+') parse_ = Parse::Charset;
             else if (c == '7') { s.savedX = s.x; s.savedY = s.y; }

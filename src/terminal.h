@@ -17,6 +17,8 @@ public:
     void stop();
     void setEnvironment(std::vector<std::pair<std::wstring, std::wstring>> values) { environment_ = std::move(values); }
     std::function<void()> starting, ended, focused, stopping;
+    std::function<void()> titleChanged;
+    const std::string& title() const { return model_.title(); }
     HWND window() const { return window_; }
     bool running() const { return process_ && WaitForSingleObject(process_.value, 0) == WAIT_TIMEOUT; }
 private:

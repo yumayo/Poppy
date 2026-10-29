@@ -24,6 +24,7 @@ void TerminalPane::add(SavedTerminal configuration) {
     session->terminal->setDpi(dpi_); session->terminal->setDirectory(directory_.wsl() ? windowsProcessDirectory() : fs::u8path(session->configuration.directory));
     if (directory_.wsl()) session->terminal->setDisplayDirectory(wide(session->configuration.directory) + L" · WSL · " + wide(directory_.location().distro));
     auto ptr = session.get();
+    session->terminal->titleChanged = [this] { layout(); };
     session->terminal->focused = [this, ptr] {
         const auto found = std::find_if(sessions_.begin(), sessions_.end(), [ptr](const auto& s) { return s.get() == ptr; });
         if (found != sessions_.end()) { active_ = static_cast<size_t>(found - sessions_.begin()); acknowledge(); InvalidateRect(window_, nullptr, FALSE); }
@@ -78,6 +79,7 @@ void TerminalPane::setDirectory(const ResourceId& directory) {
         session->terminal->setDirectory(directory.wsl() ? windowsProcessDirectory() : fs::u8path(session->configuration.directory));
         if (directory.wsl()) session->terminal->setDisplayDirectory(wide(session->configuration.directory) + L" · WSL · " + wide(directory.location().distro));
     }
+    layout();
 }
 void TerminalPane::relocate(const ResourceId& source, const ResourceId& destination) {
     directory_ = relocateResource(directory_, source, destination);
@@ -115,7 +117,7 @@ std::wstring TerminalPane::description() const {
     const auto aggregate = summary();
     for (size_t i = 0; i < aggregate.counts.size(); ++i) if (aggregate.counts[i]) text += L" " + wide(aiStateName(static_cast<AiState>(i))) + L": " + std::to_wstring(aggregate.counts[i]);
     for(const auto& s:sessions_) {
-        text+=L"\n"+wide(s->configuration.name)+L": "+wide(aiStateName(s->ai.state));
+        text+=L"\n"+sessionName(*s)+L": "+wide(aiStateName(s->ai.state));
         if(s->ai.changedAt) text+=L" · "+std::to_wstring((GetTickCount64()-s->ai.changedAt)/1000)+L"s ago";
         if (s->terminal->running() && !s->notificationError.empty()) text += L" · notifications unavailable: " + s->notificationError;
         else if (s->terminal->running() && !s->notificationId.empty() && !s->events.running()) text += L" · notification relay disconnected";
@@ -160,8 +162,14 @@ RECT TerminalPane::groupBounds(int group) const {
 std::vector<RECT> TerminalPane::bounds() const {
     std::vector<RECT> result; const int padding=MulDiv(74,dpi_,96);
     int x[2] = {groupBounds(0).left - offset_[0], groupBounds(1).left - offset_[1]};
-    for(const auto& s:sessions_) { const int group = s->configuration.group; const int width=std::max(MulDiv(110,dpi_,96),renderer_.textWidth(wide(s->configuration.name))+padding); result.push_back({x[group],0,x[group]+width,header_}); x[group]+=width; }
+    for(const auto& s:sessions_) { const int group = s->configuration.group; const int width=std::max(MulDiv(110,dpi_,96),renderer_.textWidth(sessionName(*s))+padding); result.push_back({x[group],0,x[group]+width,header_}); x[group]+=width; }
     return result;
+}
+std::wstring TerminalPane::sessionName(const TerminalSession& session) const {
+    // Keep saved/manual names separate from the process's transient OSC title.
+    if (session.configuration.name != "Shell") return wide(session.configuration.name);
+    if (!session.terminal->title().empty()) return wide(session.terminal->title());
+    return directory_.wsl() ? L"WSL" : L"PowerShell";
 }
 void TerminalPane::layout(){
     if(!window_||sessions_.empty())return;
@@ -176,6 +184,9 @@ void TerminalPane::layout(){
     rects=bounds();
     for(size_t i=0;i<sessions_.size();++i){
         const auto w=sessions_[i]->terminal->window(); const auto& config = sessions_[i]->configuration;
+        const auto name = sessionName(*sessions_[i]);
+        wchar_t current[257]{}; GetWindowTextW(w, current, 257);
+        if (name != current) SetWindowTextW(w, name.c_str());
         const auto pane = groupBounds(config.group);
         if(!config.displayed)ShowWindow(w,SW_HIDE);
         else SetWindowPos(w,nullptr,pane.left,header_,std::max(0L,pane.right-pane.left),std::max(0L,pane.bottom-header_),SWP_NOZORDER|SWP_NOACTIVATE|SWP_SHOWWINDOW);
@@ -194,7 +205,7 @@ void TerminalPane::paint(){
         const bool selected = sessions_[i]->configuration.displayed;
         renderer_.fill(rect,selected?panel:background);if(selected)renderer_.fill({rect.left,header_-2,rect.right,header_},accent);
         drawAiStatus(renderer_,{rect.left,0,rect.left+unit,header_},sessions_[i]->ai.state,dpi_,static_cast<unsigned>(GetTickCount64()/80));
-        renderer_.label({rect.left+unit,0,rect.right-unit,header_},wide(sessions_[i]->configuration.name),foreground);
+        renderer_.label({rect.left+unit,0,rect.right-unit,header_},sessionName(*sessions_[i]),foreground);
         renderer_.label({rect.right-unit,0,rect.right,header_},L"×",muted,DT_CENTER|DT_VCENTER|DT_SINGLELINE);
         if(sessions_[i]->ai.unread)renderer_.fill({rect.left+unit-4,4,rect.left+unit,8},accent);
     }
@@ -253,7 +264,7 @@ void TerminalPane::menu(size_t index,POINT point){
     else if(command==1){
         if(rename_)DestroyWindow(rename_);
         renaming_=index;
-        rename_=CreateWindowExW(WS_EX_CLIENTEDGE,L"EDIT",wide(sessions_[index]->configuration.name).c_str(),WS_CHILD|WS_VISIBLE|WS_TABSTOP|ES_AUTOHSCROLL,0,0,0,0,window_,reinterpret_cast<HMENU>(1001),instance_,nullptr);
+        rename_=CreateWindowExW(WS_EX_CLIENTEDGE,L"EDIT",sessionName(*sessions_[index]).c_str(),WS_CHILD|WS_VISIBLE|WS_TABSTOP|ES_AUTOHSCROLL,0,0,0,0,window_,reinterpret_cast<HMENU>(1001),instance_,nullptr);
         SetWindowSubclass(rename_, renameProcedure, 1, reinterpret_cast<DWORD_PTR>(this));
         const auto rect=bounds()[index];SetWindowPos(rename_,HWND_TOP,std::max(0L,rect.left),0,std::max(100L,rect.right-std::max(0L,rect.left)),header_,SWP_SHOWWINDOW);
         SendMessageW(rename_,EM_SETLIMITTEXT,120,0);SendMessageW(rename_,EM_SETSEL,0,-1);SetFocus(rename_);

@@ -42,6 +42,7 @@ bool Terminal::start() {
     endedNotified_ = false;
     display_ = TerminalDisplay{}; display_.update(model_, scroll_, GetTickCount64(), false, true);
     scrollbars();
+    if (titleChanged) titleChanged();
     HANDLE read = nullptr, write = nullptr;
     if (!CreatePipe(&read, &write, nullptr, 0)) { error_ = winError(); stop(); return false; }
     Handle childInput(read); input_.reset(write);
@@ -171,7 +172,9 @@ bool Terminal::receive() {
     }
     if (text.empty()) return false;
     condition_.notify_all();
+    const auto previousTitle = model_.title();
     model_.feed(text); scroll_ = std::min(scroll_, model_.historySize());
+    if (model_.title() != previousTitle && titleChanged) titleChanged();
     display_.changed(GetTickCount64());
     return true;
 }

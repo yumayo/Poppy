@@ -31,6 +31,7 @@ public:
     bool applicationCursor() const { return applicationCursor_; }
     bool alternate() const { return alternate_; }
     bool synchronizedOutput() const { return synchronizedOutput_; }
+    const std::string& title() const { return title_; }
     void endSynchronizedOutput() { synchronizedOutput_ = false; }
     std::function<void(std::string)> reply;
 private:
@@ -58,6 +59,7 @@ private:
     bool bracketedPaste_ = false, applicationCursor_ = false, autoWrap_ = true, origin_ = false;
     bool synchronizedOutput_ = false;
     Parse parse_ = Parse::Text;
-    std::string sequence_, utf8_;
+    std::string sequence_, utf8_, title_;
+    bool oscOverflow_ = false;
 };
 }

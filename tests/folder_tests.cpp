@@ -1900,6 +1900,57 @@ void scrollingProjectDragTests(const fs::path& executable) {
     send(app.host,WM_LBUTTONUP,0,MAKELPARAM(px(60),px(45)));
     click(app.host,px(60),px(68));app.tree();check(app.window==surfaces[0],"Auto-scroll did not move the last project to the start");
 }
+void terminalTitleTests(const fs::path& executable) {
+    Fixture fixture; writeFile(fixture.root / L"test.txt");
+    {
+        Application app(executable, fixture.root); app.tree();
+        const auto pane = FindWindowExW(app.window, nullptr, L"PoppyTerminalPane", nullptr);
+        const auto shell = FindWindowExW(pane, nullptr, L"PoppyTerminal", nullptr);
+        check(shell != nullptr, "Project has no shell for title tests");
+        const auto name = [](HWND window) { wchar_t text[512]{}; GetWindowTextW(window, text, 512); return std::wstring(text); };
+        const auto type = [](HWND window, const std::wstring& text) { for (const auto ch : text) send(window, WM_CHAR, ch); };
+        check(name(shell) == L"PowerShell", "Unstarted terminal did not show its shell name");
+        click(shell, 10, 10);
+        type(shell, L"[Console]::Title = 'Build 日本語'\r");
+        waitFor([&] { return name(shell) == L"Build 日本語"; }, "ConPTY title did not reach the terminal tab");
+        const auto px = [dpi = GetDpiForWindow(pane)](int value) { return MulDiv(value, dpi, 96); };
+        RECT client{}; GetClientRect(pane, &client);
+        click(pane, client.right - px(17), px(16));
+        const auto second = FindWindowExW(pane, shell, L"PoppyTerminal", nullptr);
+        check(second && name(second) == L"PowerShell", "New terminal inherited another session's title");
+        click(second, 10, 10);
+        type(second, L"[Console]::Title = 'Second title'\r");
+        waitFor([&] { return name(second) == L"Second title"; }, "Second terminal did not receive its own title");
+        check(!IsWindowVisible(shell), "Adding a terminal did not hide the first session");
+        type(shell, L"[Console]::Title = 'Background title'\r");
+        waitFor([&] { return name(shell) == L"Background title"; }, "Hidden terminal stopped updating its title");
+        check(name(second) == L"Second title", "Background title changed the active terminal's name");
+        click(pane, px(40), px(16));
+
+        check(PostMessageW(pane, WM_CONTEXTMENU, reinterpret_cast<WPARAM>(pane), MAKELPARAM(-1, -1)), "Cannot open terminal context menu");
+        waitFor([&] { GUITHREADINFO info{}; info.cbSize = sizeof(info); return GetGUIThreadInfo(app.process.dwThreadId, &info) && (info.flags & GUI_INMENUMODE); }, "Terminal context menu did not open");
+        PostMessageW(pane, WM_KEYDOWN, VK_HOME, 0); PostMessageW(pane, WM_KEYDOWN, VK_RETURN, 0);
+        HWND edit = nullptr;
+        waitFor([&] { edit = GetDlgItem(pane, 1001); return edit != nullptr; }, "Terminal rename did not open");
+        wchar_t initial[512]{}; send(edit, WM_GETTEXT, 512, reinterpret_cast<LPARAM>(initial));
+        check(std::wstring(initial) == L"Background title", "Rename did not start with the displayed process title");
+        send(edit, WM_SETTEXT, 0, reinterpret_cast<LPARAM>(L"Pinned name")); send(edit, WM_KEYDOWN, VK_RETURN);
+        waitFor([&] { return name(shell) == L"Pinned name"; }, "Manual terminal name was not applied");
+        type(shell, L"[Console]::Title = 'Automatic replacement'\r");
+        const auto started = GetTickCount64();
+        waitFor([&] { check(name(shell) == L"Pinned name", "Process title overwrote a manual terminal name"); return GetTickCount64() - started >= 300; }, "Manual terminal title did not remain stable");
+    }
+    {
+        Application app(executable, fixture.root); app.tree();
+        const auto pane = FindWindowExW(app.window, nullptr, L"PoppyTerminalPane", nullptr);
+        const auto first = FindWindowExW(pane, nullptr, L"PoppyTerminal", nullptr);
+        const auto second = FindWindowExW(pane, first, L"PoppyTerminal", nullptr);
+        wchar_t text[128]{}; GetWindowTextW(first, text, 128);
+        check(std::wstring(text) == L"Pinned name", "Restart lost the manual terminal name");
+        GetWindowTextW(second, text, 128);
+        check(second && std::wstring(text) == L"PowerShell", "Restart persisted a transient process title");
+    }
+}
 void terminalBackspaceTests(const fs::path& executable) {
     Fixture fixture;
     writeFile(fixture.root / L"test.txt");
@@ -2002,7 +2053,7 @@ int wmain(int argc, wchar_t** argv) {
         check(argc == 2, "Pass the path to Poppy.exe");
         SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         for (const auto test : {folderTests, sidebarTests, treeInteractionTests, tabTests, pinnedTabTests,
-                tabDragTests, wrappingTabDragTests, wrappingTabTests, renameTests, explorerMoveTests, createItemTests, newFileShortcutTests, pasteImageTests, splitPaneTests, quickOpenTests, fullSearchTests, gitSidebarTests, gitAutoRefreshTests, branchSidebarTests, multiRepositoryTests, sessionTests, multiProjectTests, recentProjectTests, projectDragTests, scrollingProjectDragTests, terminalBackspaceTests}) {
+                tabDragTests, wrappingTabDragTests, wrappingTabTests, renameTests, explorerMoveTests, createItemTests, newFileShortcutTests, pasteImageTests, splitPaneTests, quickOpenTests, fullSearchTests, gitSidebarTests, gitAutoRefreshTests, branchSidebarTests, multiRepositoryTests, sessionTests, multiProjectTests, recentProjectTests, projectDragTests, scrollingProjectDragTests, terminalTitleTests, terminalBackspaceTests}) {
             Fixture appData; AppDataEnvironment environment(appData.root);
             test(fs::absolute(argv[1]));
         }

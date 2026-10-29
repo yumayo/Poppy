@@ -56,6 +56,7 @@ private:
     void addMenu(POINT point);
     void layout();
     void paint();
+    std::wstring sessionName(const TerminalSession& session) const;
     std::vector<RECT> bounds() const;
     void normalizeGroups();
     void drag(POINT point);
