@@ -394,8 +394,8 @@ void Viewer::moveCaret(WPARAM key, bool shift, bool ctrl) {
     const auto point = caretPoint();
     caretTrailing_ = false;
     size_t next = caret_;
-    if (key == VK_LEFT) next = !shift && anchor_ != caret_ ? std::min(anchor_, caret_) : edit_->previous(caret_);
-    else if (key == VK_RIGHT) next = !shift && anchor_ != caret_ ? std::max(anchor_, caret_) : edit_->next(caret_);
+    if (key == VK_LEFT) next = !shift && anchor_ != caret_ ? std::min(anchor_, caret_) : ctrl ? edit_->previousWord(caret_) : edit_->previous(caret_);
+    else if (key == VK_RIGHT) next = !shift && anchor_ != caret_ ? std::max(anchor_, caret_) : ctrl ? edit_->nextWord(caret_) : edit_->next(caret_);
     else if (key == VK_HOME) next = ctrl ? 0 : d.lines[row] + (wrapping() ? wrapped.begin : 0);
     else if (key == VK_END) {
         next = ctrl ? d.text.size() : d.lines[row] + (wrapping() ? wrapped.end : d.line(row).size());

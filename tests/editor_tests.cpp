@@ -9,6 +9,50 @@ EditBuffer load(std::string bytes) {
     check(decodeText(bytes, buffer.document.text, buffer.document.encoding, error));
     indexDocument(buffer.document); buffer.initialize(std::move(bytes)); return buffer;
 }
+void wordMovement() {
+    auto buffer = load("foo_bar42  += bar.baz\r\n\r\n  end \t");
+    const std::vector<size_t> stops{0, 11, 14, 17, 18, 27, 32};
+    for (size_t i = 1; i < stops.size(); ++i) {
+        check(buffer.nextWord(stops[i - 1]) == stops[i]);
+        check(buffer.previousWord(stops[i]) == stops[i - 1]);
+    }
+    check(buffer.previousWord(0) == 0 && buffer.nextWord(32) == 32);
+    check(buffer.nextWord(3) == 11 && buffer.previousWord(3) == 0);
+    check(buffer.nextWord(10) == 11 && buffer.previousWord(10) == 0);
+    check(buffer.nextWord(12) == 14 && buffer.previousWord(12) == 11);
+    check(buffer.nextWord(21) == 27 && buffer.previousWord(23) == 18);
+    check(buffer.nextWord(100) == 32 && buffer.previousWord(100) == 27);
+
+    buffer = load(u8"日本語　café_42、😀 next\r\n最後");
+    const std::vector<size_t> unicodeStops{0, 12, 20, 28, 34, 40};
+    for (size_t i = 1; i < unicodeStops.size(); ++i) {
+        check(buffer.nextWord(unicodeStops[i - 1]) == unicodeStops[i]);
+        check(buffer.previousWord(unicodeStops[i]) == unicodeStops[i - 1]);
+    }
+    check(buffer.nextWord(3) == 12 && buffer.previousWord(6) == 0);
+    check(buffer.nextWord(23) == 28 && buffer.previousWord(27) == 20);
+    for (size_t p = 0; p < buffer.document.text.size(); p = buffer.next(p)) {
+        const auto right = buffer.nextWord(p), left = buffer.previousWord(p);
+        check(right > p && (left < p || p == 0));
+        check(right <= buffer.document.text.size());
+        for (const auto offset : {left, right}) {
+            check(offset == buffer.document.text.size() || (static_cast<unsigned char>(buffer.document.text[offset]) & 0xc0) != 0x80);
+            check(!offset || buffer.document.text[offset - 1] != '\r');
+        }
+    }
+    check(!buffer.dirty() && buffer.encoded() == u8"日本語　café_42、😀 next\r\n最後");
+    buffer = load(u8"a\u00a0b\u2009c\u3000d");
+    check(buffer.nextWord(0) == 3 && buffer.nextWord(3) == 7 && buffer.nextWord(7) == 11);
+    check(buffer.previousWord(11) == 7 && buffer.previousWord(7) == 3 && buffer.previousWord(3) == 0);
+    buffer = load(u8"naïve e\u0301clair");
+    check(buffer.nextWord(0) == 7 && buffer.nextWord(7) == buffer.document.text.size());
+    check(buffer.previousWord(buffer.document.text.size()) == 7);
+    for (const auto& text : {std::string{}, std::string(" \t\r\n\n  "), std::string(10000, 'x')}) {
+        buffer = load(text);
+        check(buffer.nextWord(0) == text.size() && buffer.previousWord(text.size()) == 0);
+        check(buffer.previousWord(0) == 0 && buffer.nextWord(text.size()) == text.size());
+    }
+}
 void wrapping() {
     auto buffer = load("abcdefgh\r\n\r\nxyz\r\n");
     const auto original = buffer.encoded();
@@ -53,6 +97,7 @@ void wrapping() {
     check(layout.rowForOffset(buffer.document, buffer.document.text.size()) == layout.rows() - 1);
 }
 int main() {
+    wordMovement();
     wrapping();
     for (const auto& bytes : {std::string("hello\r\nworld\r\n"), std::string("\xef\xbb\xbf") + u8"日本語\n😀", std::string("\xff\xfeh\0i\0\r\0\n\0", 10), std::string("\xfe\xff\0h\0i\0\n", 8)}) {
         auto buffer = load(bytes); check(!buffer.dirty()); check(buffer.encoded() == bytes);
@@ -70,5 +115,5 @@ int main() {
     check(!buffer.replace(0, 0, std::string(maxFileBytes, 'x')));
     check(buffer.replace(1, 5, "X")); check(buffer.document.text == u8"aX日本\r\nz");
     check(buffer.newline() == "\r\n"); check(buffer.document.lines.size() == 2);
-    std::cout << "Editor encoding, selection, Unicode, history, wrapping and limits passed\n";
+    std::cout << "Editor encoding, selection, word movement, Unicode, history, wrapping and limits passed\n";
 }

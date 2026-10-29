@@ -22,6 +22,8 @@ public:
     std::string newline() const;
     size_t previous(size_t offset) const;
     size_t next(size_t offset) const;
+    size_t previousWord(size_t offset) const;
+    size_t nextWord(size_t offset) const;
 private:
     struct Change { size_t begin; std::string before, after; };
     std::string savedText_;

@@ -2,6 +2,23 @@
 #include <algorithm>
 
 namespace poppy {
+namespace {
+enum class WordClass { Space, Word, Symbol };
+WordClass wordClass(std::string_view text, size_t offset) {
+    const auto c = decodeUtf8(text, offset);
+    if (c <= U' ' || c == 0x85 || c == 0xa0 || c == 0x1680 ||
+        (c >= 0x2000 && c <= 0x200a) || c == 0x2028 || c == 0x2029 ||
+        c == 0x202f || c == 0x205f || c == 0x3000) return WordClass::Space;
+    if ((c >= U'a' && c <= U'z') || (c >= U'A' && c <= U'Z') ||
+        (c >= U'0' && c <= U'9') || c == U'_') return WordClass::Word;
+    // Keep non-ASCII text together, separating common punctuation and emoji.
+    if (c >= 0x80 && !(c >= 0x2000 && c <= 0x206f) &&
+        !(c >= 0x3000 && c <= 0x303f) && !(c >= 0xff01 && c <= 0xff0f) &&
+        !(c >= 0xff1a && c <= 0xff20) && !(c >= 0xff3b && c <= 0xff40) &&
+        !(c >= 0xff5b && c <= 0xff65) && !(c >= 0x1f000 && c <= 0x1faff)) return WordClass::Word;
+    return WordClass::Symbol;
+}
+}
 void EditBuffer::initialize(std::string bytes) {
     baseline = std::move(bytes); savedText_ = document.text;
     bom = baseline.compare(0, 3, "\xef\xbb\xbf") == 0;
@@ -18,6 +35,24 @@ size_t EditBuffer::next(size_t p) const {
     p = std::min(p, document.text.size());
     if (document.text.compare(p, 2, "\r\n") == 0) return p + 2;
     if (p < document.text.size()) decodeUtf8(document.text, p);
+    return p;
+}
+size_t EditBuffer::previousWord(size_t p) const {
+    p = std::min(p, document.text.size());
+    while (p && wordClass(document.text, previous(p)) == WordClass::Space) p = previous(p);
+    if (p) {
+        const auto kind = wordClass(document.text, previous(p));
+        do { p = previous(p); } while (p && wordClass(document.text, previous(p)) == kind);
+    }
+    return p;
+}
+size_t EditBuffer::nextWord(size_t p) const {
+    p = std::min(p, document.text.size());
+    if (p < document.text.size()) {
+        const auto kind = wordClass(document.text, p);
+        do { p = next(p); } while (p < document.text.size() && wordClass(document.text, p) == kind);
+    }
+    while (p < document.text.size() && wordClass(document.text, p) == WordClass::Space) p = next(p);
     return p;
 }
 std::string EditBuffer::newline() const {

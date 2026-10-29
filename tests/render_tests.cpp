@@ -397,6 +397,76 @@ void editorCaret() {
     viewer.message(L"Loading");
     check(viewer.textStatus().empty(), "A loading message retained the previous file format");
 }
+void editorWordMovement() {
+    Viewer viewer;
+    const HWND parent = CreateWindowExW(0, L"STATIC", L"Editor word movement test", WS_POPUP | WS_CLIPCHILDREN,
+        0, 0, 640, 360, nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
+    check(parent != nullptr, "Could not create the word movement test window");
+    struct WindowOwner { HWND value; ~WindowOwner() { DestroyWindow(value); } } owner{parent};
+    viewer.create(parent, GetModuleHandleW(nullptr));
+    const HWND window = viewer.window(); MoveWindow(window, 0, 0, 640, 360, FALSE);
+    struct KeyboardState {
+        BYTE original[256]{};
+        KeyboardState() { check(GetKeyboardState(original) != FALSE, "Could not save keyboard state"); }
+        ~KeyboardState() { SetKeyboardState(original); }
+    } keyboard;
+    const auto key = [&](WPARAM code, bool ctrl, bool shift) {
+        BYTE keys[256]{};
+        keys[VK_CONTROL] = ctrl ? 0x80 : 0; keys[VK_SHIFT] = shift ? 0x80 : 0;
+        check(SetKeyboardState(keys) != FALSE, "Could not set test modifiers");
+        SendMessageW(window, WM_KEYDOWN, code, 0);
+    };
+    const auto selection = [&](size_t anchor, size_t caret) {
+        const auto state = viewer.state();
+        check(state.anchor == anchor && state.caret == caret, "Word movement lost the caret or selection anchor");
+    };
+    auto buffer = std::make_shared<EditBuffer>();
+    buffer->document.text = "foo_bar42  += bar.baz\r\n\r\n  end \t";
+    indexDocument(buffer->document); buffer->initialize(buffer->document.text);
+    for (const bool wrap : {false, true}) for (const UINT dpi : {96u, 144u}) {
+        viewer.setWordWrap(wrap); viewer.setDpi(dpi); viewer.edit(buffer, L"words.txt"); SetFocus(window);
+        const std::vector<size_t> stops{0, 11, 14, 17, 18, 27, 32};
+        for (size_t i = 1; i < stops.size(); ++i) { key(VK_RIGHT, true, false); selection(stops[i], stops[i]); }
+        key(VK_RIGHT, true, false); selection(32, 32);
+        for (size_t i = stops.size() - 1; i > 0; --i) { key(VK_LEFT, true, false); selection(stops[i - 1], stops[i - 1]); }
+        key(VK_LEFT, true, false); selection(0, 0);
+        viewer.restore({0, 0, 14, 14});
+        key(VK_RIGHT, true, true); selection(14, 17);
+        key(VK_RIGHT, true, true); selection(14, 18);
+        key(VK_RIGHT, true, true); selection(14, 27);
+        key(VK_LEFT, true, true); selection(14, 18);
+        key(VK_LEFT, true, true); selection(14, 17);
+        key(VK_LEFT, true, true); selection(14, 14);
+        key(VK_LEFT, true, true); selection(14, 11);
+        key(VK_LEFT, true, false); selection(11, 11);
+        viewer.restore({0, 0, 27, 14});
+        key(VK_LEFT, true, true); selection(27, 11);
+        key(VK_RIGHT, true, false); selection(27, 27);
+        key(VK_LEFT, false, false); selection(26, 26);
+        key(VK_RIGHT, false, true); selection(26, 27);
+        viewer.restore({0, 0, 0, 0}); key(VK_LEFT, true, true); selection(0, 0);
+        viewer.restore({0, 0, 32, 32}); key(VK_RIGHT, true, true); selection(32, 32);
+    }
+    check(!buffer->dirty(), "Word movement modified the document");
+    buffer->document.text = u8"日本語　café_42、😀 next\r\n最後";
+    indexDocument(buffer->document); buffer->initialize(buffer->document.text);
+    viewer.edit(buffer, L"unicode-words.txt");
+    for (const size_t offset : {12u, 20u, 28u, 34u, 40u}) { key(VK_RIGHT, true, true); selection(0, offset); }
+    for (const size_t offset : {34u, 28u, 20u, 12u, 0u}) { key(VK_LEFT, true, true); selection(0, offset); }
+    viewer.restore({0, 0, 23, 23}); key(VK_RIGHT, false, false); selection(27, 27);
+    viewer.restore({0, 0, 32, 32}); key(VK_RIGHT, false, false); selection(34, 34);
+
+    buffer->document.text = std::string(2000, 'x') + "  tail";
+    indexDocument(buffer->document); buffer->initialize(buffer->document.text);
+    viewer.edit(buffer, L"wrapped-words.txt");
+    key(VK_RIGHT, true, true); selection(0, 2002);
+    GUITHREADINFO info{}; info.cbSize = sizeof(info);
+    check(GetGUIThreadInfo(GetCurrentThreadId(), &info) && info.hwndCaret == window &&
+        info.rcCaret.top >= 0 && info.rcCaret.bottom <= Scrollbars::contentRect(window).bottom && viewer.state().wrapOffset > 0,
+        "A word jump across wrapped rows did not reveal the caret");
+    key(VK_LEFT, true, true); selection(0, 0);
+    check(!buffer->dirty(), "Word selection modified the document");
+}
 void editorWrapping() {
     Viewer viewer;
     const HWND parent = CreateWindowExW(0, L"STATIC", L"Editor wrapping test", WS_POPUP | WS_CLIPCHILDREN,
@@ -961,7 +1031,7 @@ int main() {
     int result = 0;
     try {
         initializeRendering();
-        statusBarLimits(); inlineTreeInput(); cellPositions(); colorsAndClipping(); imagePreviews(); smoothIcons(); windowTargets(); editorCaret(); editorWrapping(); diffWrapping(); documentFind(); horizontalWheelScrolling(); continuousViewerScrolling(); themedScrollbars(); quickOpenStability();
+        statusBarLimits(); inlineTreeInput(); cellPositions(); colorsAndClipping(); imagePreviews(); smoothIcons(); windowTargets(); editorCaret(); editorWordMovement(); editorWrapping(); diffWrapping(); documentFind(); horizontalWheelScrolling(); continuousViewerScrolling(); themedScrollbars(); quickOpenStability();
         std::cout << "Direct2D rendering tests passed\n";
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; result = 1; }
     if (SUCCEEDED(com)) CoUninitialize();
