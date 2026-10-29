@@ -174,6 +174,7 @@ void Viewer::scroll(int vertical, int horizontal) {
 size_t Viewer::position(int x, int y, bool* trailing) const {
     if (trailing) *trailing = false;
     if (!document_ || !rowCount()) return 0;
+    if (stickyFile()) y = std::max(y, contentTop() + cellHeight_);
     const size_t visualRow = std::min(rowCount() - 1, static_cast<size_t>(std::max(0, (y - contentTop()) / cellHeight_ + top_)));
     int origin = textGutter();
     WrappedRow wrapped;
@@ -307,7 +308,8 @@ void Viewer::revealRange(TextMatch match) {
         row = diff_->rowForLine(source, after_, inlineView_); line = diff_->line(source); offset = diff_->offset(source);
     }
     if (wrapping()) row = diff_ ? diffLayout_.rowForOffset(*diff_, row, match.begin - offset, after_) : textLayout_.rowForOffset(*document_, match.begin);
-    if (static_cast<int>(row) < top_ || static_cast<int>(row) >= top_ + visibleRows()) top_ = std::max(0, static_cast<int>(row) - visibleRows() / 2);
+    if (static_cast<int>(row) < top_ + (stickyFile() ? 1 : 0) || static_cast<int>(row) >= top_ + visibleRows())
+        top_ = std::max(0, static_cast<int>(row) - std::max(1, visibleRows() / 2));
     if (!wrapping()) {
         int column = 0;
         for (size_t p = 0; p < line.size() && offset + p < match.begin;) { const auto ch = decodeUtf8(line, p); column += ch == '\t' ? 4 - column % 4 : std::max(1, cellWidth(ch)); }
@@ -513,9 +515,18 @@ void Viewer::paint() {
                 if (!change.heading) continue;
                 const int y = body + screenRow * cellHeight_;
                 dc.fill({0, y, r.right, y + cellHeight_}, panel);
-                auto text = document_->line(change.heading - 1);
-                if (text.substr(0, 11) == "diff --git ") text.remove_prefix(11);
+                const auto file = diff_->fileForRow(diffRow(row), inlineView_);
+                const auto text = file && diff_->rows[file->row].heading == change.heading ?
+                    std::string_view(file->path) : document_->line(change.heading - 1);
                 dc.label({14, y, r.right - 12, y + cellHeight_}, wide(text), accent);
+            }
+            if (const auto file = body < r.bottom ? stickyFile() : nullptr) {
+                // Paint after both panes so the filename stays fixed across
+                // wrapping and horizontal scrolling, above all source cells.
+                const int bottom = std::min(body + cellHeight_, static_cast<int>(r.bottom));
+                dc.fill({0, body, r.right, bottom}, panel);
+                dc.label({14, body, r.right - 12, bottom}, wide(file->path), accent);
+                dc.fill({0, bottom - 1, r.right, bottom}, border);
             }
         }
         if (edit_ && caretVisible_ && GetFocus() == window_) {
@@ -571,7 +582,7 @@ LRESULT Viewer::handle(UINT m, WPARAM a, LPARAM b) {
             const auto button = layoutButton(inlineView);
             if (PtInRect(&button, point)) { setDiffLayout(inlineView); return 0; }
         }
-        if (point.y < contentTop()) return 0;
+        if (point.y < contentTop() + (stickyFile() ? cellHeight_ : 0)) return 0;
         revealFind_ = false;
         bool after = splitDiff() && point.x >= Scrollbars::contentRect(window_).right / 2;
         if (diff_ && inlineView_ && rowCount()) {
@@ -659,7 +670,10 @@ LRESULT Viewer::handle(UINT m, WPARAM a, LPARAM b) {
 
 size_t poppy::Viewer::documentBytes() const {
     size_t bytes = textLayout_.bytes() + diffLayout_.bytes() + (document_ ? document_->text.capacity() + document_->lines.capacity() * sizeof(uint32_t) + document_->states.capacity() * sizeof(LexState) : 0);
-    if (diff_) bytes += diff_->rows.capacity() * sizeof(DiffRow) + diff_->inlineOrder.capacity() * sizeof(uint32_t);
+    if (diff_) {
+        bytes += diff_->rows.capacity() * sizeof(DiffRow) + diff_->inlineOrder.capacity() * sizeof(uint32_t) + diff_->files.capacity() * sizeof(DiffFile);
+        for (const auto& file : diff_->files) bytes += file.path.capacity();
+    }
     if (image_) bytes += image_->pixels.capacity() * 2; // CPU pixels and the device bitmap.
     return bytes;
 }

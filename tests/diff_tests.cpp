@@ -103,6 +103,43 @@ void syntaxLanguages() {
     combined.patch.text = "@@ -1 +1 @@\n-return 1\n+return 2\n"; indexDiff(combined);
     check(styleAt(combined, combined.rows[0].after, 0) == Style::Text, "Reindexing retained a previous file's syntax metadata");
 }
+void fileHeadings() {
+    const std::vector<std::pair<std::string, std::string>> fixtures{
+        {"diff --git a/src/one b/two.txt b/src/one b/two.txt\nold mode 100644\nnew mode 100755\n", "src/one b/two.txt"},
+        {untrackedPatch("新しい file.cpp", "return 42;\n"), "新しい file.cpp"},
+        {"diff --git a/deleted.py b/deleted.py\ndeleted file mode 100644\n--- a/deleted.py\n+++ /dev/null\n@@ -1 +0,0 @@\n-old\n", "deleted.py"},
+        {"diff --git a/old name.txt b/new name.txt\nsimilarity index 100%\nrename from old name.txt\nrename to new name.txt\n", "new name.txt"},
+        {"diff --git \"a/old\\tname\" \"b/new\\\"name\"\n--- \"a/old\\tname\"\n+++ \"b/new\\\"name\"\n@@ -1 +1 @@\n-old\n+new\n", "new\"name"},
+        {"diff --git \"a/\\346\\227\\245\\346\\234\\254.txt\" \"b/\\346\\227\\245\\346\\234\\254.txt\"\nBinary files differ\n", "日本.txt"},
+        {"diff --git a/src/with spaces.py b/src/with spaces.py\n--- a/src/with spaces.py\t\n+++ b/src/with spaces.py\t\n@@ -1 +1 @@\n-old\n+new\n", "src/with spaces.py"},
+        {untrackedPatch("empty b/file", ""), "empty b/file"},
+        {untrackedPatch("image 日本語.png", std::string_view("\0", 1)), "image 日本語.png"},
+        {"diff --git \"a/back\\\\slash.txt\" \"b/back\\\\slash.txt\"\nold mode 100644\nnew mode 100755\n", "back\\slash.txt"}
+    };
+    DiffDocument diff;
+    for (const auto& fixture : fixtures) diff.patch.text += fixture.first;
+    const auto original = diff.patch.text;
+    indexDiff(diff, true);
+    check(diff.files.size() == fixtures.size(), "Every changed file needs one filename, including binary, empty and mode-only files");
+    for (size_t i = 0; i < fixtures.size(); ++i)
+        check(diff.files[i].path == fixtures[i].second, "File headings must use one decoded path, preferring the destination except for deletions");
+    for (bool inlineView : {false, true}) {
+        DiffLayout layout; layout.build(diff, inlineView, 2);
+        size_t file = 0;
+        for (size_t visual = 0; visual < layout.rows(); ++visual) {
+            const size_t row = layout.row(visual).row;
+            const auto change = diff.displayRow(row, inlineView);
+            if (file + 1 < diff.files.size() && change.heading == diff.rows[diff.files[file + 1].row].heading) ++file;
+            check(diff.fileForRow(row, inlineView) == &diff.files[file], "Sticky filenames must follow file boundaries across metadata and wrapped source rows in both layouts");
+        }
+        check(diff.fileForRow(diff.rowCount(inlineView), inlineView) == nullptr, "A row past the diff must not retain a sticky filename");
+    }
+    check(diff.patch.text == original, "Filename display must not rewrite the patch snapshot");
+    indexDiff(diff);
+    check(diff.files.empty() && !diff.fileForRow(0, true), "Reindexing without headings must clear sticky filenames");
+    diff.patch.text.clear(); indexDiff(diff, true);
+    check(diff.files.empty() && !diff.fileForRow(0, false), "An empty diff must clear sticky filenames");
+}
 void alignment() {
     const auto diff = parse(
         "diff --git a/file.cpp b/file.cpp\nindex 1234567..7654321 100644\n"
@@ -278,6 +315,6 @@ void wrapping() {
 }
 }
 int main() {
-    try { syntaxHighlighting(); multilineSyntax(); syntaxLanguages(); alignment(); additionsAndDeletions(); inlineLayout(); edgeCases(); viewPositions(); wrapping(); std::cout << "Diff tests passed.\n"; return EXIT_SUCCESS; }
+    try { syntaxHighlighting(); multilineSyntax(); syntaxLanguages(); fileHeadings(); alignment(); additionsAndDeletions(); inlineLayout(); edgeCases(); viewPositions(); wrapping(); std::cout << "Diff tests passed.\n"; return EXIT_SUCCESS; }
     catch (const std::exception& error) { std::cerr << error.what() << '\n'; return EXIT_FAILURE; }
 }

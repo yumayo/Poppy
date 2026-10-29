@@ -1,6 +1,7 @@
 #include "diff.h"
 #include <algorithm>
 #include <charconv>
+#include <iterator>
 #include <limits>
 
 namespace poppy {
@@ -35,6 +36,49 @@ Language headerLanguage(std::string_view path) {
     const auto dot = path.find_last_of('.');
     return dot == path.npos || dot == 0 ? Language::Plain : languageFor(std::string(path.substr(dot)));
 }
+std::string unquotePath(std::string_view text) {
+    if (text.empty() || text.front() != '"') return std::string(text);
+    std::string path;
+    for (size_t i = 1; i < text.size(); ++i) {
+        char c = text[i];
+        if (c == '"') break;
+        if (c == '\\' && i + 1 < text.size()) {
+            c = text[++i];
+            if (c >= '0' && c <= '7') {
+                unsigned value = c - '0';
+                for (int n = 1; n < 3 && i + 1 < text.size() && text[i + 1] >= '0' && text[i + 1] <= '7'; ++n)
+                    value = value * 8 + text[++i] - '0';
+                c = static_cast<char>(value);
+            } else switch (c) {
+            case 'a': c = '\a'; break; case 'b': c = '\b'; break; case 't': c = '\t'; break;
+            case 'n': c = '\n'; break; case 'v': c = '\v'; break; case 'f': c = '\f'; break; case 'r': c = '\r'; break;
+            }
+        }
+        path += c;
+    }
+    return path;
+}
+std::string sourcePath(std::string_view text) {
+    auto path = unquotePath(text);
+    if (path.compare(0, 2, "a/") == 0 || path.compare(0, 2, "b/") == 0) path.erase(0, 2);
+    return path;
+}
+std::string diffHeaderPath(std::string_view text) {
+    // Unquoted paths may contain spaces, including " b/". Equal halves are
+    // unambiguous and also cover binary, empty and mode-only changes.
+    const size_t half = text.size() / 2;
+    if (half >= 2 && text.size() % 2 && text[half] == ' ' && text.substr(0, half).substr(2) == text.substr(half + 1).substr(2))
+        return sourcePath(text.substr(half + 1));
+    if (!text.empty() && text.front() == '"') {
+        for (size_t i = 1; i < text.size(); ++i) {
+            if (text[i] == '\\') { ++i; continue; }
+            if (text[i] == '"' && i + 2 < text.size() && text[i + 1] == ' ') return sourcePath(text.substr(i + 2));
+        }
+    }
+    auto separator = text.rfind(" b/");
+    if (separator == text.npos) separator = text.rfind(" \"b/");
+    return sourcePath(separator == text.npos ? text : text.substr(separator + 1));
+}
 }
 std::string_view DiffDocument::line(DiffLine source) const {
     return source.number ? patch.line(source.row).substr(1) : std::string_view{};
@@ -49,6 +93,12 @@ DiffRow DiffDocument::displayRow(size_t index, bool inlineView) const {
         else row.after = {};
     }
     return row;
+}
+const DiffFile* DiffDocument::fileForRow(size_t index, bool inlineView) const {
+    if (index >= rowCount(inlineView)) return nullptr;
+    const size_t splitRow = inlineView ? inlineOrder[index] / 2 : index;
+    const auto it = std::upper_bound(files.begin(), files.end(), splitRow, [](size_t row, const DiffFile& file) { return row < file.row; });
+    return it == files.begin() ? nullptr : &*std::prev(it);
 }
 size_t DiffDocument::rowForLine(DiffLine source, bool after, bool inlineView) const {
     if (!source.number) return 0;
@@ -111,7 +161,7 @@ std::string DiffDocument::selectedText(bool after, size_t start, size_t end, boo
 }
 void indexDiff(DiffDocument& d, bool fileHeadings) {
     d.patch.language = Language::Plain; indexDocument(d.patch);
-    d.rows.clear(); d.inlineOrder.clear(); d.maxColumns = 0;
+    d.rows.clear(); d.files.clear(); d.inlineOrder.clear(); d.maxColumns = 0;
     std::vector<DiffLine> removed, added;
     auto flush = [&] {
         const size_t first = d.rows.size();
@@ -131,10 +181,19 @@ void indexDiff(DiffDocument& d, bool fileHeadings) {
             flush(); beforeCount = afterCount = 0;
             beforeLanguage = afterLanguage = Language::Plain;
             beforeState = afterState = LexState::Normal;
+            if (fileHeadings) d.files.push_back({d.rows.size(), diffHeaderPath(text.substr(11))});
         }
         if (!beforeCount && !afterCount) {
-            if (text.substr(0, 4) == "--- ") { beforeLanguage = headerLanguage(text.substr(4)); continue; }
-            if (text.substr(0, 4) == "+++ ") { afterLanguage = headerLanguage(text.substr(4)); continue; }
+            if (text.substr(0, 4) == "--- " || text.substr(0, 4) == "+++ ") {
+                auto path = text.substr(4);
+                if (!path.empty() && path.back() == '\t') path.remove_suffix(1);
+                if (!d.files.empty() && path != "/dev/null") d.files.back().path = sourcePath(path);
+                if (text.front() == '-') beforeLanguage = headerLanguage(text.substr(4));
+                else afterLanguage = headerLanguage(text.substr(4));
+                continue;
+            }
+            if (!d.files.empty() && (text.substr(0, 10) == "rename to " || text.substr(0, 8) == "copy to "))
+                d.files.back().path = unquotePath(text.substr(text.front() == 'r' ? 10 : 8));
         }
         if (fileHeadings && ((!beforeCount && !afterCount) &&
             (text.substr(0, 11) == "diff --git " || text.substr(0, 7) == "Binary " || text.substr(0, 9) == "old mode " ||

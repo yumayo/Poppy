@@ -484,6 +484,10 @@ void diffWrapping() {
     const int right = Scrollbars::contentRect(window).right / 2 + 1;
     SendMessageW(window, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(right + 70, 68 + height / 2));
     SendMessageW(window, WM_LBUTTONUP, 0, MAKELPARAM(right + 70, 68 + height / 2));
+    check(viewer.state().anchor == saved.anchor && viewer.state().caret == saved.caret && GetCapture() != window,
+        "Clicking the sticky filename must not select the hidden source row");
+    SendMessageW(window, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(right + 70, 68 + height + height / 2));
+    SendMessageW(window, WM_LBUTTONUP, 0, MAKELPARAM(right + 70, 68 + height + height / 2));
     const auto padded = viewer.state(); const int splitTop = info().nPos;
     check(padded.after && padded.caret == after + 5 && padded.wrapOffset > 0, "Split padding did not map to the shorter side's end");
     viewer.restore({}); viewer.restore(padded);

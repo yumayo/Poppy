@@ -553,6 +553,8 @@ void repositorySyntax() {
             DiffDocument diff;
             diff.patch.text = repo.git(gitDiffArguments(kind, revision, file.first));
             indexDiff(diff, true);
+            check(diff.files.size() == 1 && diff.files.front().path == file.first,
+                "Working, staged and historical file headings must display a single decoded filename");
             size_t sources = 0;
             for (const auto& row : diff.rows) for (const auto source : {row.before, row.after}) {
                 if (!source.number) continue;

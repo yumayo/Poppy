@@ -11,9 +11,12 @@ struct DiffLine {
     LexState state = LexState::Normal;
 };
 struct DiffRow { DiffLine before, after; bool changed = false; uint32_t heading = 0; };
+struct DiffFile { size_t row = 0; std::string path; };
 struct DiffDocument {
     Document patch;
     std::vector<DiffRow> rows;
+    // File boundaries in split-row order, separate from other metadata headings.
+    std::vector<DiffFile> files;
     // Split row index * 2, plus 1 for its added line. Context appears once.
     std::vector<uint32_t> inlineOrder;
     uint32_t maxColumns = 0;
@@ -21,6 +24,7 @@ struct DiffDocument {
     size_t offset(DiffLine source) const;
     size_t rowCount(bool inlineView) const { return inlineView ? inlineOrder.size() : rows.size(); }
     DiffRow displayRow(size_t index, bool inlineView) const;
+    const DiffFile* fileForRow(size_t index, bool inlineView) const;
     size_t rowForLine(DiffLine source, bool after, bool inlineView) const;
     // Maps a visible text range in the patch to an inline row, excluding metadata and +/- prefixes.
     std::optional<size_t> inlineRowForText(size_t begin, size_t end) const;
