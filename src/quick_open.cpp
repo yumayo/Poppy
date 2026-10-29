@@ -86,6 +86,7 @@ void QuickOpen::refresh() {
     if (indexing_) { indexAgain_ = true; return; }
     const auto revision = ++indexRevision_; const auto root = root_;
     indexing_ = true; layout();
+    if (updated) updated();
     indexWorker_->submit(L"index", [this, revision, root] {
         auto index = std::make_shared<FileIndex>();
         try { *index = provider_ ? provider_->indexFiles(root, [this, revision] { return indexRevision_.load() != revision; }) : poppy::indexFiles(root.local(), [this, revision] { return indexRevision_.load() != revision; }); }
@@ -94,6 +95,7 @@ void QuickOpen::refresh() {
         indexWorker_->complete([this, revision, index] {
             if (indexRevision_.load() != revision) return;
             index_ = index; indexing_ = false;
+            if (updated) updated();
             request();
             if (std::exchange(indexAgain_, false)) refresh();
         });

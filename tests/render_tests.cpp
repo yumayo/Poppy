@@ -1,6 +1,8 @@
 #include "scrollbars.h"
 #include "quick_open.h"
 #include "viewer.h"
+#include "status_bar.h"
+#include <commctrl.h>
 #include <algorithm>
 #include <fstream>
 #include <iostream>
@@ -10,6 +12,50 @@ using namespace poppy;
 namespace {
 void check(bool condition, const char* message) {
     if (!condition) throw std::runtime_error(message);
+}
+void statusBarLimits() {
+    INITCOMMONCONTROLSEX controls{sizeof(controls), ICC_WIN95_CLASSES};
+    check(InitCommonControlsEx(&controls) != FALSE, "Cannot initialize status tooltip controls");
+    const auto instance = GetModuleHandleW(nullptr);
+    const auto parent = CreateWindowExW(0, L"STATIC", L"Status bar test", WS_POPUP | WS_CLIPCHILDREN, 0, 0, 1400, 200, nullptr, nullptr, instance, nullptr);
+    check(parent != nullptr, "Cannot create status bar test parent");
+    StatusBar bar; bar.create(parent, instance); bar.message(L"Ready");
+    FileIndex index; index.files.resize(1234); index.storageBytes = 1024 * 1024;
+    const auto watch = watchLimitStatus(WatchUsage{1234, 65536, 524288, false, {}});
+    bar.update(L"main", {watch, fileLimitStatus(&index, false), treeLimitStatus(1234, 50000, 10000)});
+    HWND tooltip = nullptr;
+    struct Context { HWND owner; HWND* tooltip; } context{bar.window(), &tooltip};
+    EnumThreadWindows(GetCurrentThreadId(), [](HWND window, LPARAM data) -> BOOL {
+        const auto& context = *reinterpret_cast<Context*>(data);
+        wchar_t name[64]{}; GetClassNameW(window, name, 64);
+        if (GetWindow(window, GW_OWNER) == context.owner && std::wstring(name) == TOOLTIPS_CLASSW) { *context.tooltip = window; return FALSE; }
+        return TRUE;
+    }, reinterpret_cast<LPARAM>(&context));
+    check(tooltip != nullptr, "Status bar hover explanations are missing");
+    for (const auto dpi : {96u, 144u, 192u}) {
+        bar.setDpi(dpi);
+        for (const int width : {1400, 720, 420}) {
+            const int scaledWidth = MulDiv(width, dpi, 96), height = MulDiv(26, dpi, 96);
+            SetWindowPos(bar.window(), nullptr, 0, 0, scaledWidth, height, SWP_NOZORDER | SWP_NOACTIVATE);
+            const auto count = SendMessageW(tooltip, TTM_GETTOOLCOUNT, 0, 0);
+            bool hasWatch = false, hasOverflow = false; std::vector<RECT> bounds;
+            for (LRESULT i = 0; i < count; ++i) {
+                TOOLINFOW tool{}; tool.cbSize = sizeof(tool);
+                check(SendMessageW(tooltip, TTM_ENUMTOOLSW, i, reinterpret_cast<LPARAM>(&tool)) != FALSE, "Cannot read status bar hover bounds");
+                check(tool.rect.left >= 0 && tool.rect.right <= scaledWidth && tool.rect.top == 0 && tool.rect.bottom == height && tool.rect.left <= tool.rect.right, "Status bar tools escaped their layout after resizing");
+                for (const auto& other : bounds) { RECT overlap{}; check(!IntersectRect(&overlap, &other, &tool.rect), "Status bar messages and limit counters overlap"); }
+                bounds.push_back(tool.rect);
+                NMTTDISPINFOW display{}; display.hdr = {tooltip, tool.uId, TTN_GETDISPINFOW};
+                SendMessageW(bar.window(), WM_NOTIFY, tool.uId, reinterpret_cast<LPARAM>(&display));
+                const std::wstring tip = display.lpszText ? display.lpszText : L"";
+                hasWatch |= tip.find(L"WSL directory watches") != tip.npos;
+                hasOverflow |= tip.find(L"Files 1,234/200,000") != tip.npos && tip.find(L"WSL file list") != tip.npos;
+            }
+            check(hasWatch, "Narrowing the status bar lost watch-limit explanations");
+            if (width == 420) check(hasOverflow, "Hidden limit counters were not exposed in the Limits tooltip");
+        }
+    }
+    DestroyWindow(parent);
 }
 // WIC provides inspectable Direct2D pixels without a DC or GDI bitmap.
 struct Bitmap {
@@ -802,7 +848,7 @@ int main() {
     int result = 0;
     try {
         initializeRendering();
-        cellPositions(); colorsAndClipping(); imagePreviews(); smoothIcons(); windowTargets(); editorCaret(); editorWrapping(); diffWrapping(); documentFind(); horizontalWheelScrolling(); continuousViewerScrolling(); themedScrollbars(); quickOpenStability();
+        statusBarLimits(); cellPositions(); colorsAndClipping(); imagePreviews(); smoothIcons(); windowTargets(); editorCaret(); editorWrapping(); diffWrapping(); documentFind(); horizontalWheelScrolling(); continuousViewerScrolling(); themedScrollbars(); quickOpenStability();
         std::cout << "Direct2D rendering tests passed\n";
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; result = 1; }
     if (SUCCEEDED(com)) CoUninitialize();

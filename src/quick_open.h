@@ -20,7 +20,10 @@ public:
     void stop();
     bool visible() const { return visible_; }
     HWND window() const { return window_; }
+    const FileIndex* index() const { return index_.get(); }
+    bool indexing() const { return indexing_; }
     std::function<void(const ResourceId&)> opened;
+    std::function<void()> updated;
 private:
     static LRESULT CALLBACK procedure(HWND, UINT, WPARAM, LPARAM);
     LRESULT handle(UINT, WPARAM, LPARAM);

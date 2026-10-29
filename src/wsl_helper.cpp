@@ -2,6 +2,7 @@
 #include "wsl_protocol.h"
 #include "wsl_events.h"
 #include "file_changes.h"
+#include "limit_status.h"
 #include "content_search_protocol.h"
 #include "resource.h"
 #include "text.h"
@@ -212,6 +213,7 @@ private:
     std::map<std::string, std::set<std::string>> readAliases_;
     size_t readAliasCount_ = 0;
     bool watchLimited_ = false, drvfs_ = false;
+    std::string watchReason_;
     bool hello_ = false;
     size_t uploadBytes_ = 0;
 };
@@ -283,9 +285,9 @@ void Server::watch(const std::string& p, const std::string& gitRoot, const std::
         return;
     }
     if (p.rfind("/mnt/", 0) == 0) drvfs_ = true;
-    if (watchPaths_.size() >= maxDirectoryWatches || notify_.value < 0) { watchLimited_ = true; return; }
+    if (watchPaths_.size() >= maxDirectoryWatches || notify_.value < 0) { watchLimited_ = true; watchReason_ = watchPaths_.size() >= maxDirectoryWatches ? "poppyLimit" : "watchFailed"; return; }
     const auto wd = inotify_add_watch(notify_.value, p.c_str(), IN_CREATE | IN_DELETE | IN_MOVED_FROM | IN_MOVED_TO | IN_MODIFY | IN_ATTRIB | IN_DELETE_SELF | IN_MOVE_SELF | IN_ONLYDIR | IN_DONT_FOLLOW);
-    if (wd < 0) { watchLimited_ = true; return; }
+    if (wd < 0) { watchLimited_ = true; watchReason_ = errno == ENOSPC ? "systemLimit" : "watchFailed"; return; }
     auto& entry = watchPaths_[wd];
     if (!entry.path.empty()) watched_.erase(entry.path);
     entry.path = p;
@@ -304,6 +306,9 @@ void Server::watchGit(const std::string& directory) {
 }
 void Server::events() {
     alignas(inotify_event) char bytes[65536]; bool warned = false;
+    uint64_t systemLimit = 0; std::ifstream("/proc/sys/fs/inotify/max_user_watches") >> systemLimit;
+    std::optional<poppy::WatchUsage> previousUsage;
+    auto reportedAt = Clock::now() - std::chrono::seconds(1);
     while (!stopping_) {
         pollfd fd{notify_.value, POLLIN, 0}; poll(&fd, 1, 100);
         std::map<std::string, poppy::FileChange> changes; bool overflow = false;
@@ -336,10 +341,17 @@ void Server::events() {
                 if (aliases != readAliases_.end()) for (const auto& alias : aliases->second) record(alias, {true, topology, true});
             }
         }
-        bool limited = false; { std::lock_guard<std::mutex> lock(watchMutex_); limited = watchLimited_ || drvfs_; }
+        poppy::WatchUsage usage;
+        { std::lock_guard<std::mutex> lock(watchMutex_); usage = {watchPaths_.size(), maxDirectoryWatches, systemLimit, watchLimited_ || drvfs_, watchLimited_ ? watchReason_ : drvfs_ ? "drvfs" : ""}; }
         // Missing watches are not evidence of a change. Repeated unconditional
         // rescans keep large workspaces permanently busy and retransfer indexes.
-        if (limited && !warned && !stopping_) { send({{"event", "watchLimited"}}); warned = true; }
+        if (usage.limited && !warned && !stopping_) { send({{"event", "watchLimited"}}); warned = true; }
+        // Progress is a cached status snapshot, never a reason to rescan.
+        // Coalesce registrations while indexing and send nothing when idle.
+        if ((!previousUsage || !(usage == *previousUsage)) && Clock::now() - reportedAt >= std::chrono::milliseconds(250) && !stopping_) {
+            send({{"event", "watchUsage"}, {"count", std::to_string(usage.count)}, {"limit", std::to_string(usage.limit)}, {"systemLimit", std::to_string(usage.systemLimit)}, {"limited", usage.limited ? "1" : "0"}, {"reason", usage.reason}});
+            previousUsage = usage; reportedAt = Clock::now();
+        }
         if (overflow && !stopping_) send({{"event", "rescanRequired"}, {"files", "1"}, {"content", "1"}});
         for (const auto& change : changes) if (!stopping_ && validUtf8(change.first))
             send({{"event", "rescanRequired"}, {"path", change.first}, {"files", change.second.files ? "1" : "0"}, {"content", change.second.content ? "1" : "0"}});
@@ -451,7 +463,7 @@ void Server::execute(const std::shared_ptr<Request>& r) {
             if (snapshot.target != p) {
                 std::lock_guard<std::mutex> lock(watchMutex_);
                 if (readAliasCount_ < 8192) { if (readAliases_[snapshot.target].insert(p).second) ++readAliasCount_; }
-                else watchLimited_ = true;
+                else { watchLimited_ = true; watchReason_ = "aliases"; }
             }
             reply(*r, {{"body", "1"}, {"size", std::to_string(snapshot.bytes.size())}, {"version", snapshot.version}}); body(*r, snapshot.bytes); reply(*r, {{"done", "1"}});
         } else if (op == "saveFile") save(*r);
@@ -509,17 +521,17 @@ void Server::execute(const std::shared_ptr<Request>& r) {
                     if (link) { struct stat target{}; isDirectory = !fstatat(dirfd(dir.get()), name.c_str(), &target, 0) && S_ISDIR(target.st_mode); }
                     if (op == "indexFiles") {
                         if (!validUtf8(name)) continue;
-                        if (isDirectory && !link) { if (++directories > 50000 || pending.size() >= 50000) { truncated = true; continue; } pending.push_back(p); }
+                        if (isDirectory && !link) { if (++directories > poppy::maxIndexDirectories || pending.size() >= poppy::maxIndexDirectories) { truncated = true; continue; } pending.push_back(p); }
                         if (!S_ISREG(info.st_mode)) continue;
                     }
-                    if (++entries > (op == "indexFiles" ? 200000 : 10000)) { truncated = true; break; }
+                    if (++entries > (op == "indexFiles" ? poppy::maxIndexedFiles : 10000)) { truncated = true; break; }
                     if (!validUtf8(name)) {
                         std::string display = "[non-UTF-8] "; for (unsigned char c : name) { display += "\\x"; display += "0123456789abcdef"[c >> 4]; display += "0123456789abcdef"[c & 15]; }
                         reply(*r, {{"entry", "1"}, {"name", display}, {"unsupported", "1"}, {"directory", "0"}}); continue;
                     }
                     reply(*r, {{"entry", "1"}, {"path", p}, {"name", name}, {"directory", isDirectory ? "1" : "0"}, {"link", link ? "1" : "0"}});
                 }
-                if (truncated && entries > 200000) break;
+                if (truncated && entries > poppy::maxIndexedFiles) break;
             }
             reply(*r, {{"truncated", truncated ? "1" : "0"}, {"done", "1"}});
         } else if (op == "searchContent") {
