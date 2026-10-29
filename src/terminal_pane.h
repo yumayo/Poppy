@@ -52,8 +52,9 @@ private:
     void select(size_t index);
     void close(size_t index);
     void menu(size_t index, POINT point);
-    void addAi(const std::wstring& tool);
-    void addMenu(POINT point);
+    void addAi(const std::wstring& tool, int group);
+    void addShell(int group, TerminalShell shell);
+    void addMenu(int group, POINT point);
     void layout();
     void paint();
     std::wstring sessionName(const TerminalSession& session) const;
@@ -63,6 +64,8 @@ private:
     void endDrag(bool drop = false);
     size_t groupTab(int group) const;
     RECT groupBounds(int group) const;
+    RECT addButtonBounds(int group, bool dropdown) const;
+    int tabsRight(int group) const { return addButtonBounds(group, false).left; }
     HWND window_ = nullptr, rename_ = nullptr, tooltips_ = nullptr;
     size_t renaming_ = 0, tools_ = 0;
     HINSTANCE instance_ = nullptr;
@@ -78,6 +81,7 @@ private:
     std::shared_ptr<ProjectProvider> provider_;
     std::vector<std::unique_ptr<TerminalSession>> sessions_;
     size_t active_ = 0;
+    TerminalShell defaultShell_ = TerminalShell::PowerShell;
     AiEventQueue* events_ = nullptr;
     std::wstring tooltipText_;
 };

@@ -1,4 +1,5 @@
 #include "terminal.h"
+#include "terminal_profile.h"
 #include <imm.h>
 #include <algorithm>
 #include <map>
@@ -71,9 +72,9 @@ bool Terminal::start() {
     if (!UpdateProcThreadAttribute(attributes, 0, PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, console_, sizeof(console_), nullptr, nullptr)) { error_ = winError(); DeleteProcThreadAttributeList(attributes); stop(); return false; }
     STARTUPINFOEXW si{}; si.StartupInfo.cb = sizeof(si); si.lpAttributeList = attributes;
     wchar_t system[MAX_PATH]{}; GetSystemDirectoryW(system, MAX_PATH);
-    const std::wstring shell = !command_.empty() ? command_.front() : std::wstring(system) + L"\\WindowsPowerShell\\v1.0\\powershell.exe";
-    std::wstring command = quoteArg(shell) + L" -NoLogo -NoProfile -NoExit -Command \"[Console]::InputEncoding = [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new()\"";
-    if (!command_.empty()) command = processCommandLine(command_);
+    const auto args = command_.empty() ? terminalShellCommand(TerminalShell::PowerShell, system) : command_;
+    const auto& shell = args.front();
+    std::wstring command = processCommandLine(args);
     job_.reset(CreateJobObjectW(nullptr, nullptr)); JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{}; limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
     if (!job_ || !SetInformationJobObject(job_.value, JobObjectExtendedLimitInformation, &limits, sizeof(limits))) { error_ = winError(); DeleteProcThreadAttributeList(attributes); stop(); return false; }
     PROCESS_INFORMATION pi{};
@@ -110,7 +111,7 @@ bool Terminal::start() {
     environment.push_back(0);
     const BOOL ok = CreateProcessW(shell.c_str(), command.data(), nullptr, nullptr, FALSE, CREATE_UNICODE_ENVIRONMENT | CREATE_SUSPENDED | EXTENDED_STARTUPINFO_PRESENT, environment.data(), directory_.empty() ? nullptr : directory_.c_str(), &si.StartupInfo, &pi);
     const DWORD error = ok ? 0 : GetLastError(); DeleteProcThreadAttributeList(attributes);
-    if (!ok) { error_ = winError(error); stop(); return false; }
+    if (!ok) { error_ = L"Could not start " + shell + L": " + winError(error); stop(); return false; }
     process_.reset(pi.hProcess); Handle thread(pi.hThread);
     if (!AssignProcessToJobObject(job_.value, process_.value)) { error_ = winError(); TerminateProcess(process_.value, 1); stop(); return false; }
     writer_.start([this] {

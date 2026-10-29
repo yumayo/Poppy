@@ -1,5 +1,6 @@
 #pragma once
 #include "git_history.h"
+#include "terminal_profile.h"
 #include <cstddef>
 #include <string>
 #include <string_view>
@@ -29,6 +30,7 @@ struct SavedTerminal {
     std::string id = "shell-1", name = "Shell", directory;
     int group = 0;
     bool displayed = false;
+    TerminalShell shell = TerminalShell::PowerShell;
 };
 struct ProjectSession {
     std::string wslUid;
@@ -46,6 +48,7 @@ struct ProjectSession {
     std::string gitSelected, focusedPane = "viewer", activeTerminal = "shell-1";
     std::vector<std::string> collapsedGit;
     std::vector<SavedTerminal> terminals = {SavedTerminal{}};
+    TerminalShell defaultShell = TerminalShell::PowerShell;
 };
 struct AppSession {
     std::string lastProject;

@@ -1,4 +1,5 @@
 #include "session.h"
+#include "command_line.h"
 #include <iostream>
 #include <stdexcept>
 
@@ -19,6 +20,13 @@ int main() {
         check(longName != projectDirectoryName("d:\\" + std::string(999, 'a') + 'b'), "Truncating long paths lost their identity");
         check(projectDirectoryName("d:/a.b") == projectDirectoryName("d:/a-b"), "The collision fixture no longer collides");
         check(poppy::projectPathHash("d:/a.b") != poppy::projectPathHash("d:/a-b"), "Colliding readable names need different suffixes");
+        const auto bash = poppy::terminalShellCommand(poppy::TerminalShell::GitBash, L"C:\\Windows\\System32");
+        check(poppy::processCommandLine(bash) == L"\"C:\\Program Files\\Git\\bin\\bash.exe\" --login -i",
+              "Git Bash needs a quoted executable path and an interactive login shell");
+        const auto powershell = poppy::terminalShellCommand(poppy::TerminalShell::PowerShell, L"D:\\Windows\\System32");
+        check(powershell.front() == L"D:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" &&
+              powershell.back().find(L"UTF8Encoding") != std::wstring::npos,
+              "PowerShell lost the system directory or UTF-8 initialization");
         std::cout << "Session path tests passed\n";
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
 }

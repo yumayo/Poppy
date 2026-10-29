@@ -2,6 +2,7 @@
 #include <commctrl.h>
 #include <tlhelp32.h>
 #include <set>
+#include <vector>
 #include "tree_messages.h"
 #include "activity_button.h"
 #include <filesystem>
@@ -840,7 +841,7 @@ void splitPaneTests(const fs::path& executable) {
         check(divider>l.right,"Editor divider did not move");
         const auto terminalPane=FindWindowExW(app.window,nullptr,L"PoppyTerminalPane",nullptr);
         RECT client{};GetClientRect(terminalPane,&client);const auto dpi=GetDpiForWindow(terminalPane);
-        click(terminalPane,client.right-MulDiv(17,dpi,96),MulDiv(16,dpi,96));
+        click(terminalPane,client.right-MulDiv(41,dpi,96),MulDiv(16,dpi,96));
         send(terminalPane,WM_LBUTTONDOWN,MK_LBUTTON,MAKELPARAM(MulDiv(135,dpi,96),MulDiv(16,dpi,96)));
         send(terminalPane,WM_MOUSEMOVE,MK_LBUTTON,MAKELPARAM(client.right*3/4,client.bottom/2));
         send(terminalPane,WM_LBUTTONUP,0,MAKELPARAM(client.right*3/4,client.bottom/2));
@@ -1646,7 +1647,7 @@ std::set<DWORD> childProcesses(DWORD parent) {
     std::set<DWORD> result; const auto snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
     check(snapshot != INVALID_HANDLE_VALUE, "Cannot inspect shell processes");
     PROCESSENTRY32W entry{}; entry.dwSize = sizeof(entry);
-    if (Process32FirstW(snapshot, &entry)) do { if (entry.th32ParentProcessID == parent && _wcsicmp(entry.szExeFile, L"powershell.exe") == 0) result.insert(entry.th32ProcessID); } while (Process32NextW(snapshot, &entry));
+    if (Process32FirstW(snapshot, &entry)) do { if (entry.th32ParentProcessID == parent && (_wcsicmp(entry.szExeFile, L"powershell.exe") == 0 || _wcsicmp(entry.szExeFile, L"bash.exe") == 0)) result.insert(entry.th32ProcessID); } while (Process32NextW(snapshot, &entry));
     CloseHandle(snapshot); return result;
 }
 void multiProjectTests(const fs::path& executable) {
@@ -1681,7 +1682,7 @@ void multiProjectTests(const fs::path& executable) {
     waitFor([&] { for (const auto child : childProcesses(app.process.dwProcessId)) if (!before.count(child)) shellPid = child; return shellPid != 0; }, "Shell process did not start");
     const auto shellProcess = OpenProcess(SYNCHRONIZE, FALSE, shellPid); check(shellProcess != nullptr, "Cannot inspect the running shell");
     const auto px=[dpi=GetDpiForWindow(terminals)](int v){return MulDiv(v,dpi,96);};
-    RECT client{};GetClientRect(terminals,&client);click(terminals,client.right-px(12),px(16));
+    RECT client{};GetClientRect(terminals,&client);click(terminals,client.right-px(41),px(16));
     check(FindWindowExW(terminals,shell,L"PoppyTerminal",nullptr)!=nullptr,"Adding a shell replaced the first session");
     select(1);
     writeFile(a.root / L"background.txt");
@@ -1915,7 +1916,7 @@ void terminalTitleTests(const fs::path& executable) {
         waitFor([&] { return name(shell) == L"Build 日本語"; }, "ConPTY title did not reach the terminal tab");
         const auto px = [dpi = GetDpiForWindow(pane)](int value) { return MulDiv(value, dpi, 96); };
         RECT client{}; GetClientRect(pane, &client);
-        click(pane, client.right - px(17), px(16));
+        click(pane, client.right - px(41), px(16));
         const auto second = FindWindowExW(pane, shell, L"PoppyTerminal", nullptr);
         check(second && name(second) == L"PowerShell", "New terminal inherited another session's title");
         click(second, 10, 10);
@@ -1949,6 +1950,62 @@ void terminalTitleTests(const fs::path& executable) {
         check(std::wstring(text) == L"Pinned name", "Restart lost the manual terminal name");
         GetWindowTextW(second, text, 128);
         check(second && std::wstring(text) == L"PowerShell", "Restart persisted a transient process title");
+    }
+}
+void terminalShellTests(const fs::path& executable) {
+    Fixture fixture; writeFile(fixture.root / L"test.txt");
+    const auto name = [](HWND window) { wchar_t text[512]{}; GetWindowTextW(window, text, 512); return std::wstring(text); };
+    const auto sessions = [](HWND pane) {
+        std::vector<HWND> result;
+        for (HWND child = nullptr; (child = FindWindowExW(pane, child, L"PoppyTerminal", nullptr));) result.push_back(child);
+        return result;
+    };
+    const auto choose = [](const Application& app, HWND pane, std::initializer_list<WPARAM> keys) {
+        RECT rect{}; GetClientRect(pane, &rect); const auto dpi = GetDpiForWindow(pane);
+        check(PostMessageW(pane, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(rect.right-MulDiv(12,dpi,96),MulDiv(16,dpi,96))), "Could not click the shell dropdown");
+        const auto open = [&] { GUITHREADINFO info{}; info.cbSize = sizeof(info); return GetGUIThreadInfo(app.process.dwThreadId, &info) && (info.flags & GUI_INMENUMODE); };
+        waitFor(open, "Shell dropdown did not open");
+        for (auto key : keys) PostMessageW(pane, WM_KEYDOWN, key, 0);
+        waitFor([&] { return !open(); }, "Shell dropdown did not close");
+        send(pane, WM_NULL);
+    };
+    const auto plus = [](HWND pane) {
+        RECT rect{}; GetClientRect(pane, &rect); const auto dpi = GetDpiForWindow(pane);
+        click(pane, rect.right-MulDiv(41,dpi,96), MulDiv(16,dpi,96));
+    };
+    {
+        Application app(executable, fixture.root); app.tree();
+        const auto pane = FindWindowExW(app.window, nullptr, L"PoppyTerminalPane", nullptr);
+        choose(app, pane, {VK_ESCAPE});
+        check(sessions(pane).size() == 1, "Cancelling shell selection added a terminal");
+        choose(app, pane, {VK_HOME, VK_DOWN, VK_RETURN});
+        auto tabs = sessions(pane);
+        check(tabs.size() == 2 && name(tabs[1]) == L"Git Bash", "Git Bash selection did not add its own terminal");
+        check(name(tabs[0]) == L"PowerShell", "Shell selection changed an existing terminal");
+        if (fs::is_regular_file(L"C:\\Program Files\\Git\\bin\\bash.exe")) {
+            click(tabs[1], 10, 10);
+            for (const auto ch : std::wstring(L"printf ready > bash-ready.txt\r")) send(tabs[1], WM_CHAR, ch);
+            waitFor([&] { std::ifstream file(fixture.root/L"bash-ready.txt"); std::string text; return file && std::getline(file,text) && text=="ready"; }, "Git Bash did not run in the Unicode project directory");
+        }
+        choose(app, pane, {VK_END, VK_RIGHT, VK_END, VK_RETURN});
+        check(sessions(pane).size() == 2, "Changing the default added a terminal");
+        plus(pane); tabs = sessions(pane);
+        check(tabs.size() == 3 && name(tabs[2]) == L"Git Bash", "Plus did not use the Git Bash default");
+        choose(app, pane, {VK_HOME, VK_RETURN}); tabs = sessions(pane);
+        check(tabs.size() == 4 && name(tabs[3]) == L"PowerShell", "Explicit PowerShell selection ignored the chosen profile");
+    }
+    {
+        Application app(executable, fixture.root); app.tree();
+        const auto pane = FindWindowExW(app.window, nullptr, L"PoppyTerminalPane", nullptr);
+        auto tabs = sessions(pane);
+        check(tabs.size() == 4 && name(tabs[0]) == L"PowerShell" && name(tabs[1]) == L"Git Bash" &&
+              name(tabs[2]) == L"Git Bash" && name(tabs[3]) == L"PowerShell", "Restart lost terminal shell profiles");
+        check(childProcesses(app.process.dwProcessId).empty(), "Restoring shell profiles automatically started a process");
+        plus(pane); tabs = sessions(pane);
+        check(tabs.size() == 5 && name(tabs[4]) == L"Git Bash", "Restart lost the default or explicit selection changed it");
+        choose(app, pane, {VK_END, VK_RIGHT, VK_HOME, VK_RETURN});
+        plus(pane); tabs = sessions(pane);
+        check(tabs.size() == 6 && name(tabs[5]) == L"PowerShell", "Could not switch the default back to PowerShell");
     }
 }
 void terminalBackspaceTests(const fs::path& executable) {
@@ -2053,7 +2110,7 @@ int wmain(int argc, wchar_t** argv) {
         check(argc == 2, "Pass the path to Poppy.exe");
         SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         for (const auto test : {folderTests, sidebarTests, treeInteractionTests, tabTests, pinnedTabTests,
-                tabDragTests, wrappingTabDragTests, wrappingTabTests, renameTests, explorerMoveTests, createItemTests, newFileShortcutTests, pasteImageTests, splitPaneTests, quickOpenTests, fullSearchTests, gitSidebarTests, gitAutoRefreshTests, branchSidebarTests, multiRepositoryTests, sessionTests, multiProjectTests, recentProjectTests, projectDragTests, scrollingProjectDragTests, terminalTitleTests, terminalBackspaceTests}) {
+                tabDragTests, wrappingTabDragTests, wrappingTabTests, renameTests, explorerMoveTests, createItemTests, newFileShortcutTests, pasteImageTests, splitPaneTests, quickOpenTests, fullSearchTests, gitSidebarTests, gitAutoRefreshTests, branchSidebarTests, multiRepositoryTests, sessionTests, multiProjectTests, recentProjectTests, projectDragTests, scrollingProjectDragTests, terminalTitleTests, terminalShellTests, terminalBackspaceTests}) {
             Fixture appData; AppDataEnvironment environment(appData.root);
             test(fs::absolute(argv[1]));
         }

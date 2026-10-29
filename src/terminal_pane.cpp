@@ -35,6 +35,9 @@ void TerminalPane::add(SavedTerminal configuration) {
         if (directory_.wsl()) {
             ptr->wslToken = newSessionId();
             ptr->terminal->setCommand(provider_->terminalCommand(directory_.at(ptr->configuration.directory), ptr->wslToken, ptr->wslTool));
+        } else {
+            wchar_t system[MAX_PATH]{}; GetSystemDirectoryW(system, MAX_PATH);
+            ptr->terminal->setCommand(terminalShellCommand(ptr->configuration.shell, system));
         }
         if (events_) {
             ptr->notificationId = newSessionId(); events_->add(ptr->notificationId);
@@ -48,11 +51,17 @@ void TerminalPane::add(SavedTerminal configuration) {
             } catch (const std::exception& failure) {
                 events_->remove(id); ptr->notificationId.clear();
                 if (directory_.wsl()) throw;
-                // A missing WSL installation must not prevent a PowerShell session.
+                // A missing WSL installation must not prevent a Windows shell.
                 ptr->notificationError = wide(failure.what());
             }
         }
-        ptr->terminal->setEnvironment({{L"AICONTAINER_EVENT_SOCKET", wide(eventSocket)}});
+        std::vector<std::pair<std::wstring, std::wstring>> environment{{L"AICONTAINER_EVENT_SOCKET", wide(eventSocket)}};
+        if (!directory_.wsl() && ptr->configuration.shell == TerminalShell::GitBash) {
+            // Git's login profile otherwise changes to HOME and uses MSYS mode.
+            environment.emplace_back(L"CHERE_INVOKING", L"1");
+            environment.emplace_back(L"MSYSTEM", L"MINGW64");
+        }
+        ptr->terminal->setEnvironment(std::move(environment));
         if (changed) changed();
     };
     session->terminal->stopping = [this, ptr] {
@@ -90,14 +99,15 @@ void TerminalPane::relocate(const ResourceId& source, const ResourceId& destinat
     }
 }
 void TerminalPane::restore(const ProjectSession& state) {
+    defaultShell_ = state.defaultShell;
     endDrag(); ratio_ = state.terminalRatio; stop(); for(auto& s:sessions_) DestroyWindow(s->terminal->window()); sessions_.clear();
     for(const auto& saved:state.terminals) add(saved);
-    if(sessions_.empty()) add();
+    if(sessions_.empty()) add({"", "Shell", directory_.u8string(), 0, false, defaultShell_});
     for (size_t i = 0; i < state.terminals.size() && i < sessions_.size(); ++i) { sessions_[i]->configuration.displayed = state.terminals[i].displayed; sessions_[i]->configuration.group = state.terminals[i].group; }
     const auto found=std::find_if(sessions_.begin(),sessions_.end(),[&](const auto& s){return s->configuration.id==state.activeTerminal;});
     select(found==sessions_.end()?0:static_cast<size_t>(found-sessions_.begin()));
 }
-void TerminalPane::snapshot(ProjectSession& state) const { state.terminals.clear();for(const auto& s:sessions_)state.terminals.push_back(s->configuration);state.activeTerminal=active().configuration.id; state.terminalRatio = ratio_; }
+void TerminalPane::snapshot(ProjectSession& state) const { state.terminals.clear();for(const auto& s:sessions_)state.terminals.push_back(s->configuration);state.activeTerminal=active().configuration.id; state.terminalRatio = ratio_; state.defaultShell = defaultShell_; }
 bool TerminalPane::apply(const AiEvent& event) {
     for(size_t i=0;i<sessions_.size();++i) if(sessions_[i]->notificationId==event.sessionId) {
         const bool visible=sessions_[i]->configuration.displayed && IsWindowVisible(window_) && GetForegroundWindow()==GetAncestor(window_,GA_ROOT) && !IsIconic(GetAncestor(window_,GA_ROOT));
@@ -138,7 +148,7 @@ void TerminalPane::close(size_t index) {
     endDrag(); if(rename_){DestroyWindow(rename_);rename_=nullptr;}
     sessions_[index]->terminal->stop();DestroyWindow(sessions_[index]->terminal->window());sessions_.erase(sessions_.begin()+static_cast<std::ptrdiff_t>(index));
     if(index<active_)--active_;
-    if(sessions_.empty())add(); else select(std::min(active_,sessions_.size()-1));
+    if(sessions_.empty())add({"", "Shell", directory_.u8string(), 0, false, defaultShell_}); else select(std::min(active_,sessions_.size()-1));
 }
 void TerminalPane::stop(){for(auto& s:sessions_)s->terminal->stop();}
 size_t TerminalPane::groupTab(int group) const {
@@ -159,6 +169,12 @@ RECT TerminalPane::groupBounds(int group) const {
     const int width = MulDiv(5, dpi_, 96), middle = MulDiv(std::max(0L, r.right - width), ratio_, 1000);
     return {group ? middle + width : 0, 0, group || !split ? r.right : middle, r.bottom};
 }
+RECT TerminalPane::addButtonBounds(int group, bool dropdown) const {
+    const auto pane = groupBounds(group);
+    const LONG split = std::max(pane.left, pane.right - MulDiv(24, dpi_, 96));
+    return {dropdown ? split : std::max(pane.left, pane.right - MulDiv(58, dpi_, 96)), 0,
+            dropdown ? pane.right : split, header_};
+}
 std::vector<RECT> TerminalPane::bounds() const {
     std::vector<RECT> result; const int padding=MulDiv(74,dpi_,96);
     int x[2] = {groupBounds(0).left - offset_[0], groupBounds(1).left - offset_[1]};
@@ -169,14 +185,14 @@ std::wstring TerminalPane::sessionName(const TerminalSession& session) const {
     // Keep saved/manual names separate from the process's transient OSC title.
     if (session.configuration.name != "Shell") return wide(session.configuration.name);
     if (!session.terminal->title().empty()) return wide(session.terminal->title());
-    return directory_.wsl() ? L"WSL" : L"PowerShell";
+    return directory_.wsl() ? L"WSL" : terminalShellName(session.configuration.shell);
 }
 void TerminalPane::layout(){
     if(!window_||sessions_.empty())return;
     normalizeGroups(); auto rects=bounds();
     for (int group = 0; group < 2; ++group) {
         const auto selected = groupTab(group); if (selected == sessions_.size()) continue;
-        const auto pane = groupBounds(group); const int edge = std::max(pane.left, pane.right - MulDiv(34, dpi_, 96));
+        const auto pane = groupBounds(group); const int edge = tabsRight(group);
         if(rects[selected].left < pane.left) offset_[group] += rects[selected].left - pane.left;
         else if(rects[selected].right > edge) offset_[group] += rects[selected].right - edge;
         offset_[group] = std::max(0, offset_[group]);
@@ -195,13 +211,13 @@ void TerminalPane::layout(){
     splitter_ = groupTab(1) < sessions_.size() ? RECT{left.right, 0, right.left, left.bottom} : RECT{};
     for(size_t i=0;i<tools_;++i){TOOLINFOW tip{};tip.cbSize=sizeof(tip);tip.hwnd=window_;tip.uId=i+1;SendMessageW(tooltips_,TTM_DELTOOLW,0,reinterpret_cast<LPARAM>(&tip));}
     tools_=rects.size();
-    for(size_t i=0;i<rects.size();++i){TOOLINFOW tip{};tip.cbSize=sizeof(tip);tip.hwnd=window_;tip.uId=i+1;tip.uFlags=TTF_SUBCLASS;tip.rect=rects[i];const auto pane = groupBounds(sessions_[i]->configuration.group);tip.rect.left=std::max(pane.left,tip.rect.left);tip.rect.right=std::min<LONG>(pane.right-MulDiv(34,dpi_,96),tip.rect.right);tip.lpszText=LPSTR_TEXTCALLBACKW;if(tip.rect.right>tip.rect.left)SendMessageW(tooltips_,TTM_ADDTOOLW,0,reinterpret_cast<LPARAM>(&tip));}
+    for(size_t i=0;i<rects.size();++i){TOOLINFOW tip{};tip.cbSize=sizeof(tip);tip.hwnd=window_;tip.uId=i+1;tip.uFlags=TTF_SUBCLASS;tip.rect=rects[i];const auto pane = groupBounds(sessions_[i]->configuration.group);tip.rect.left=std::max(pane.left,tip.rect.left);tip.rect.right=std::min<LONG>(tabsRight(sessions_[i]->configuration.group),tip.rect.right);tip.lpszText=LPSTR_TEXTCALLBACKW;if(tip.rect.right>tip.rect.left)SendMessageW(tooltips_,TTM_ADDTOOLW,0,reinterpret_cast<LPARAM>(&tip));}
     InvalidateRect(window_,nullptr,FALSE);
 }
 void TerminalPane::paint(){
     Renderer::Paint paint(renderer_,window_);if(!paint)return;RECT r{};GetClientRect(window_,&r);renderer_.fill(r,background);
     const auto rects=bounds();const int unit=MulDiv(26,dpi_,96);
-    for(size_t i=0;i<rects.size();++i){auto rect=rects[i];const auto pane = groupBounds(sessions_[i]->configuration.group);rect.left=std::max(rect.left,pane.left);rect.right=std::min<LONG>(rect.right,pane.right-MulDiv(34,dpi_,96));if(rect.left>=rect.right)continue;
+    for(size_t i=0;i<rects.size();++i){auto rect=rects[i];const auto pane = groupBounds(sessions_[i]->configuration.group);rect.left=std::max(rect.left,pane.left);rect.right=std::min<LONG>(rect.right,tabsRight(sessions_[i]->configuration.group));if(rect.left>=rect.right)continue;
         const bool selected = sessions_[i]->configuration.displayed;
         renderer_.fill(rect,selected?panel:background);if(selected)renderer_.fill({rect.left,header_-2,rect.right,header_},accent);
         drawAiStatus(renderer_,{rect.left,0,rect.left+unit,header_},sessions_[i]->ai.state,dpi_,static_cast<unsigned>(GetTickCount64()/80));
@@ -210,7 +226,12 @@ void TerminalPane::paint(){
         if(sessions_[i]->ai.unread)renderer_.fill({rect.left+unit-4,4,rect.left+unit,8},accent);
     }
     for (int group = 0; group < 2; ++group) if (groupTab(group) < sessions_.size()) {
-        const auto pane = groupBounds(group); RECT button{pane.right-MulDiv(34,dpi_,96),0,pane.right,header_}; renderer_.fill(button,panel);renderer_.label(button,L"+",accent,DT_CENTER|DT_VCENTER|DT_SINGLELINE);
+        const auto button = addButtonBounds(group, false), dropdown = addButtonBounds(group, true);
+        renderer_.fill(button, panel); renderer_.fill(dropdown, panel);
+        renderer_.label(button, L"+", accent, DT_CENTER|DT_VCENTER|DT_SINGLELINE);
+        const float x = (dropdown.left + dropdown.right) / 2.0f, y = header_ / 2.0f, scale = dpi_ / 96.0f;
+        renderer_.line(x - 4*scale, y - 2*scale, x, y + 2*scale, foreground, 1.5f*scale);
+        renderer_.line(x, y + 2*scale, x + 4*scale, y - 2*scale, foreground, 1.5f*scale);
     }
     renderer_.fill(splitter_, border);
 }
@@ -232,7 +253,7 @@ void TerminalPane::drag(POINT point) {
             if(point.x < (rects[i].left+rects[i].right)/2) { d.position=i; x=rects[i].left; break; }
             d.position=i+1; x=rects[i].right;
         }
-        x=std::clamp<LONG>(x,pane.left,std::max(pane.left,pane.right-MulDiv(34,dpi_,96)));
+        x=std::clamp<LONG>(x,pane.left,tabsRight(d.group));
         preview_.show({x,0,x+3,header_}); return;
     }
     if ((!split && sessions_.size()<2) || (split && target==sessions_[d.index]->configuration.group)) { preview_.hide(); return; }
@@ -270,22 +291,39 @@ void TerminalPane::menu(size_t index,POINT point){
         SendMessageW(rename_,EM_SETLIMITTEXT,120,0);SendMessageW(rename_,EM_SETSEL,0,-1);SetFocus(rename_);
     }
 }
-void TerminalPane::addAi(const std::wstring& tool) {
+void TerminalPane::addAi(const std::wstring& tool, int group) {
     if (!directory_.wsl()) return;
     if (!provider_ || provider_->state() != ConnectionState::Ready) { MessageBoxW(GetAncestor(window_, GA_ROOT), L"Reconnect the WSL project before starting an AI container.", L"Poppy", MB_OK | MB_ICONINFORMATION); return; }
-    const int group = active().configuration.group;
     add({"", utf8(tool == L"codex" ? L"Codex" : L"Claude"), directory_.u8string(), group});
     active().wslTool = tool; active().terminal->launch(); SetFocus(window());
 }
-void TerminalPane::addMenu(POINT point) {
-    HMENU menu = CreatePopupMenu(); AppendMenuW(menu, MF_STRING, 1, L"New shell");
+void TerminalPane::addShell(int group, TerminalShell shell) {
+    if (sessions_.size() >= 100) return;
+    add({"", "Shell", directory_.u8string(), group, false, shell}); SetFocus(window());
+}
+void TerminalPane::addMenu(int group, POINT point) {
+    HMENU menu = CreatePopupMenu();
     if (directory_.wsl()) {
+        AppendMenuW(menu, MF_STRING, 1, L"New WSL shell");
         AppendMenuW(menu, MF_STRING, 2, L"New Codex (ai-container)");
         AppendMenuW(menu, MF_STRING, 3, L"New Claude Code (ai-container)");
+    } else {
+        AppendMenuW(menu, MF_STRING, 1, L"PowerShell");
+        AppendMenuW(menu, MF_STRING, 4, L"Git Bash");
+        AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+        HMENU defaults = CreatePopupMenu();
+        AppendMenuW(defaults, MF_STRING, 5, L"PowerShell");
+        AppendMenuW(defaults, MF_STRING, 6, L"Git Bash");
+        CheckMenuRadioItem(defaults, 5, 6, defaultShell_ == TerminalShell::GitBash ? 6 : 5, MF_BYCOMMAND);
+        AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(defaults), L"Default shell for this project");
     }
     const auto command = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, point.x, point.y, 0, window_, nullptr); DestroyMenu(menu);
-    if (command == 1) { const int group = active().configuration.group; add({"", "Shell", directory_.u8string(), group}); SetFocus(window()); }
-    else if (command == 2 || command == 3) addAi(command == 2 ? L"codex" : L"claude");
+    if (command == 1 || command == 4) addShell(group, command == 4 ? TerminalShell::GitBash : TerminalShell::PowerShell);
+    else if (command == 2 || command == 3) addAi(command == 2 ? L"codex" : L"claude", group);
+    else if (command == 5 || command == 6) {
+        defaultShell_ = command == 6 ? TerminalShell::GitBash : TerminalShell::PowerShell;
+        layout(); if (changed) changed();
+    }
 }
 LRESULT CALLBACK TerminalPane::renameProcedure(HWND window, UINT message, WPARAM a, LPARAM b, UINT_PTR, DWORD_PTR data) {
     auto& self = *reinterpret_cast<TerminalPane*>(data);
@@ -305,11 +343,12 @@ case WM_LBUTTONDOWN:{
     const POINT point{GET_X_LPARAM(b),GET_Y_LPARAM(b)};
     if (PtInRect(&splitter_,point)) { resizing_=true;SetCapture(window_);return 0; }
     for(int group=0;group<2;++group)if(groupTab(group)<sessions_.size()) {
-        const auto pane=groupBounds(group);const RECT button{pane.right-MulDiv(34,dpi_,96),0,pane.right,header_};
-        if(PtInRect(&button,point)){add({"","Shell",directory_.u8string(),group});SetFocus(window());return 0;}
+        const auto button = addButtonBounds(group, false), dropdown = addButtonBounds(group, true);
+        if(PtInRect(&button,point)){addShell(group,defaultShell_);return 0;}
+        if(PtInRect(&dropdown,point)){POINT screen{button.left,header_};ClientToScreen(window_,&screen);addMenu(group,screen);return 0;}
     }
     const auto rects=bounds();for(size_t i=0;i<rects.size();++i) {
-        auto rect=rects[i];const auto pane=groupBounds(sessions_[i]->configuration.group);rect.left=std::max(rect.left,pane.left);rect.right=std::min<LONG>(rect.right,pane.right-MulDiv(34,dpi_,96));
+        auto rect=rects[i];const auto pane=groupBounds(sessions_[i]->configuration.group);rect.left=std::max(rect.left,pane.left);rect.right=std::min<LONG>(rect.right,tabsRight(sessions_[i]->configuration.group));
         if(PtInRect(&rect,point)){if(point.x>=rect.right-MulDiv(26,dpi_,96))close(i);else{select(i);drag_=Drag{i,point,point,false,-1,sessions_.size()};SetCapture(window_);}SetFocus(window());break;}
     }return 0;
 }
@@ -318,7 +357,7 @@ case WM_LBUTTONUP:if(drag_)drag({GET_X_LPARAM(b),GET_Y_LPARAM(b)});endDrag(true)
 case WM_CANCELMODE:case WM_CAPTURECHANGED:endDrag();resizing_=false;if(GetCapture()==window_)ReleaseCapture();return 0;
 case WM_SETCURSOR:{POINT point{};GetCursorPos(&point);ScreenToClient(window_,&point);if(PtInRect(&splitter_,point)){SetCursor(LoadCursorW(nullptr,IDC_SIZEWE));return TRUE;}break;}
 case WM_MOUSEWHEEL:{POINT point{GET_X_LPARAM(b),GET_Y_LPARAM(b)};ScreenToClient(window_,&point);const int group=groupTab(1)<sessions_.size() && point.x>splitter_.left?1:0;offset_[group]=std::max(0,offset_[group]-GET_WHEEL_DELTA_WPARAM(a)/WHEEL_DELTA*MulDiv(90,dpi_,96));InvalidateRect(window_,nullptr,FALSE);return 0;}
-case WM_CONTEXTMENU:{POINT point{GET_X_LPARAM(b),GET_Y_LPARAM(b)};if(point.x==-1&&point.y==-1){point={0,header_};ClientToScreen(window_,&point);menu(active_,point);return 0;}auto local=point;ScreenToClient(window_,&local);for(int group=0;group<2;++group)if(groupTab(group)<sessions_.size()){auto pane=groupBounds(group);RECT button{pane.right-MulDiv(34,dpi_,96),0,pane.right,header_};if(PtInRect(&button,local)){active_=groupTab(group);addMenu(point);return 0;}}const auto rects=bounds();for(size_t i=0;i<rects.size();++i)if(PtInRect(&rects[i],local)){menu(i,point);break;}return 0;}
+case WM_CONTEXTMENU:{POINT point{GET_X_LPARAM(b),GET_Y_LPARAM(b)};if(point.x==-1&&point.y==-1){point={0,header_};ClientToScreen(window_,&point);menu(active_,point);return 0;}auto local=point;ScreenToClient(window_,&local);for(int group=0;group<2;++group)if(groupTab(group)<sessions_.size()){const auto button=addButtonBounds(group,false),dropdown=addButtonBounds(group,true);if(PtInRect(&button,local)||PtInRect(&dropdown,local)){addMenu(group,point);return 0;}}const auto rects=bounds();for(size_t i=0;i<rects.size();++i){auto rect=rects[i];const int group=sessions_[i]->configuration.group;rect.left=std::max(rect.left,groupBounds(group).left);rect.right=std::min<LONG>(rect.right,tabsRight(group));if(PtInRect(&rect,local)){menu(i,point);break;}}return 0;}
 case WM_NOTIFY:if(reinterpret_cast<NMHDR*>(b)->code==TTN_GETDISPINFOW){tooltipText_=description();reinterpret_cast<NMTTDISPINFOW*>(b)->lpszText=tooltipText_.data();}return 0;
 }return DefWindowProcW(window_,m,a,b);}
 }

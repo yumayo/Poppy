@@ -35,6 +35,10 @@ constexpr const char* appLocations =
     "ALTER TABLE projects ADD COLUMN distro TEXT NOT NULL DEFAULT '';"
     "ALTER TABLE projects ADD COLUMN user TEXT NOT NULL DEFAULT '';"
     "ALTER TABLE projects ADD COLUMN remote_root TEXT NOT NULL DEFAULT '';";
+constexpr const char* terminalShells =
+    "CREATE TABLE IF NOT EXISTS terminal_settings (id INTEGER PRIMARY KEY CHECK(id=1), default_shell INTEGER NOT NULL);"
+    "CREATE TABLE IF NOT EXISTS terminal_shells (terminal_id TEXT PRIMARY KEY, shell INTEGER NOT NULL);";
+TerminalShell readShell(sqlite3_int64 value) { return value == static_cast<int>(TerminalShell::GitBash) ? TerminalShell::GitBash : TerminalShell::PowerShell; }
 
 class Database {
 public:
@@ -135,7 +139,7 @@ void projectSchema(Database& db) {
         "CREATE TABLE IF NOT EXISTS tabs (position INTEGER PRIMARY KEY, path TEXT NOT NULL, diff INTEGER NOT NULL,"
         " file_top INTEGER NOT NULL, file_left INTEGER NOT NULL, file_anchor INTEGER NOT NULL, file_caret INTEGER NOT NULL, file_after INTEGER NOT NULL,"
         " diff_top INTEGER NOT NULL, diff_left INTEGER NOT NULL, diff_anchor INTEGER NOT NULL, diff_caret INTEGER NOT NULL, diff_after INTEGER NOT NULL, pinned INTEGER NOT NULL);"
-        "CREATE TABLE IF NOT EXISTS expanded (path TEXT PRIMARY KEY);") + projectViews + splitViews + projectConnection + gitComparisons + wrappedViews + wrappedDiffViews + comparisonRepositories).c_str(), {
+        "CREATE TABLE IF NOT EXISTS expanded (path TEXT PRIMARY KEY);") + projectViews + splitViews + projectConnection + gitComparisons + wrappedViews + wrappedDiffViews + comparisonRepositories + terminalShells).c_str(), {
         "ALTER TABLE session ADD COLUMN diff_inline INTEGER NOT NULL DEFAULT 0;"
         "UPDATE session SET diff_inline=COALESCE((SELECT diff_inline FROM tabs WHERE diff<>0"
         " ORDER BY (position=(SELECT active_tab FROM session WHERE id=1)) DESC,position LIMIT 1),0);"
@@ -144,7 +148,7 @@ void projectSchema(Database& db) {
         "ALTER TABLE tabs DROP COLUMN file_inline;"
         "ALTER TABLE tabs DROP COLUMN diff_inline;",
         "ALTER TABLE session ADD COLUMN git_tree INTEGER NOT NULL DEFAULT 0;",
-        "ALTER TABLE tabs ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0;", projectViews, splitViews, projectConnection, gitComparisons, wrappedViews, wrappedDiffViews, comparisonRepositories});
+        "ALTER TABLE tabs ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0;", projectViews, splitViews, projectConnection, gitComparisons, wrappedViews, wrappedDiffViews, comparisonRepositories, terminalShells});
 }
 }
 struct Storage::Impl {
@@ -266,6 +270,10 @@ std::optional<ProjectSession> Storage::loadProject(const std::string& key, const
     Statement terminals(db, "SELECT terminal_id,name,directory FROM terminals ORDER BY position LIMIT 100");
     state.terminals.clear();
     while (terminals.row()) state.terminals.push_back({terminals.text(0), terminals.text(1), terminals.text(2)});
+    Statement settings(db, "SELECT default_shell FROM terminal_settings WHERE id=1");
+    if (settings.row()) state.defaultShell = readShell(settings.number(0));
+    Statement shells(db, "SELECT terminal_id,shell FROM terminal_shells");
+    while (shells.row()) for (auto& terminal : state.terminals) if (terminal.id == shells.text(0)) { terminal.shell = readShell(shells.number(1)); break; }
     if (state.terminals.empty()) state.terminals.push_back({"shell-1", "Shell", path});
     if (std::none_of(state.terminals.begin(), state.terminals.end(), [&](const SavedTerminal& terminal) { return terminal.id == state.activeTerminal; })) state.activeTerminal = state.terminals.front().id;
     Statement collapsed(db, "SELECT path FROM git_collapsed ORDER BY path LIMIT 50000");
@@ -310,15 +318,19 @@ void Storage::saveProject(const std::string& key, const std::string& path, const
     }
     Statement expanded(db, "INSERT OR IGNORE INTO expanded VALUES(?)");
     for (const auto& value : state.expanded) { expanded.text(1, value); expanded.run(); expanded.reset(); }
-    db.exec("DELETE FROM terminals; DELETE FROM git_collapsed;");
+    db.exec("DELETE FROM terminals; DELETE FROM git_collapsed; DELETE FROM terminal_shells;");
+    Statement settings(db, "INSERT OR REPLACE INTO terminal_settings VALUES(1,?)");
+    settings.number(1, static_cast<int>(state.defaultShell)); settings.run();
     Statement views(db, "INSERT OR REPLACE INTO view_state VALUES(1,?,?,?,?,?,?,?,?)");
     views.number(1, state.explorerTop); views.number(2, state.explorerLeft); views.number(3, state.gitTop); views.number(4, state.gitLeft);
     views.number(5, static_cast<sqlite3_int64>(state.firstTabRow)); views.text(6, state.gitSelected); views.text(7, state.focusedPane); views.text(8, state.activeTerminal); views.run();
     Statement terminal(db, "INSERT INTO terminals VALUES(?,?,?,?)");
+    Statement shell(db, "INSERT INTO terminal_shells VALUES(?,?)");
     for (size_t i = 0; i < state.terminals.size(); ++i) {
         const auto& value = state.terminals[i];
         if (value.id.empty() || value.id.size() > 64 || value.name.size() > 512) throw std::runtime_error("Invalid terminal configuration");
         terminal.number(1, static_cast<sqlite3_int64>(i)); terminal.text(2, value.id); terminal.text(3, value.name); terminal.text(4, value.directory); terminal.run(); terminal.reset();
+        shell.text(1, value.id); shell.number(2, static_cast<int>(value.shell)); shell.run(); shell.reset();
     }
     Statement collapsed(db, "INSERT OR IGNORE INTO git_collapsed VALUES(?)");
     for (const auto& value : state.collapsedGit) { collapsed.text(1, value); collapsed.run(); collapsed.reset(); }

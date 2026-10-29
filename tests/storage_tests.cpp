@@ -33,7 +33,7 @@ bool same(const poppy::ViewState& a, const poppy::ViewState& b) {
     return a.top == b.top && a.left == b.left && a.anchor == b.anchor && a.caret == b.caret && a.after == b.after && a.wrapOffset == b.wrapOffset;
 }
 bool same(const poppy::ProjectSession& a, const poppy::ProjectSession& b) {
-    if (a.wslUid != b.wslUid) return false;
+    if (a.wslUid != b.wslUid || a.defaultShell != b.defaultShell) return false;
     if (a.sidebar != b.sidebar || a.terminalHeight != b.terminalHeight || a.terminalVisible != b.terminalVisible ||
         a.gitSidebar != b.gitSidebar || a.branchSidebar != b.branchSidebar || a.diffInline != b.diffInline || a.gitTree != b.gitTree || a.activeTab != b.activeTab || a.expanded != b.expanded || a.selected != b.selected || a.tabs.size() != b.tabs.size() || a.explorerTop != b.explorerTop || a.explorerLeft != b.explorerLeft ||
         a.gitTop != b.gitTop || a.gitLeft != b.gitLeft || a.firstTabRow != b.firstTabRow || a.rightTabRow != b.rightTabRow || a.editorRatio != b.editorRatio || a.terminalRatio != b.terminalRatio || a.gitSelected != b.gitSelected ||
@@ -42,7 +42,7 @@ bool same(const poppy::ProjectSession& a, const poppy::ProjectSession& b) {
         const auto& x = a.tabs[i]; const auto& y = b.tabs[i];
         if (x.path != y.path || x.diff != y.diff || x.pinned != y.pinned || x.group != y.group || x.displayed != y.displayed || x.diffKind != y.diffKind || x.revision != y.revision || x.allChanges != y.allChanges || x.gitRoot != y.gitRoot || !same(x.fileView, y.fileView) || !same(x.diffView, y.diffView)) return false;
     }
-    for (size_t i = 0; i < a.terminals.size(); ++i) { const auto& x = a.terminals[i]; const auto& y = b.terminals[i]; if (x.id != y.id || x.name != y.name || x.directory != y.directory || x.group != y.group || x.displayed != y.displayed) return false; }
+    for (size_t i = 0; i < a.terminals.size(); ++i) { const auto& x = a.terminals[i]; const auto& y = b.terminals[i]; if (x.id != y.id || x.name != y.name || x.directory != y.directory || x.group != y.group || x.displayed != y.displayed || x.shell != y.shell) return false; }
     return true;
 }
 void roundTripAndIsolation() {
@@ -55,6 +55,7 @@ void roundTripAndIsolation() {
     state.explorerTop = 13; state.explorerLeft = 7; state.gitTop = 3; state.gitLeft = 4; state.firstTabRow = 2;
     state.gitSelected = "src/日本語"; state.collapsedGit = {"docs", "src/nested"}; state.focusedPane = "terminal";
     state.terminals = {{"codex", "Codex", path}, {"claude", "Claude Code", path}, {"shell", "確認用", path}}; state.activeTerminal = "claude";
+    state.defaultShell = poppy::TerminalShell::GitBash; state.terminals[2].shell = poppy::TerminalShell::GitBash;
     state.tabs = {{path + "\\日本語's file.cpp", false, {42, 17, 30, 50, false}, {20, 3, 2, 11, true}},
                   {path + "\\deleted.cpp", true, {5, 2, 1, 7, false}, {50, 4, 6, 14, true}}};
     state.tabs[0].pinned = true; state.tabs[0].displayed = true; state.tabs[1].group = 1; state.tabs[1].displayed = true;
@@ -273,6 +274,35 @@ void migrateWrapping() {
     storage.saveProject(key, key, state);
     check(same(*storage.loadProject(key, key), state), "A migrated diff lost its continuation or selected side");
 }
+void terminalShellMigration() {
+    Fixture fixture;
+    const std::string key = "c:/shell profiles";
+    poppy::Storage storage(fixture.directory);
+    poppy::ProjectSession state;
+    state.terminals = {{"left", "Build", key, 0, true}, {"right", "Shell", key, 1, true}};
+    state.activeTerminal = "right";
+    storage.saveProject(key, key, state);
+    const auto db = storage.projectDirectory(key, key) / "storage.sql";
+    execute(db, "DROP TABLE terminal_settings; DROP TABLE terminal_shells; PRAGMA user_version=11;");
+    check(same(*storage.loadProject(key, key), state), "Shell migration changed existing names, groups or the PowerShell default");
+    state.defaultShell = poppy::TerminalShell::GitBash;
+    state.terminals[1].shell = poppy::TerminalShell::GitBash;
+    storage.saveProject(key, key, state);
+    {
+        poppy::Storage reopened(fixture.directory);
+        check(same(*reopened.loadProject(key, key), state), "Shell profiles or default did not survive reopening a migrated project");
+    }
+    auto invalid = state; invalid.defaultShell = poppy::TerminalShell::PowerShell;
+    invalid.terminals[0].shell = poppy::TerminalShell::GitBash; invalid.terminals.push_back(invalid.terminals[0]);
+    rejects([&] { storage.saveProject(key, key, invalid); }, "Duplicate terminal save was accepted");
+    check(same(*storage.loadProject(key, key), state), "Failed save partially changed shell profiles or the default");
+    state.defaultShell = poppy::TerminalShell::PowerShell;
+    storage.saveProject(key, key, state);
+    check(storage.loadProject(key, key)->terminals[1].shell == poppy::TerminalShell::GitBash, "Changing the default modified an existing terminal");
+    execute(db, "UPDATE terminal_settings SET default_shell=99; UPDATE terminal_shells SET shell=99;");
+    state.terminals[1].shell = poppy::TerminalShell::PowerShell;
+    check(same(*storage.loadProject(key, key), state), "Unknown saved shells did not fall back to PowerShell");
+}
 void schemaAndRegistry() {
     Fixture fixture;
     const auto appDb = fixture.directory / "storage.sql";
@@ -344,7 +374,7 @@ void wslRoundTripAndMigration() {
 }
 int main() {
     try {
-        roundTripAndIsolation(); atomicSave(); projectHistory(); migrateProjectLayout(); migrateGitLayout(); migratePinnedTabs(); migrateWorkspaceAndTerminals(); migrateSplitLayout(); migrateWrapping(); schemaAndRegistry(); gitComparisonRoundTrip(); wslRoundTripAndMigration();
+        roundTripAndIsolation(); atomicSave(); projectHistory(); migrateProjectLayout(); migrateGitLayout(); migratePinnedTabs(); migrateWorkspaceAndTerminals(); migrateSplitLayout(); migrateWrapping(); terminalShellMigration(); schemaAndRegistry(); gitComparisonRoundTrip(); wslRoundTripAndMigration();
         std::cout << "Storage tests passed\n";
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
 }
