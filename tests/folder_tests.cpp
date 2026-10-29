@@ -769,12 +769,14 @@ void explorerMoveTests(const fs::path& executable) {
         for (const UINT cancel : {WM_KEYDOWN, WM_CANCELMODE, WM_CAPTURECHANGED}) {
             drag(nested, point(to), cancel);
             check(fs::exists(source / L"nested") && !fs::exists(target / L"nested"), "Cancelled drag moved a folder");
+            check(expanded(tree, nested), "Cancelled folder drag toggled the source folder");
         }
         drag(nested, {-20, -20});
         drag(from, point(nested)); // Cannot move a folder into its descendants.
         drag(nested, point(nested, 160)); // Cannot move into itself.
         drag(nested, point(from)); // Already in this folder.
         drag(root, point(to)); // The project root cannot be moved.
+        check(expanded(tree, root), "Dragging the project root collapsed its children");
         check(fs::exists(source / L"nested" / L"edited.txt") && !fs::exists(target / L"nested"), "Invalid drag moved a folder");
         drag(nested, point(to));
         waitFor([&] { return fs::exists(movedFile) && !fs::exists(source / L"nested"); }, "Dragging a folder did not move its descendants");
@@ -1004,24 +1006,30 @@ void treeInteractionTests(const fs::path& executable) {
           "Clicking the arrow did not collapse and retain cached children");
     // Real rapid clicks arrive as DOWN/UP/DBLCLK/UP, not two DOWN/UP pairs.
     // Check each press while the loaded children stay cached.
-    bool open = false;
-    for (const auto message : {WM_LBUTTONDOWN, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONDBLCLK}) {
-        send(tree, message, MK_LBUTTON, MAKELPARAM(arrowX, y));
-        send(tree, WM_LBUTTONUP, 0, MAKELPARAM(arrowX, y));
-        open = !open;
-        check(expanded(tree, directory) == open, "Rapid arrow clicks skipped an expand/collapse press");
-        check(nextItem(tree, TreeRelation::Child, directory) == nested, "Rapid toggling discarded cached children");
-        if (!open) check(send(tree, treeGetRow, nested) == -1, "Rapid collapse left a child visible");
-    }
     const int labelX = MulDiv(50, GetDpiForWindow(app.window), 96);
-    for (const bool expected : {true, false}) {
-        click(tree, labelX, y);
-        check(expanded(tree, directory) != expected, "A single label click toggled the folder");
-        send(tree, WM_LBUTTONDBLCLK, MK_LBUTTON, MAKELPARAM(labelX, y));
-        send(tree, WM_LBUTTONUP, 0, MAKELPARAM(labelX, y));
-        check(expanded(tree, directory) == expected, "Double-clicking the label did not toggle the folder once");
-        if (expected) waitFor([&] { return nextItem(tree, TreeRelation::Child, directory) != 0; }, "Rapid clicks prevented the next folder load");
+    RECT client{}; GetClientRect(tree, &client);
+    const int paddingX = client.right - MulDiv(24, GetDpiForWindow(app.window), 96);
+    for (const int x : {MulDiv(4, GetDpiForWindow(app.window), 96), arrowX, labelX, paddingX}) {
+        bool open = false;
+        for (const auto message : {WM_LBUTTONDOWN, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONDBLCLK}) {
+            send(tree, message, MK_LBUTTON, MAKELPARAM(x, y));
+            send(tree, WM_LBUTTONUP, 0, MAKELPARAM(x, y));
+            open = !open;
+            check(expanded(tree, directory) == open, "Folder row clicks skipped an expand/collapse press");
+            check(nextItem(tree, TreeRelation::Child, directory) == nested, "Rapid toggling discarded cached children");
+            if (!open) check(send(tree, treeGetRow, nested) == -1, "Rapid collapse left a child visible");
+        }
+        for (const UINT cancel : {WM_KEYDOWN, WM_CANCELMODE, WM_CAPTURECHANGED}) {
+            send(tree, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(x, y));
+            send(tree, cancel, cancel == WM_KEYDOWN ? VK_ESCAPE : 0);
+            send(tree, WM_LBUTTONUP, 0, MAKELPARAM(x, y));
+            check(!expanded(tree, directory), "A cancelled folder row click toggled the folder");
+        }
     }
+    click(tree, labelX, height / 2);
+    check(!expanded(tree, root), "A single root row click did not collapse the tree");
+    click(tree, labelX, height / 2);
+    check(expanded(tree, root), "A single root row click did not reopen the tree");
 }
 void folderTests(const fs::path& executable) {
     Fixture fixture;
@@ -1209,8 +1217,22 @@ void gitSidebarTests(const fs::path& executable) {
         send(changes, treeSelect, docs);
         check(scrollInfo(viewer).nMax == 0, "Selecting a Git folder opened a file");
         send(changes, treeSelect, nextItem(changes, TreeRelation::Child, docs)); waitLines(viewer, 200);
-        expand(changes, src, false);
-        check(!expanded(changes, src), "A Git folder did not collapse");
+        const auto clickFolder = [&](UINT message, int x) {
+            const int height = static_cast<int>(send(changes, treeGetRowHeight));
+            const int y = (static_cast<int>(send(changes, treeGetRow, src)) - scrollInfo(changes).nPos) * height + height / 2;
+            send(changes, message, MK_LBUTTON, MAKELPARAM(px(x), y));
+            send(changes, WM_LBUTTONUP, 0, MAKELPARAM(px(x), y));
+        };
+        for (const int x : {4, 90}) {
+            bool open = true;
+            for (const auto message : {WM_LBUTTONDOWN, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONDBLCLK}) {
+                clickFolder(message, x); open = !open;
+                check(expanded(changes, src) == open, "Git folder row clicks skipped an expand/collapse press");
+            }
+        }
+        check(visibleTabCount(app) == 1, "Clicking a Git folder opened another file tab");
+        clickFolder(WM_LBUTTONDOWN, 90);
+        check(!expanded(changes, src), "A single Git folder row click did not collapse the folder");
         view(false); view(true);
         group = gitGroup(changes, false);
         docs = nextItem(changes, TreeRelation::Child, group); src = nextItem(changes, TreeRelation::Next, docs);

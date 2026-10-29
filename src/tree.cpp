@@ -194,7 +194,12 @@ void Tree::endDrag(bool drop) {
     if (GetCapture() == window_) ReleaseCapture();
     SetCursor(LoadCursorW(nullptr, IDC_ARROW)); InvalidateRect(window_, nullptr, FALSE);
     if (!drop || !item(drag.source)) return;
-    if (!drag.active) { select(drag.source); return; }
+    if (!drag.active) {
+        const auto node = item(drag.source);
+        if (node->expandable) expand(drag.source, !node->expanded);
+        else select(drag.source);
+        return;
+    }
     if (drag.target && canDrag && canDrag(drag.source) && canDrop && canDrop(drag.source, drag.target) && moveCommitted)
         moveCommitted(drag.source, drag.target);
 }
@@ -281,7 +286,7 @@ LRESULT CALLBACK Tree::procedure(HWND w, UINT m, WPARAM a, LPARAM b) {
     return self ? self->handle(m, a, b) : DefWindowProcW(w, m, a, b);
 }
 LRESULT Tree::handle(UINT m, WPARAM a, LPARAM b) {
-    // A file drag owns capture; scrollbar hit testing must not consume its release.
+    // A row press owns capture; scrollbar hit testing must not consume its release.
     if (drag_) {
         if (m == WM_SETCURSOR && drag_->active) { SetCursor(LoadCursorW(nullptr, drag_->target ? IDC_SIZEALL : IDC_NO)); return TRUE; }
         if (m == WM_MOUSEMOVE) { updateDrag({GET_X_LPARAM(b), GET_Y_LPARAM(b)}); return 0; }
@@ -358,41 +363,29 @@ LRESULT Tree::handle(UINT m, WPARAM a, LPARAM b) {
     case WM_GETDLGCODE: return DLGC_WANTARROWS | DLGC_WANTCHARS;
     case WM_SETFOCUS: if (!selection() && child()) select(child(), false); InvalidateRect(window_, nullptr, FALSE); return 0;
     case WM_KILLFOCUS: InvalidateRect(window_, nullptr, FALSE); return 0;
-    case WM_LBUTTONDOWN: {
+    // Windows sends DBLCLK instead of the second DOWN during rapid clicks.
+    case WM_LBUTTONDOWN: case WM_LBUTTONDBLCLK: {
         SetFocus(window_);
         hover({GET_X_LPARAM(b), GET_Y_LPARAM(b)});
         const auto id = hit(GET_Y_LPARAM(b)); if (!id) return 0;
         for (const unsigned slot : {0u, 1u, 2u, 3u}) {
             const auto action = actionBounds(id, slot);
             if (actionVisible(id, slot) && PtInRect(&action, {GET_X_LPARAM(b), GET_Y_LPARAM(b)})) {
+                if (m == WM_LBUTTONDBLCLK) return 0;
                 SendMessageW(actionTips_, TTM_POP, 0, 0); select(id, false);
                 const auto& clicked = slot == 3 ? quaternaryActionClicked : slot == 2 ? tertiaryActionClicked : slot == 1 ? secondaryActionClicked : actionClicked;
                 if (clicked) clicked(id);
                 return 0;
             }
         }
-        const auto& row = model_.visible()[static_cast<size_t>(this->row(id))];
-        const int x = GET_X_LPARAM(b) + left_, edge = static_cast<int>(row.depth) * indent_;
-        if (item(id)->expandable && x >= edge && x < edge + indent_) expand(id, !item(id)->expanded);
-        else if (canDrag && canDrag(id)) {
+        if (m == WM_LBUTTONDBLCLK && !item(id)->expandable) return 0;
+        // The entire folder row, including its arrow, has one click target.
+        // Commit on release so a drag or cancellation does not toggle it.
+        if (item(id)->expandable || (canDrag && canDrag(id))) {
             select(id, false);
             drag_ = Drag{id, 0, {GET_X_LPARAM(b), GET_Y_LPARAM(b)}, {GET_X_LPARAM(b), GET_Y_LPARAM(b)}};
             SetCapture(window_);
         } else select(id);
-        return 0;
-    }
-    case WM_LBUTTONDBLCLK: {
-        const auto id = hit(GET_Y_LPARAM(b));
-        for (const unsigned slot : {0u, 1u, 2u, 3u}) {
-            const auto action = actionBounds(id, slot);
-            if (PtInRect(&action, {GET_X_LPARAM(b), GET_Y_LPARAM(b)})) return 0;
-        }
-        if (id && item(id)->expandable) {
-            const auto& row = model_.visible()[static_cast<size_t>(this->row(id))];
-            // Windows replaces the second button-down with this message.
-            // Arrow clicks must toggle on every press, even in a double-click.
-            if (GET_X_LPARAM(b) + left_ >= static_cast<int>(row.depth) * indent_) expand(id, !item(id)->expanded);
-        }
         return 0;
     }
     case WM_MOUSEWHEEL: {
