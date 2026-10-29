@@ -305,8 +305,69 @@ void terminalCopyTests() {
     history.feed("first\r\nsecond\r\nthird"); scrolled.update(history, 1, 0, false, true);
     check(scrolled.selectedText(0, 16) == "first\r\nsecond", "copy uses the visible scrollback rather than the live screen");
 }
+void terminalSelectionScrollTests() {
+    TerminalModel model(8, 2); TerminalDisplay display;
+    model.feed("first\r\nsecond\r\nthird\r\nfourth\r\nfifth");
+    display.update(model, 0, 0, false, true);
+    display.beginSelection(0); display.extendSelection(model, 6);
+    check(display.hasSelection() && display.selectedText() == "fourth", "drag selects the committed terminal text");
+    display.update(model, 1, 1);
+    check(display.selectionRange() == std::make_pair(8, 14) && display.selectedText() == "fourth", "scrolling moves highlighting with the selected row");
+    display.update(model, 3, 2);
+    check(display.hasSelection() && display.selectionRange() == std::make_pair(16, 16) && display.selectedText() == "fourth", "selection and copy survive scrolling completely off screen");
+    display.update(model, 0, 3);
+    check(display.selectionRange() == std::make_pair(0, 6), "scrolling back restores the original highlight");
+    display.beginSelection(6); display.extendSelection(model, 0);
+    display.update(model, 3, 4);
+    display.extendSelection(model, 0);
+    check(display.selectedText() == "first\r\nsecond\r\nthird\r\nfourth", "backward drag across scroll positions includes hidden intervening rows");
+    check(display.selectionRange() == std::make_pair(0, 16), "a selection spanning the viewport highlights all visible cells");
+    display.beginSelection(2); display.update(model, 0, 5); display.extendSelection(model, 13);
+    check(display.selectedText() == "rst\r\nsecond\r\nthird\r\nfourth\r\nfifth", "forward drag across scroll positions keeps both endpoints and row boundaries");
+    display.clearSelection();
+    check(!display.hasSelection() && display.selectedText().empty() && display.selectionRange() == std::make_pair(0, 0), "clearing also discards an off-screen selection");
+    display.beginSelection(0); display.extendSelection(model, 0);
+    check(!display.hasSelection() && display.selectedText().empty(), "a click still does not select text");
+
+    TerminalModel unicode(12, 2); TerminalDisplay wide;
+    unicode.feed("A日本😀Z\r\nnext"); wide.update(unicode, 0, 0, false, true);
+    wide.beginSelection(2); wide.extendSelection(unicode, 6);
+    unicode.feed("\r\nlast"); wide.changed(1); wide.update(unicode, 0, 40);
+    check(wide.hasSelection() && wide.selectionRange() == std::make_pair(0, 0) && wide.selectedText() == "日本😀", "output scroll keeps the selected Unicode text off screen");
+    wide.update(unicode, 1, 41);
+    check(wide.selectionRange() == std::make_pair(1, 7) && wide.selectedText() == "日本😀", "wide-character highlight is restored on returning to history");
+    unicode.feed("\x1b[?2026h\x1b[H\x1b[2Jpartial"); wide.changed(42);
+    check(!wide.update(unicode, 0, 42), "selection scrolling respects a synchronized frame");
+    wide.beginSelection(2); wide.extendSelection(unicode, 6);
+    check(wide.selectedText() == "日本😀", "selecting during synchronized output reads the displayed cells");
+    unicode.feed("\x1b[?2026l"); wide.changed(43); wide.update(unicode, 0, 43);
+    check(wide.hasSelection() && wide.selectedText() == "日本😀", "a delayed scroll commit preserves selected text");
+
+    TerminalModel bounded(8, 2); TerminalDisplay history;
+    for (int i = 0; i < 1002; ++i) bounded.feed("row\r\n");
+    history.update(bounded, 0, 0, false, true);
+    history.beginSelection(0); history.extendSelection(bounded, 3);
+    bounded.feed("next\r\n"); history.changed(1); history.update(bounded, 1, 40);
+    check(history.selectionRange() == std::make_pair(0, 3) && history.selectedText() == "row", "history eviction does not shift the selection onto a different row");
+    history.update(bounded, bounded.historySize(), 41);
+    history.beginSelection(0); history.extendSelection(bounded, 3);
+    bounded.feed("drop\r\n"); history.changed(42); history.update(bounded, bounded.historySize(), 80);
+    check(!history.hasSelection(), "selection is cleared when its text leaves the history budget");
+    history.beginSelection(0); history.extendSelection(bounded, 3);
+    bounded.feed("\x1b[3J"); history.changed(81); history.update(bounded, 0, 120);
+    check(!history.hasSelection(), "erasing selected history clears its selection");
+    history.beginSelection(0); history.extendSelection(bounded, 3);
+    bounded.feed("\x1b[?1049hALT\x1b[?1049l"); history.changed(121); history.update(bounded, 0, 160);
+    check(!history.hasSelection(), "switching terminal buffers invalidates old selection coordinates");
+    history.beginSelection(0); history.extendSelection(bounded, 3);
+    bounded.resize(10, 3); history.resized(161); history.update(bounded, 0, 300);
+    check(!history.hasSelection(), "resizing invalidates the selected cell coordinates");
+    history.beginSelection(0); history.extendSelection(bounded, 3);
+    bounded.feed("\x1b" "c"); history.changed(301); history.update(bounded, 0, 340);
+    check(!history.hasSelection(), "terminal reset clears selection without reusing old row coordinates");
+}
 }
 int main() {
-    try { textTests(); terminalTests(); terminalTitleTests(); terminalDisplayTests(); terminalInputTests(); terminalScrollTests(); terminalCopyTests(); std::cout << "Text and terminal core tests passed.\n"; return EXIT_SUCCESS; }
+    try { textTests(); terminalTests(); terminalTitleTests(); terminalDisplayTests(); terminalInputTests(); terminalScrollTests(); terminalCopyTests(); terminalSelectionScrollTests(); std::cout << "Text and terminal core tests passed.\n"; return EXIT_SUCCESS; }
     catch (const std::exception& error) { std::cerr << error.what() << '\n'; return EXIT_FAILURE; }
 }

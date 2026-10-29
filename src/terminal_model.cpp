@@ -22,6 +22,7 @@ Color color256(int n) {
 TerminalModel::TerminalModel(int columns, int rows) : columns_(std::max(2, columns)), rows_(std::max(1, rows)), bottom_(rows_ - 1) { reset(); }
 Cell TerminalModel::blank() const { return {U' ', inverse_ ? bg_ : fg_, inverse_ ? fg_ : bg_, false}; }
 void TerminalModel::reset() {
+    ++generation_; firstRow_ = 0;
     fg_ = foreground; bg_ = background; inverse_ = bold_ = alternate_ = false;
     cursorVisible_ = autoWrap_ = true; bracketedPaste_ = applicationCursor_ = origin_ = false;
     synchronizedOutput_ = false;
@@ -35,6 +36,7 @@ void TerminalModel::reset() {
 void TerminalModel::resize(int columns, int rows) {
     columns = std::clamp(columns, 2, 500); rows = std::clamp(rows, 1, 200);
     if (columns == columns_ && rows == rows_) return;
+    ++generation_;
     for (Screen* s : {&normal_, &alternateScreen_}) {
         // Keep the cursor visible when the pane shrinks; no unbounded reflow buffer.
         const int remove = std::max(0, s->y - rows + 1);
@@ -74,7 +76,7 @@ void TerminalModel::scrollUp(int count) {
         if (!alternate_ && top_ == 0 && bottom_ == rows_ - 1) {
             historyCells_ += s.cells.front().size(); history_.push_back(std::move(s.cells.front()));
             // At most 1,000 lines AND 131,072 cells (roughly 2 MiB).
-            while (history_.size() > 1000 || historyCells_ > 131072) { historyCells_ -= history_.front().size(); history_.pop_front(); }
+            while (history_.size() > 1000 || historyCells_ > 131072) { historyCells_ -= history_.front().size(); history_.pop_front(); ++firstRow_; }
         }
         for (int y = top_; y < bottom_; ++y) s.cells[y] = std::move(s.cells[y + 1]);
         s.cells[bottom_] = std::vector<Cell>(columns_, blank());
@@ -162,7 +164,7 @@ void TerminalModel::csi(char command) {
     case 'H': case 'f': s.y = std::clamp(minY + n - 1, minY, maxY); s.x = std::clamp(arg(1, 1) - 1, 0, columns_ - 1); break;
     case 'J':
         if (args[0] == 2) for (int y = 0; y < rows_; ++y) erase(y, 0, columns_);
-        else if (args[0] == 3) { history_.clear(); historyCells_ = 0; }
+        else if (args[0] == 3) { firstRow_ += static_cast<int64_t>(history_.size()); history_.clear(); historyCells_ = 0; }
         else if (args[0] == 0) { erase(s.y, s.x, columns_); for (int y = s.y + 1; y < rows_; ++y) erase(y, 0, columns_); }
         else if (args[0] == 1) { for (int y = 0; y < s.y; ++y) erase(y, 0, columns_); erase(s.y, 0, s.x + 1); }
         break;
@@ -191,6 +193,7 @@ void TerminalModel::csi(char command) {
             else if (mode == 2026) synchronizedOutput_ = on;
             else if (mode == 1049 || mode == 47 || mode == 1047) {
                 if (on != alternate_) {
+                    ++generation_;
                     alternate_ = on; top_ = 0; bottom_ = rows_ - 1;
                     if (on) { alternateScreen_ = {}; alternateScreen_.cells.assign(rows_, std::vector<Cell>(columns_)); }
                 }

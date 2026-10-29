@@ -28,7 +28,7 @@ private:
     void send(std::string text, bool userInput = true);
     void paste();
     void copy();
-    bool hasSelection() const { return anchor_ >= 0 && caret_ >= 0 && anchor_ != caret_; }
+    bool hasSelection() const { return display_.hasSelection(); }
     void paint();
     void resize();
     void scrollbars();
@@ -59,7 +59,6 @@ private:
     int requestedColumns_ = 80, requestedRows_ = 24;
     std::wstring error_;
     size_t scroll_ = 0;
-    int anchor_ = -1, caret_ = -1;
     bool selecting_ = false;
     wchar_t highSurrogate_ = 0;
 };

@@ -22,6 +22,9 @@ public:
     void resize(int columns, int rows);
     const std::vector<Cell>& row(int y, size_t scroll = 0) const;
     size_t historySize() const { return alternate_ ? 0 : history_.size(); }
+    // Stable row coordinates even when the bounded history drops old lines.
+    int64_t firstRow() const { return alternate_ ? 0 : firstRow_; }
+    uint64_t generation() const { return generation_; }
     int columns() const { return columns_; }
     int rows() const { return rows_; }
     int cursorX() const { return active().x; }
@@ -54,6 +57,8 @@ private:
     Screen normal_, alternateScreen_;
     std::deque<std::vector<Cell>> history_;
     size_t historyCells_ = 0;
+    int64_t firstRow_ = 0;
+    uint64_t generation_ = 0;
     Color fg_ = foreground, bg_ = background;
     bool inverse_ = false, bold_ = false, alternate_ = false, cursorVisible_ = true;
     bool bracketedPaste_ = false, applicationCursor_ = false, autoWrap_ = true, origin_ = false;

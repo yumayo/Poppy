@@ -39,7 +39,7 @@ bool Terminal::start() {
     try { if (starting) starting(); }
     catch (const std::exception& failure) { error_ = wide(failure.what()); stop(); return false; }
     error_.clear(); model_ = TerminalModel(model_.columns(), model_.rows()); model_.reply = [this](std::string s) { send(std::move(s), false); };
-    scroll_ = 0; anchor_ = caret_ = -1;
+    scroll_ = 0; display_.clearSelection();
     endedNotified_ = false;
     display_ = TerminalDisplay{}; display_.update(model_, scroll_, GetTickCount64(), false, true);
     scrollbars();
@@ -157,7 +157,7 @@ void Terminal::send(std::string text, bool userInput) {
     if (userInput) {
         display_.input(GetTickCount64());
         const bool selected = hasSelection();
-        scroll_ = 0; anchor_ = caret_ = -1;
+        scroll_ = 0; display_.clearSelection();
         // Echo will invalidate the new frame. Avoid painting the old screen on
         // every key before ConPTY has even processed it.
         if (selected) InvalidateRect(window_, nullptr, FALSE);
@@ -209,11 +209,8 @@ void Terminal::pump() {
             terminal->display_.changed(GetTickCount64());
             if (terminal->ended) terminal->ended();
         }
-        const int oldColumns = terminal->display_.columns(), oldRows = terminal->display_.rows();
         if (terminal->display_.update(terminal->model_, terminal->scroll_, GetTickCount64(), queued,
             finished && !queued && terminal->display_.pending())) {
-            if (oldColumns != terminal->display_.columns() || oldRows != terminal->display_.rows())
-                terminal->anchor_ = terminal->caret_ = -1;
             terminal->scrollbars();
             terminal->imePosition();
             if (IsWindowVisible(terminal->window_)) {
@@ -240,7 +237,7 @@ void Terminal::resize() {
     const int columns = std::clamp((static_cast<int>(rect.right) - 12) / cellWidth_, 2, 500);
     const int rows = std::clamp((static_cast<int>(rect.bottom) - header_ - 8) / cellHeight_, 1, 200);
     if (columns == model_.columns() && rows == model_.rows()) return;
-    model_.resize(columns, rows); scroll_ = 0; anchor_ = caret_ = -1;
+    model_.resize(columns, rows); scroll_ = 0; display_.clearSelection();
     scrollbars();
     display_.resized(GetTickCount64());
     if (console_) {
@@ -263,7 +260,6 @@ void Terminal::scrollbars() {
 }
 void Terminal::scroll(int offset) {
     scroll_ = static_cast<size_t>(std::clamp(offset, 0, static_cast<int>(model_.historySize())));
-    anchor_ = caret_ = -1;
     display_.update(model_, scroll_, GetTickCount64());
     scrollbars(); imePosition(); InvalidateRect(window_, nullptr, FALSE);
     // Present each wheel or thumb position while input continues to arrive.
@@ -295,8 +291,8 @@ int Terminal::point(int x, int y) const {
 }
 void Terminal::copy() {
     if (!hasSelection()) return;
-    if (copyText(window_, wide(display_.selectedText(anchor_, caret_)))) {
-        anchor_ = caret_ = -1;
+    if (copyText(window_, wide(display_.selectedText()))) {
+        display_.clearSelection();
         InvalidateRect(window_, nullptr, FALSE); UpdateWindow(window_);
     } else {
         MessageBeep(MB_ICONWARNING);
@@ -316,7 +312,7 @@ void Terminal::paint() {
     } else {
         RECT clip{6, header_ + 4, rect.right - 6, rect.bottom};
         dc.fill({0, header_, rect.right, rect.bottom}, background);
-        const auto [begin, end] = display_.selectionRange(anchor_, caret_);
+        const auto [begin, end] = display_.selectionRange();
         std::vector<Cell> visible;
         for (int y = 0; y < display_.rows(); ++y) {
             visible = display_.row(y);
@@ -355,9 +351,9 @@ LRESULT Terminal::handle(UINT m, WPARAM a, LPARAM b) {
     case WM_LBUTTONDOWN:
         SetFocus(window_);
         if (!started_ || (!running() && GET_Y_LPARAM(b) < header_)) { start(); InvalidateRect(window_, nullptr, FALSE); return 0; }
-        if (GET_Y_LPARAM(b) >= header_) { anchor_ = caret_ = point(GET_X_LPARAM(b), GET_Y_LPARAM(b)); selecting_ = true; SetCapture(window_); InvalidateRect(window_, nullptr, FALSE); } return 0;
-    case WM_MOUSEMOVE: if (selecting_) { caret_ = point(GET_X_LPARAM(b), GET_Y_LPARAM(b)); InvalidateRect(window_, nullptr, FALSE); UpdateWindow(window_); } return 0;
-    case WM_LBUTTONUP: if (selecting_) { caret_ = point(GET_X_LPARAM(b), GET_Y_LPARAM(b)); selecting_ = false; ReleaseCapture(); InvalidateRect(window_, nullptr, FALSE); UpdateWindow(window_); } return 0;
+        if (GET_Y_LPARAM(b) >= header_) { display_.beginSelection(point(GET_X_LPARAM(b), GET_Y_LPARAM(b))); selecting_ = true; SetCapture(window_); InvalidateRect(window_, nullptr, FALSE); } return 0;
+    case WM_MOUSEMOVE: if (selecting_) { display_.extendSelection(model_, point(GET_X_LPARAM(b), GET_Y_LPARAM(b))); InvalidateRect(window_, nullptr, FALSE); UpdateWindow(window_); } return 0;
+    case WM_LBUTTONUP: if (selecting_) { display_.extendSelection(model_, point(GET_X_LPARAM(b), GET_Y_LPARAM(b))); selecting_ = false; ReleaseCapture(); InvalidateRect(window_, nullptr, FALSE); UpdateWindow(window_); } return 0;
     case WM_CAPTURECHANGED: selecting_ = false; return 0;
     case WM_RBUTTONUP: if (hasSelection()) copy(); else { if (!started_) start(); paste(); } return 0;
     case WM_MOUSEWHEEL: {
@@ -395,7 +391,7 @@ LRESULT Terminal::handle(UINT m, WPARAM a, LPARAM b) {
         case VK_PRIOR: send("\x1b[5~"); return 0; case VK_NEXT: send("\x1b[6~"); return 0;
         case VK_TAB: if (shift) send("\x1b[Z"); return 0;
         case VK_ESCAPE:
-            if (hasSelection()) { anchor_ = caret_ = -1; InvalidateRect(window_, nullptr, FALSE); }
+            if (hasSelection()) { display_.clearSelection(); InvalidateRect(window_, nullptr, FALSE); }
             else send("\x1b");
             return 0;
         default: break;
