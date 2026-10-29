@@ -2,6 +2,7 @@
 #include "wsl_protocol.h"
 #include "command_line.h"
 #include "file_changes.h"
+#include "limit_status.h"
 #include <iostream>
 #include <stdexcept>
 #ifdef _WIN32
@@ -11,6 +12,28 @@
 
 namespace {
 void check(bool value, const char* message) { if (!value) throw std::runtime_error(message); }
+void limitStatuses() {
+    using namespace poppy;
+    check(groupedCount(0) == L"0" && groupedCount(1234) == L"1,234" && groupedCount(UINT64_MAX) == L"18,446,744,073,709,551,615", "Limit counters lost separators or integer precision");
+    const auto disconnected = watchLimitStatus({});
+    check(disconnected.text == L"Watch —/65,536" && !disconnected.warning, "An unknown watch count was presented as zero");
+    WatchUsage usage{1234, 65536, 524288, false, {}};
+    auto status = watchLimitStatus(usage);
+    check(status.text == L"Watch 1,234/65,536" && !status.warning && status.tooltip.find(L"524,288") != status.tooltip.npos && status.tooltip.find(L"Shared by all projects") != status.tooltip.npos, "Watch tooltip omitted its scope or Linux quota");
+    usage.limited = true; usage.reason = "systemLimit"; status = watchLimitStatus(usage);
+    check(status.warning && status.tooltip.find(L"Linux could not allocate") != status.tooltip.npos && status.tooltip.find(L"F5") != status.tooltip.npos, "Partial monitoring below the Poppy cap was not explained");
+    usage.count = usage.limit; usage.reason = "poppyLimit"; status = watchLimitStatus(usage);
+    check(status.warning && status.tooltip.find(L"Poppy's directory watch limit") != status.tooltip.npos, "Watch capacity was not highlighted");
+    FileIndex index; index.files.resize(1234); index.storageBytes = 3 * 1024 * 1024 / 2;
+    status = fileLimitStatus(&index, true);
+    check(status.text == L"Files 1,234/200,000 …" && status.tooltip.find(L"1.5/64 MiB") != status.tooltip.npos && status.tooltip.find(L"last completed scan") != status.tooltip.npos, "File status did not distinguish the cached scan and memory budget");
+    index.error = "File list reached its file-count or memory limit.";
+    check(fileLimitStatus(&index, false).warning && fileLimitStatus(&index, false).tooltip.find(L"partial list") != std::wstring::npos, "A partial file index was not highlighted");
+    status = treeLimitStatus(50000, 50000, 10000);
+    check(status.text == L"Tree 50,000/50,000" && status.warning && status.tooltip.find(L"cached children") != status.tooltip.npos, "Explorer status did not include cached items and its limit");
+    status = treeLimitStatus(10001, 50000, 10000, 1);
+    check(status.warning && status.text.find(L"!") != status.text.npos && status.tooltip.find(L"incomplete listings") != status.tooltip.npos, "Per-folder truncation below the total tree cap was hidden");
+}
 void changeClassification() {
     using poppy::classifyFileChange;
     for (const auto& path : {".git/index.lock", "nested/.git/HEAD.lock", "nested/.git/refs/heads/main.lock", "nested/.git/objects/ab/cd", "nested/.git/logs/HEAD", "nested/.git/FETCH_HEAD"})
@@ -171,4 +194,4 @@ void frameBatchBoundaries() {
     check(writes.size() == 1 && writes[0] == bytes, "An invalid frame corrupted a pending batch");
 }
 }
-int main() { try { changeClassification(); commandLines(); resources(); protocol(); frameBatching(); frameBatchBoundaries(); std::cout << "WSL command line, resource and protocol tests passed\n"; } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; } }
+int main() { try { limitStatuses(); changeClassification(); commandLines(); resources(); protocol(); frameBatching(); frameBatchBoundaries(); std::cout << "WSL command line, resource and protocol tests passed\n"; } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; } }

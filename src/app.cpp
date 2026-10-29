@@ -11,6 +11,7 @@
 #include "clipboard_image.h"
 #include "project_provider.h"
 #include "file_changes.h"
+#include "status_bar.h"
 #include <commctrl.h>
 #include <dwmapi.h>
 #include <shobjidl.h>
@@ -38,7 +39,7 @@ struct Node {
     bool directory, loaded = false, loading = false, reparse = false;
     // Keep expansion intent while loading, even when an empty item cannot expand.
     bool expandRequested = false;
-    bool unsupported = false; std::wstring label;
+    bool unsupported = false, truncated = false; std::wstring label;
 };
 using DirectoryResult = ProviderListing;
 struct FileResult { std::shared_ptr<EditBuffer> buffer; std::shared_ptr<Document> document; std::wstring error; std::shared_ptr<const ImagePreview> image; };
@@ -277,11 +278,16 @@ private:
     void pollWatch();
     void stopWatch();
     void status(std::wstring message);
+    void updateStatusBar();
     void toggleTerminal();
     HWND window_ = nullptr, tree_ = nullptr, gitTree_ = nullptr, branchTree_ = nullptr, explorerButton_ = nullptr, gitButton_ = nullptr, branchButton_ = nullptr, searchButton_ = nullptr, tooltips_ = nullptr;
     HINSTANCE instance_ = nullptr;
     Tree explorer_, changes_, branches_;
     Renderer renderer_;
+    StatusBar statusBar_;
+    bool statusDirty_ = true;
+    size_t partialFolders_ = 0;
+    std::optional<WatchUsage> watchUsage_;
     ActivityButton explorerActivity_, gitActivity_, branchActivity_, searchActivity_;
     UINT dpi_ = 96;
     int sidebar_ = 245, terminalHeight_ = 260, toolbar_ = 44, footer_ = 26, splitter_ = 5;
@@ -373,7 +379,7 @@ void ProjectRuntime::Impl::create() {
         if (value) { expandedPaths_[pathKey(n->path)] = n->path; n->expandRequested = true; if (!n->loaded) requestDirectory(item); }
         else { expandedPaths_.erase(pathKey(n->path)); n->expandRequested = false; }
     };
-    explorer_.removed = [this](uintptr_t data) { const auto n = reinterpret_cast<Node*>(data); if (n) { nodes_.erase(n->id); delete n; } };
+    explorer_.removed = [this](uintptr_t data) { const auto n = reinterpret_cast<Node*>(data); if (n) { nodes_.erase(n->id); if (n->truncated) --partialFolders_; statusDirty_ = true; delete n; } };
     explorer_.canCreate = [this](TreeItem item) { return canCreateItem(item); };
     explorer_.createCommitted = [this](TreeItem item, const std::wstring& name, bool directory) { createItem(item, name, directory); };
     explorer_.canRename = [this](TreeItem item) { return item != rootItem_ && node(item) && !node(item)->unsupported && !renamePending_ && !pastePending_ && !createPending_ && !gitDiscardPending_ && !gitStashPending_ && (!root_.wsl() || (connected_ && provider_->state() == ConnectionState::Ready)); };
@@ -461,6 +467,7 @@ void ProjectRuntime::Impl::create() {
     branchActivity_.clicked = [this] { selectSidebar(Sidebar::Branch); };
     searchActivity_.clicked = [this] { selectSidebar(Sidebar::Search); };
     explorerActivity_.select(true);
+    statusBar_.create(window_, instance_);
     tooltips_ = CreateWindowExW(WS_EX_TOPMOST, TOOLTIPS_CLASSW, nullptr, WS_POPUP | TTS_ALWAYSTIP | TTS_NOPREFIX, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, window_, nullptr, instance_, nullptr);
     for (const auto button : {explorerButton_, gitButton_, branchButton_, searchButton_}) {
         TOOLINFOW tip{}; tip.cbSize = sizeof(tip); tip.uFlags = TTF_IDISHWND | TTF_SUBCLASS; tip.hwnd = window_; tip.uId = reinterpret_cast<UINT_PTR>(button);
@@ -478,6 +485,7 @@ void ProjectRuntime::Impl::create() {
     dropPreview_.create(window_, instance_);
     terminal_.changed = [this] { if (owner_ && owner_->changed) owner_->changed(); };
     quickOpen_.create(window_, instance_);
+    quickOpen_.updated = [this] { statusDirty_ = true; };
     quickOpen_.opened = [this](const ResourceId& path) { openFile(path); SetFocus(viewer().window()); };
     searchPane_.create(window_, instance_);
     searchPane_.opened = [this](const ContentMatch& match, const std::string& query, bool matchCase) { openContentResult(match, query, matchCase); };
@@ -501,7 +509,7 @@ void ProjectRuntime::Impl::dpi(UINT value) {
     toolbar_ = MulDiv(44, dpi_, 96); footer_ = MulDiv(26, dpi_, 96); splitter_ = MulDiv(5, dpi_, 96);
     activityWidth_ = MulDiv(48, dpi_, 96); sidebarHeader_ = MulDiv(34, dpi_, 96); gitHeader_ = MulDiv(84, dpi_, 96);
     for (auto& view : viewers_) view.setDpi(dpi_);
-    terminal_.setDpi(dpi_); quickOpen_.setDpi(dpi_); layout();
+    terminal_.setDpi(dpi_); quickOpen_.setDpi(dpi_); statusBar_.setDpi(dpi_); layout();
 }
 void ProjectRuntime::Impl::layout(bool revealTab) {
     if (!tree_) return;
@@ -559,7 +567,8 @@ void ProjectRuntime::Impl::layout(bool revealTab) {
     if (tabDrag_ && tabDrag_->active) tabDrag_->target = tabDropAt(tabDrag_->point);
 
     struct Placement { HWND window; int x, y, width, height, flags; };
-    const std::array<Placement, 11> panes{{
+    const std::array<Placement, 12> panes{{
+        {statusBar_.window(), 0, std::max(0, height - footer_), width, footer_, SWP_SHOWWINDOW},
         {explorerButton_, 0, toolbar_, activityWidth_ - 1, activityWidth_, SWP_SHOWWINDOW},
         {searchButton_, 0, toolbar_ + activityWidth_, activityWidth_ - 1, activityWidth_, SWP_SHOWWINDOW},
         {gitButton_, 0, toolbar_ + 2 * activityWidth_, activityWidth_ - 1, activityWidth_, SWP_SHOWWINDOW},
@@ -604,9 +613,6 @@ void ProjectRuntime::Impl::paint() {
     dc.label({scaled(374), 0, scaled(460), toolbar_}, L"Terminal", terminalVisible_ ? accent : muted);
     dc.label({scaled(480), 0, scaled(566), toolbar_}, L"Find file", foreground);
     dc.label({scaled(582), 0, r.right - scaled(16), toolbar_}, root_.empty() ? L"" : root_.native(), muted, DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_PATH_ELLIPSIS);
-    const std::wstring gitLabel = !git_ ? L"Git" : !git_->error.empty() ? L"Git unavailable" : git_->repositories.empty() ? L"No Git repository" : (git_->repositories.size() == 1 ? git_->repositories.front()->branch : std::to_wstring(git_->repositories.size()) + L" repositories") + L"  ·  " + std::to_wstring(git_->changed) + L" changed  ·  " + std::to_wstring(git_->untracked) + L" untracked";
-    dc.label({scaled(12), r.bottom - footer_, scaled(390), r.bottom}, gitLabel, muted);
-    dc.label({scaled(400), r.bottom - footer_, r.right - scaled(12), r.bottom}, status_, muted, DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
     dc.fill({0, toolbar_, activityWidth_, r.bottom - footer_}, background);
     dc.fill({activityWidth_ - 1, toolbar_, activityWidth_, r.bottom - footer_}, border);
     dc.fill(sidebarRect_, panel);
@@ -1094,7 +1100,16 @@ void ProjectRuntime::Impl::revealInFileExplorer(ResourceId resource) {
         MessageBoxW(window_, (path + L"\n\n" + winError(static_cast<DWORD>(result))).c_str(), L"Poppy — Reveal in File Explorer", MB_OK | MB_ICONWARNING);
     }
 }
-void ProjectRuntime::Impl::status(std::wstring message) { status_ = std::move(message); RECT r{}; GetClientRect(window_, &r); r.top = r.bottom - footer_; InvalidateRect(window_, &r, FALSE); }
+void ProjectRuntime::Impl::status(std::wstring message) { status_ = std::move(message); statusBar_.message(status_); }
+void ProjectRuntime::Impl::updateStatusBar() {
+    const std::wstring gitLabel = !git_ ? L"Git" : !git_->error.empty() ? L"Git unavailable" : git_->repositories.empty() ? L"No Git repository" : (git_->repositories.size() == 1 ? git_->repositories.front()->branch : std::to_wstring(git_->repositories.size()) + L" repositories") + L"  ·  " + groupedCount(git_->changed) + L" changed  ·  " + groupedCount(git_->untracked) + L" untracked";
+    std::vector<LimitStatus> limits;
+    if (!root_.empty()) {
+        if (root_.wsl()) { limits.push_back(watchLimitStatus(watchUsage_)); limits.push_back(fileLimitStatus(quickOpen_.index(), quickOpen_.indexing())); }
+        limits.push_back(treeLimitStatus(nodes_.size(), maxTreeNodes, maxEntries, partialFolders_));
+    }
+    statusBar_.update(gitLabel, std::move(limits)); statusBar_.message(status_);
+}
 void ProjectRuntime::Impl::chooseFolder() {
     if (owner_ && owner_->chooseProject) { owner_->chooseProject(); return; }
     IFileOpenDialog* dialog = nullptr;
@@ -1414,8 +1429,10 @@ void ProjectRuntime::Impl::requestDirectory(TreeItem item) {
         });
     });
 }
-void ProjectRuntime::Impl::applyDirectory(TreeItem item, Node*, const DirectoryResult& result) {
+void ProjectRuntime::Impl::applyDirectory(TreeItem item, Node* directory, const DirectoryResult& result) {
+    statusDirty_ = true;
     if (!result.error.empty()) { status(L"Folder: " + result.error); return; }
+    bool truncated = result.truncated;
     std::map<std::wstring, TreeItem> existing;
     for (auto child = explorer_.child(item); child; child = explorer_.next(child)) if (const auto n = node(child)) existing[n->unsupported ? L"unsupported:" + n->label : pathKey(n->path)] = child;
     Tree::Batch batch(explorer_);
@@ -1427,7 +1444,7 @@ void ProjectRuntime::Impl::applyDirectory(TreeItem item, Node*, const DirectoryR
             if (n) forgetExpanded(n->path);
             explorer_.erase(found->second); existing.erase(found);
         }
-        insert(item, entry);
+        if (!insert(item, entry)) truncated = true;
     }
     for (const auto& stale : existing) { if (const auto n = node(stale.second)) forgetExpanded(n->path); explorer_.erase(stale.second); }
     explorer_.sort(item, [](uintptr_t a, uintptr_t b) {
@@ -1442,7 +1459,8 @@ void ProjectRuntime::Impl::applyDirectory(TreeItem item, Node*, const DirectoryR
             explorer_.select(child, false); pendingTreeSelection_.clear();
         }
     }
-    if (result.truncated || nodes_.size() >= maxTreeNodes) status(L"Explorer limit: 10,000 items/folder, 50,000 visible nodes.");
+    if (directory->truncated != truncated) { if (truncated) ++partialFolders_; else --partialFolders_; directory->truncated = truncated; }
+    if (truncated || nodes_.size() >= maxTreeNodes) status(L"Explorer limit: 10,000 items/folder, 50,000 retained nodes.");
 }
 void ProjectRuntime::Impl::normalizeGroups() {
     if (tabs_.empty()) { focusedGroup_ = 0; activeTab_ = 0; return; }
@@ -1829,6 +1847,7 @@ void ProjectRuntime::Impl::refreshGit(bool rescan) {
             if (generation != generation_) return;
             if (scanRevision == gitScanRevision_) gitScanDirty_ = false;
             git_ = result;
+            statusDirty_ = true;
             if (result->repositories.empty()) {
                 branches_.clear(); branchesLoaded_ = branchesLoading_ = false; branchError_.clear(); ++branchRequest_;
             }
@@ -1884,6 +1903,8 @@ void ProjectRuntime::Impl::armWatch() {
 void ProjectRuntime::Impl::pollWatch() {
     const auto now = GetTickCount64();
     if (root_.wsl() && provider_) {
+        const auto usage = provider_->watchUsage();
+        if (!(usage == watchUsage_)) { watchUsage_ = usage; statusDirty_ = true; }
         const auto changes = connected_ ? provider_->takeChanges() : ProviderChanges{};
         if (connected_ && provider_->state() != ConnectionState::Ready) { connected_ = false; ++generation_; ++serial_[0]; ++serial_[1]; connectionError_ = provider_->error(); status(L"WSL disconnected. " + connectionError_ + L" Your edits have been kept. Use F5 to reconnect."); if (owner_ && owner_->changed) owner_->changed(); }
         else if (connected_) {
@@ -1917,6 +1938,7 @@ void ProjectRuntime::Impl::pollWatch() {
         watchPending_ = false; armWatch();
     }
     if (dirty_ && (now - lastEvent_ >= 500 || now - dirtySince_ >= 2000)) { dirty_ = false; refresh(false); }
+    if (statusDirty_) { statusDirty_ = false; updateStatusBar(); }
 }
 void ProjectRuntime::Impl::stopWatch() {
     KillTimer(window_, timerId);

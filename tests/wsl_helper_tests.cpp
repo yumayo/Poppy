@@ -65,7 +65,9 @@ public:
             const auto pending = std::find_if(deferred_.begin(), deferred_.end(), [id](const Frame& f) { return f.kind == 1 ? number(decodeMessage(f.payload),"id") == id : decodeChunk(f).id == id; });
             if (pending != deferred_.end()) { frame = std::move(*pending); deferred_.erase(pending); } else frame = next(deadline);
             if (frame.kind == 1) {
-                auto message = decodeMessage(frame.payload); if (!field(message,"event").empty()) { events_.push_back(std::move(message)); continue; }
+                auto message = decodeMessage(frame.payload);
+                if (field(message, "event") == "watchUsage") { watchUsage_ = std::move(message); ++usageEvents_; continue; }
+                if (!field(message,"event").empty()) { events_.push_back(std::move(message)); continue; }
                 if (number(message,"id") != id) { deferred_.push_back(std::move(frame)); continue; }
                 check(field(message,"projectId") == "fixture" && field(message,"generation") == "7","Helper response crossed projects/generations");
                 if (field(message,"entry") == "1") result.entries.push_back(std::move(message));
@@ -92,6 +94,7 @@ public:
                 auto frame = std::move(frames_.front()); frames_.pop_front();
                 if (frame.kind == 1) {
                     auto message = decodeMessage(frame.payload);
+                    if (field(message, "event") == "watchUsage") { watchUsage_ = std::move(message); ++usageEvents_; continue; }
                     if (!field(message, "event").empty()) { result.push_back(std::move(message)); continue; }
                 }
                 deferred_.push_back(std::move(frame));
@@ -105,6 +108,8 @@ public:
             }
         }
     }
+    const Message& watchUsage() const { return watchUsage_; }
+    size_t usageEvents() const { return usageEvents_; }
     void eof() {
         close(input_); input_ = -1; const auto deadline = std::chrono::steady_clock::now()+std::chrono::seconds(3); int status = 0;
         while (waitpid(child_,&status,WNOHANG) == 0 && std::chrono::steady_clock::now() < deadline) std::this_thread::sleep_for(std::chrono::milliseconds(10));
@@ -121,6 +126,7 @@ private:
     }
     pid_t child_ = -1; int input_ = -1, output_ = -1; uint64_t next_ = 1;
     FrameReader reader_; std::deque<Frame> frames_, deferred_; std::vector<Message> events_;
+    Message watchUsage_; size_t usageEvents_ = 0;
 };
 std::string version(const Result& result) { return field(result.metadata,"version"); }
 void watching(const std::string& executable) {
@@ -175,12 +181,16 @@ void watchLimitIdle(const std::string& executable) {
         fs::create_directory((i < firstCount ? first : second) / ("directory-" + std::to_string(i)));
     write(fixture.root / "file", "readable");
     Helper helper(executable); helper.hello(); helper.call("connect", fixture.root); helper.call("indexFiles", first);
-    check(helper.takeEvents(200ms).empty(), "A workspace below 65,536 directories reached the watch limit");
+    check(helper.takeEvents(400ms).empty(), "A workspace below 65,536 directories reached the watch limit");
+    check(number(helper.watchUsage(), "count") == firstCount + 2 && number(helper.watchUsage(), "limit") == maxDirectoryWatches && field(helper.watchUsage(), "limited") == "0", "Watch progress did not report the real shared count and limit");
     const auto changed = first / "directory-39999" / "added.txt"; write(changed, "new file");
     const auto updates = helper.takeEvents(300ms);
     check(std::any_of(updates.begin(), updates.end(), [&](const Message& event) { return field(event, "path") == changed.string() && field(event, "files") == "1"; }), "A large workspace lost directory change notifications");
     helper.call("indexFiles", second);
     const auto events = helper.takeEvents(2300ms);
+    check(number(helper.watchUsage(), "count") == maxDirectoryWatches && field(helper.watchUsage(), "limited") == "1" && field(helper.watchUsage(), "reason") == "poppyLimit", "Watch limit status did not explain partial monitoring");
+    const auto notifications = helper.usageEvents(); helper.takeEvents(400ms);
+    check(helper.usageEvents() == notifications, "Watch status was retransmitted while idle");
     check(std::count_if(events.begin(), events.end(), [](const Message& event) { return field(event, "event") == "watchLimited"; }) == 1, "Missing one-time watch-limit notification");
     check(std::none_of(events.begin(), events.end(), [](const Message& event) { return field(event, "event") == "rescanRequired"; }), "An unchanged workspace rescanned periodically after reaching the watch limit");
     check(helper.call("readFile", fixture.root / "file").bytes == "readable", "Watch limit disconnected the project");

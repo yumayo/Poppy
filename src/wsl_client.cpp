@@ -59,6 +59,7 @@ private:
     struct ProjectWatch { ResourceId root; ProviderChanges changes; };
     std::map<std::string, ProjectWatch> projectWatches_;
     bool watchLimited_ = false;
+    std::optional<WatchUsage> watchUsage_;
     std::deque<std::string> writes_;
     size_t writeBytes_ = 0;
     size_t responseBytes_ = 0;
@@ -118,7 +119,9 @@ void Connection::start() {
     if (!CreateProcessW(args[0].c_str(), line.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW | CREATE_SUSPENDED | EXTENDED_STARTUPINFO_PRESENT, nullptr, cwd.c_str(), &startup.StartupInfo, &pi)) throw std::runtime_error(utf8(winError()));
     process_.reset(pi.hProcess); Handle thread(pi.hThread);
     if (!AssignProcessToJobObject(job_.value, process_.value)) { TerminateProcess(process_.value, 1); throw std::runtime_error(utf8(winError())); }
-    stopping_ = false; diagnostic_.clear(); watchLimited_ = false; ResumeThread(thread.value); childInput.reset(); childOutput.reset(); childError.reset();
+    stopping_ = false; diagnostic_.clear();
+    { std::lock_guard<std::mutex> lock(mutex_); watchLimited_ = false; watchUsage_.reset(); }
+    ResumeThread(thread.value); childInput.reset(); childOutput.reset(); childError.reset();
     reader_.start([this] {
         FrameReader frames;
         try {
@@ -172,6 +175,11 @@ void Connection::received(Frame frame) {
     if (frame.kind == 1) {
         auto message = decodeMessage(frame.payload);
         const auto event = field(message, "event");
+        if (event == "watchUsage") {
+            WatchUsage usage{number(message, "count"), number(message, "limit"), number(message, "systemLimit"), field(message, "limited") == "1", field(message, "reason")};
+            if (usage.limit != maxDirectoryWatches || usage.count > usage.limit) throw std::runtime_error("Invalid WSL watch count");
+            watchUsage_ = std::move(usage); return;
+        }
         if (event == "watchLimited") {
             watchLimited_ = true;
             for (auto& project : projectWatches_) project.second.changes.watchLimited = true;
@@ -361,6 +369,10 @@ public:
     ConnectionState state() const override { return connection_->state() == ConnectionState::Ready ? projectState_.load() : connection_->state(); }
     std::wstring error() const override { return connection_->error(); }
     uint64_t revision() const override { return connection_->revision(); }
+    std::optional<WatchUsage> watchUsage() const override {
+        std::lock_guard<std::mutex> lock(connection_->mutex_);
+        return state() == ConnectionState::Ready ? connection_->watchUsage_ : std::nullopt;
+    }
     ProviderChanges takeChanges() override {
         std::lock_guard<std::mutex> lock(connection_->mutex_);
         const auto found = connection_->projectWatches_.find(project_);

@@ -4,6 +4,7 @@
 #include "file_search.h"
 #include "content_search.h"
 #include "git_repositories.h"
+#include "limit_status.h"
 #include <memory>
 
 namespace poppy {
@@ -40,6 +41,7 @@ public:
     virtual std::wstring error() const { return {}; }
     virtual uint64_t revision() const { return 0; }
     virtual ProviderChanges takeChanges() { return {}; }
+    virtual std::optional<WatchUsage> watchUsage() const { return {}; }
     virtual void reconnect() {}
     virtual void expectIdentity(std::string) {}
     virtual std::string identity() const { return {}; }

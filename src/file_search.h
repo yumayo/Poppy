@@ -6,6 +6,7 @@
 #include <vector>
 
 namespace poppy {
+constexpr size_t maxIndexedFiles = 200000, maxIndexBytes = 64 * 1024 * 1024, maxIndexDirectories = 50000;
 struct FileMatch { std::filesystem::path relative; int score; std::string exactRelative; };
 struct IndexedFile { std::string relative; std::u32string normalized; };
 struct FileIndex {
@@ -26,7 +27,7 @@ FileIndex indexFiles(const std::filesystem::path& root, const std::function<bool
 // Bound retained remote entries, including UTF-32 names and vector growth.
 // A full index keeps its existing files and reports an error without throwing.
 bool addIndexedFile(FileIndex& index, std::string relative,
-    size_t byteLimit = 64 * 1024 * 1024, size_t fileLimit = 200000);
+    size_t byteLimit = maxIndexBytes, size_t fileLimit = maxIndexedFiles);
 // Filter an immutable snapshot without filesystem access. Paths are normalized
 // while indexing; queries only retain the best results in a bounded heap.
 FileSearchResult searchFiles(const FileIndex& index, std::string_view query,

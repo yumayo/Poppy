@@ -9,7 +9,7 @@
 
 namespace poppy::wsl {
 constexpr unsigned protocolVersion = 1;
-constexpr const char* helperVersion = "9";
+constexpr const char* helperVersion = "10";
 constexpr size_t maxControl = 64 * 1024, maxChunk = 256 * 1024, maxFrame = 1024 * 1024;
 constexpr size_t maxOutputBatch = 64 * 1024;
 // Per shared helper connection, across all of its projects. The kernel's
