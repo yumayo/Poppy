@@ -1,6 +1,7 @@
 #include "resource.h"
 #include "wsl_protocol.h"
 #include "command_line.h"
+#include "file_changes.h"
 #include <iostream>
 #include <stdexcept>
 #ifdef _WIN32
@@ -10,6 +11,23 @@
 
 namespace {
 void check(bool value, const char* message) { if (!value) throw std::runtime_error(message); }
+void changeClassification() {
+    using poppy::classifyFileChange;
+    for (const auto& path : {".git/index.lock", "nested/.git/HEAD.lock", "nested/.git/refs/heads/main.lock", "nested/.git/objects/ab/cd", "nested/.git/logs/HEAD", "nested/.git/FETCH_HEAD"})
+        check(!classifyFileChange(path, true).relevant, "Git bookkeeping triggered a rescan");
+    for (const auto& path : {".git/HEAD", "nested/.git/index", "nested/.git/config", "nested/.git/packed-refs", "nested/.git/refs/heads/main"}) {
+        const auto change = classifyFileChange(path, true);
+        check(change.relevant && !change.files && !change.content, "Git metadata invalidated file lists or documents");
+    }
+    const auto content = classifyFileChange("nested/file.txt", false), added = classifyFileChange("nested/file.txt", true);
+    check(content.relevant && content.content && !content.files, "A content edit invalidated the file index");
+    check(added.relevant && added.content && added.files, "An added file did not invalidate the index");
+    check(classifyFileChange("nested/.git", true).files, "Adding a repository did not invalidate repository discovery");
+    check(classifyFileChange("nested/.GIT/index.lock", true).files && classifyFileChange("nested/.git\\index.lock", true).files, "Linux filename semantics were lost");
+    check(!classifyFileChange("nested\\.GIT\\index.lock", true, true).relevant, "Nested Windows Git locks triggered a rescan");
+    const auto head = classifyFileChange("nested\\.GIT\\HEAD", true, true);
+    check(head.relevant && !head.files && !head.content, "Windows HEAD change was ignored or reindexed files");
+}
 template<class F> void rejects(F operation) { try { operation(); } catch (const std::exception&) { return; } throw std::runtime_error("Invalid input was accepted"); }
 void commandLines() {
     using poppy::processCommandLine;
@@ -153,4 +171,4 @@ void frameBatchBoundaries() {
     check(writes.size() == 1 && writes[0] == bytes, "An invalid frame corrupted a pending batch");
 }
 }
-int main() { try { commandLines(); resources(); protocol(); frameBatching(); frameBatchBoundaries(); std::cout << "WSL command line, resource and protocol tests passed\n"; } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; } }
+int main() { try { changeClassification(); commandLines(); resources(); protocol(); frameBatching(); frameBatchBoundaries(); std::cout << "WSL command line, resource and protocol tests passed\n"; } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; } }

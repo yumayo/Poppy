@@ -9,7 +9,7 @@
 
 namespace poppy::wsl {
 constexpr unsigned protocolVersion = 1;
-constexpr const char* helperVersion = "7";
+constexpr const char* helperVersion = "8";
 constexpr size_t maxControl = 64 * 1024, maxChunk = 256 * 1024, maxFrame = 1024 * 1024;
 constexpr size_t maxOutputBatch = 64 * 1024;
 // Flat JSON control messages. Lists are streamed as individual control frames;

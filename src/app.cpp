@@ -10,6 +10,7 @@
 #include "file_name.h"
 #include "clipboard_image.h"
 #include "project_provider.h"
+#include "file_changes.h"
 #include <commctrl.h>
 #include <dwmapi.h>
 #include <shobjidl.h>
@@ -69,6 +70,7 @@ struct TabDrag {
 struct GitEntry { ResourceId path; wchar_t state; bool staged = false, changed = false; char index = ' ', worktree = ' '; std::string previousPath; };
 struct GitResult { ResourceId root; std::wstring branch, error; std::vector<GitEntry> entries; size_t changed = 0, untracked = 0; bool truncated = false, unsupportedNames = false; };
 struct GitWorkspace {
+    GitRepositoryScan scan;
     std::vector<std::shared_ptr<GitResult>> repositories;
     std::vector<ResourceId> roots;
     std::map<std::wstring, wchar_t> states;
@@ -144,9 +146,10 @@ std::shared_ptr<GitResult> readGit(ProjectProvider& provider, const ResourceId& 
     }
     return result;
 }
-std::shared_ptr<GitWorkspace> readGitWorkspace(ProjectProvider& provider, const ResourceId& directory, const std::atomic<bool>* cancelled) {
+std::shared_ptr<GitWorkspace> readGitWorkspace(ProjectProvider& provider, const ResourceId& directory, const std::atomic<bool>* cancelled, const GitRepositoryScan* cached) {
     auto result = std::make_shared<GitWorkspace>();
-    auto scan = provider.gitRepositories(directory, [cancelled] { return cancelled && *cancelled; });
+    result->scan = cached ? *cached : provider.gitRepositories(directory, [cancelled] { return cancelled && *cancelled; });
+    const auto& scan = result->scan;
     result->warning = wide(scan.error); result->truncated = scan.truncated;
     // Only .git candidates in the opened folder belong to this workspace.
     // Running Git in the folder itself can resolve an ancestor outside it.
@@ -233,7 +236,6 @@ private:
     void applyDirectory(TreeItem item, Node* node, const DirectoryResult& result);
     TreeItem insert(TreeItem parent, const Entry& entry);
     Node* node(TreeItem item) const;
-    void clearChildren(TreeItem parent);
     void updateLabel(TreeItem item);
     bool canCreateItem(TreeItem item) const;
     void newFile();
@@ -269,7 +271,7 @@ private:
     ResourceId selectedPath() const { return tabs_.empty() ? ResourceId{} : tabs_[activeTab_].path; }
     void showDiff();
     void refresh(bool force = true);
-    void refreshGit();
+    void refreshGit(bool rescan = false);
     void watch();
     void armWatch();
     void pollWatch();
@@ -335,9 +337,11 @@ private:
     uint64_t generation_ = 0, serial_[2]{}, nextId_ = 1;
     std::map<uint64_t, TreeItem> nodes_;
     std::shared_ptr<GitWorkspace> git_;
+    bool gitScanDirty_ = true;
+    uint64_t gitScanRevision_ = 0;
     std::shared_ptr<ProjectProvider> provider_;
     bool connecting_ = false, connected_ = false, active_ = false;
-    uint64_t providerRevision_ = 0;
+    bool watchLimited_ = false;
     void connectRemote();
     std::wstring status_ = L"Ready  ·  Ctrl+O: open folder";
     std::wstring tabTip_, connectionError_;
@@ -366,8 +370,8 @@ void ProjectRuntime::Impl::create() {
     };
     explorer_.expanded = [this](TreeItem item, bool value) {
         const auto n = node(item); if (!n) return;
-        if (value) { expandedPaths_[pathKey(n->path)] = n->path; if (!n->loaded) requestDirectory(item); }
-        else { forgetExpanded(n->path); n->expandRequested = false; clearChildren(item); n->loaded = false; }
+        if (value) { expandedPaths_[pathKey(n->path)] = n->path; n->expandRequested = true; if (!n->loaded) requestDirectory(item); }
+        else { expandedPaths_.erase(pathKey(n->path)); n->expandRequested = false; }
     };
     explorer_.removed = [this](uintptr_t data) { const auto n = reinterpret_cast<Node*>(data); if (n) { nodes_.erase(n->id); delete n; } };
     explorer_.canCreate = [this](TreeItem item) { return canCreateItem(item); };
@@ -1105,7 +1109,6 @@ void ProjectRuntime::Impl::chooseFolder() {
     dialog->Release();
 }
 Node* ProjectRuntime::Impl::node(TreeItem item) const { const auto value = explorer_.item(item); return value ? reinterpret_cast<Node*>(value->data) : nullptr; }
-void ProjectRuntime::Impl::clearChildren(TreeItem parent) { explorer_.clearChildren(parent); }
 wchar_t ProjectRuntime::Impl::stateFor(const ResourceId& path) const {
     if (!git_) return 0;
     const auto direct = git_->states.find(pathKey(path));
@@ -1311,7 +1314,7 @@ void ProjectRuntime::Impl::connectRemote() {
             connecting_ = false; connectionError_ = error;
             if (!error.empty()) { status(L"WSL unavailable. " + error + L"  ·  F5: reconnect"); if (!viewer().hasDocument()) viewer().message(error + L"\n\nPress F5 to reconnect."); }
             else {
-                const auto previous = root_; root_ = resolved; connected_ = true; wslUid_ = provider_->identity(); providerRevision_ = provider_->revision();
+                const auto previous = root_; root_ = resolved; connected_ = true; wslUid_ = provider_->identity(); git_.reset(); watchLimited_ = false;
                 std::map<std::wstring, ResourceId> expanded;
                 for (const auto& item : expandedPaths_) { auto path = relocateResource(item.second, previous, root_); expanded[pathKey(path)] = std::move(path); }
                 expandedPaths_ = std::move(expanded); expandedPaths_[pathKey(root_)] = root_;
@@ -1815,13 +1818,16 @@ void ProjectRuntime::Impl::showDiff() {
     if (!tab.diff && (!git_ || !git_->repository(tab.path) || !git_->repository(tab.path)->error.empty())) { status(L"Git repository unavailable. Check Git in the project environment and press F5."); return; }
     saveTab(); tab.diff = !tab.diff; layout(); loadTab();
 }
-void ProjectRuntime::Impl::refreshGit() {
+void ProjectRuntime::Impl::refreshGit(bool rescan) {
     if (root_.empty() || (root_.wsl() && !connected_)) return;
-    const auto generation = generation_; const auto root = root_;
-    gitWorker_->submit(L"git", [this, root, generation] {
-        auto result = readGitWorkspace(*provider_, root, gitWorker_->cancellation());
-        gitWorker_->complete([this, generation, result] {
+    if (rescan) { gitScanDirty_ = true; ++gitScanRevision_; }
+    const auto scanRevision = gitScanRevision_;
+    const auto generation = generation_; const auto root = root_; const auto cached = gitScanDirty_ ? nullptr : git_;
+    gitWorker_->submit(L"git", [this, root, generation, cached, scanRevision] {
+        auto result = readGitWorkspace(*provider_, root, gitWorker_->cancellation(), cached ? &cached->scan : nullptr);
+        gitWorker_->complete([this, generation, result, scanRevision] {
             if (generation != generation_) return;
+            if (scanRevision == gitScanRevision_) gitScanDirty_ = false;
             git_ = result;
             if (result->repositories.empty()) {
                 branches_.clear(); branchesLoaded_ = branchesLoading_ = false; branchError_.clear(); ++branchRequest_;
@@ -1842,10 +1848,19 @@ void ProjectRuntime::Impl::refresh(bool force) {
     if (force && activeSidebar_ == Sidebar::Search) searchPane_.refresh();
     if (root_.empty()) return;
     if (root_.wsl() && (!connected_ || provider_->state() != ConnectionState::Ready)) { if (force) connectRemote(); return; }
-    if (force || filesDirty_) quickOpen_.refresh();
+    const bool files = force || filesDirty_;
+    if (files) quickOpen_.refresh();
     filesDirty_ = false;
-    for (const auto& pair : nodes_) { const auto n = node(pair.second); if (n && n->expandRequested) requestDirectory(pair.second); }
-    refreshGit();
+    if (files) {
+        for (const auto& pair : nodes_) if (auto n = node(pair.second); n && n->directory) n->loaded = false;
+        for (const auto& pair : nodes_) {
+            const auto n = node(pair.second); if (!n || !n->expandRequested) continue;
+            auto item = explorer_.item(pair.second); bool visible = true;
+            while (item && item->parent) { item = explorer_.item(item->parent); if (item && !item->expanded) { visible = false; break; } }
+            if (visible) requestDirectory(pair.second);
+        }
+    }
+    refreshGit(files);
     const bool showingGitChanges = std::any_of(tabs_.begin(), tabs_.end(), [](const Tab& tab) { return tab.displayed && tab.diff && tab.diffKind != GitDiffKind::Commit; });
     if (!tabs_.empty() && (force || fileDirty_ || showingGitChanges)) {
         if (!IsWindowVisible(window_) && !viewer().hasDocument()) { fileDirty_ = true; return; }
@@ -1869,11 +1884,17 @@ void ProjectRuntime::Impl::armWatch() {
 void ProjectRuntime::Impl::pollWatch() {
     const auto now = GetTickCount64();
     if (root_.wsl() && provider_) {
-        const auto revision = provider_->revision();
-        if (revision != providerRevision_) {
-            providerRevision_ = revision;
-            if (connected_ && provider_->state() != ConnectionState::Ready) { connected_ = false; ++generation_; ++serial_[0]; ++serial_[1]; connectionError_ = provider_->error(); status(L"WSL disconnected. " + connectionError_ + L" Your edits have been kept. Use F5 to reconnect."); if (owner_ && owner_->changed) owner_->changed(); }
-            else if (connected_) { if (!dirty_) dirtySince_ = now; dirty_ = fileDirty_ = filesDirty_ = true; lastEvent_ = now; }
+        const auto changes = connected_ ? provider_->takeChanges() : ProviderChanges{};
+        if (connected_ && provider_->state() != ConnectionState::Ready) { connected_ = false; ++generation_; ++serial_[0]; ++serial_[1]; connectionError_ = provider_->error(); status(L"WSL disconnected. " + connectionError_ + L" Your edits have been kept. Use F5 to reconnect."); if (owner_ && owner_->changed) owner_->changed(); }
+        else if (connected_) {
+            if (changes.watchLimited) { watchLimited_ = true; status(L"Some WSL changes cannot be watched automatically. Use F5 to refresh."); }
+            if (changes.changed) {
+                if (!dirty_) dirtySince_ = now;
+                dirty_ = true; filesDirty_ |= changes.files; lastEvent_ = now;
+                fileDirty_ |= changes.allContent;
+                for (const auto& path : changes.contentPaths) for (const auto& tab : tabs_)
+                    if (tab.displayed && path.contains(tab.path)) fileDirty_ = true;
+            }
         }
     }
     if (watchPending_ && WaitForSingleObject(watchEvent_.value, 0) == WAIT_OBJECT_0) {
@@ -1883,10 +1904,9 @@ void ProjectRuntime::Impl::pollWatch() {
         for (size_t offset = 0; ok && offset + sizeof(FILE_NOTIFY_INFORMATION) <= bytes;) {
             const auto info = reinterpret_cast<const FILE_NOTIFY_INFORMATION*>(watchBuffer_.data() + offset);
             const std::wstring name(info->FileName, info->FileNameLength / sizeof(wchar_t));
-            const bool gitNoise = name.rfind(L".git\\", 0) == 0 && name != L".git\\HEAD" && name != L".git\\index" && name.rfind(L".git\\refs\\", 0) != 0;
-            if (!gitNoise) relevant = true;
-            if (!gitNoise && info->Action != FILE_ACTION_MODIFIED) filesDirty_ = true;
-            if (!tabs_.empty()) {
+            const auto change = classifyFileChange(utf8(name), info->Action != FILE_ACTION_MODIFIED, true);
+            relevant |= change.relevant; filesDirty_ |= change.files;
+            if (change.content && !tabs_.empty()) {
                 const auto changed = pathKey(root_ / name), selected = pathKey(selectedPath());
                 if (changed == selected || selected.rfind(changed + L"\\", 0) == 0 || (groupTab(1 - focusedGroup_) < tabs_.size() && changed == pathKey(tabs_[groupTab(1 - focusedGroup_)].path))) fileDirty_ = true;
             }
@@ -1923,7 +1943,15 @@ LRESULT ProjectRuntime::Impl::handle(UINT m, WPARAM a, LPARAM b) {
     case WM_TIMER: if (a == timerId) pollWatch(); else if (a == tabDragTimerId) scrollTabDrag(); return 0;
     case WM_APP + 14: loadTab(false, 0); loadTab(false, 1); return 0;
     case WM_APP + 13: if (!root_.empty()) { if (!watchDirectory_) watch(); refresh(); } return 0;
-    case WM_APP + 12: if (!root_.empty() && IsWindowVisible(window_)) { if (root_.wsl()) { if (connected_) { fileDirty_ = filesDirty_ = true; refresh(false); } } else { refreshGit(); if (!tabs_.empty()) { saveTab(); loadTab(true, 0); loadTab(true, 1); } } } return 0;
+    case WM_APP + 12:
+        if (!root_.empty() && IsWindowVisible(window_)) {
+            pollWatch();
+            if (!root_.wsl() || connected_) {
+                for (int group = 0; group < 2; ++group) if (groupTab(group) < tabs_.size() && !viewers_[group].hasDocument()) loadTab(true, group);
+                if (watchLimited_) status(L"Some WSL changes cannot be watched automatically. Use F5 to refresh.");
+            }
+        }
+        return 0;
     case WM_LBUTTONDOWN: {
         quickOpen_.close();
         const int x = MulDiv(GET_X_LPARAM(b), 96, dpi_), y = GET_Y_LPARAM(b);
@@ -2092,7 +2120,7 @@ void ProjectRuntime::poll() { if (ready()) impl_->pollWatch(); if (IsWindowVisib
 bool ProjectRuntime::key(const MSG& message) { return impl_->key(message); }
 ProjectSession ProjectRuntime::snapshot() { return impl_->saveSession(); }
 AiSummary ProjectRuntime::summary() const { return impl_->terminal_.summary(); }
-std::wstring ProjectRuntime::description() const { return (impl_->root_.wsl() ? L"\n" + (impl_->connectionError_.empty() ? impl_->provider_->error() : impl_->connectionError_) : L"") + impl_->terminal_.description(); }
+std::wstring ProjectRuntime::description() const { return (impl_->root_.wsl() ? L"\n" + (impl_->connectionError_.empty() ? impl_->provider_->error() : impl_->connectionError_) + (impl_->watchLimited_ ? L"\nSome changes cannot be watched automatically. Use F5 to refresh." : L"") : L"") + impl_->terminal_.description(); }
 bool ProjectRuntime::apply(const AiEvent& event) { return impl_->terminal_.apply(event); }
 void ProjectRuntime::focusAttention() { impl_->terminalVisible_ = true; impl_->layout(false); impl_->terminal_.focusAttention(); }
 size_t ProjectRuntime::documentBytes() const {

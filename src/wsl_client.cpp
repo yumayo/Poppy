@@ -56,6 +56,9 @@ private:
     std::mutex startMutex_, uploadMutex_;
     std::condition_variable condition_;
     std::map<uint64_t, std::shared_ptr<Pending>> pending_;
+    struct ProjectWatch { ResourceId root; ProviderChanges changes; };
+    std::map<std::string, ProjectWatch> projectWatches_;
+    bool watchLimited_ = false;
     std::deque<std::string> writes_;
     size_t writeBytes_ = 0;
     size_t responseBytes_ = 0;
@@ -115,7 +118,7 @@ void Connection::start() {
     if (!CreateProcessW(args[0].c_str(), line.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW | CREATE_SUSPENDED | EXTENDED_STARTUPINFO_PRESENT, nullptr, cwd.c_str(), &startup.StartupInfo, &pi)) throw std::runtime_error(utf8(winError()));
     process_.reset(pi.hProcess); Handle thread(pi.hThread);
     if (!AssignProcessToJobObject(job_.value, process_.value)) { TerminateProcess(process_.value, 1); throw std::runtime_error(utf8(winError())); }
-    stopping_ = false; diagnostic_.clear(); ResumeThread(thread.value); childInput.reset(); childOutput.reset(); childError.reset();
+    stopping_ = false; diagnostic_.clear(); watchLimited_ = false; ResumeThread(thread.value); childInput.reset(); childOutput.reset(); childError.reset();
     reader_.start([this] {
         FrameReader frames;
         try {
@@ -168,7 +171,27 @@ void Connection::received(Frame frame) {
     std::unique_lock<std::mutex> lock(mutex_);
     if (frame.kind == 1) {
         auto message = decodeMessage(frame.payload);
-        if (field(message, "event") == "rescanRequired") { ++revision_; return; }
+        const auto event = field(message, "event");
+        if (event == "watchLimited") {
+            watchLimited_ = true;
+            for (auto& project : projectWatches_) project.second.changes.watchLimited = true;
+            return;
+        }
+        if (event == "rescanRequired") {
+            const auto path = field(message, "path");
+            if (!path.empty() && (path.front() != '/' || path.find('\0') != path.npos || !validUtf8(path))) throw std::runtime_error("Invalid WSL change path");
+            for (auto& project : projectWatches_) {
+                const auto& root = project.second.root; const auto resource = path.empty() ? root : root.at(path);
+                if (!path.empty() && !root.contains(resource) && !resource.contains(root)) continue;
+                auto& changes = project.second.changes;
+                changes.changed = true; changes.files |= field(message, "files") == "1";
+                if (field(message, "content") == "1" && !changes.allContent) {
+                    if (path.empty() || changes.contentPaths.size() >= 256) { changes.allContent = true; changes.contentPaths.clear(); }
+                    else changes.contentPaths.push_back(resource);
+                }
+            }
+            return;
+        }
         const auto found = pending_.find(number(message, "id")); if (found == pending_.end()) throw std::runtime_error("Unexpected WSL response ID"); auto& pending = *found->second;
         if (pending.done || field(message, "projectId") != pending.project || field(message, "generation") != pending.generation) throw std::runtime_error("WSL response authority/generation mismatch");
         if (field(message, "entry") == "1") {
@@ -233,9 +256,17 @@ bool Connection::stopTerminal(const std::string& token) const {
 class WslProvider final : public ProjectProvider {
 public:
     WslProvider(const ResourceId& root, std::shared_ptr<Connection> connection) : connection_(std::move(connection)), project_(sha256(root.key()).substr(0, 32)) {}
+    ~WslProvider() override { std::lock_guard<std::mutex> lock(connection_->mutex_); connection_->projectWatches_.erase(project_); }
     ResourceId connect(const ResourceId& root) override {
         projectState_ = ConnectionState::Connecting;
-        try { connection_->ensure(); if (!expectedUid_.empty() && identity() != expectedUid_) throw std::runtime_error("The WSL user UID changed. Reopen this project with the previous Linux user; saved edits have been kept."); const auto response = call("connect", root); projectState_ = ConnectionState::Ready; return ResourceId::wsl(root.location().distro, field(response.metadata, "path"), root.location().user); }
+        try {
+            connection_->ensure();
+            if (!expectedUid_.empty() && identity() != expectedUid_) throw std::runtime_error("The WSL user UID changed. Reopen this project with the previous Linux user; saved edits have been kept.");
+            const auto response = call("connect", root);
+            const auto resolved = ResourceId::wsl(root.location().distro, field(response.metadata, "path"), root.location().user);
+            { std::lock_guard<std::mutex> lock(connection_->mutex_); auto& watch = connection_->projectWatches_[project_]; watch.root = resolved; watch.changes = {}; watch.changes.watchLimited = connection_->watchLimited_; }
+            projectState_ = ConnectionState::Ready; return resolved;
+        }
         catch (...) { projectState_ = ConnectionState::Unavailable; throw; }
     }
     GitRepositoryScan gitRepositories(const ResourceId& root, const std::function<bool()>& cancelled) override {
@@ -330,6 +361,11 @@ public:
     ConnectionState state() const override { return connection_->state() == ConnectionState::Ready ? projectState_.load() : connection_->state(); }
     std::wstring error() const override { return connection_->error(); }
     uint64_t revision() const override { return connection_->revision(); }
+    ProviderChanges takeChanges() override {
+        std::lock_guard<std::mutex> lock(connection_->mutex_);
+        const auto found = connection_->projectWatches_.find(project_);
+        return found == connection_->projectWatches_.end() ? ProviderChanges{} : std::exchange(found->second.changes, ProviderChanges{});
+    }
     void reconnect() override { connection_->reconnect(); ++generation_; }
     void expectIdentity(std::string uid) override { expectedUid_ = std::move(uid); }
     std::string identity() const override { std::lock_guard<std::mutex> lock(connection_->mutex_); return connection_->uid_; }

@@ -9,6 +9,7 @@ add_library(poppy_core src/text.cpp src/text_layout.cpp src/text_search.cpp src/
 target_include_directories(poppy_core PUBLIC src)
 target_sources(poppy_core PRIVATE src/clipboard_image.cpp src/image_preview.cpp)
 target_sources(poppy_core PRIVATE src/startup_options.cpp)
+target_sources(poppy_core PRIVATE src/file_changes.cpp)
 find_package(Threads REQUIRED)
 target_link_libraries(poppy_core PUBLIC Threads::Threads)
 if(MSVC)
