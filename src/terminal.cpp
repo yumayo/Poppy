@@ -306,7 +306,7 @@ void Terminal::paint() {
     auto& dc = renderer_; dc.font(Renderer::Font::Ui);
     const auto rect = Scrollbars::contentRect(window_);
     dc.fill({0, 0, rect.right, header_}, panel);
-    dc.label({12, 0, rect.right - 12, header_}, L"TERMINAL  ·  " + (!displayDirectory_.empty() ? displayDirectory_ : directory_.empty() ? std::wstring(L"PowerShell") : directory_.native()), muted);
+    dc.label({12, 0, rect.right - 12, header_}, L"TERMINAL", muted);
     dc.fill({0, header_ - 1, rect.right, header_}, border);
     if (!started_) {
         dc.fill({0, header_, rect.right, rect.bottom}, background);
