@@ -618,7 +618,6 @@ void ProjectRuntime::Impl::paint() {
     dc.label({scaled(305), 0, scaled(360), toolbar_}, L"Diff", foreground);
     dc.label({scaled(374), 0, scaled(460), toolbar_}, L"Terminal", terminalVisible_ ? accent : muted);
     dc.label({scaled(480), 0, scaled(566), toolbar_}, L"Find file", foreground);
-    dc.label({scaled(582), 0, r.right - scaled(16), toolbar_}, root_.empty() ? L"" : root_.native(), muted, DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_PATH_ELLIPSIS);
     dc.fill({0, toolbar_, activityWidth_, r.bottom - footer_}, background);
     dc.fill({activityWidth_ - 1, toolbar_, activityWidth_, r.bottom - footer_}, border);
     dc.fill(sidebarRect_, panel);
