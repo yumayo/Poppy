@@ -9,12 +9,11 @@
 
 namespace poppy::wsl {
 constexpr unsigned protocolVersion = 1;
-constexpr const char* helperVersion = "10";
+constexpr const char* helperVersion = "11";
 constexpr size_t maxControl = 64 * 1024, maxChunk = 256 * 1024, maxFrame = 1024 * 1024;
 constexpr size_t maxOutputBatch = 64 * 1024;
-// Per shared helper connection, across all of its projects. The kernel's
-// per-user inotify quota is independent and can reject watches earlier.
-constexpr size_t maxDirectoryWatches = 64 * 1024;
+// Used only if the helper cannot read the Linux user watch limit at startup.
+constexpr size_t fallbackDirectoryWatches = 64 * 1024;
 // Flat JSON control messages. Lists are streamed as individual control frames;
 // bodies use binary frames, never JSON strings or base64.
 using Message = std::map<std::string, std::string>;

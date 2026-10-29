@@ -4,6 +4,7 @@
 #include "file_changes.h"
 #include "limit_status.h"
 #include <iostream>
+#include <sstream>
 #include <stdexcept>
 #ifdef _WIN32
 #include <windows.h>
@@ -12,18 +13,44 @@
 
 namespace {
 void check(bool value, const char* message) { if (!value) throw std::runtime_error(message); }
+void watchBudgets() {
+    using namespace poppy;
+    for (const uint64_t systemLimit : {uint64_t{0}, uint64_t{1}, uint64_t{2}, uint64_t{65536}, uint64_t{524288}, uint64_t{1048577}, UINT64_MAX}) {
+        std::istringstream input(" \t" + std::to_string(systemLimit) + "\n");
+        const auto usage = readWatchBudget(input);
+        check(usage.systemLimit == systemLimit && usage.limit == systemLimit / 2 && usage.count == 0 && validWatchUsage(usage), "Watch budget was not half the startup Linux quota");
+        auto full = usage; full.count = full.limit;
+        check(validWatchUsage(full), "A full watch budget was rejected");
+        ++full.count;
+        check(!validWatchUsage(full), "A watch count above its budget was accepted");
+    }
+    for (const auto* value : {"", "invalid", "-1", "+10", "524288 trailing", "524288x", "18446744073709551616"}) {
+        std::istringstream input(value);
+        const auto usage = readWatchBudget(input);
+        check(usage.limit == wsl::fallbackDirectoryWatches && usage.systemLimit == 0 && validWatchUsage(usage), "An unreadable Linux quota did not retain the fallback budget");
+    }
+    check(!validWatchUsage({0, 65536, 524288, false, {}}), "The old fixed budget was accepted with a larger Linux quota");
+    check(!validWatchUsage({0, 262145, 524288, false, {}}), "A watch budget above half the Linux quota was accepted");
+    check(!validWatchUsage({0, 1, 0, false, {}}), "An arbitrary fallback watch budget was accepted");
+}
 void limitStatuses() {
     using namespace poppy;
     check(groupedCount(0) == L"0" && groupedCount(1234) == L"1,234" && groupedCount(UINT64_MAX) == L"18,446,744,073,709,551,615", "Limit counters lost separators or integer precision");
     const auto disconnected = watchLimitStatus({});
-    check(disconnected.text == L"Watch —/65,536" && !disconnected.warning, "An unknown watch count was presented as zero");
-    WatchUsage usage{1234, 65536, 524288, false, {}};
+    check(disconnected.text == L"Watch —/—" && !disconnected.warning, "An unknown watch budget was presented as a fixed limit");
+    WatchUsage usage{1234, 262144, 524288, false, {}};
     auto status = watchLimitStatus(usage);
-    check(status.text == L"Watch 1,234/65,536" && !status.warning && status.tooltip.find(L"524,288") != status.tooltip.npos && status.tooltip.find(L"Shared by all projects") != status.tooltip.npos, "Watch tooltip omitted its scope or Linux quota");
+    check(status.text == L"Watch 1,234/262,144" && !status.warning && status.tooltip.find(L"524,288") != status.tooltip.npos && status.tooltip.find(L"Shared by all projects") != status.tooltip.npos && status.tooltip.find(L"half") != status.tooltip.npos && status.tooltip.find(L"startup") != status.tooltip.npos, "Watch tooltip omitted its scope or dynamic Linux budget");
     usage.limited = true; usage.reason = "systemLimit"; status = watchLimitStatus(usage);
     check(status.warning && status.tooltip.find(L"Linux could not allocate") != status.tooltip.npos && status.tooltip.find(L"F5") != status.tooltip.npos, "Partial monitoring below the Poppy cap was not explained");
     usage.count = usage.limit; usage.reason = "poppyLimit"; status = watchLimitStatus(usage);
     check(status.warning && status.tooltip.find(L"Poppy's directory watch limit") != status.tooltip.npos, "Watch capacity was not highlighted");
+    std::istringstream unavailable;
+    status = watchLimitStatus(readWatchBudget(unavailable));
+    check(status.text == L"Watch 0/65,536" && status.tooltip.find(L"fallback") != status.tooltip.npos && !status.warning, "A fallback watch budget was not explained");
+    std::istringstream zero("0");
+    status = watchLimitStatus(readWatchBudget(zero));
+    check(status.text == L"Watch 0/0" && status.warning && status.tooltip.find(L"Linux user watch limit: 0") != status.tooltip.npos, "A zero Linux watch quota was presented as unknown");
     FileIndex index; index.files.resize(1234); index.storageBytes = 3 * 1024 * 1024 / 2;
     status = fileLimitStatus(&index, true);
     check(status.text == L"Files 1,234/200,000 …" && status.tooltip.find(L"1.5/64 MiB") != status.tooltip.npos && status.tooltip.find(L"last completed scan") != status.tooltip.npos, "File status did not distinguish the cached scan and memory budget");
@@ -194,4 +221,4 @@ void frameBatchBoundaries() {
     check(writes.size() == 1 && writes[0] == bytes, "An invalid frame corrupted a pending batch");
 }
 }
-int main() { try { limitStatuses(); changeClassification(); commandLines(); resources(); protocol(); frameBatching(); frameBatchBoundaries(); std::cout << "WSL command line, resource and protocol tests passed\n"; } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; } }
+int main() { try { watchBudgets(); limitStatuses(); changeClassification(); commandLines(); resources(); protocol(); frameBatching(); frameBatchBoundaries(); std::cout << "WSL command line, resource and protocol tests passed\n"; } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; } }

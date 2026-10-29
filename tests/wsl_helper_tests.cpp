@@ -170,28 +170,33 @@ void watching(const std::string& executable) {
 }
 void watchLimitIdle(const std::string& executable) {
     using namespace std::chrono_literals;
+    uint64_t systemLimit = 0;
+    check(static_cast<bool>(std::ifstream("/proc/sys/fs/inotify/max_user_watches") >> systemLimit) && systemLimit >= 8, "Cannot read a usable Linux watch quota for the integration test");
+    const auto watchLimit = systemLimit / 2;
     Fixture fixture;
     const auto first = fixture.root / "first", second = fixture.root / "second";
     fs::create_directory(first); fs::create_directory(second);
-    // Each scan stays below the 50,000-directory index limit. The shared
-    // helper must watch more than the former 8,192 cap, then enforce its new
-    // connection-wide budget across both roots.
-    constexpr size_t firstCount = 40000;
-    for (size_t i = 0; i < maxDirectoryWatches; ++i)
+    // Each scan stays below the 50,000-directory index limit. Verify shared
+    // accounting beyond the old 65,536 cap without allocating half a large
+    // host quota just for a test. Small quotas also exercise partial watching.
+    const auto directoryCount = static_cast<size_t>(std::min<uint64_t>(watchLimit, 65536 + 16));
+    const auto firstCount = directoryCount / 2;
+    for (size_t i = 0; i < directoryCount; ++i)
         fs::create_directory((i < firstCount ? first : second) / ("directory-" + std::to_string(i)));
     write(fixture.root / "file", "readable");
     Helper helper(executable); helper.hello(); helper.call("connect", fixture.root); helper.call("indexFiles", first);
-    check(helper.takeEvents(400ms).empty(), "A workspace below 65,536 directories reached the watch limit");
-    check(number(helper.watchUsage(), "count") == firstCount + 2 && number(helper.watchUsage(), "limit") == maxDirectoryWatches && field(helper.watchUsage(), "limited") == "0", "Watch progress did not report the real shared count and limit");
-    const auto changed = first / "directory-39999" / "added.txt"; write(changed, "new file");
+    check(helper.takeEvents(400ms).empty(), "A workspace below the dynamic watch budget reached the watch limit");
+    check(number(helper.watchUsage(), "count") == firstCount + 2 && number(helper.watchUsage(), "limit") == watchLimit && number(helper.watchUsage(), "systemLimit") == systemLimit && field(helper.watchUsage(), "limited") == "0", "Watch progress did not report half the startup quota and the real shared count");
+    const auto changed = first / ("directory-" + std::to_string(firstCount - 1)) / "added.txt"; write(changed, "new file");
     const auto updates = helper.takeEvents(300ms);
     check(std::any_of(updates.begin(), updates.end(), [&](const Message& event) { return field(event, "path") == changed.string() && field(event, "files") == "1"; }), "A large workspace lost directory change notifications");
     helper.call("indexFiles", second);
     const auto events = helper.takeEvents(2300ms);
-    check(number(helper.watchUsage(), "count") == maxDirectoryWatches && field(helper.watchUsage(), "limited") == "1" && field(helper.watchUsage(), "reason") == "poppyLimit", "Watch limit status did not explain partial monitoring");
+    const bool limited = directoryCount + 3 > watchLimit;
+    check(number(helper.watchUsage(), "count") == std::min<uint64_t>(directoryCount + 3, watchLimit) && number(helper.watchUsage(), "limit") == watchLimit && field(helper.watchUsage(), "limited") == (limited ? "1" : "0") && field(helper.watchUsage(), "reason") == (limited ? "poppyLimit" : ""), "Watch status did not enforce the shared dynamic budget");
     const auto notifications = helper.usageEvents(); helper.takeEvents(400ms);
     check(helper.usageEvents() == notifications, "Watch status was retransmitted while idle");
-    check(std::count_if(events.begin(), events.end(), [](const Message& event) { return field(event, "event") == "watchLimited"; }) == 1, "Missing one-time watch-limit notification");
+    check(std::count_if(events.begin(), events.end(), [](const Message& event) { return field(event, "event") == "watchLimited"; }) == (limited ? 1 : 0), "Unexpected watch-limit notification count");
     check(std::none_of(events.begin(), events.end(), [](const Message& event) { return field(event, "event") == "rescanRequired"; }), "An unchanged workspace rescanned periodically after reaching the watch limit");
     check(helper.call("readFile", fixture.root / "file").bytes == "readable", "Watch limit disconnected the project");
     helper.eof();
