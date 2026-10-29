@@ -165,9 +165,21 @@ void watching(const std::string& executable) {
 void watchLimitIdle(const std::string& executable) {
     using namespace std::chrono_literals;
     Fixture fixture;
-    for (int i = 0; i < 8193; ++i) fs::create_directory(fixture.root / ("directory-" + std::to_string(i)));
+    const auto first = fixture.root / "first", second = fixture.root / "second";
+    fs::create_directory(first); fs::create_directory(second);
+    // Each scan stays below the 50,000-directory index limit. The shared
+    // helper must watch more than the former 8,192 cap, then enforce its new
+    // connection-wide budget across both roots.
+    constexpr size_t firstCount = 40000;
+    for (size_t i = 0; i < maxDirectoryWatches; ++i)
+        fs::create_directory((i < firstCount ? first : second) / ("directory-" + std::to_string(i)));
     write(fixture.root / "file", "readable");
-    Helper helper(executable); helper.hello(); helper.call("connect", fixture.root); helper.call("indexFiles", fixture.root);
+    Helper helper(executable); helper.hello(); helper.call("connect", fixture.root); helper.call("indexFiles", first);
+    check(helper.takeEvents(200ms).empty(), "A workspace below 65,536 directories reached the watch limit");
+    const auto changed = first / "directory-39999" / "added.txt"; write(changed, "new file");
+    const auto updates = helper.takeEvents(300ms);
+    check(std::any_of(updates.begin(), updates.end(), [&](const Message& event) { return field(event, "path") == changed.string() && field(event, "files") == "1"; }), "A large workspace lost directory change notifications");
+    helper.call("indexFiles", second);
     const auto events = helper.takeEvents(2300ms);
     check(std::count_if(events.begin(), events.end(), [](const Message& event) { return field(event, "event") == "watchLimited"; }) == 1, "Missing one-time watch-limit notification");
     check(std::none_of(events.begin(), events.end(), [](const Message& event) { return field(event, "event") == "rescanRequired"; }), "An unchanged workspace rescanned periodically after reaching the watch limit");

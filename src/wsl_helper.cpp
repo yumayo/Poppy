@@ -283,7 +283,7 @@ void Server::watch(const std::string& p, const std::string& gitRoot, const std::
         return;
     }
     if (p.rfind("/mnt/", 0) == 0) drvfs_ = true;
-    if (watchPaths_.size() >= 8192 || notify_.value < 0) { watchLimited_ = true; return; }
+    if (watchPaths_.size() >= maxDirectoryWatches || notify_.value < 0) { watchLimited_ = true; return; }
     const auto wd = inotify_add_watch(notify_.value, p.c_str(), IN_CREATE | IN_DELETE | IN_MOVED_FROM | IN_MOVED_TO | IN_MODIFY | IN_ATTRIB | IN_DELETE_SELF | IN_MOVE_SELF | IN_ONLYDIR | IN_DONT_FOLLOW);
     if (wd < 0) { watchLimited_ = true; return; }
     auto& entry = watchPaths_[wd];
