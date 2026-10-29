@@ -1,4 +1,5 @@
 #include "viewer.h"
+#include "selection_scroll.h"
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -31,6 +32,7 @@ void Viewer::setDpi(UINT dpi) {
     scrollbars(); findLayout(); caretPosition(); InvalidateRect(window_, nullptr, FALSE);
 }
 void Viewer::show(std::shared_ptr<const Document> d, const ResourceId& path, bool preserve) {
+    stopSelection();
     image_.reset(); renderer_.setImage({});
     const auto previous = preserve && document_ ? std::optional<State>(state()) : std::nullopt;
     edit_.reset(); highSurrogate_ = 0;
@@ -47,6 +49,7 @@ void Viewer::edit(std::shared_ptr<EditBuffer> buffer, const ResourceId& path, bo
     edit_ = std::move(buffer); caretPosition();
 }
 void Viewer::showDiff(std::shared_ptr<const DiffDocument> d, const ResourceId& path, bool preserve) {
+    stopSelection();
     image_.reset(); renderer_.setImage({});
     const auto previous = preserve && document_ ? std::optional<State>(state()) : std::nullopt;
     edit_.reset(); highSurrogate_ = 0;
@@ -60,6 +63,7 @@ void Viewer::showDiff(std::shared_ptr<const DiffDocument> d, const ResourceId& p
     if (statusChanged) statusChanged();
 }
 void Viewer::message(const std::wstring& text, const ResourceId& path) {
+    stopSelection();
     image_.reset(); renderer_.setImage({});
     findBar_.close(); KillTimer(window_, findTimer); search_.query("");
     edit_.reset(); highSurrogate_ = 0;
@@ -124,6 +128,7 @@ void Viewer::restore(const State& state) {
 }
 void Viewer::setWordWrap(bool enabled) {
     if (wordWrap_ == enabled) return;
+    stopSelection();
     const auto previous = state();
     wordWrap_ = enabled; layoutDirty_ = true;
     scrollbars(); findLayout();
@@ -135,7 +140,7 @@ void Viewer::setDiffLayout(bool inlineView) {
     if (inlineView_ == inlineView) return;
     const auto previous = state();
     inlineView_ = inlineView; layoutDirty_ = true;
-    if (selecting_) { selecting_ = false; ReleaseCapture(); }
+    stopSelection();
     scrollbars();
     if (diff_) { restoreTop(previous); scrollbars(); }
     caretPosition(); InvalidateRect(window_, nullptr, FALSE);
@@ -184,6 +189,30 @@ void Viewer::scroll(int vertical, int horizontal) {
     // WM_PAINT has lower priority than mouse input. Present this position
     // before handling another move, including while a thumb is dragged quickly.
     UpdateWindow(window_);
+}
+void Viewer::extendSelection(int x, int y) {
+    selectionPoint_ = {x, y};
+    const auto rect = Scrollbars::contentRect(window_);
+    const int top = contentTop() + (stickyFile() ? cellHeight_ : 0);
+    if (rect.bottom <= top) return;
+    // Hit-test the visible edge; the timer brings further rows into view.
+    caret_ = position(x, std::clamp(y, top, static_cast<int>(rect.bottom) - 1), &caretTrailing_);
+    caretPosition(); InvalidateRect(window_, nullptr, FALSE); UpdateWindow(window_);
+}
+void Viewer::scrollSelection() {
+    if (!selecting_ || GetCapture() != window_) { stopSelection(); return; }
+    const auto rect = Scrollbars::contentRect(window_);
+    const int rows = selectionScrollRows(selectionPoint_.y, contentTop() + (stickyFile() ? cellHeight_ : 0), rect.bottom, cellHeight_);
+    if (!rows) return;
+    const int previous = top_;
+    top_ += rows; scrollbars();
+    if (top_ != previous) extendSelection(selectionPoint_.x, selectionPoint_.y);
+}
+void Viewer::stopSelection() {
+    if (window_) KillTimer(window_, selectionTimer);
+    if (!selecting_) return;
+    selecting_ = false;
+    if (GetCapture() == window_) ReleaseCapture();
 }
 size_t Viewer::position(int x, int y, bool* trailing) const {
     if (trailing) *trailing = false;
@@ -560,15 +589,18 @@ LRESULT Viewer::handle(UINT m, WPARAM a, LPARAM b) {
     case WM_SETTINGCHANGE: caretPosition(); return 0;
     case WM_SETFOCUS: caretPosition(); if (focused) focused(); return 0;
     case WM_KILLFOCUS:
+        stopSelection();
         highSurrogate_ = 0; caretVisible_ = false; KillTimer(window_, caretTimer); DestroyCaret();
         InvalidateRect(window_, nullptr, FALSE); return 0;
     case WM_TIMER:
+        if (a == selectionTimer) { scrollSelection(); return 0; }
         if (a == findTimer) { searchSlice(); return 0; }
         if (a == caretTimer && edit_ && GetFocus() == window_ && GetCaretBlinkTime() != INFINITE) {
             caretVisible_ = !caretVisible_; InvalidateRect(window_, nullptr, FALSE);
         }
         return 0;
-    case WM_DESTROY: KillTimer(window_, caretTimer); KillTimer(window_, findTimer); return 0;
+    case WM_DESTROY: stopSelection(); KillTimer(window_, caretTimer); KillTimer(window_, findTimer); return 0;
+    case WM_SHOWWINDOW: if (!a) stopSelection(); break;
     case WM_SETCURSOR:
         if (image_ && LOWORD(b) == HTCLIENT) { SetCursor(LoadCursorW(nullptr, IDC_ARROW)); return TRUE; }
         if (diff_ && LOWORD(b) == HTCLIENT) {
@@ -583,7 +615,7 @@ LRESULT Viewer::handle(UINT m, WPARAM a, LPARAM b) {
     case WM_LBUTTONDOWN: {
         SetFocus(window_);
         const POINT point{GET_X_LPARAM(b), GET_Y_LPARAM(b)};
-        if (image_) return 0;
+        if (!document_) return 0;
         if (diff_) for (const bool inlineView : {false, true}) {
             const auto button = layoutButton(inlineView);
             if (PtInRect(&button, point)) { setDiffLayout(inlineView); return 0; }
@@ -598,11 +630,12 @@ LRESULT Viewer::handle(UINT m, WPARAM a, LPARAM b) {
         const bool extend = (GetKeyState(VK_SHIFT) & 0x8000) && (!splitDiff() || after == after_);
         after_ = after;
         if (!extend) anchor_ = position(GET_X_LPARAM(b), GET_Y_LPARAM(b));
-        caret_ = position(GET_X_LPARAM(b), GET_Y_LPARAM(b), &caretTrailing_); selecting_ = true; SetCapture(window_); caretPosition(); InvalidateRect(window_, nullptr, FALSE); return 0;
+        selecting_ = true; SetCapture(window_); SetTimer(window_, selectionTimer, 50, nullptr);
+        extendSelection(point.x, point.y); return 0;
     }
-    case WM_MOUSEMOVE: if (selecting_) { caret_ = position(GET_X_LPARAM(b), GET_Y_LPARAM(b), &caretTrailing_); caretPosition(); InvalidateRect(window_, nullptr, FALSE); } return 0;
-    case WM_LBUTTONUP: if (selecting_) { selecting_ = false; ReleaseCapture(); } return 0;
-    case WM_CAPTURECHANGED: selecting_ = false; return 0;
+    case WM_MOUSEMOVE: if (selecting_) extendSelection(GET_X_LPARAM(b), GET_Y_LPARAM(b)); return 0;
+    case WM_LBUTTONUP: if (selecting_) { extendSelection(GET_X_LPARAM(b), GET_Y_LPARAM(b)); stopSelection(); } return 0;
+    case WM_CANCELMODE: case WM_CAPTURECHANGED: stopSelection(); return 0;
     case WM_MOUSEWHEEL: scroll(-GET_WHEEL_DELTA_WPARAM(a) / WHEEL_DELTA * 3, 0); return 0;
     case WM_VSCROLL: case WM_HSCROLL: {
         const bool vertical = m == WM_VSCROLL; int& pos = vertical ? top_ : left_;
@@ -617,6 +650,7 @@ LRESULT Viewer::handle(UINT m, WPARAM a, LPARAM b) {
         scroll(0, 0); return 0;
     }
     case WM_KEYDOWN:
+        if (a == VK_ESCAPE && selecting_) { stopSelection(); return 0; }
         if (findKey(MSG{window_, m, a, b, 0, {0, 0}})) return 0;
         revealFind_ = false;
         if (edit_) {

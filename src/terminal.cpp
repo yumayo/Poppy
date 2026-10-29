@@ -1,5 +1,6 @@
 #include "terminal.h"
 #include "terminal_profile.h"
+#include "selection_scroll.h"
 #include <imm.h>
 #include <algorithm>
 #include <map>
@@ -132,6 +133,7 @@ bool Terminal::start() {
     ResumeThread(thread.value); started_ = true; InvalidateRect(window_, nullptr, FALSE); return true;
 }
 void Terminal::stop() {
+    stopSelection();
     if (stopping) stopping();
     if (ended) ended();
     if (window_) KillTimer(window_, 2);
@@ -155,6 +157,7 @@ void Terminal::send(std::string text, bool userInput) {
     { std::lock_guard<std::mutex> lock(mutex_); if (writeBytes_ + text.size() > 1024 * 1024) { MessageBeep(MB_ICONWARNING); return; } writeBytes_ += text.size(); writes_.push_back(std::move(text)); }
     condition_.notify_all();
     if (userInput) {
+        stopSelection();
         display_.input(GetTickCount64());
         const bool selected = hasSelection();
         scroll_ = 0; display_.clearSelection();
@@ -237,6 +240,7 @@ void Terminal::resize() {
     const int columns = std::clamp((static_cast<int>(rect.right) - 12) / cellWidth_, 2, 500);
     const int rows = std::clamp((static_cast<int>(rect.bottom) - header_ - 8) / cellHeight_, 1, 200);
     if (columns == model_.columns() && rows == model_.rows()) return;
+    stopSelection();
     model_.resize(columns, rows); scroll_ = 0; display_.clearSelection();
     scrollbars();
     display_.resized(GetTickCount64());
@@ -265,6 +269,29 @@ void Terminal::scroll(int offset) {
     // Present each wheel or thumb position while input continues to arrive.
     UpdateWindow(window_);
 }
+void Terminal::extendSelection(int x, int y) {
+    selectionPoint_ = {x, y};
+    display_.extendSelection(model_, point(x, y));
+    InvalidateRect(window_, nullptr, FALSE); UpdateWindow(window_);
+}
+void Terminal::scrollSelection() {
+    if (!selecting_ || GetCapture() != window_) { stopSelection(); return; }
+    const auto rect = Scrollbars::contentRect(window_);
+    const int top = header_ + 4, bottom = std::min(static_cast<int>(rect.bottom), top + display_.rows() * cellHeight_);
+    const int rows = selectionScrollRows(selectionPoint_.y, top, bottom, cellHeight_);
+    const int offset = std::clamp(static_cast<int>(scroll_) - rows, 0, static_cast<int>(model_.historySize()));
+    if (!rows || offset == static_cast<int>(scroll_)) return;
+    scroll_ = static_cast<size_t>(offset);
+    display_.update(model_, scroll_, GetTickCount64());
+    scrollbars(); imePosition();
+    extendSelection(selectionPoint_.x, selectionPoint_.y);
+}
+void Terminal::stopSelection() {
+    if (window_) KillTimer(window_, selectionTimer);
+    if (!selecting_) return;
+    selecting_ = false;
+    if (GetCapture() == window_) ReleaseCapture();
+}
 void Terminal::imePosition() {
     const auto context = ImmGetContext(window_); if (!context) return;
     COMPOSITIONFORM form{}; form.dwStyle = CFS_POINT; form.ptCurrentPos = {6 + display_.cursorX() * cellWidth_, header_ + 4 + display_.cursorY() * cellHeight_};
@@ -292,6 +319,7 @@ int Terminal::point(int x, int y) const {
 void Terminal::copy() {
     if (!hasSelection()) return;
     if (copyText(window_, wide(display_.selectedText()))) {
+        stopSelection();
         display_.clearSelection();
         InvalidateRect(window_, nullptr, FALSE); UpdateWindow(window_);
     } else {
@@ -343,18 +371,28 @@ LRESULT Terminal::handle(UINT m, WPARAM a, LPARAM b) {
     case WM_ERASEBKGND: return 1;
     case WM_SIZE: resize(); return 0;
     case wmTerminal: pump(); return 0;
-    case WM_TIMER: if (a == 2) pump(); return 0;
+    case WM_TIMER:
+        if (a == selectionTimer) scrollSelection();
+        else if (a == 2) pump();
+        return 0;
+    case WM_DESTROY: stopSelection(); return 0;
+    case WM_SHOWWINDOW: if (!a) stopSelection(); break;
     case WM_GETDLGCODE: return DLGC_WANTALLKEYS;
     case WM_COPY: copy(); return 0;
     case WM_SETFOCUS: if (focused) focused(); InvalidateRect(window_, nullptr, FALSE); return 0;
-    case WM_KILLFOCUS: InvalidateRect(window_, nullptr, FALSE); return 0;
+    case WM_KILLFOCUS: stopSelection(); InvalidateRect(window_, nullptr, FALSE); return 0;
     case WM_LBUTTONDOWN:
         SetFocus(window_);
         if (!started_ || (!running() && GET_Y_LPARAM(b) < header_)) { start(); InvalidateRect(window_, nullptr, FALSE); return 0; }
-        if (GET_Y_LPARAM(b) >= header_) { display_.beginSelection(point(GET_X_LPARAM(b), GET_Y_LPARAM(b))); selecting_ = true; SetCapture(window_); InvalidateRect(window_, nullptr, FALSE); } return 0;
-    case WM_MOUSEMOVE: if (selecting_) { display_.extendSelection(model_, point(GET_X_LPARAM(b), GET_Y_LPARAM(b))); InvalidateRect(window_, nullptr, FALSE); UpdateWindow(window_); } return 0;
-    case WM_LBUTTONUP: if (selecting_) { display_.extendSelection(model_, point(GET_X_LPARAM(b), GET_Y_LPARAM(b))); selecting_ = false; ReleaseCapture(); InvalidateRect(window_, nullptr, FALSE); UpdateWindow(window_); } return 0;
-    case WM_CAPTURECHANGED: selecting_ = false; return 0;
+        if (GET_Y_LPARAM(b) >= header_) {
+            selectionPoint_ = {GET_X_LPARAM(b), GET_Y_LPARAM(b)};
+            display_.beginSelection(point(selectionPoint_.x, selectionPoint_.y));
+            selecting_ = true; SetCapture(window_); SetTimer(window_, selectionTimer, 50, nullptr);
+            InvalidateRect(window_, nullptr, FALSE);
+        } return 0;
+    case WM_MOUSEMOVE: if (selecting_) extendSelection(GET_X_LPARAM(b), GET_Y_LPARAM(b)); return 0;
+    case WM_LBUTTONUP: if (selecting_) { extendSelection(GET_X_LPARAM(b), GET_Y_LPARAM(b)); stopSelection(); } return 0;
+    case WM_CANCELMODE: case WM_CAPTURECHANGED: stopSelection(); return 0;
     case WM_RBUTTONUP: if (hasSelection()) copy(); else { if (!started_) start(); paste(); } return 0;
     case WM_MOUSEWHEEL: {
         const int delta = GET_WHEEL_DELTA_WPARAM(a) / WHEEL_DELTA * 3;
@@ -391,7 +429,7 @@ LRESULT Terminal::handle(UINT m, WPARAM a, LPARAM b) {
         case VK_PRIOR: send("\x1b[5~"); return 0; case VK_NEXT: send("\x1b[6~"); return 0;
         case VK_TAB: if (shift) send("\x1b[Z"); return 0;
         case VK_ESCAPE:
-            if (hasSelection()) { display_.clearSelection(); InvalidateRect(window_, nullptr, FALSE); }
+            if (selecting_ || hasSelection()) { stopSelection(); display_.clearSelection(); InvalidateRect(window_, nullptr, FALSE); }
             else send("\x1b");
             return 0;
         default: break;

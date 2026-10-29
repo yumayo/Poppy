@@ -33,6 +33,9 @@ private:
     void resize();
     void scrollbars();
     void scroll(int offset);
+    void extendSelection(int x, int y);
+    void scrollSelection();
+    void stopSelection();
     void imePosition();
     int point(int x, int y) const;
     HWND window_ = nullptr;
@@ -60,6 +63,8 @@ private:
     std::wstring error_;
     size_t scroll_ = 0;
     bool selecting_ = false;
+    POINT selectionPoint_{};
+    static constexpr UINT_PTR selectionTimer = 0x5058;
     wchar_t highSurrogate_ = 0;
 };
 }

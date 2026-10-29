@@ -1,6 +1,7 @@
 #include "scrollbars.h"
 #include "quick_open.h"
 #include "viewer.h"
+#include "terminal.h"
 #include "status_bar.h"
 #include "tree.h"
 #include <commctrl.h>
@@ -877,6 +878,149 @@ void continuousViewerScrolling() {
     SendMessageW(window, WM_MOUSEWHEEL, MAKEWPARAM(MK_SHIFT, static_cast<WORD>(-WHEEL_DELTA)), 0);
     check(viewer.state().left == 0 && viewer.state().top == wrappedTop, "Shift+wheel scrolled a wrapped viewer vertically");
 }
+// Keep the pointer stationary between ticks to catch implementations that only
+// scroll on WM_MOUSEMOVE. One real timer also verifies scheduling on mouse down.
+constexpr UINT_PTR selectionTimer = 0x5058;
+void selectionTicks(HWND window, int count) {
+    for (int i = 0; i < count; ++i) SendMessageW(window, WM_TIMER, selectionTimer, 0);
+}
+void selectionAutoScrolling() {
+    Viewer viewer;
+    const auto instance = GetModuleHandleW(nullptr);
+    const auto parent = CreateWindowExW(0, L"STATIC", L"Selection scrolling test", WS_POPUP | WS_CLIPCHILDREN,
+        0, 0, 640, 360, nullptr, nullptr, instance, nullptr);
+    check(parent != nullptr, "Cannot create the selection scrolling window");
+    struct WindowOwner { HWND value; ~WindowOwner() { DestroyWindow(value); } } owner{parent};
+    viewer.create(parent, instance);
+    const auto window = viewer.window(); MoveWindow(window, 0, 0, 640, 360, FALSE);
+    ShowWindow(parent, SW_SHOWNOACTIVATE);
+    auto buffer = std::make_shared<EditBuffer>();
+    for (int row = 0; row < 40; ++row) buffer->document.text += u8"日本語😀 " + std::string(160, 'x') + '\n';
+    indexDocument(buffer->document); buffer->initialize(buffer->document.text);
+    auto diff = std::make_shared<DiffDocument>();
+    diff->patch.text = "diff --git a/file.txt b/file.txt\n@@ -1,40 +1,40 @@\n";
+    for (int row = 0; row < 40; ++row) diff->patch.text += " " + std::string(160, 'x') + '\n';
+    indexDiff(*diff, true);
+    bool realTimerChecked = false;
+    for (const auto dpi : {96u, 144u}) for (const bool wrap : {false, true}) for (int mode = 0; mode < 4; ++mode) {
+        viewer.setDpi(dpi); viewer.setWordWrap(wrap);
+        if (mode == 0) viewer.edit(buffer, L"selection.txt");
+        else if (mode == 1) viewer.show(std::make_shared<Document>(buffer->document), L"readonly.txt");
+        else { viewer.setDiffLayout(mode == 2); viewer.showDiff(diff, L"selection.diff"); }
+        SetFocus(window);
+        const auto rect = Scrollbars::contentRect(window);
+        Renderer metrics; metrics.setDpi(dpi);
+        const int height = metrics.textHeight() + MulDiv(3, dpi, 96);
+        const int x = MulDiv(mode == 2 ? 140 : 70, dpi, 96) + 3 * metrics.cellWidth();
+        const int y = (mode >= 2 ? MulDiv(34, dpi, 96) : 0) + 3 * height + height / 2;
+        SendMessageW(window, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(x, y));
+        check(GetCapture() == window, "Selection did not capture the pointer");
+        const auto anchor = viewer.state().anchor;
+        SendMessageW(window, WM_MOUSEMOVE, MK_LBUTTON, MAKELPARAM(x, rect.bottom + 2 * height));
+        const auto before = viewer.state().caret;
+        if (!realTimerChecked) {
+            const auto start = GetTickCount64(); bool received = false;
+            while (!received) {
+                MSG message{};
+                while (PeekMessageW(&message, window, WM_TIMER, WM_TIMER, PM_REMOVE)) {
+                    received |= message.wParam == selectionTimer;
+                    DispatchMessageW(&message);
+                }
+                check(GetTickCount64() - start < 1000, "Selection scrolling did not start its timer");
+                if (!received) MsgWaitForMultipleObjects(0, nullptr, FALSE, 10, QS_TIMER);
+            }
+            realTimerChecked = true;
+        }
+        selectionTicks(window, 5);
+        check(GetScrollPos(window, SB_VERT) > 0 && viewer.state().caret > before && viewer.state().anchor == anchor,
+            "Stationary downward dragging did not scroll and extend the same selection");
+        SendMessageW(window, WM_MOUSEMOVE, MK_LBUTTON, MAKELPARAM(x, y));
+        const int inside = GetScrollPos(window, SB_VERT); selectionTicks(window, 3);
+        check(GetScrollPos(window, SB_VERT) == inside, "Returning inside the text did not stop scrolling");
+        SendMessageW(window, WM_MOUSEMOVE, MK_LBUTTON, MAKELPARAM(x, -2 * height));
+        const auto lower = viewer.state().caret; selectionTicks(window, 2);
+        check(GetScrollPos(window, SB_VERT) < inside && viewer.state().caret < lower && viewer.state().anchor == anchor,
+            "Upward dragging did not reverse scrolling with a stable anchor");
+        selectionTicks(window, 100);
+        check(GetScrollPos(window, SB_VERT) == 0, "Dragging above the document did not stop at the beginning");
+        SendMessageW(window, WM_MOUSEMOVE, MK_LBUTTON, MAKELPARAM(x, rect.bottom + 1000)); selectionTicks(window, 200);
+        const auto end = ScrollbarWindow::info(window, SB_VERT);
+        check(end.nPos == end.nMax - static_cast<int>(end.nPage) + 1, "Dragging below the document did not stop at the end");
+        SendMessageW(window, WM_LBUTTONUP, 0, MAKELPARAM(x, rect.bottom + 1000));
+        const auto released = viewer.state(); selectionTicks(window, 3);
+        check(GetCapture() != window && viewer.state().caret == released.caret && GetScrollPos(window, SB_VERT) == end.nPos,
+            "A stale timer changed a released selection");
+    }
+    // Cancellation must also kill scrolling without requiring a button-up.
+    for (int cancel = 0; cancel < 6; ++cancel) {
+        viewer.edit(buffer, L"selection.txt"); SetFocus(window);
+        SendMessageW(window, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(130, 60));
+        SendMessageW(window, WM_MOUSEMOVE, MK_LBUTTON, MAKELPARAM(130, 500)); selectionTicks(window, 1);
+        if (cancel == 0) SendMessageW(window, WM_CANCELMODE, 0, 0);
+        if (cancel == 1) { SetCapture(parent); ReleaseCapture(); }
+        if (cancel == 2) SetFocus(parent);
+        if (cancel == 3) { ShowWindow(window, SW_HIDE); ShowWindow(window, SW_SHOWNA); }
+        if (cancel == 4) viewer.message(L"Loading");
+        if (cancel == 5) SendMessageW(window, WM_KEYDOWN, VK_ESCAPE, 0);
+        const auto saved = viewer.state(); const int top = GetScrollPos(window, SB_VERT); selectionTicks(window, 3);
+        check(GetCapture() != window && GetScrollPos(window, SB_VERT) == top && viewer.state().caret == saved.caret,
+            "Cancelling or switching content left selection scrolling active");
+    }
+    check(!buffer->dirty(), "Selection scrolling edited the buffer");
+}
+void terminalSelectionAutoScrolling() {
+    Terminal terminal;
+    const auto instance = GetModuleHandleW(nullptr);
+    const auto parent = CreateWindowExW(0, L"STATIC", L"Terminal selection scrolling test", WS_POPUP | WS_CLIPCHILDREN,
+        0, 0, 640, 360, nullptr, nullptr, instance, nullptr);
+    check(parent != nullptr, "Cannot create the terminal scrolling window");
+    struct WindowOwner { HWND value; ~WindowOwner() { DestroyWindow(value); } } owner{parent};
+    terminal.create(parent, instance); terminal.setDpi(96);
+    const auto window = terminal.window(); MoveWindow(window, 0, 0, 640, 360, FALSE); ShowWindow(parent, SW_SHOWNOACTIVATE);
+    wchar_t system[MAX_PATH]{}; GetSystemDirectoryW(system, MAX_PATH);
+    terminal.setDirectory(fs::temp_directory_path());
+    terminal.setCommand({std::wstring(system) + L"\\WindowsPowerShell\\v1.0\\powershell.exe", L"-NoLogo", L"-NoProfile", L"-NonInteractive", L"-Command",
+        L"1..120 | ForEach-Object { [Console]::WriteLine(('ROW{0:D3}' -f $_)) }; [Console]::Title = 'Poppy selection fixture ready'"});
+    check(terminal.launch(), "Cannot start the terminal scrolling fixture");
+    const auto start = GetTickCount64();
+    for (;;) {
+        Terminal::pump();
+        if (!terminal.running() && terminal.title() == "Poppy selection fixture ready" && ScrollbarWindow::info(window, SB_VERT).nPos >= 100) break;
+        check(GetTickCount64() - start < 10000, "The terminal scrolling fixture did not produce history");
+        MsgWaitForMultipleObjects(0, nullptr, FALSE, 10, QS_ALLINPUT);
+    }
+    SetFocus(window);
+    SendMessageW(window, WM_VSCROLL, SB_BOTTOM, 0);
+    SendMessageW(window, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(6, 80));
+    SendMessageW(window, WM_MOUSEMOVE, MK_LBUTTON, MAKELPARAM(6, -100));
+    const int bottom = GetScrollPos(window, SB_VERT); selectionTicks(window, 5);
+    check(GetScrollPos(window, SB_VERT) < bottom, "Terminal drag did not scroll into history");
+    SendMessageW(window, WM_MOUSEMOVE, MK_LBUTTON, MAKELPARAM(6, 100));
+    const int inside = GetScrollPos(window, SB_VERT); selectionTicks(window, 3);
+    check(GetScrollPos(window, SB_VERT) == inside, "Terminal kept scrolling after returning inside");
+    SendMessageW(window, WM_MOUSEMOVE, MK_LBUTTON, MAKELPARAM(6, -100)); selectionTicks(window, 100);
+    check(GetScrollPos(window, SB_VERT) == 0, "Terminal drag did not stop at the oldest history");
+    SendMessageW(window, WM_LBUTTONUP, 0, MAKELPARAM(6, -100));
+    selectionTicks(window, 3); check(GetScrollPos(window, SB_VERT) == 0, "Released terminal drag kept scrolling");
+    SendMessageW(window, WM_COPY, 0, 0);
+    const auto upward = clipboardText(window);
+    check(upward.find(L"ROW001") != std::wstring::npos && upward.find(L"ROW090") != std::wstring::npos,
+        "Upward auto-scrolling lost text across terminal history pages");
+    SendMessageW(window, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(6, 34));
+    SendMessageW(window, WM_MOUSEMOVE, MK_LBUTTON, MAKELPARAM(6, 500)); selectionTicks(window, 100);
+    check(GetScrollPos(window, SB_VERT) == bottom, "Terminal drag did not scroll back to the live screen");
+    SendMessageW(window, WM_LBUTTONUP, 0, MAKELPARAM(6, 500)); SendMessageW(window, WM_COPY, 0, 0);
+    const auto downward = clipboardText(window);
+    check(downward.find(L"ROW001") != std::wstring::npos && downward.find(L"ROW120") != std::wstring::npos,
+        "Downward auto-scrolling lost its original terminal anchor");
+    for (const auto message : {WM_CANCELMODE, WM_KEYDOWN, WM_KILLFOCUS}) {
+        SendMessageW(window, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(6, 80));
+        SendMessageW(window, WM_MOUSEMOVE, MK_LBUTTON, MAKELPARAM(6, -100));
+        SendMessageW(window, message, message == WM_KEYDOWN ? VK_ESCAPE : 0, 0);
+        const int saved = GetScrollPos(window, SB_VERT); selectionTicks(window, 3);
+        check(GetCapture() != window && GetScrollPos(window, SB_VERT) == saved, "Cancelled terminal selection kept scrolling");
+    }
+}
 void themedScrollbars() {
     ScrollbarWindow pane;
     Renderer renderer; renderer.setDpi(96);
@@ -1031,7 +1175,7 @@ int main() {
     int result = 0;
     try {
         initializeRendering();
-        statusBarLimits(); inlineTreeInput(); cellPositions(); colorsAndClipping(); imagePreviews(); smoothIcons(); windowTargets(); editorCaret(); editorWordMovement(); editorWrapping(); diffWrapping(); documentFind(); horizontalWheelScrolling(); continuousViewerScrolling(); themedScrollbars(); quickOpenStability();
+        statusBarLimits(); inlineTreeInput(); cellPositions(); colorsAndClipping(); imagePreviews(); smoothIcons(); windowTargets(); editorCaret(); editorWordMovement(); editorWrapping(); diffWrapping(); documentFind(); horizontalWheelScrolling(); continuousViewerScrolling(); selectionAutoScrolling(); terminalSelectionAutoScrolling(); themedScrollbars(); quickOpenStability();
         std::cout << "Direct2D rendering tests passed\n";
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; result = 1; }
     if (SUCCEEDED(com)) CoUninitialize();

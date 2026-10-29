@@ -43,6 +43,9 @@ private:
     void paint();
     void scrollbars();
     void scroll(int vertical, int horizontal);
+    void extendSelection(int x, int y);
+    void scrollSelection();
+    void stopSelection();
     void restoreTop(const State& state);
     size_t position(int x, int y, bool* trailing = nullptr) const;
     void copy();
@@ -75,11 +78,13 @@ private:
     int top_ = 0, left_ = 0;
     size_t anchor_ = 0, caret_ = 0;
     bool selecting_ = false, after_ = false, inlineView_ = true;
+    POINT selectionPoint_{};
     bool wordWrap_ = true, layoutDirty_ = true, caretTrailing_ = false;
     TextLayout textLayout_;
     DiffLayout diffLayout_;
     static constexpr UINT_PTR caretTimer = 0x5056;
     static constexpr UINT_PTR findTimer = 0x5057;
+    static constexpr UINT_PTR selectionTimer = 0x5058;
     bool caretVisible_ = false;
     std::shared_ptr<const Document> document_;
     std::shared_ptr<const ImagePreview> image_;

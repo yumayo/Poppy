@@ -1,5 +1,6 @@
 #include "edit_buffer.h"
 #include "text_layout.h"
+#include "selection_scroll.h"
 #include <cstdlib>
 #include <iostream>
 using namespace poppy;
@@ -96,7 +97,26 @@ void wrapping() {
     check(layout.row(buffer.document, layout.rows() - 1).end == maxLineColumns);
     check(layout.rowForOffset(buffer.document, buffer.document.text.size()) == layout.rows() - 1);
 }
+void selectionScrolling() {
+    for (const int height : {20, 30, 40}) {
+        // Headers, search bars and DPI change the text viewport, not direction.
+        const int top = 3 * height, bottom = top + 10 * height;
+        for (int y = top; y < bottom; ++y) check(selectionScrollRows(y, top, bottom, height) == 0);
+        check(selectionScrollRows(top - 1, top, bottom, height) == -1);
+        check(selectionScrollRows(bottom, top, bottom, height) == 1);
+        check(selectionScrollRows(top - height, top, bottom, height) == -1);
+        check(selectionScrollRows(bottom + height - 1, top, bottom, height) == 1);
+        check(selectionScrollRows(top - height - 1, top, bottom, height) == -2);
+        check(selectionScrollRows(bottom + height, top, bottom, height) == 2);
+        check(selectionScrollRows(-32000, top, bottom, height) == -8);
+        check(selectionScrollRows(32000, top, bottom, height) == 8);
+    }
+    check(selectionScrollRows(-10, 40, 40, 20) == 0);
+    check(selectionScrollRows(100, 40, 20, 20) == 0);
+    check(selectionScrollRows(100, 0, 80, 0) == 0);
+}
 int main() {
+    selectionScrolling();
     wordMovement();
     wrapping();
     for (const auto& bytes : {std::string("hello\r\nworld\r\n"), std::string("\xef\xbb\xbf") + u8"日本語\n😀", std::string("\xff\xfeh\0i\0\r\0\n\0", 10), std::string("\xfe\xff\0h\0i\0\n", 8)}) {
