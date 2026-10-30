@@ -405,15 +405,11 @@ void Viewer::caretPosition(bool reveal) {
         scrollbars(); point = caretPoint();
     }
     if (GetFocus() == window_) {
-        // Keep the native caret hidden for IME/accessibility. Its XOR drawing
-        // races with Direct2D presentation and can leave marks after a move.
-        DestroyCaret(); CreateCaret(window_, nullptr, 2, cellHeight_); SetCaretPos(point.x, point.y);
+        positionIme(window_, point, cellHeight_);
         caretVisible_ = true; KillTimer(window_, caretTimer);
         const UINT blink = GetCaretBlinkTime();
         if (blink != INFINITE) SetTimer(window_, caretTimer, blink ? blink : 500, nullptr);
         InvalidateRect(window_, nullptr, FALSE);
-        const auto context = ImmGetContext(window_);
-        if (context) { COMPOSITIONFORM form{}; form.dwStyle = CFS_POINT; form.ptCurrentPos = point; ImmSetCompositionWindow(context, &form); CANDIDATEFORM candidate{}; candidate.dwStyle = CFS_CANDIDATEPOS; candidate.ptCurrentPos = {point.x, point.y + cellHeight_}; ImmSetCandidateWindow(context, &candidate); ImmReleaseContext(window_, context); }
     }
 }
 void Viewer::edited() { layoutDirty_ = true; caretTrailing_ = false; requestFind(false, false, false); scrollbars(); caretPosition(true); InvalidateRect(window_, nullptr, FALSE); if (changed) changed(); if (statusChanged) statusChanged(); }
@@ -710,8 +706,17 @@ LRESULT Viewer::handle(UINT m, WPARAM a, LPARAM b) {
             replace(utf8(text));
         }
         return 0;
+    case WM_IME_SETCONTEXT: case WM_INPUTLANGCHANGE: {
+        const auto result = DefWindowProcW(window_, m, a, b);
+        if (m == WM_INPUTLANGCHANGE || a) caretPosition();
+        return result;
+    }
+    case WM_IME_NOTIFY:
+        if (a == IMN_OPENCANDIDATE || a == IMN_CHANGECANDIDATE) caretPosition();
+        break;
     case WM_IME_STARTCOMPOSITION: caretPosition(); break;
     case WM_IME_COMPOSITION:
+        caretPosition();
         if (edit_ && (b & GCS_RESULTSTR)) {
             const auto context = ImmGetContext(window_); const LONG bytes = context ? ImmGetCompositionStringW(context, GCS_RESULTSTR, nullptr, 0) : 0;
             if (bytes > 0) { std::wstring text(static_cast<size_t>(bytes) / sizeof(wchar_t), 0); ImmGetCompositionStringW(context, GCS_RESULTSTR, text.data(), bytes); replace(utf8(text)); }

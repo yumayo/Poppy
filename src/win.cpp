@@ -4,11 +4,31 @@
 #include <cstring>
 #include <cerrno>
 #include <memory>
+#include <imm.h>
 #include <process.h>
 #include <stdexcept>
 #include <system_error>
 
 namespace poppy {
+void positionIme(HWND window, POINT point, int height) {
+    // Windows share the thread's default input context. Background output must
+    // never replace the composition/candidate position of the focused control.
+    if (!window || GetFocus() != window) return;
+    GUITHREADINFO info{}; info.cbSize = sizeof(info);
+    if (!GetGUIThreadInfo(GetCurrentThreadId(), &info) || info.hwndCaret != window ||
+        info.rcCaret.bottom - info.rcCaret.top != height)
+        CreateCaret(window, nullptr, 2, height);
+    // Keep the native caret hidden: Direct2D draws the visible cursor. Retain
+    // it across moves so IME/accessibility can always query an insertion point.
+    SetCaretPos(point.x, point.y);
+    const auto context = ImmGetContext(window); if (!context) return;
+    COMPOSITIONFORM form{}; form.dwStyle = CFS_POINT; form.ptCurrentPos = point;
+    ImmSetCompositionWindow(context, &form);
+    CANDIDATEFORM candidate{}; candidate.dwStyle = CFS_CANDIDATEPOS;
+    candidate.ptCurrentPos = {point.x, point.y + height};
+    ImmSetCandidateWindow(context, &candidate);
+    ImmReleaseContext(window, context);
+}
 fs::path relocatePath(const fs::path& path, const fs::path& source, const fs::path& destination) {
     const auto normalized = path.lexically_normal().make_preferred();
     const auto from = source.lexically_normal().make_preferred();

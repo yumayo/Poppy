@@ -27,7 +27,7 @@ void Terminal::create(HWND parent, HINSTANCE instance) {
 void Terminal::setDpi(UINT dpi) {
     renderer_.setDpi(dpi);
     cellWidth_ = renderer_.cellWidth(); cellHeight_ = renderer_.textHeight() + MulDiv(2, dpi, 96); header_ = MulDiv(30, dpi, 96);
-    scrollbars(); resize(); InvalidateRect(window_, nullptr, FALSE);
+    scrollbars(); resize(); imePosition(); InvalidateRect(window_, nullptr, FALSE);
 }
 void Terminal::setDirectory(const fs::path& directory) {
     if (!started_) { directory_ = directory; error_.clear(); InvalidateRect(window_, nullptr, FALSE); }
@@ -43,7 +43,7 @@ bool Terminal::start() {
     scroll_ = 0; display_.clearSelection();
     endedNotified_ = false;
     display_ = TerminalDisplay{}; display_.update(model_, scroll_, GetTickCount64(), false, true);
-    scrollbars();
+    scrollbars(); imePosition();
     if (titleChanged) titleChanged();
     HANDLE read = nullptr, write = nullptr;
     if (!CreatePipe(&read, &write, nullptr, 0)) { error_ = winError(); stop(); return false; }
@@ -249,6 +249,7 @@ void Terminal::resize() {
         condition_.notify_all();
     }
     else display_.update(model_, scroll_, GetTickCount64(), false, true);
+    imePosition();
     InvalidateRect(window_, nullptr, FALSE);
     if (console_) pump();
 }
@@ -293,11 +294,7 @@ void Terminal::stopSelection() {
     if (GetCapture() == window_) ReleaseCapture();
 }
 void Terminal::imePosition() {
-    const auto context = ImmGetContext(window_); if (!context) return;
-    COMPOSITIONFORM form{}; form.dwStyle = CFS_POINT; form.ptCurrentPos = {6 + display_.cursorX() * cellWidth_, header_ + 4 + display_.cursorY() * cellHeight_};
-    ImmSetCompositionWindow(context, &form);
-    CANDIDATEFORM candidate{}; candidate.dwStyle = CFS_CANDIDATEPOS; candidate.ptCurrentPos = {form.ptCurrentPos.x, form.ptCurrentPos.y + cellHeight_}; ImmSetCandidateWindow(context, &candidate);
-    ImmReleaseContext(window_, context);
+    positionIme(window_, {6 + display_.cursorX() * cellWidth_, header_ + 4 + display_.cursorY() * cellHeight_}, cellHeight_);
 }
 void Terminal::paste() {
     auto text = utf8(clipboardText(window_)); if (text.empty()) return;
@@ -375,12 +372,12 @@ LRESULT Terminal::handle(UINT m, WPARAM a, LPARAM b) {
         if (a == selectionTimer) scrollSelection();
         else if (a == 2) pump();
         return 0;
-    case WM_DESTROY: stopSelection(); return 0;
+    case WM_DESTROY: stopSelection(); if (GetFocus() == window_) DestroyCaret(); return 0;
     case WM_SHOWWINDOW: if (!a) stopSelection(); break;
     case WM_GETDLGCODE: return DLGC_WANTALLKEYS;
     case WM_COPY: copy(); return 0;
-    case WM_SETFOCUS: if (focused) focused(); InvalidateRect(window_, nullptr, FALSE); return 0;
-    case WM_KILLFOCUS: stopSelection(); InvalidateRect(window_, nullptr, FALSE); return 0;
+    case WM_SETFOCUS: imePosition(); if (focused) focused(); InvalidateRect(window_, nullptr, FALSE); return 0;
+    case WM_KILLFOCUS: stopSelection(); highSurrogate_ = 0; DestroyCaret(); InvalidateRect(window_, nullptr, FALSE); return 0;
     case WM_LBUTTONDOWN:
         SetFocus(window_);
         if (!started_ || (!running() && GET_Y_LPARAM(b) < header_)) { start(); InvalidateRect(window_, nullptr, FALSE); return 0; }
@@ -454,8 +451,17 @@ LRESULT Terminal::handle(UINT m, WPARAM a, LPARAM b) {
         std::wstring text; if (highSurrogate_) { text += highSurrogate_; highSurrogate_ = 0; } text += c;
         send((m == WM_SYSCHAR ? "\x1b" : "") + utf8(text)); return 0;
     }
+    case WM_IME_SETCONTEXT: case WM_INPUTLANGCHANGE: {
+        const auto result = DefWindowProcW(window_, m, a, b);
+        if (m == WM_INPUTLANGCHANGE || a) imePosition();
+        return result;
+    }
+    case WM_IME_NOTIFY:
+        if (a == IMN_OPENCANDIDATE || a == IMN_CHANGECANDIDATE) imePosition();
+        break;
     case WM_IME_STARTCOMPOSITION: imePosition(); break;
     case WM_IME_COMPOSITION:
+        imePosition();
         if (b & GCS_RESULTSTR) {
             const auto context = ImmGetContext(window_);
             const LONG bytes = context ? ImmGetCompositionStringW(context, GCS_RESULTSTR, nullptr, 0) : 0;

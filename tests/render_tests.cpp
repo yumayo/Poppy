@@ -5,6 +5,7 @@
 #include "status_bar.h"
 #include "tree.h"
 #include <commctrl.h>
+#include <imm.h>
 #include <algorithm>
 #include <fstream>
 #include <iostream>
@@ -397,6 +398,113 @@ void editorCaret() {
     check(viewer.textStatus() == L"UTF-16 LE  ·  LF" && updates >= 2, "Editing the first newline did not refresh line-ending status");
     viewer.message(L"Loading");
     check(viewer.textStatus().empty(), "A loading message retained the previous file format");
+}
+void imePositions() {
+    Viewer viewer;
+    Terminal terminal, backgroundTerminal;
+    QuickOpen quickOpen;
+    const auto instance = GetModuleHandleW(nullptr);
+    const auto parent = CreateWindowExW(0, L"STATIC", L"IME position test", WS_POPUP | WS_CLIPCHILDREN,
+        0, 0, 900, 700, nullptr, nullptr, instance, nullptr);
+    check(parent != nullptr, "Cannot create the IME test window");
+    struct WindowOwner { HWND value; ~WindowOwner() { DestroyWindow(value); } } owner{parent};
+    viewer.create(parent, instance); terminal.create(parent, instance); backgroundTerminal.create(parent, instance);
+    quickOpen.create(parent, instance, true);
+    const auto editor = viewer.window(), input = terminal.window(), background = backgroundTerminal.window();
+    const auto find = FindWindowExW(editor, nullptr, L"PoppyFindBar", nullptr);
+    check(find != nullptr, "Cannot find the editor's search input");
+    MoveWindow(editor, 0, 0, 640, 300, FALSE);
+    MoveWindow(input, 0, 300, 640, 200, FALSE);
+    MoveWindow(background, 0, 500, 640, 200, FALSE);
+    ShowWindow(parent, SW_SHOWNOACTIVATE);
+    // Explicitly share an input context, as Windows does by default. No IME
+    // language pack or interactive candidate selection is needed for this test.
+    struct ContextOwner {
+        HIMC value = ImmCreateContext();
+        std::vector<std::pair<HWND, HIMC>> previous;
+        ~ContextOwner() {
+            for (const auto& entry : previous) ImmAssociateContext(entry.first, entry.second);
+            if (value) ImmDestroyContext(value);
+        }
+    } context;
+    check(context.value != nullptr, "Cannot create the shared IME context");
+    for (const auto window : {editor, input, background, find, quickOpen.window()})
+        context.previous.emplace_back(window, ImmAssociateContext(window, context.value));
+    const auto caret = [&](HWND window) {
+        GUITHREADINFO info{}; info.cbSize = sizeof(info);
+        check(GetGUIThreadInfo(GetCurrentThreadId(), &info) && info.hwndCaret == window,
+            "The focused input lost its native IME caret");
+        check(!(info.flags & GUI_CARETBLINKING), "The native IME caret draws over Direct2D");
+        return info.rcCaret;
+    };
+    const auto checkPosition = [&](HWND window) {
+        const auto rect = caret(window);
+        COMPOSITIONFORM composition{}; CANDIDATEFORM candidate{};
+        check(ImmGetCompositionWindow(context.value, &composition) && ImmGetCandidateWindow(context.value, 0, &candidate),
+            "Cannot inspect the IME window positions");
+        check(composition.dwStyle == CFS_POINT && composition.ptCurrentPos.x == rect.left && composition.ptCurrentPos.y == rect.top,
+            "The IME composition is detached from the insertion point");
+        check(candidate.dwStyle == CFS_CANDIDATEPOS && candidate.ptCurrentPos.x == rect.left && candidate.ptCurrentPos.y == rect.bottom,
+            "The IME candidate position is detached from the insertion point");
+    };
+    const auto resetPosition = [&] {
+        COMPOSITIONFORM composition{}; composition.dwStyle = CFS_POINT;
+        CANDIDATEFORM candidate{}; candidate.dwStyle = CFS_CANDIDATEPOS;
+        check(ImmSetCompositionWindow(context.value, &composition) && ImmSetCandidateWindow(context.value, &candidate),
+            "Cannot simulate an IME position reset");
+    };
+    const auto refresh = [&](HWND window) {
+        const MSG events[] = {
+            {window, WM_IME_SETCONTEXT, TRUE, 0, 0, {0, 0}},
+            {window, WM_INPUTLANGCHANGE, 0, reinterpret_cast<LPARAM>(GetKeyboardLayout(0)), 0, {0, 0}},
+            {window, WM_IME_STARTCOMPOSITION, 0, 0, 0, {0, 0}},
+            {window, WM_IME_COMPOSITION, 0, GCS_COMPSTR, 0, {0, 0}},
+            {window, WM_IME_NOTIFY, IMN_OPENCANDIDATE, 1, 0, {0, 0}},
+            {window, WM_IME_NOTIFY, IMN_CHANGECANDIDATE, 1, 0, {0, 0}}
+        };
+        for (const auto& event : events) {
+            resetPosition();
+            SendMessageW(window, event.message, event.wParam, event.lParam);
+            checkPosition(window);
+        }
+        SendMessageW(window, WM_IME_ENDCOMPOSITION, 0, 0);
+    };
+    auto buffer = std::make_shared<EditBuffer>();
+    buffer->document.text = "first\n\t" + std::string(400, 'a') + u8"日本語\nlast";
+    indexDocument(buffer->document); buffer->initialize(buffer->document.text);
+    viewer.edit(buffer, L"ime.txt");
+    for (const UINT dpi : {96u, 144u, 192u}) for (const bool wrap : {true, false}) {
+        SetFocus(editor); viewer.setDpi(dpi); viewer.setWordWrap(wrap);
+        viewer.restore({0, 0, 8, 8});
+        SendMessageW(editor, WM_KEYDOWN, VK_END, 0);
+        checkPosition(editor);
+        for (int i = 0; i < 8; ++i) {
+            terminal.setDpi(dpi); backgroundTerminal.setDpi(dpi);
+            SendMessageW(input, WM_VSCROLL, SB_BOTTOM, 0);
+            SendMessageW(background, WM_VSCROLL, SB_BOTTOM, 0);
+            SendMessageW(find, WM_SIZE, 0, 0);
+            SendMessageW(quickOpen.window(), WM_SIZE, 0, 0);
+            Terminal::pump();
+            checkPosition(editor);
+        }
+        refresh(editor);
+        SendMessageW(editor, WM_CHAR, '!', 0); checkPosition(editor);
+        SetFocus(input); checkPosition(input); refresh(input);
+        const auto before = caret(input);
+        viewer.setDpi(dpi); backgroundTerminal.setDpi(dpi);
+        SendMessageW(quickOpen.window(), WM_SIZE, 0, 0);
+        SendMessageW(background, WM_VSCROLL, SB_BOTTOM, 0);
+        checkPosition(input);
+        terminal.setDpi(dpi == 96 ? 144 : 96); checkPosition(input);
+        check(caret(input).bottom - caret(input).top != before.bottom - before.top,
+            "A terminal DPI change did not resize its native IME caret");
+        SetFocus(background); checkPosition(background);
+        SetFocus(editor); checkPosition(editor);
+    }
+    SetFocus(parent);
+    GUITHREADINFO info{}; info.cbSize = sizeof(info);
+    check(GetGUIThreadInfo(GetCurrentThreadId(), &info) && info.hwndCaret == nullptr,
+        "Leaving an input retained its native IME caret");
 }
 void editorWordSelection() {
     Viewer viewer;
@@ -1342,7 +1450,7 @@ int main() {
     int result = 0;
     try {
         initializeRendering();
-        statusBarLimits(); inlineTreeInput(); cellPositions(); colorsAndClipping(); imagePreviews(); smoothIcons(); windowTargets(); editorCaret(); editorWordSelection(); editorWordMovement(); editorLineShortcuts(); editorWrapping(); diffWrapping(); documentFind(); horizontalWheelScrolling(); continuousViewerScrolling(); selectionAutoScrolling(); terminalSelectionAutoScrolling(); themedScrollbars(); quickOpenStability();
+        statusBarLimits(); inlineTreeInput(); cellPositions(); colorsAndClipping(); imagePreviews(); smoothIcons(); windowTargets(); editorCaret(); imePositions(); editorWordSelection(); editorWordMovement(); editorLineShortcuts(); editorWrapping(); diffWrapping(); documentFind(); horizontalWheelScrolling(); continuousViewerScrolling(); selectionAutoScrolling(); terminalSelectionAutoScrolling(); themedScrollbars(); quickOpenStability();
         std::cout << "Direct2D rendering tests passed\n";
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; result = 1; }
     if (SUCCEEDED(com)) CoUninitialize();

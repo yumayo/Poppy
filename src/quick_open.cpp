@@ -182,6 +182,7 @@ void QuickOpen::caretChanged() {
     imePosition(); InvalidateRect(window_, nullptr, FALSE);
 }
 void QuickOpen::imePosition() {
+    if (GetFocus() != window_) return;
     const auto context = ImmGetContext(window_); if (!context) return;
     COMPOSITIONFORM form{}; form.dwStyle = CFS_POINT; form.ptCurrentPos = {caretX_, px(44)};
     ImmSetCompositionWindow(context, &form);

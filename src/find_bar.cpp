@@ -73,6 +73,7 @@ void FindBar::replace(std::wstring text) {
     caretChanged(); if (changed) changed();
 }
 void FindBar::imePosition() {
+    if (GetFocus() != window_) return;
     const auto rect = input();
     const POINT point{caretX_, rect.top + px(2)};
     if (GetFocus() == window_) {
