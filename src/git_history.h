@@ -16,14 +16,17 @@ struct GitStatusEntry {
     bool staged() const { return index != ' ' && index != '?' && !conflicted(); }
     bool changed() const { return worktree != ' ' || conflicted(); }
 };
-struct GitCommitFile { std::string path; char state = 'M'; };
+struct GitCommitFile { std::string path; char state = 'M'; std::string previousPath = {}; };
 std::vector<GitBranch> parseGitBranches(std::string_view output);
 std::vector<GitCommit> parseGitCommits(std::string_view output);
 std::vector<GitStatusEntry> parseGitStatus(std::string_view output);
 std::vector<GitCommitFile> parseGitCommitFiles(std::string_view output);
+std::vector<std::string> gitStatusArguments();
 std::vector<std::string> gitLogArguments(const std::string& tip, size_t skip);
 std::vector<std::string> gitCommitFilesArguments(const std::string& hash);
-std::vector<std::string> gitDiffArguments(GitDiffKind kind, const std::string& hash, const std::string& path);
+// Include both paths of a rename: filtering on its destination alone makes
+// Git treat it as an addition before rename detection can run.
+std::vector<std::string> gitDiffArguments(GitDiffKind kind, const std::string& hash, const std::string& path, const std::string& previousPath = {});
 // Update only this file's index entries; a rename also includes its source.
 std::vector<std::string> gitStageArguments(const GitStatusEntry& entry, bool stage);
 // Stage tracked and untracked changes throughout the command's repository.

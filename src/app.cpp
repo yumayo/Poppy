@@ -164,7 +164,7 @@ std::shared_ptr<GitResult> readGit(ProjectProvider& provider, const ResourceId& 
         auto head = provider.git({L"git.exe", L"--no-optional-locks", L"rev-parse", L"--short", L"HEAD"}, result->root, cancelled);
         result->branch = head.code == 0 ? trimmed(head.output) + L" (detached)" : L"HEAD";
     }
-    auto status = provider.git({L"git.exe", L"--no-optional-locks", L"-c", L"core.fsmonitor=false", L"status", L"--porcelain=v1", L"-z", L"--untracked-files=all"}, result->root, cancelled);
+    auto status = provider.git(gitArguments(gitStatusArguments()), result->root, cancelled);
     if (status.code) { result->error = status.error; return result; }
     for (const auto& entry : parseGitStatus(status.output)) {
         const char x = entry.index, y = entry.worktree;
@@ -948,7 +948,7 @@ void ProjectRuntime::Impl::discardGitChanges(TreeItem item, bool all) {
             result.code = 1; result.error = L"The Git repository changed. Refresh before discarding changes.";
         }
         // Read complete status here, rather than using the bounded UI snapshot.
-        if (!result.code) result = provider->git({L"git.exe", L"--no-optional-locks", L"-c", L"core.fsmonitor=false", L"status", L"--porcelain=v1", L"-z", L"--untracked-files=all"}, root, gitWorker_->cancellation());
+        if (!result.code) result = provider->git(gitArguments(gitStatusArguments()), root, gitWorker_->cancellation());
         if (!result.code) try {
             const auto entries = parseGitStatus(result.output);
             const auto commands = all ? gitDiscardAllArguments(entries) : gitDiscardFileArguments(entries, path);
@@ -989,7 +989,7 @@ void ProjectRuntime::Impl::stashGitChanges(TreeItem item) {
         if (!result.code && pathKey(root.at(utf8(trimmed(result.output)))) != pathKey(root)) {
             result.code = 1; result.error = L"The Git repository changed. Refresh before stashing changes.";
         }
-        if (!result.code) result = provider->git({L"git.exe", L"--no-optional-locks", L"-c", L"core.fsmonitor=false", L"status", L"--porcelain=v1", L"-z", L"--untracked-files=all"}, root, gitWorker_->cancellation());
+        if (!result.code) result = provider->git(gitArguments(gitStatusArguments()), root, gitWorker_->cancellation());
         if (!result.code) try {
             const auto entries = parseGitStatus(result.output);
             const auto arguments = staged ? gitStashStagedArguments(entries) : gitStashUnstagedArguments(entries);
@@ -1167,7 +1167,7 @@ void ProjectRuntime::Impl::requestHistory(TreeItem item, bool more) {
             } else {
                 n->files.clear();
                 for (auto& file : files) {
-                    if (root.wsl() && !validUtf8(file.path)) { status(L"Some commit filenames are not UTF-8 and cannot be opened."); continue; }
+                    if (root.wsl() && (!validUtf8(file.path) || !validUtf8(file.previousPath))) { status(L"Some commit filenames are not UTF-8 and cannot be opened."); continue; }
                     if (n->files.size() >= maxTreeNodes) { status(L"Commit file tree limited to 50,000 files."); break; }
                     n->files.push_back(std::move(file));
                 }
@@ -2070,13 +2070,26 @@ void ProjectRuntime::Impl::loadTab(bool preserve, int group) {
     gitWorker_->submit(L"diff:" + std::to_wstring(group), [this, group, serial, generation, path, root, preserve, state, kind, revision, allChanges, roots] {
         constexpr size_t maxPatchBytes = 4 * 1024 * 1024;
         const auto relative = allChanges ? std::string{} : path.lexically_relative(root).generic_u8string();
-        auto readDiff = [&](GitDiffKind scope) { return provider_->git(gitArguments(gitDiffArguments(scope, revision, relative)), root, gitWorker_->cancellation()); };
+        auto readDiff = [&](GitDiffKind scope) {
+            std::string previousPath;
+            if (!relative.empty() && scope == GitDiffKind::Commit) {
+                auto files = provider_->git(gitArguments(gitCommitFilesArguments(revision)), root, gitWorker_->cancellation());
+                if (files.code) return files;
+                for (const auto& file : parseGitCommitFiles(files.output)) if (file.path == relative) { previousPath = file.previousPath; break; }
+            } else if (!relative.empty() && scope == GitDiffKind::Staged) {
+                auto status = provider_->git(gitArguments(gitStatusArguments()), root, gitWorker_->cancellation());
+                if (status.code) return status;
+                for (const auto& entry : parseGitStatus(status.output)) if (entry.path == relative && entry.index == 'R') { previousPath = entry.previousPath; break; }
+            }
+            if (root.wsl() && !validUtf8(previousPath)) return ProcessResult{1, {}, L"The rename source is not a UTF-8 path."};
+            return provider_->git(gitArguments(gitDiffArguments(scope, revision, relative, previousPath)), root, gitWorker_->cancellation());
+        };
         auto scope = kind == GitDiffKind::Automatic ? GitDiffKind::Changes : kind;
         auto result = readDiff(scope);
         if (kind == GitDiffKind::Automatic && result.code == 0 && result.output.empty()) { scope = GitDiffKind::Staged; result = readDiff(scope); }
         std::vector<ResourceId> untracked;
         if (!result.code && allChanges && kind == GitDiffKind::Changes) {
-            auto status = provider_->git({L"git.exe", L"--no-optional-locks", L"-c", L"core.fsmonitor=false", L"status", L"--porcelain=v1", L"-z", L"--untracked-files=all"}, root, gitWorker_->cancellation());
+            auto status = provider_->git(gitArguments(gitStatusArguments()), root, gitWorker_->cancellation());
             if (status.code) { result.code = status.code; result.error = status.error; }
             else for (const auto& entry : parseGitStatus(status.output)) if (entry.index == '?' && (!root.wsl() || validUtf8(entry.path))) {
                 const auto file = (root / std::string_view(entry.path)).lexically_normal();

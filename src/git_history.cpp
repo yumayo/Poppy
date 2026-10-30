@@ -49,9 +49,18 @@ std::vector<GitCommitFile> parseGitCommitFiles(std::string_view output) {
     std::string state, path;
     while (field(output, state) && field(output, path)) {
         if (state.empty() || path.empty()) continue;
-        files.push_back({std::move(path), state[0]});
+        GitCommitFile file{std::move(path), state[0]};
+        // Unlike porcelain status, name-status lists the source first.
+        if (file.state == 'R' || file.state == 'C') {
+            file.previousPath = std::move(file.path);
+            if (!field(output, file.path) || file.path.empty()) break;
+        }
+        files.push_back(std::move(file));
     }
     return files;
+}
+std::vector<std::string> gitStatusArguments() {
+    return {"git.exe", "--no-optional-locks", "-c", "core.fsmonitor=false", "status", "--porcelain=v1", "-z", "--untracked-files=all", "--renames"};
 }
 std::vector<std::string> gitLogArguments(const std::string& tip, size_t skip) {
     return {"git.exe", "--no-optional-locks", "log", "--no-decorate", "--encoding=UTF-8", "-z",
@@ -60,17 +69,20 @@ std::vector<std::string> gitLogArguments(const std::string& tip, size_t skip) {
 }
 std::vector<std::string> gitCommitFilesArguments(const std::string& hash) {
     return {"git.exe", "--no-optional-locks", "show", "--format=", "--first-parent", "--diff-merges=first-parent",
-        "--name-status", "--no-renames", "-z", hash, "--"};
+        "--name-status", "--find-renames", "-z", hash, "--"};
 }
-std::vector<std::string> gitDiffArguments(GitDiffKind kind, const std::string& hash, const std::string& path) {
+std::vector<std::string> gitDiffArguments(GitDiffKind kind, const std::string& hash, const std::string& path, const std::string& previousPath) {
     std::vector<std::string> args{"git.exe", "--literal-pathspecs", "--no-optional-locks", "-c", "diff.suppressBlankEmpty=false",
         "-c", "core.quotePath=false", kind == GitDiffKind::Commit ? "show" : "diff", "--patch", "--no-ext-diff", "--no-textconv",
-        "--no-renames", "--color=never", "--output-indicator-old=-", "--output-indicator-new=+", "--output-indicator-context= "};
+        "--find-renames", "--color=never", "--output-indicator-old=-", "--output-indicator-new=+", "--output-indicator-context= "};
     if (kind == GitDiffKind::Commit) args.insert(args.end(), {"--format=", "--first-parent", "--diff-merges=first-parent", hash});
     else if (kind == GitDiffKind::Staged) args.push_back("--cached");
     else args.push_back("--ours");
     args.push_back("--");
-    if (!path.empty()) args.push_back(path);
+    if (!path.empty()) {
+        args.push_back(path);
+        if (!previousPath.empty() && previousPath != path) args.push_back(previousPath);
+    }
     return args;
 }
 std::vector<std::string> gitStageArguments(const GitStatusEntry& entry, bool stage) {

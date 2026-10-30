@@ -43,6 +43,14 @@ void records() {
     check(commits.size() == 2 && commits[0].subject == "日本語 subject\twith spaces" && commits[1].hash == "def", "NUL-delimited commit records lost metadata");
     const auto files = parseGitCommitFiles(nul({"A", "src/new.txt", "D", "old.txt", "M", "path\nwith newline.txt"}));
     check(files.size() == 3 && files[1].state == 'D' && files[2].path == "path\nwith newline.txt", "Commit files lost states or unusual paths");
+    const auto renamed = parseGitCommitFiles(nul({"R100", "old/日本語.txt", "new/name\nwith tab\t.txt", "M", "next.txt",
+        "C075", "source.txt", "copy.txt", "D", "deleted.txt"}));
+    check(renamed.size() == 4 && renamed[0].state == 'R' && renamed[0].previousPath == "old/日本語.txt" &&
+          renamed[0].path == "new/name\nwith tab\t.txt" && renamed[1].path == "next.txt" && renamed[1].state == 'M' &&
+          renamed[2].state == 'C' && renamed[2].previousPath == "source.txt" && renamed[2].path == "copy.txt" && renamed[3].state == 'D',
+          "Rename/copy records lost their destination or shifted subsequent commit files");
+    check(parseGitCommitFiles(nul({"R100", "source.txt"})).empty() && parseGitCommitFiles(nul({"R100", "source.txt", ""})).empty(),
+        "An incomplete rename became a commit file");
 }
 void repositoryOwnership() {
     const auto app = ResourceId::wsl("Ubuntu", "/home/user/app");
@@ -687,6 +695,70 @@ void repositorySyntax() {
         }
     }
 }
+void repositoryRenames() {
+    Repository repo;
+    repo.git({"init", "--quiet", "--template=", "--initial-branch=main"});
+    repo.git({"config", "user.name", "Poppy Test"}); repo.git({"config", "user.email", "poppy@example.invalid"});
+    repo.git({"config", "core.autocrlf", "false"}); repo.git({"config", "commit.gpgsign", "false"});
+    // Display commands must detect renames even when repository defaults don't.
+    repo.git({"config", "diff.renames", "false"}); repo.git({"config", "status.renames", "false"});
+    const std::string source = "old/日本語 [1].cpp", destination = "new/renamed [2].cpp";
+    const std::string original = "int first = 1;\nint second = 2;\nint third = 3;\nint fourth = 4;\n";
+    const std::string edited = "int first = 5;\nint second = 2;\nint third = 3;\nint fourth = 4;\n";
+    repo.write(source, original); repo.write("other.txt", "unrelated original\n");
+    repo.git({"add", "."}); repo.git({"commit", "-qm", "baseline"});
+    fs::create_directories(repo.path / "new"); repo.git({"mv", "--", source, destination});
+    const auto index = repo.git({"ls-files", "--stage", "-z"});
+    auto entries = parseGitStatus(repo.git(gitStatusArguments()));
+    check(entries.size() == 1 && entries[0].index == 'R' && entries[0].previousPath == source && entries[0].path == destination,
+        "A staged rename was displayed as a new file and a deletion");
+    auto patch = repo.git(gitDiffArguments(GitDiffKind::Staged, {}, entries[0].path, entries[0].previousPath));
+    DiffDocument diff; diff.patch.text = patch; indexDiff(diff, true);
+    check(diff.files.size() == 1 && diff.files[0].path == destination && !diff.rows.empty() && patch.find("rename from ") != patch.npos &&
+          patch.find("rename to ") != patch.npos && patch.find("@@") == patch.npos && patch.find("new file mode") == patch.npos,
+          "A pure rename was rendered as a whole-file addition or an empty diff");
+    repo.write(destination, edited); repo.write("other.txt", "unrelated staged\n");
+    const auto working = repo.git(gitDiffArguments(GitDiffKind::Changes, {}, destination));
+    check(working.find("-int first = 1;") != working.npos && working.find("+int first = 5;") != working.npos &&
+          working.find("rename from ") == working.npos, "Working edits after a staged rename used the pre-rename baseline");
+    repo.git({"add", "."});
+    const auto head = repo.hash();
+    const auto stagedIndex = repo.git({"ls-files", "--stage", "-z"});
+    auto verify = [&](GitDiffKind kind, const std::string& revision) {
+        const auto files = kind == GitDiffKind::Commit ? parseGitCommitFiles(repo.git(gitCommitFilesArguments(revision))) : std::vector<GitCommitFile>{};
+        std::string previous;
+        if (kind == GitDiffKind::Commit) {
+            check(files.size() == 2, "Commit rename was split into addition and deletion entries");
+            const auto file = std::find_if(files.begin(), files.end(), [&](const GitCommitFile& file) { return file.path == destination; });
+            check(file != files.end() && file->state == 'R' && file->previousPath == source, "Commit rename lost its source, destination or state");
+            previous = file->previousPath;
+        } else {
+            entries = parseGitStatus(repo.git(gitStatusArguments()));
+            const auto entry = std::find_if(entries.begin(), entries.end(), [&](const GitStatusEntry& entry) { return entry.path == destination; });
+            check(entry != entries.end() && entry->index == 'R', "Edited staged rename was treated as an addition");
+            previous = entry->previousPath;
+        }
+        DiffDocument single; single.patch.text = repo.git(gitDiffArguments(kind, revision, destination, previous)); indexDiff(single, true);
+        check(single.files.size() == 1 && single.files[0].path == destination && single.patch.text.find("rename from ") != single.patch.text.npos &&
+              single.patch.text.find("new file mode") == single.patch.text.npos && single.patch.text.find("unrelated") == single.patch.text.npos &&
+              single.selectedText(false, 0, single.patch.text.size()) == original && single.selectedText(true, 0, single.patch.text.size()) == edited,
+              "An individual rename diff lost its old contents, included other files or rendered a new file");
+        DiffDocument all; all.patch.text = repo.git(gitDiffArguments(kind, revision, {})); indexDiff(all, true);
+        check(all.files.size() == 2 && all.patch.text.find("rename from ") != all.patch.text.npos && all.patch.text.find("new file mode") == all.patch.text.npos,
+            "All Changes split a rename into addition and deletion patches");
+    };
+    verify(GitDiffKind::Staged, {});
+    check(repo.git({"ls-files", "--stage", "-z"}) == stagedIndex && repo.hash() == head && repo.readFile(destination) == edited,
+        "Reading a rename diff changed the index, HEAD or working file");
+    check(index != stagedIndex, "Edited rename fixture did not update the index");
+    repo.git({"commit", "-qm", "rename and edit"});
+    const auto revision = repo.hash();
+    verify(GitDiffKind::Commit, revision);
+    // Historical and restored diff tabs resolve sources from their revision,
+    // even after the working file and its current status no longer exist.
+    repo.git({"rm", "--", destination}); repo.git({"commit", "-qm", "remove renamed file"});
+    verify(GitDiffKind::Commit, revision);
+}
 void repositoryHistory() {
     Repository repo;
     repo.git({"init", "--quiet", "--template=", "--initial-branch=main"});
@@ -720,7 +792,8 @@ void repositoryHistory() {
     repo.git({"mv", "src/日本語.txt", "src/renamed.txt"}); repo.git({"rm", "delete.txt"}); repo.git({"commit", "-qm", "rename and delete"});
     const auto deleted = repo.hash();
     const auto deletedFiles = parseGitCommitFiles(repo.git(gitCommitFilesArguments(deleted)));
-    check(deletedFiles.size() == 3 && std::count_if(deletedFiles.begin(), deletedFiles.end(), [](const GitCommitFile& file) { return file.state == 'D'; }) == 2,
+    check(deletedFiles.size() == 2 && std::count_if(deletedFiles.begin(), deletedFiles.end(), [](const GitCommitFile& file) { return file.state == 'D'; }) == 1 &&
+          std::count_if(deletedFiles.begin(), deletedFiles.end(), [](const GitCommitFile& file) { return file.state == 'R' && file.path == "src/renamed.txt" && file.previousPath == "src/日本語.txt"; }) == 1,
         "Renames and deleted files were omitted from commit changes");
     const auto historic = repo.git(gitDiffArguments(GitDiffKind::Commit, root, "src/日本語.txt"));
     check(historic.find("+initial") != historic.npos && historic.find("+working") == historic.npos, "Historical diffs read the current file");
@@ -743,7 +816,7 @@ int main() {
     try {
         statusGroups(); records(); patchLists(); repositoryOwnership(); ignoredNameBatches();
 #ifndef _WIN32
-        repositoryIgnores(); repositoryStaging(); repositoryStageAll(); repositoryUnstageAll(); repositoryDiscardAll(); repositoryDiscardFile(); repositoryStashUnstaged(); repositoryStashStaged(); repositorySyntax(); repositoryHistory(); multipleRepositories();
+        repositoryIgnores(); repositoryStaging(); repositoryStageAll(); repositoryUnstageAll(); repositoryDiscardAll(); repositoryDiscardFile(); repositoryStashUnstaged(); repositoryStashStaged(); repositorySyntax(); repositoryRenames(); repositoryHistory(); multipleRepositories();
 #endif
         std::cout << "Git history tests passed.\n"; return 0;
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
