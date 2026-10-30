@@ -19,6 +19,7 @@
 #include <shobjidl.h>
 #include <shlobj.h>
 #include <shellapi.h>
+#include <shlwapi.h>
 #include <algorithm>
 #include <array>
 #include <cstdlib>
@@ -43,6 +44,17 @@ struct Node {
     bool expandRequested = false;
     bool unsupported = false, truncated = false, ignored = false; std::wstring label;
 };
+bool explorerLess(uintptr_t a, uintptr_t b) {
+    const auto x = reinterpret_cast<const Node*>(a), y = reinterpret_cast<const Node*>(b);
+    if (x->directory != y->directory) return x->directory;
+    const auto left = x->unsupported ? x->label : x->path.filename().native();
+    const auto right = y->unsupported ? y->label : y->path.filename().native();
+    // Use Windows' case-insensitive natural order for both Windows and WSL.
+    const int order = StrCmpLogicalW(left.c_str(), right.c_str());
+    if (order) return order < 0;
+    // WSL can contain distinct names that differ only in case or zero padding.
+    return CompareStringOrdinal(left.c_str(), -1, right.c_str(), -1, FALSE) == CSTR_LESS_THAN;
+}
 struct DirectoryResult : ProviderListing { std::unordered_set<std::string> ignored; };
 
 std::unordered_set<std::string> ignoredNames(ProjectProvider& provider, const ResourceId& directory, const std::vector<std::string>& names,
@@ -1448,11 +1460,7 @@ void ProjectRuntime::Impl::applyRelocation(const ResourceId& source, const Resou
         for (const auto& pair : nodes_) if (auto current = node(pair.second)) {
             current->path = relocateResource(current->path, source, destination); current->loading = false; updateLabel(pair.second);
         }
-        for (const auto& pair : nodes_) if (const auto current = node(pair.second); current && current->directory) explorer_.sort(pair.second, [](uintptr_t a, uintptr_t b) {
-            const auto x = reinterpret_cast<Node*>(a), y = reinterpret_cast<Node*>(b);
-            if (x->directory != y->directory) return x->directory;
-            return CompareStringOrdinal(x->path.filename().native().c_str(), -1, y->path.filename().native().c_str(), -1, x->path.wsl() ? FALSE : TRUE) == CSTR_LESS_THAN;
-        });
+        for (const auto& pair : nodes_) if (const auto current = node(pair.second); current && current->directory) explorer_.sort(pair.second, explorerLess);
         if (moving && node(parent)) requestDirectory(parent);
     }
     for (auto& tab : tabs_) {
@@ -1729,11 +1737,7 @@ void ProjectRuntime::Impl::applyDirectory(TreeItem item, Node* directory, const 
         else { node(child)->ignored = !entry.unsupported && result.ignored.count(entry.path.filename().u8string()); updateLabel(child); }
     }
     for (const auto& stale : existing) { if (const auto n = node(stale.second)) forgetExpanded(n->path); explorer_.erase(stale.second); }
-    explorer_.sort(item, [](uintptr_t a, uintptr_t b) {
-        const auto x = reinterpret_cast<Node*>(a), y = reinterpret_cast<Node*>(b);
-        if (x->directory != y->directory) return x->directory;
-        return CompareStringOrdinal(x->path.filename().native().c_str(), -1, y->path.filename().native().c_str(), -1, x->path.wsl() ? FALSE : TRUE) == CSTR_LESS_THAN;
-    });
+    explorer_.sort(item, explorerLess);
     for (auto child = explorer_.child(item); child; child = explorer_.next(child)) {
         const auto n = node(child); if (!n) continue;
         if (n->directory && !n->loaded && !n->loading && expandedPaths_.count(pathKey(n->path))) requestDirectory(child);

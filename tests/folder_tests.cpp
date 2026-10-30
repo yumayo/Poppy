@@ -1134,6 +1134,55 @@ void treeInteractionTests(const fs::path& executable) {
     click(tree, labelX, height / 2);
     check(expanded(tree, root), "A single root row click did not reopen the tree");
 }
+void explorerSortTests(const fs::path& executable) {
+    Fixture fixture;
+    for (const auto number : {11, 2}) {
+        const auto folder = fixture.root / (std::to_wstring(number) + L"_folder");
+        fs::create_directory(folder); writeLines(folder / L"nested.txt", number + 100);
+    }
+    for (const auto number : {11, 4, 3, 2, 1}) writeLines(fixture.root / (std::to_wstring(number) + L"_file.txt"), number + 200);
+    writeLines(fixture.root / L"a2.txt", 302); writeLines(fixture.root / L"A11.txt", 311);
+    Application app(executable, fixture.root);
+    const auto tree = app.tree(), viewer = FindWindowExW(app.window, nullptr, L"PoppyViewer", nullptr);
+    waitFor([&] { return send(tree, treeGetCount) == 10; }, "Natural sort fixture did not load");
+    const auto root = nextItem(tree, TreeRelation::Root);
+    auto folder = nextItem(tree, TreeRelation::Child, root);
+    for (const auto lines : {102, 111}) {
+        check(folder != 0, "Natural sort hid a folder");
+        expand(tree, folder);
+        waitFor([&] { return nextItem(tree, TreeRelation::Child, folder) != 0; }, "Sorted folder did not expand");
+        send(tree, treeSelect, nextItem(tree, TreeRelation::Child, folder)); waitLines(viewer, lines);
+        folder = nextItem(tree, TreeRelation::Next, folder);
+    }
+    const auto checkFiles = [&](std::initializer_list<int> expected) {
+        const auto firstFolder = nextItem(tree, TreeRelation::Child, root);
+        auto item = nextItem(tree, TreeRelation::Next, nextItem(tree, TreeRelation::Next, firstFolder));
+        for (const auto lines : expected) {
+            check(item != 0, "Natural sort hid a file");
+            send(tree, treeSelect, item); waitLines(viewer, lines);
+            item = nextItem(tree, TreeRelation::Next, item);
+        }
+        check(!item, "Natural sort produced unexpected siblings");
+    };
+    checkFiles({201, 202, 203, 204, 211, 302, 311});
+    // Rename through Poppy to exercise the immediate re-sort after relocation.
+    const auto firstFolder = nextItem(tree, TreeRelation::Child, root);
+    const auto firstFile = nextItem(tree, TreeRelation::Next, nextItem(tree, TreeRelation::Next, firstFolder));
+    send(tree, treeSelect, firstFile); waitLines(viewer, 201);
+    send(tree, WM_KEYDOWN, VK_F2);
+    const auto edit = FindWindowExW(tree, nullptr, treeInputClassName, nullptr);
+    check(edit && SetWindowTextW(edit, L"12_file.txt"), "Could not enter a numeric filename");
+    send(edit, WM_KEYDOWN, VK_RETURN);
+    waitFor([&] { return fs::exists(fixture.root / L"12_file.txt") && nextItem(tree, TreeRelation::Next, firstFile) != 0 &&
+        nextItem(tree, TreeRelation::Next, nextItem(tree, TreeRelation::Next, firstFolder)) != firstFile; }, "Renaming did not re-sort numeric filenames");
+    checkFiles({202, 203, 204, 211, 201, 302, 311});
+    // Wait for a new enumeration rather than checking the cached order.
+    const auto count = send(tree, treeGetCount);
+    writeLines(fixture.root / L"10_file.txt", 210);
+    send(app.window, WM_KEYDOWN, VK_F5);
+    waitFor([&] { return send(tree, treeGetCount) == count + 1; }, "Refresh did not enumerate the added numeric filename");
+    checkFiles({202, 203, 204, 210, 211, 201, 302, 311});
+}
 void folderTests(const fs::path& executable) {
     Fixture fixture;
     const auto empty = fixture.root / L"a empty";
@@ -2367,7 +2416,7 @@ int wmain(int argc, wchar_t** argv) {
     try {
         check(argc == 2, "Pass the path to Poppy.exe");
         SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
-        for (const auto test : {folderTests, sidebarTests, treeInteractionTests, tabTests, pinnedTabTests,
+        for (const auto test : {folderTests, explorerSortTests, sidebarTests, treeInteractionTests, tabTests, pinnedTabTests,
                 tabDragTests, wrappingTabDragTests, wrappingTabTests, renameTests, explorerMoveTests, explorerDeleteTests, createItemTests, newFileShortcutTests, pasteImageTests, splitPaneTests, quickOpenTests, fullSearchTests, gitSidebarTests, gitIgnoredExplorerTests, gitAutoRefreshTests, branchSidebarTests, multiRepositoryTests, sessionTests, multiProjectTests, recentProjectTests, projectDragTests, scrollingProjectDragTests, terminalTitleTests, terminalShellTests, terminalShortcutTests, terminalBackspaceTests}) {
             Fixture appData; AppDataEnvironment environment(appData.root);
             test(fs::absolute(argv[1]));
