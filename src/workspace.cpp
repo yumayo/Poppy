@@ -116,7 +116,8 @@ int Workspace::run(HINSTANCE instance,int show,const StartupOptions& options,Sin
     while(GetMessageW(&message,nullptr,0,0)>0) {
         if(recent_.visible() && message.hwnd!=recent_.window() &&
             (message.message==WM_LBUTTONDOWN || message.message==WM_MBUTTONDOWN || message.message==WM_RBUTTONDOWN))recent_.close();
-        const bool key=message.message==WM_KEYDOWN;
+        // Application shortcuts must not intercept input destined for a terminal.
+        const bool key=message.message==WM_KEYDOWN && (projects_.empty() || !projects_[active_].runtime->terminalInput(message.hwnd));
         if(key && message.wParam==VK_ESCAPE && projectDrag_){endProjectDrag();continue;}
         if(key && (GetKeyState(VK_CONTROL)&0x8000) && message.wParam=='O'){choose();continue;}
         if(key && (GetKeyState(VK_CONTROL)&0x8000) && !(GetKeyState(VK_SHIFT)&0x8000) && !(GetKeyState(VK_MENU)&0x8000) && message.wParam=='R'){showRecent();continue;}

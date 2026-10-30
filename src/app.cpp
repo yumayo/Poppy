@@ -2285,10 +2285,12 @@ LRESULT ProjectRuntime::Impl::handle(UINT m, WPARAM a, LPARAM b) {
     return DefWindowProcW(window_, m, a, b);
 }
 bool ProjectRuntime::Impl::key(const MSG& message) {
+        if (terminal_.key(message)) return true;
+        // Let every terminal session (and its rename input) receive its own keys.
+        if (terminal_.contains(message.hwnd)) return false;
         if (explorer_.dragging() && (message.message == WM_KEYDOWN || message.message == WM_CHAR)) {
             SendMessageW(tree_, message.message, message.wParam, message.lParam); return true;
         }
-        if (terminal_.key(message)) return true;
         const bool key = message.message == WM_KEYDOWN;
         const bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
         const bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
@@ -2369,6 +2371,7 @@ void ProjectRuntime::activate(bool active) {
 void ProjectRuntime::setDpi(UINT dpi) { impl_->dpi(dpi); }
 void ProjectRuntime::poll() { if (ready()) impl_->pollWatch(); if (IsWindowVisible(impl_->terminal_.container())) { impl_->terminal_.acknowledge(); if (summary().counts[static_cast<size_t>(AiState::Running)]) InvalidateRect(impl_->terminal_.container(), nullptr, FALSE); } }
 bool ProjectRuntime::key(const MSG& message) { return impl_->key(message); }
+bool ProjectRuntime::terminalInput(HWND window) const { return impl_->terminal_.contains(window); }
 ProjectSession ProjectRuntime::snapshot() { return impl_->saveSession(); }
 AiSummary ProjectRuntime::summary() const { return impl_->terminal_.summary(); }
 std::wstring ProjectRuntime::description() const { return (impl_->root_.wsl() ? L"\n" + (impl_->connectionError_.empty() ? impl_->provider_->error() : impl_->connectionError_) + (impl_->watchLimited_ ? L"\nSome changes cannot be watched automatically. Use F5 to refresh." : L"") : L"") + impl_->terminal_.description(); }

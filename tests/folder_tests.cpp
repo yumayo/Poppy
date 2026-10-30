@@ -669,22 +669,19 @@ void newFileShortcutTests(const fs::path& executable) {
     waitFor([&] { return fs::is_regular_file(file.parent_path() / L"second.txt") && send(tree, treeGetCount) == 9; }, "Could not reuse existing intermediate folders");
     check(visibleTabCount(app) == 2, "Second new file did not open a tab");
     send(tree, treeSelect, root); expand(tree, root, false);
-    const auto terminalPane = FindWindowExW(app.window, nullptr, L"PoppyTerminalPane", nullptr);
-    const auto terminal = FindWindowExW(terminalPane, nullptr, L"PoppyTerminal", nullptr);
-    check(terminal != nullptr, "Shortcut terminal is missing");
-    edit = start(terminal, L"cancelled/path.txt"); send(edit, WM_KEYDOWN, VK_ESCAPE);
+    edit = start(tree, L"cancelled/path.txt"); send(edit, WM_KEYDOWN, VK_ESCAPE);
     check(!fs::exists(fixture.root / L"cancelled") && !FindWindowExW(tree, nullptr, treeInputClassName, nullptr), "Escape created intermediate folders");
     edit = start(viewer, L"focus-cancelled/path.txt"); click(tree, 30, 10);
     check(!fs::exists(fixture.root / L"focus-cancelled") && !FindWindowExW(tree, nullptr, treeInputClassName, nullptr), "Focus loss created intermediate folders");
     // The full input, not only one 255-character component, reaches creation.
     const auto longPath = std::wstring(130, L'a') + L"/" + std::wstring(130, L'b') + L"/long.txt";
-    edit = start(terminal, longPath);
+    edit = start(viewer, longPath);
     check(GetWindowTextLengthW(edit) == static_cast<int>(longPath.size()), "Ctrl+N truncated a path longer than 255 characters");
     send(edit, WM_KEYDOWN, VK_ESCAPE);
     // Keep the filesystem check below MAX_PATH so the test does not depend on
     // the host's long-path registry setting.
-    edit = start(terminal, L"root.txt"); commit(edit);
-    waitFor([&] { return fs::is_regular_file(fixture.root / L"root.txt") && expanded(tree, root); }, "Ctrl+N from a terminal did not create a file inside the collapsed root");
+    edit = start(viewer, L"root.txt"); commit(edit);
+    waitFor([&] { return fs::is_regular_file(fixture.root / L"root.txt") && expanded(tree, root); }, "Ctrl+N did not create a file inside the collapsed root");
     check(visibleTabCount(app) == 3, "Root file did not open a tab");
 }
 void pasteImageTests(const fs::path& executable) {
@@ -1865,7 +1862,7 @@ void recentProjectTests(const fs::path& executable) {
         const auto palette = FindWindowExW(app.host, nullptr, L"PoppyQuickOpen", L"Recent projects");
         check(palette != nullptr, "Recent projects palette is missing");
         // Share the application's input state while posting a real message-loop
-        // shortcut. This also verifies Ctrl+R from editor/tree/terminal focus.
+        // shortcut. This also verifies Ctrl+R from editor/tree focus.
         struct Input {
             DWORD thread; BYTE previous[256]{};
             explicit Input(DWORD target) : thread(target) {
@@ -1911,10 +1908,7 @@ void recentProjectTests(const fs::path& executable) {
         check(PostMessageW(surfaceB, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(px(12), px(22))) != FALSE, "Cannot click outside history");
         waitFor([&] { return !IsWindowVisible(palette); }, "An outside click did not close recent projects");
         // The second row opens an existing project instead of creating a copy.
-        const auto pane = FindWindowExW(surfaceB, nullptr, L"PoppyTerminalPane", nullptr);
-        const auto terminal = FindWindowExW(pane, nullptr, L"PoppyTerminal", nullptr);
-        check(terminal != nullptr, "History test terminal is missing");
-        palette = show(app, terminal); send(palette, WM_KEYDOWN, VK_DOWN); send(palette, WM_KEYDOWN, VK_RETURN);
+        palette = show(app, FindWindowExW(surfaceB, nullptr, L"PoppyViewer", nullptr)); send(palette, WM_KEYDOWN, VK_DOWN); send(palette, WM_KEYDOWN, VK_RETURN);
         app.tree(); check(app.window == surfaceA && count(app.host) == 2, "History duplicated an already open project");
         click(app.host, px(60), px(44+48+24), true);
         check(!IsWindow(surfaceB) && count(app.host) == 1, "History test could not close project B");
@@ -2129,6 +2123,65 @@ void terminalShellTests(const fs::path& executable) {
         check(tabs.size() == 6 && name(tabs[5]) == L"PowerShell", "Could not switch the default back to PowerShell");
     }
 }
+void terminalShortcutTests(const fs::path& executable) {
+    Fixture fixture; writeLines(fixture.root / L"test.txt", 200);
+    Application app(executable, fixture.root);
+    const auto tree = app.tree(), viewer = FindWindowExW(app.window, nullptr, L"PoppyViewer", nullptr);
+    const auto root = nextItem(tree, TreeRelation::Root);
+    waitFor([&] { return nextItem(tree, TreeRelation::Child, root) != 0; }, "Shortcut file did not load");
+    send(tree, treeSelect, nextItem(tree, TreeRelation::Child, root)); waitLines(viewer, 200);
+    const auto pane = FindWindowExW(app.window, nullptr, L"PoppyTerminalPane", nullptr);
+    const auto first = FindWindowExW(pane, nullptr, L"PoppyTerminal", nullptr);
+    check(first != nullptr, "Shortcut terminal is missing");
+    const auto px = [dpi = GetDpiForWindow(pane)](int value) { return MulDiv(value, dpi, 96); };
+    RECT client{}; GetClientRect(pane, &client);
+    click(pane, client.right - px(41), px(16));
+    const auto second = FindWindowExW(pane, first, L"PoppyTerminal", nullptr);
+    check(second != nullptr, "Second shortcut terminal is missing");
+    send(pane, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(px(40), px(16)));
+    send(pane, WM_MOUSEMOVE, MK_LBUTTON, MAKELPARAM(client.right * 3 / 4, client.bottom / 2));
+    send(pane, WM_LBUTTONUP, 0, MAKELPARAM(client.right * 3 / 4, client.bottom / 2));
+    check(IsWindowVisible(first) && IsWindowVisible(second), "Shortcut terminals did not split");
+    struct Input {
+        DWORD thread; BYTE previous[256]{};
+        explicit Input(DWORD target) : thread(target) {
+            check(AttachThreadInput(GetCurrentThreadId(), thread, TRUE) != FALSE, "Cannot attach terminal shortcut input");
+            GetKeyboardState(previous);
+        }
+        ~Input() { SetKeyboardState(previous); AttachThreadInput(GetCurrentThreadId(), thread, FALSE); }
+    } input(app.process.dwThreadId);
+    struct Shortcut { WPARAM key; bool ctrl, shift; };
+    const Shortcut shortcuts[] = {{'O', true, false}, {'R', true, false}, {'N', true, false},
+        {'P', true, false}, {'F', true, false}, {'W', true, false}, {'J', true, false},
+        {'F', true, true}, {'E', true, true}, {'G', true, true}, {'B', true, true},
+        {VK_F3, false, false}, {VK_F5, false, false}, {VK_F6, false, false}, {VK_F7, false, false}};
+    for (const auto shell : {first, second}) {
+        click(shell, 10, 10);
+        // Read actual ConPTY input, rather than sending WM_CHAR directly: the
+        // application's message loop must translate and dispatch each key.
+        const auto command = L"for ($i=0; $i -lt " + std::to_wstring(sizeof(shortcuts) / sizeof(shortcuts[0])) +
+            L"; $i++) { [Console]::Title = ('shortcut-' + $i); $k = [Console]::ReadKey($true); "
+            L"if ($i -eq 0 -and [int]$k.KeyChar -ne 15) { throw 'Ctrl+O was changed' } }; [Console]::Title = 'shortcut-done'\r";
+        for (const auto ch : command) send(shell, WM_CHAR, ch);
+        const auto waitTitle = [&](const std::wstring& expected) {
+            waitFor([&] { wchar_t title[128]{}; GetWindowTextW(shell, title, 128); return title == expected; },
+                "An application shortcut intercepted terminal input");
+        };
+        size_t index = 0;
+        for (const auto& shortcut : shortcuts) {
+            waitTitle(L"shortcut-" + std::to_wstring(index++));
+            BYTE keys[256]{};
+            if (shortcut.ctrl) keys[VK_CONTROL] = keys[VK_LCONTROL] = 0x80;
+            if (shortcut.shift) keys[VK_SHIFT] = keys[VK_LSHIFT] = 0x80;
+            check(SetKeyboardState(keys) && PostMessageW(shell, WM_KEYDOWN, shortcut.key, 0), "Cannot post a terminal shortcut");
+        }
+        waitTitle(L"shortcut-done");
+        BYTE keys[256]{}; SetKeyboardState(keys);
+        GUITHREADINFO focus{}; focus.cbSize = sizeof(focus);
+        check(GetGUIThreadInfo(app.process.dwThreadId, &focus) && focus.hwndFocus == shell, "A shortcut moved terminal focus");
+        check(IsWindowVisible(pane) && IsWindowVisible(tree) && visibleTabCount(app) == 1, "A terminal shortcut changed application panes or tabs");
+    }
+}
 void terminalBackspaceTests(const fs::path& executable) {
     Fixture fixture;
     writeFile(fixture.root / L"test.txt");
@@ -2231,7 +2284,7 @@ int wmain(int argc, wchar_t** argv) {
         check(argc == 2, "Pass the path to Poppy.exe");
         SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         for (const auto test : {folderTests, sidebarTests, treeInteractionTests, tabTests, pinnedTabTests,
-                tabDragTests, wrappingTabDragTests, wrappingTabTests, renameTests, explorerMoveTests, explorerDeleteTests, createItemTests, newFileShortcutTests, pasteImageTests, splitPaneTests, quickOpenTests, fullSearchTests, gitSidebarTests, gitAutoRefreshTests, branchSidebarTests, multiRepositoryTests, sessionTests, multiProjectTests, recentProjectTests, projectDragTests, scrollingProjectDragTests, terminalTitleTests, terminalShellTests, terminalBackspaceTests}) {
+                tabDragTests, wrappingTabDragTests, wrappingTabTests, renameTests, explorerMoveTests, explorerDeleteTests, createItemTests, newFileShortcutTests, pasteImageTests, splitPaneTests, quickOpenTests, fullSearchTests, gitSidebarTests, gitAutoRefreshTests, branchSidebarTests, multiRepositoryTests, sessionTests, multiProjectTests, recentProjectTests, projectDragTests, scrollingProjectDragTests, terminalTitleTests, terminalShellTests, terminalShortcutTests, terminalBackspaceTests}) {
             Fixture appData; AppDataEnvironment environment(appData.root);
             test(fs::absolute(argv[1]));
         }

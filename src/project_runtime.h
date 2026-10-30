@@ -20,6 +20,7 @@ public:
     void setDpi(UINT dpi);
     void poll();
     bool key(const MSG& message);
+    bool terminalInput(HWND window) const;
     ProjectSession snapshot();
     AiSummary summary() const;
     std::wstring description() const;
