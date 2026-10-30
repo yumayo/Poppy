@@ -1538,7 +1538,7 @@ void ProjectRuntime::Impl::openFolder(ResourceId path) {
     if (expandedPaths_.count(pathKey(root_))) requestDirectory(rootItem_);
     if (pathKey(pendingTreeSelection_) == pathKey(root_)) { explorer_.select(rootItem_, false); pendingTreeSelection_.clear(); }
     terminal_.setDirectory(root_); watch(); if (connected_) quickOpen_.setRoot(root_); refreshGit();
-    SetWindowTextW(window_, (L"Poppy — " + root_.native()).c_str()); status(L"F5: refresh  ·  F6: diff  ·  Ctrl+`: terminal"); InvalidateRect(window_, nullptr, FALSE);
+    SetWindowTextW(window_, (L"Poppy — " + root_.native()).c_str()); status(L"F5: refresh  ·  F6: diff  ·  Ctrl+J: terminal"); InvalidateRect(window_, nullptr, FALSE);
     if (root_.wsl() && active_) connectRemote();
     if (!tabs_.empty()) { if (activeTab_ < tabs_.size()) { focusedGroup_ = tabs_[activeTab_].group; for (auto& tab : tabs_) if (tab.group == focusedGroup_) tab.displayed = false; tabs_[activeTab_].displayed = true; } normalizeGroups(); layout(false); loadTab(false, 0); loadTab(false, 1); }
 }
@@ -2294,6 +2294,7 @@ bool ProjectRuntime::Impl::key(const MSG& message) {
         const bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
         if (key && message.wParam == VK_ESCAPE && tabDrag_) { endTabDrag(); return true; }
         if (key && ctrl && !shift && !(GetKeyState(VK_MENU) & 0x8000) && message.wParam == 'N') { newFile(); return true; }
+        if (key && ctrl && !shift && !(GetKeyState(VK_MENU) & 0x8000) && message.wParam == 'J') { quickOpen_.close(); toggleTerminal(); return true; }
         if (key && ctrl && shift && !(GetKeyState(VK_MENU) & 0x8000) && message.wParam == 'F') { quickOpen_.close(); selectSidebar(Sidebar::Search); return true; }
         if (key && ctrl && !shift && !(GetKeyState(VK_MENU) & 0x8000) && message.wParam == 'P') { quickOpen_.show(); return true; }
         if (key && ctrl && message.wParam == 'O') { quickOpen_.close(); chooseFolder(); return true; }
