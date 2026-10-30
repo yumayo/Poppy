@@ -332,7 +332,7 @@ LRESULT Tree::handle(UINT m, WPARAM a, LPARAM b) {
     }
     case WM_DESTROY: endDrag(); finishRename(false); renderer_.discard(); return 0;
     case WM_CONTEXTMENU: {
-        if (!renameRequested && !openWithDefaultAppRequested && !revealInFileExplorerRequested && !pasteImageRequested && !createCommitted) return 0;
+        if (!renameRequested && !deleteRequested && !openWithDefaultAppRequested && !revealInFileExplorerRequested && !pasteImageRequested && !createCommitted) return 0;
         POINT screen{GET_X_LPARAM(b), GET_Y_LPARAM(b)}; auto id = selection();
         if (screen.x == -1 && screen.y == -1) { screen = {indent_, (row(id) - top_ + 1) * rowHeight_}; ClientToScreen(window_, &screen); }
         else { auto point = screen; ScreenToClient(window_, &point); id = hit(point.y); if (id) select(id, false); }
@@ -340,7 +340,7 @@ LRESULT Tree::handle(UINT m, WPARAM a, LPARAM b) {
         const bool canOpen = id && openWithDefaultAppRequested && (!canOpenWithDefaultApp || canOpenWithDefaultApp(id));
         const bool canReveal = id && revealInFileExplorerRequested && (!canRevealInFileExplorer || canRevealInFileExplorer(id));
         const bool create = id && createCommitted && canCreate && canCreate(id);
-        if (!renameRequested && !canOpen && !canReveal && !pasteImageRequested && !create) return 0;
+        if (!renameRequested && !deleteRequested && !canOpen && !canReveal && !pasteImageRequested && !create) return 0;
         HMENU menu = CreatePopupMenu(); if (!menu) return 0;
         if (create) {
             AppendMenuW(menu, MF_STRING, 4, L"New File…");
@@ -350,6 +350,7 @@ LRESULT Tree::handle(UINT m, WPARAM a, LPARAM b) {
         if (canReveal) AppendMenuW(menu, MF_STRING, 6, L"Reveal in File Explorer");
         if (canOpen) AppendMenuW(menu, MF_STRING, 2, L"Open with Default Application");
         if (id && renameRequested) AppendMenuW(menu, MF_STRING | (canRename && !canRename(id) ? MF_GRAYED : 0), 1, L"Rename\tF2");
+        if (id && deleteRequested) AppendMenuW(menu, MF_STRING | (canDelete && !canDelete(id) ? MF_GRAYED : 0), 9, L"Delete\tDel");
         if (pasteImageRequested) AppendMenuW(menu, MF_STRING | (canPasteImage && !canPasteImage(id) ? MF_GRAYED : 0), 3, L"Paste Image\tCtrl+V");
         if (undoRequested || redoRequested) {
             AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
@@ -365,6 +366,7 @@ LRESULT Tree::handle(UINT m, WPARAM a, LPARAM b) {
         else if (command == 6 && revealInFileExplorerRequested && (!canRevealInFileExplorer || canRevealInFileExplorer(id))) revealInFileExplorerRequested(id);
         else if (command == 2 && openWithDefaultAppRequested && (!canOpenWithDefaultApp || canOpenWithDefaultApp(id))) openWithDefaultAppRequested(id);
         else if (command == 1 && renameRequested && (!canRename || canRename(id))) renameRequested(id);
+        else if (command == 9 && deleteRequested && (!canDelete || canDelete(id))) deleteRequested(id);
         return 0;
     }
     case WM_GETDLGCODE: return DLGC_WANTARROWS | DLGC_WANTCHARS;
@@ -434,6 +436,10 @@ LRESULT Tree::handle(UINT m, WPARAM a, LPARAM b) {
         const auto id = selection(); const auto node = item(id);
         int index = row(id); if (index < 0) index = 0;
         switch (a) {
+        case VK_DELETE:
+            if (!(GetKeyState(VK_CONTROL) & 0x8000) && !(GetKeyState(VK_MENU) & 0x8000) &&
+                !(b & (1LL << 30)) && id && deleteRequested && (!canDelete || canDelete(id))) deleteRequested(id);
+            return 0;
         case VK_F2: if (id && renameRequested && (!canRename || canRename(id))) renameRequested(id); return 0;
         case VK_F4: if (id && actionClicked && actionLabel && !actionLabel(id).empty()) actionClicked(id); return 0;
         case VK_LEFT: if (node && node->expanded) expand(id, false); else if (node && node->parent) select(node->parent); return 0;

@@ -383,7 +383,7 @@ void explorerHistory(const std::string& executable) {
     helper.call("createFile", file, {{"size", std::to_string(bytes.size())}}, &bytes);
     chmod(file.c_str(), 0751);
     write(outside.root / "keep", "outside link target"); fs::create_directory_symlink(outside.root, folder / "link");
-    history.record({resource(backup), resource(folder), true});
+    history.record({resource(backup), resource(folder), poppy::ExplorerEditKind::Create});
     check(history.replay(false, rename).empty() && !fs::exists(folder) && disk(backup / "child.txt") == bytes, "WSL folder undo did not remove/preserve descendants");
     fs::create_directory(folder);
     check(!history.replay(true, rename).empty() && fs::is_empty(folder) && history.next(true), "WSL redo overwrote an existing folder or discarded history");
@@ -395,7 +395,7 @@ void explorerHistory(const std::string& executable) {
     check(!fs::exists(backup) && disk(outside.root / "keep") == "outside link target", "WSL backup cleanup leaked a folder or followed a link");
     const auto single = root / "single.txt", fileBackup = fixture.root / ".poppy-undo-file";
     helper.call("createFile", single, {{"size", std::to_string(bytes.size())}}, &bytes);
-    history.record({resource(fileBackup), resource(single), true});
+    history.record({resource(fileBackup), resource(single), poppy::ExplorerEditKind::Create});
     check(history.replay(false, rename).empty() && !fs::exists(single), "WSL file creation undo failed");
     check(history.replay(true, rename).empty() && disk(single) == bytes, "WSL file creation redo failed");
     const auto baseline = helper.call("readFile", single); const std::string edited = "saved after redo";
@@ -404,6 +404,18 @@ void explorerHistory(const std::string& executable) {
     for (const auto& path : history.clear()) helper.call("removeResource", fs::path(path.u8string()));
     check(!fs::exists(fileBackup), "WSL file backup cleanup failed");
     helper.call("removeResource", fileBackup); // Missing backups are already clean.
+    helper.call("createDirectory", folder);
+    helper.call("createFile", file, {{"size", std::to_string(bytes.size())}}, &bytes);
+    chmod(file.c_str(), 0751); fs::create_directory_symlink(outside.root, folder / "link");
+    check(rename(resource(folder), resource(backup)).empty(), "WSL folder deletion failed");
+    history.record({resource(folder), resource(backup), poppy::ExplorerEditKind::Delete});
+    check(history.replay(false, rename).empty() && disk(file) == bytes && fs::is_symlink(folder / "link"), "WSL deletion undo lost contents or links");
+    stat(file.c_str(), &info); check((info.st_mode & 0777) == 0751, "WSL deletion undo changed permissions");
+    const auto restored = helper.call("readFile", file);
+    helper.call("saveFile", file, {{"version", version(restored)}, {"size", std::to_string(edited.size())}}, &edited);
+    check(history.replay(true, rename).empty() && !fs::exists(folder) && disk(backup / "child.txt") == edited, "WSL deletion redo lost saved changes");
+    for (const auto& path : history.clear()) helper.call("removeResource", fs::path(path.u8string()));
+    check(!fs::exists(backup) && disk(outside.root / "keep") == "outside link target", "WSL deleted-folder cleanup followed a link or leaked data");
     helper.eof();
 }
 void repositories(const std::string& executable) {

@@ -3,13 +3,16 @@
 #include <functional>
 
 namespace poppy {
-// Creation is represented by moving the new resource into private storage on
-// undo. Redo restores the same object, including contents, permissions and links.
+enum class ExplorerEditKind { Move, Create, Delete };
+// Creation and deletion move resources into private storage while absent.
+// Restoration keeps the same contents, permissions and links.
 struct ExplorerEdit {
     ResourceId before, after;
-    bool creation = false;
+    ExplorerEditKind kind = ExplorerEditKind::Move;
     ResourceId selection = {};
     std::vector<ResourceId> expanded = {};
+    const ResourceId& resource() const { return kind == ExplorerEditKind::Delete ? before : after; }
+    bool restores(bool redo) const { return kind == ExplorerEditKind::Create ? redo : !redo; }
 };
 class ExplorerHistory {
 public:

@@ -758,6 +758,64 @@ void renameTests(const fs::path& executable) {
         check(visibleTabCount(app)==1,"Restart lost the renamed tab");
     }
 }
+void explorerDeleteTests(const fs::path& executable) {
+    Fixture fixture;
+    const auto folder = fixture.root / L"a folder 日本語", single = fixture.root / L"b file 日本語.txt", keep = fixture.root / L"c keep.txt";
+    fs::create_directories(folder / L"nested"); writeLines(folder / L"nested" / L"child.txt", 140);
+    writeLines(single, 120); writeFile(keep);
+    Application app(executable, fixture.root); const auto tree = app.tree();
+    const auto viewer = FindWindowExW(app.window, nullptr, L"PoppyViewer", nullptr);
+    waitFor([&] { return send(tree, treeGetCount) == 4; }, "Delete fixture did not load");
+    const auto root = nextItem(tree, TreeRelation::Root), directory = nextItem(tree, TreeRelation::Child, root);
+    const auto file = nextItem(tree, TreeRelation::Next, directory);
+    send(tree, treeSelect, root); send(tree, WM_KEYDOWN, VK_DELETE);
+    check(fs::exists(fixture.root) && !send(tree, treeCanUndo), "Delete accepted the project root");
+    send(tree, treeSelect, file); waitLines(viewer, 120);
+    send(tree, WM_KEYDOWN, VK_F2);
+    const auto input = FindWindowExW(tree, nullptr, treeInputClassName, nullptr);
+    check(input && SetWindowTextW(input, L"name.txt"), "Delete test could not open the filename input");
+    send(input, EM_SETSEL, 0, 1); send(input, WM_KEYDOWN, VK_DELETE);
+    wchar_t name[32]{}; GetWindowTextW(input, name, 32);
+    check(std::wstring(name) == L"ame.txt" && fs::exists(single), "Delete in a filename input deleted the resource");
+    send(input, WM_KEYDOWN, VK_ESCAPE);
+    send(viewer, WM_CHAR, '\r'); waitLines(viewer, 121);
+    send(tree, WM_KEYDOWN, VK_DELETE, 1LL << 30);
+    check(!send(tree, treeCanUndo) && fs::exists(single), "An auto-repeated Delete started another deletion");
+    PostMessageW(tree, WM_KEYDOWN, VK_DELETE, 0);
+    waitFor([&] { return !fs::exists(single) && send(tree, treeGetCount) == 3; }, "Delete did not remove the file without confirmation");
+    check(visibleTabCount(app) == 1, "Deletion closed the open tab"); waitLines(viewer, 121);
+    controlKey(app, tree, 'Z');
+    waitFor([&] { return fs::exists(single) && send(tree, treeGetCount) == 4; }, "Undo did not restore the deleted file");
+    waitLines(viewer, 121);
+    controlKey(app, tree, 'Y');
+    waitFor([&] { return !fs::exists(single) && send(tree, treeGetCount) == 3; }, "Redo did not delete the restored file");
+    controlKey(app, tree, 'Z');
+    waitFor([&] { return fs::exists(single) && send(tree, treeGetCount) == 4; }, "Second undo did not restore the file");
+    waitLines(viewer, 121); send(viewer, WM_KEYDOWN, VK_BACK); waitLines(viewer, 120);
+    expand(tree, directory);
+    waitFor([&] { return nextItem(tree, TreeRelation::Child, directory) != 0; }, "Delete folder did not expand");
+    expand(tree, nextItem(tree, TreeRelation::Child, directory));
+    waitFor([&] { return send(tree, treeGetCount) == 6; }, "Delete subtree did not load");
+    send(tree, treeSelect, directory); PostMessageW(tree, WM_KEYDOWN, VK_DELETE, 0);
+    waitFor([&] { return !fs::exists(folder) && send(tree, treeGetCount) == 3; }, "Delete did not remove a nonempty folder");
+    check(fs::exists(single) && fs::exists(keep), "Folder deletion removed a sibling");
+    controlKey(app, tree, 'Z');
+    waitFor([&] { return fs::exists(folder / L"nested" / L"child.txt") && send(tree, treeGetCount) == 6; }, "Folder undo lost descendants or expansion state");
+    controlKey(app, tree, 'Y');
+    waitFor([&] { return !fs::exists(folder) && send(tree, treeGetCount) == 3; }, "Folder redo did not remove descendants");
+    controlKey(app, tree, 'Z');
+    waitFor([&] { return fs::exists(folder) && send(tree, treeGetCount) == 6; }, "Second folder undo failed");
+
+    // A sharing violation reports an error and leaves the selected file intact.
+    const auto locked = CreateFileW(keep.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    check(locked != INVALID_HANDLE_VALUE, "Cannot lock the deletion fixture");
+    send(tree, treeSelect, nextItem(tree, TreeRelation::Next, nextItem(tree, TreeRelation::Next, nextItem(tree, TreeRelation::Child, root))));
+    PostMessageW(tree, WM_KEYDOWN, VK_DELETE, 0);
+    HWND dialog = nullptr;
+    waitFor([&] { dialog = FindWindowW(L"#32770", L"Poppy — Delete"); return dialog != nullptr; }, "Failed deletion did not report an error");
+    CloseHandle(locked); send(dialog, WM_COMMAND, IDOK);
+    check(fs::exists(keep) && fs::exists(single) && fs::exists(folder), "Failed deletion changed a live resource");
+}
 void explorerMoveTests(const fs::path& executable) {
     Fixture fixture;
     const auto source = fixture.root / L"a source", target = fixture.root / L"b target 日本語";
@@ -2173,7 +2231,7 @@ int wmain(int argc, wchar_t** argv) {
         check(argc == 2, "Pass the path to Poppy.exe");
         SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         for (const auto test : {folderTests, sidebarTests, treeInteractionTests, tabTests, pinnedTabTests,
-                tabDragTests, wrappingTabDragTests, wrappingTabTests, renameTests, explorerMoveTests, createItemTests, newFileShortcutTests, pasteImageTests, splitPaneTests, quickOpenTests, fullSearchTests, gitSidebarTests, gitAutoRefreshTests, branchSidebarTests, multiRepositoryTests, sessionTests, multiProjectTests, recentProjectTests, projectDragTests, scrollingProjectDragTests, terminalTitleTests, terminalShellTests, terminalBackspaceTests}) {
+                tabDragTests, wrappingTabDragTests, wrappingTabTests, renameTests, explorerMoveTests, explorerDeleteTests, createItemTests, newFileShortcutTests, pasteImageTests, splitPaneTests, quickOpenTests, fullSearchTests, gitSidebarTests, gitAutoRefreshTests, branchSidebarTests, multiRepositoryTests, sessionTests, multiProjectTests, recentProjectTests, projectDragTests, scrollingProjectDragTests, terminalTitleTests, terminalShellTests, terminalBackspaceTests}) {
             Fixture appData; AppDataEnvironment environment(appData.root);
             test(fs::absolute(argv[1]));
         }

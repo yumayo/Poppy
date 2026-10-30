@@ -44,6 +44,8 @@ public:
     std::function<bool(TreeItem)> canRename;
     std::function<void(TreeItem)> renameRequested;
     std::function<void(TreeItem, const std::wstring&)> renameCommitted;
+    std::function<bool(TreeItem)> canDelete;
+    std::function<void(TreeItem)> deleteRequested;
     std::function<bool(TreeItem)> canDrag;
     std::function<bool(TreeItem, TreeItem)> canDrop;
     std::function<void(TreeItem, TreeItem)> moveCommitted;

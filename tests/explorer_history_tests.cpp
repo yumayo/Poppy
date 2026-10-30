@@ -27,20 +27,20 @@ void filesAndFolders() {
     write(original, "created\r\n");
     ExplorerHistory history;
     check(!history.next(false) && !history.next(true), "New project had Explorer history");
-    history.record({backup, original, true});
-    check(renameResource(original, named).empty(), "Cannot rename fixture"); history.record({original, named, false});
+    history.record({backup, original, ExplorerEditKind::Create});
+    check(renameResource(original, named).empty(), "Cannot rename fixture"); history.record({original, named, ExplorerEditKind::Move});
     check(history.replay(false, renameResource).empty() && fs::exists(original) && !fs::exists(named), "Rename undo failed");
     write(original, "saved after creation");
     check(history.replay(false, renameResource).empty() && !fs::exists(original) && read(backup) == "saved after creation", "Creation undo did not remove/preserve the file");
     write(original, "external collision");
-    check(!history.replay(true, renameResource).empty() && history.next(true)->creation && read(original) == "external collision", "Failed redo advanced history or overwrote a file");
+    check(!history.replay(true, renameResource).empty() && history.next(true)->kind == ExplorerEditKind::Create && read(original) == "external collision", "Failed redo advanced history or overwrote a file");
     fs::remove(original);
     check(history.replay(true, renameResource).empty() && read(original) == "saved after creation" && !fs::exists(backup), "File redo lost saved contents");
     check(history.replay(true, renameResource).empty() && read(named) == "saved after creation", "Rename redo failed");
     const auto folder = root / "nested", moved = root / "destination", folderBackup = fixture.root / ".poppy-undo-folder";
     fs::create_directories(folder / "child"); write(folder / "child" / "data", "descendant");
-    history.record({folderBackup, folder, true});
-    check(renameResource(folder, moved).empty(), "Cannot move fixture"); history.record({folder, moved, false});
+    history.record({folderBackup, folder, ExplorerEditKind::Create});
+    check(renameResource(folder, moved).empty(), "Cannot move fixture"); history.record({folder, moved, ExplorerEditKind::Move});
     check(history.replay(false, renameResource).empty() && read(folder / "child" / "data") == "descendant", "Folder move undo lost descendants");
     check(history.replay(false, renameResource).empty() && !fs::exists(folder) && read(folderBackup / "child" / "data") == "descendant", "Folder creation undo failed");
     check(history.replay(true, renameResource).empty() && read(folder / "child" / "data") == "descendant", "Folder creation redo failed");
@@ -51,21 +51,68 @@ void branchingAndFailures() {
     const auto root = ResourceId::wsl("Ubuntu", "/home/test/project");
     ExplorerHistory history;
     const auto first = root / std::string_view("a"), second = root / std::string_view("b"), backup = root.parent_path() / std::string_view(".poppy-undo-test");
-    history.record({backup, first, true});
+    history.record({backup, first, ExplorerEditKind::Create});
     check(!history.replay(false, [](const auto&, const auto&) { return L"Permission denied"; }).empty() && !history.next(true), "Failed undo advanced the cursor");
     check(history.replay(false, [&](const auto& from, const auto& to) { check(from == first && to == backup, "Undo crossed resources or authorities"); return L""; }).empty(), "Undo failed");
-    auto discarded = history.record({first, second, false});
+    auto discarded = history.record({first, second, ExplorerEditKind::Move});
     check(discarded.size() == 1 && discarded.front() == backup && !history.next(true), "A new action did not discard the redo backup");
     history.clear();
-    history.record({backup, first, true}); history.replay(false, [](const auto&, const auto&) { return L""; });
+    history.record({backup, first, ExplorerEditKind::Create}); history.replay(false, [](const auto&, const auto&) { return L""; });
     discarded = history.clear(); check(discarded.size() == 1 && discarded.front() == backup, "Closing a project leaked its undone creation");
-    for (int i = 0; i < 1001; ++i) history.record({first, second, false});
+    for (int i = 0; i < 1001; ++i) history.record({first, second, ExplorerEditKind::Move});
     int count = 0;
     while (history.next(false)) { check(history.replay(false, [](const auto&, const auto&) { return L""; }).empty(), "History limit broke undo"); ++count; }
     check(count == 1000, "Explorer history exceeded its bound");
 }
+void deletions() {
+    Fixture fixture; const auto root = fixture.root / "project"; fs::create_directory(root);
+    const auto file = root / fs::u8path("日本語 file.txt"), backup = fixture.root / ".poppy-undo-deleted";
+    write(file, "saved contents");
+    ExplorerHistory history;
+    check(renameResource(file, backup).empty(), "Cannot delete fixture file");
+    history.record({file, backup, ExplorerEditKind::Delete, file});
+    check(!fs::exists(file) && history.next(false)->resource() == ResourceId(file) &&
+        history.next(false)->restores(false) && !history.next(false)->restores(true), "Deletion lost its logical path or replay direction");
+    write(file, "external collision");
+    check(!history.replay(false, renameResource).empty() && !history.next(true) && read(file) == "external collision" &&
+        read(backup) == "saved contents", "Deletion undo overwrote a collision or advanced history");
+    fs::remove(file);
+    check(history.replay(false, renameResource).empty() && read(file) == "saved contents" && !fs::exists(backup), "File deletion undo lost contents");
+    write(file, "saved after restore");
+    check(history.replay(true, renameResource).empty() && !fs::exists(file) && read(backup) == "saved after restore", "File deletion redo lost later edits");
+    check(history.replay(false, renameResource).empty(), "Cannot restore deleted file again");
+    check(history.record({file, root / "other", ExplorerEditKind::Move}).empty() && fs::exists(file), "Discarding deletion redo removed a live resource");
+    check(history.clear().empty(), "Clearing an undone deletion removed a live resource");
+
+    const auto folder = root / "folder", folderBackup = fixture.root / ".poppy-undo-directory";
+    fs::create_directories(folder / "nested"); write(folder / "nested" / "child", "descendant");
+    check(renameResource(folder, folderBackup).empty(), "Cannot delete fixture folder");
+    history.record({folder, folderBackup, ExplorerEditKind::Delete, folder});
+    check(history.replay(false, renameResource).empty() && read(folder / "nested" / "child") == "descendant", "Folder deletion undo lost descendants");
+    check(history.replay(true, renameResource).empty() && !fs::exists(folder), "Folder deletion redo failed");
+    const auto abandoned = history.clear();
+    check(abandoned.size() == 1 && abandoned.front() == ResourceId(folderBackup), "Closing history leaked a deleted folder backup");
+    for (const auto& path : abandoned) fs::remove_all(path.local());
+    check(fs::exists(file) && !fs::exists(folderBackup), "Backup cleanup affected a restored file");
+}
+void deletionCleanup() {
+    const auto root = ResourceId::wsl("Ubuntu", "/home/test/project");
+    const auto file = root / std::string_view("file"), backup = root.parent_path() / std::string_view(".poppy-undo-deleted");
+    ExplorerHistory history;
+    history.record({file, backup, ExplorerEditKind::Delete});
+    for (int i = 0; i < 999; ++i) check(history.record({file, file, ExplorerEditKind::Move}).empty(), "Deletion backup was removed while still undoable");
+    auto abandoned = history.record({file, file, ExplorerEditKind::Move});
+    check(abandoned.size() == 1 && abandoned.front() == backup, "History eviction leaked a deleted resource");
+    history.clear();
+    history.record({file, backup, ExplorerEditKind::Delete});
+    const auto newFile = root / std::string_view("created"), newBackup = root.parent_path() / std::string_view(".poppy-undo-created");
+    history.record({newBackup, newFile, ExplorerEditKind::Create});
+    check(history.replay(false, [](const auto&, const auto&) { return L""; }).empty(), "Cannot undo mixed history");
+    abandoned = history.clear();
+    check(abandoned.size() == 2 && abandoned[0] == backup && abandoned[1] == newBackup, "Mixed history cleanup missed applied deletions or undone creations");
+}
 }
 int main() {
-    try { filesAndFolders(); branchingAndFailures(); std::cout << "Explorer history tests passed\n"; return 0; }
+    try { filesAndFolders(); branchingAndFailures(); deletions(); deletionCleanup(); std::cout << "Explorer history tests passed\n"; return 0; }
     catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
 }
