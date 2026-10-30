@@ -53,7 +53,7 @@ void limitStatuses() {
     check(status.text == L"Watch 0/0" && status.warning && status.tooltip.find(L"Linux user watch limit: 0") != status.tooltip.npos, "A zero Linux watch quota was presented as unknown");
     FileIndex index; index.files.resize(1234); index.storageBytes = 3 * 1024 * 1024 / 2;
     status = fileLimitStatus(&index, true);
-    check(status.text == L"Files 1,234/200,000 …" && status.tooltip.find(L"1.5/64 MiB") != status.tooltip.npos && status.tooltip.find(L"last completed scan") != status.tooltip.npos, "File status did not distinguish the cached scan and memory budget");
+    check(status.text == L"Files 1,234/200,000 …" && status.tooltip.find(L"1.5/256 MiB") != status.tooltip.npos && status.tooltip.find(L"last completed scan") != status.tooltip.npos, "File status did not distinguish the cached scan and memory budget");
     index.error = "File list reached its file-count or memory limit.";
     check(fileLimitStatus(&index, false).warning && fileLimitStatus(&index, false).tooltip.find(L"partial list") != std::wstring::npos, "A partial file index was not highlighted");
     status = treeLimitStatus(50000, 50000, 10000);

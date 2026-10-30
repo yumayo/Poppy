@@ -6,7 +6,7 @@
 #include <vector>
 
 namespace poppy {
-constexpr size_t maxIndexedFiles = 200000, maxIndexBytes = 64 * 1024 * 1024, maxIndexDirectories = 50000;
+constexpr size_t maxIndexedFiles = 200000, maxIndexBytes = 256 * 1024 * 1024, maxIndexDirectories = 50000;
 struct FileMatch { std::filesystem::path relative; int score; std::string exactRelative; };
 struct IndexedFile { std::string relative; std::u32string normalized; };
 struct FileIndex {
