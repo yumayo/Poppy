@@ -108,6 +108,10 @@ struct Repository {
         const auto entries = parseGitStatus(git({"status", "--porcelain=v1", "-z", "--untracked-files=all"}));
         for (const auto& command : gitDiscardAllArguments(entries)) git(command);
     }
+    void discardFile(const std::string& path) const {
+        const auto entries = parseGitStatus(git({"status", "--porcelain=v1", "-z", "--untracked-files=all"}));
+        for (const auto& command : gitDiscardFileArguments(entries, path)) git(command);
+    }
     void stashUnstaged() const {
         const auto args = gitStashUnstagedArguments(parseGitStatus(git({"status", "--porcelain=v1", "-z", "--untracked-files=all"})));
         if (!args.empty()) git(args);
@@ -386,6 +390,58 @@ void repositoryDiscardAll() {
           repo.readFile("src/日本語 [1].txt") == "keep working\n" && repo.readFile("keep untracked.txt") == "keep\n",
           "Discard All Changes modified files before rejecting merge conflicts");
 }
+void repositoryDiscardFile() {
+    Repository repo;
+    repo.git({"init", "--quiet", "--template=", "--initial-branch=main"});
+    repo.git({"config", "user.name", "Poppy Test"}); repo.git({"config", "user.email", "poppy@example.invalid"});
+    repo.git({"config", "core.autocrlf", "false"}); repo.git({"config", "commit.gpgsign", "false"});
+    repo.git({"config", "core.excludesFile", "/dev/null"});
+    repo.write("new/日本語 [1].txt", "remove\n"); repo.write("new/日本語 1.txt", "keep\n");
+    repo.discardFile("new/日本語 [1].txt");
+    check(!fs::exists(repo.path / "new/日本語 [1].txt") && repo.readFile("new/日本語 1.txt") == "keep\n",
+          "Single-file discard expanded a path pattern or failed before the first index");
+    repo.write("partial [1].txt", "staged before first commit\n"); repo.git({"add", "--", "partial [1].txt"});
+    repo.write("partial [1].txt", "working\n");
+    repo.discardFile("partial [1].txt");
+    check(repo.readFile("partial [1].txt") == "staged before first commit\n", "Single-file discard required HEAD or lost a staged addition");
+    repo.write("partial 1.txt", "initial\n"); repo.write("deleted.txt", "initial\n"); repo.write("rename source.txt", "initial\n");
+    repo.write(".gitignore", "ignored.txt\n"); repo.git({"add", "."}); repo.git({"commit", "-qm", "baseline"});
+    const auto head = repo.hash();
+    repo.write("partial [1].txt", "staged\n"); repo.git({"add", "--", "partial [1].txt"});
+    repo.write("partial [1].txt", "working\n"); repo.write("partial 1.txt", "other change\n");
+    fs::remove(repo.path / "deleted.txt");
+    repo.git({"mv", "--", "rename source.txt", "renamed.txt"}); repo.write("renamed.txt", "working rename\n");
+    repo.write("new/untracked [2].txt", "remove\n"); repo.write("new/untracked 2.txt", "keep\n");
+    repo.write("ignored.txt", "ignored\n");
+    const auto index = repo.git({"ls-files", "--stage", "-z"});
+    repo.discardFile("partial [1].txt");
+    check(repo.readFile("partial [1].txt") == "staged\n" && repo.readFile("partial 1.txt") == "other change\n" &&
+          !fs::exists(repo.path / "deleted.txt") && repo.readFile("new/untracked [2].txt") == "remove\n",
+          "Single-file discard lost partial staging or changed another file");
+    repo.discardFile("deleted.txt"); repo.discardFile("renamed.txt"); repo.discardFile("new/untracked [2].txt");
+    repo.discardFile("ignored.txt"); repo.discardFile("partial [1].txt"); repo.discardFile("missing.txt");
+    check(repo.readFile("deleted.txt") == "initial\n" && repo.readFile("renamed.txt") == "initial\n" &&
+          !fs::exists(repo.path / "rename source.txt") && !fs::exists(repo.path / "new/untracked [2].txt") &&
+          repo.readFile("new/untracked 2.txt") == "keep\n" && repo.readFile("ignored.txt") == "ignored\n" &&
+          repo.git({"ls-files", "--stage", "-z"}) == index && repo.hash() == head,
+          "Single-file discard failed to restore deletions/renames or preserve the index, HEAD and other files");
+    Repository outside; outside.write("keep.txt", "outside\n");
+    fs::create_directory_symlink(outside.path, repo.path / "untracked-link");
+    repo.discardFile("untracked-link");
+    check(!fs::exists(repo.path / "untracked-link") && outside.readFile("keep.txt") == "outside\n",
+          "Single-file discard followed a symlink outside the repository");
+    repo.git({"checkout", "-qb", "topic"}); repo.write("deleted.txt", "topic\n"); repo.git({"add", "deleted.txt"}); repo.git({"commit", "-qm", "topic"});
+    repo.git({"checkout", "-q", "main"}); repo.write("deleted.txt", "main\n"); repo.git({"add", "deleted.txt"}); repo.git({"commit", "-qm", "main"});
+    try { repo.git({"merge", "topic"}); } catch (const std::runtime_error&) {}
+    const auto conflict = repo.readFile("deleted.txt"), conflictIndex = repo.git({"ls-files", "--stage", "-z"});
+    bool failed = false;
+    try { repo.discardFile("deleted.txt"); } catch (const std::invalid_argument&) { failed = true; }
+    check(failed && repo.readFile("deleted.txt") == conflict && repo.git({"ls-files", "--stage", "-z"}) == conflictIndex,
+          "Single-file discard modified a conflicted file or its index");
+    repo.discardFile("partial 1.txt");
+    check(repo.readFile("partial 1.txt") == "initial\n" && repo.readFile("deleted.txt") == conflict &&
+          repo.git({"ls-files", "--stage", "-z"}) == conflictIndex, "A conflict in another file affected single-file discard");
+}
 void repositoryStashUnstaged() {
     Repository repo;
     repo.git({"init", "--quiet", "--template=", "--initial-branch=main"});
@@ -625,7 +681,7 @@ int main() {
     try {
         statusGroups(); records(); patchLists(); repositoryOwnership();
 #ifndef _WIN32
-        repositoryStaging(); repositoryStageAll(); repositoryUnstageAll(); repositoryDiscardAll(); repositoryStashUnstaged(); repositoryStashStaged(); repositorySyntax(); repositoryHistory(); multipleRepositories();
+        repositoryStaging(); repositoryStageAll(); repositoryUnstageAll(); repositoryDiscardAll(); repositoryDiscardFile(); repositoryStashUnstaged(); repositoryStashStaged(); repositorySyntax(); repositoryHistory(); multipleRepositories();
 #endif
         std::cout << "Git history tests passed.\n"; return 0;
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }

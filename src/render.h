@@ -28,7 +28,7 @@ void initializeRendering();
 class Renderer {
 public:
     enum class Font { Ui, Code };
-    enum class Icon { Explorer, SourceControl, Branch, OpenAllChanges, Search, StageChanges, UnstageChanges, DiscardChanges, StashChanges };
+    enum class Icon { Explorer, SourceControl, Branch, OpenAllChanges, Search, StageChanges, UnstageChanges, DiscardChanges, StashChanges, OpenFile };
     // Keeps both the Win32 paint validation and the Direct2D drawing balanced,
     // including empty windows and failed render-target creation.
     class Paint {

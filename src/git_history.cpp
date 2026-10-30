@@ -119,6 +119,17 @@ std::vector<std::vector<std::string>> gitDiscardAllArguments(const std::vector<G
     commands.push_back({"git.exe", "--literal-pathspecs", "--no-optional-locks", "clean", "-f", "-d", "--", "."});
     return commands;
 }
+std::vector<std::vector<std::string>> gitDiscardFileArguments(const std::vector<GitStatusEntry>& entries, const std::string& path) {
+    const auto found = std::find_if(entries.begin(), entries.end(), [&](const GitStatusEntry& entry) { return entry.path == path && entry.changed(); });
+    if (found == entries.end()) return {};
+    if (found->conflicted()) throw std::invalid_argument("Resolve the file's merge conflict before discarding changes.");
+    std::vector<std::string> args{"git.exe", "--literal-pathspecs", "--no-optional-locks"};
+    if (found->index == '?') args.insert(args.end(), {"clean", "-f", "-d"});
+    else args.insert(args.end(), {"restore", "--worktree", "--no-recurse-submodules"});
+    args.insert(args.end(), {"--", found->path});
+    if (found->worktree == 'R' && !found->previousPath.empty()) args.push_back(found->previousPath);
+    return {std::move(args)};
+}
 std::string untrackedPatch(const std::string& path, std::string_view text) {
     std::string patch = "diff --git a/" + path + " b/" + path + "\nnew file mode 100644\n";
     if (text.find('\0') != text.npos) return patch + "Binary file (untracked)\n";

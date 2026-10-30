@@ -221,13 +221,13 @@ private:
     RECT gitViewButton(bool tree) const;
     void setGitView(bool tree);
     void updateGitFiles();
-    void openGitFile(TreeItem item);
+    void openGitFile(TreeItem item, bool diff = true);
     SourceNode* sourceNode(TreeItem item) const;
     void updateCommitFiles(TreeItem item);
     void clearHistoryChildren(TreeItem item);
     void sortHistory(TreeItem item);
     void stageGitChanges(TreeItem item, bool all = false);
-    void discardGitChanges(TreeItem item);
+    void discardGitChanges(TreeItem item, bool all = false);
     void stashGitChanges(TreeItem item);
     void openGitDiff(const ResourceId& path, GitDiffKind kind, std::string revision = {}, bool allChanges = false, ResourceId root = {});
     std::wstring repositoryLabel(const ResourceId& root) const;
@@ -439,27 +439,39 @@ void ProjectRuntime::Impl::create() {
         const auto source = sourceNode(item);
         if (!source) return L"";
         const auto& node = *source;
-        return node.group && changes_.child(item) ? node.staged ? L"Unstage All Changes" : L"Stage All Changes" : L"";
+        if (node.group) return changes_.child(item) ? node.staged ? L"Unstage All Changes" : L"Stage All Changes" : L"";
+        return node.directory ? L"" : node.staged ? L"Open File" : L"Discard Changes";
     };
     changes_.secondaryActionIcon = [this](TreeItem item) {
         const auto source = sourceNode(item);
+        if (source && !source->group) return source->staged ? Renderer::Icon::OpenFile : Renderer::Icon::DiscardChanges;
         return source && source->staged ? Renderer::Icon::UnstageChanges : Renderer::Icon::StageChanges;
     };
-    changes_.secondaryActionClicked = [this](TreeItem item) { stageGitChanges(item, true); };
+    changes_.secondaryActionClicked = [this](TreeItem item) {
+        const auto source = sourceNode(item);
+        if (!source) return;
+        if (source->group) stageGitChanges(item, true);
+        else if (source->staged) openGitFile(item, false);
+        else discardGitChanges(item);
+    };
     changes_.tertiaryActionLabel = [this](TreeItem item) {
         const auto source = sourceNode(item);
         if (!source) return L"";
         const auto& node = *source;
-        return node.group && changes_.child(item) ? node.staged ? L"Stash Staged Changes" : L"Discard All Changes" : L"";
+        if (node.group) return changes_.child(item) ? node.staged ? L"Stash Staged Changes" : L"Discard All Changes" : L"";
+        return !node.directory && !node.staged ? L"Open File" : L"";
     };
     changes_.tertiaryActionIcon = [this](TreeItem item) {
         const auto source = sourceNode(item);
+        if (source && !source->group) return Renderer::Icon::OpenFile;
         return source && source->staged ? Renderer::Icon::StashChanges : Renderer::Icon::DiscardChanges;
     };
     changes_.tertiaryActionClicked = [this](TreeItem item) {
         const auto source = sourceNode(item);
-        if (source && source->staged) stashGitChanges(item);
-        else discardGitChanges(item);
+        if (!source) return;
+        if (!source->group) openGitFile(item, false);
+        else if (source->staged) stashGitChanges(item);
+        else discardGitChanges(item, true);
     };
     changes_.quaternaryActionLabel = [this](TreeItem item) {
         const auto source = sourceNode(item);
@@ -818,14 +830,23 @@ void ProjectRuntime::Impl::updateGitFiles() {
     if (git_ && branchesLoaded_) { changes_.restoreScroll(restoreGitTop_ ? restoreGitTop_ : oldTop, restoreGitLeft_ ? restoreGitLeft_ : oldLeft); restoreGitTop_ = restoreGitLeft_ = 0; pendingGitSelection_.clear(); }
     layout(false);
 }
-void ProjectRuntime::Impl::openGitFile(TreeItem item) {
+void ProjectRuntime::Impl::openGitFile(TreeItem item, bool diff) {
     if (updatingGitFiles_ || !git_) return;
     const auto source = sourceNode(item);
     if (!source) return;
     const auto& node = *source;
     const auto& repo = *git_->repositories[node.repository];
-    if (node.directory || node.entry >= repo.entries.size()) return;
+    if (node.group || node.directory || node.entry >= repo.entries.size()) return;
     const auto entry = repo.entries[node.entry];
+    if (!diff) {
+        openFile(entry.path);
+        // A normal file tab may already have been switched to diff with F6.
+        if (activeTab_ < tabs_.size() && tabs_[activeTab_].diff) {
+            saveTab(); tabs_[activeTab_].diff = false; loadTab();
+        }
+        SetFocus(viewer().window());
+        return;
+    }
     if (entry.state == L'?') { openFile(entry.path); return; }
     openGitDiff(entry.path, node.staged ? GitDiffKind::Staged : GitDiffKind::Changes, {}, false, repo.root);
 }
@@ -864,29 +885,37 @@ void ProjectRuntime::Impl::stageGitChanges(TreeItem item, bool all) {
         });
     });
 }
-void ProjectRuntime::Impl::discardGitChanges(TreeItem item) {
+void ProjectRuntime::Impl::discardGitChanges(TreeItem item, bool all) {
     if (updatingGitFiles_ || gitStagePending_ || gitDiscardPending_ || gitStashPending_ || renamePending_ || pastePending_ || createPending_ || !git_) return;
     if (root_.wsl() && (!connected_ || provider_->state() != ConnectionState::Ready)) { status(L"Reconnect WSL before discarding changes."); return; }
     const auto source = sourceNode(item);
     if (!source) return;
     const auto& node = *source;
-    if (!node.group || node.staged || !changes_.child(item) || node.repository >= git_->repositories.size()) return;
+    if (node.staged || node.repository >= git_->repositories.size()) return;
     const auto& repo = *git_->repositories[node.repository];
+    if (all) { if (!node.group || !changes_.child(item)) return; }
+    else if (node.group || node.directory || node.entry >= repo.entries.size()) return;
     if (!repo.error.empty()) return;
     if (std::any_of(tabs_.begin(), tabs_.end(), [](const Tab& tab) { return tab.buffer && tab.buffer->saving; })) {
         status(L"Wait for file saves to finish before discarding changes."); return;
     }
     // MessageBox dispatches UI completions. Copy the target before entering it.
-    const auto root = repo.root; const auto name = repositoryLabel(root);
+    const auto root = repo.root;
+    const auto path = all ? std::string{} : repo.entries[node.entry].path.lexically_relative(root).generic_u8string();
+    const auto name = all ? repositoryLabel(root) : wide(path);
     const auto provider = provider_; const auto generation = generation_;
     gitDiscardPending_ = true;
-    const auto answer = MessageBoxW(window_, (L"Discard all unstaged changes in " + root.native() +
+    const auto message = all ? L"Discard all unstaged changes in " + root.native() +
         L"?\n\nWorking files will be restored from the index. Untracked files and folders will be permanently deleted. This cannot be undone.\n\n"
-        L"Staged changes, ignored files, untracked nested repositories, submodules and unsaved editor text will be kept.").c_str(),
-        L"Poppy — Discard All Changes", MB_OKCANCEL | MB_ICONWARNING | MB_DEFBUTTON2);
+        L"Staged changes, ignored files, untracked nested repositories, submodules and unsaved editor text will be kept." :
+        L"Discard unstaged changes to " + name + L" in " + root.native() +
+        L"?\n\nThis file will be restored from the index, or permanently deleted if it is untracked. This cannot be undone.\n\n"
+        L"Staged changes, other files and unsaved editor text will be kept.";
+    const auto answer = MessageBoxW(window_, message.c_str(),
+        all ? L"Poppy — Discard All Changes" : L"Poppy — Discard Changes", MB_OKCANCEL | MB_ICONWARNING | MB_DEFBUTTON2);
     if (answer != IDOK || generation != generation_) { gitDiscardPending_ = false; return; }
     status(L"Discarding changes in " + name + L"…");
-    gitWorker_->submit(L"git-discard", [this, root, provider, generation, name] {
+    gitWorker_->submit(L"git-discard", [this, root, provider, generation, name, all, path] {
         // A removed .git must not redirect this destructive operation to a parent.
         auto result = provider->git({L"git.exe", L"--no-optional-locks", L"rev-parse", L"--show-toplevel"}, root, gitWorker_->cancellation());
         if (!result.code && (pathKey(root.at(utf8(trimmed(result.output)))) != pathKey(root))) {
@@ -895,7 +924,8 @@ void ProjectRuntime::Impl::discardGitChanges(TreeItem item) {
         // Read complete status here, rather than using the bounded UI snapshot.
         if (!result.code) result = provider->git({L"git.exe", L"--no-optional-locks", L"-c", L"core.fsmonitor=false", L"status", L"--porcelain=v1", L"-z", L"--untracked-files=all"}, root, gitWorker_->cancellation());
         if (!result.code) try {
-            const auto commands = gitDiscardAllArguments(parseGitStatus(result.output));
+            const auto entries = parseGitStatus(result.output);
+            const auto commands = all ? gitDiscardAllArguments(entries) : gitDiscardFileArguments(entries, path);
             for (const auto& command : commands) {
                 result = provider->git(gitArguments(command), root, gitWorker_->cancellation());
                 if (result.code) break;

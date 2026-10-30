@@ -42,6 +42,9 @@ std::vector<std::string> gitStashStagedArguments(const std::vector<GitStatusEntr
 // Use fresh, complete status entries. Reject conflicts before changing any files;
 // do not recurse into submodules or force removal of nested repositories.
 std::vector<std::vector<std::string>> gitDiscardAllArguments(const std::vector<GitStatusEntry>& entries);
+// Discard only the selected path using fresh status. Keep its index and all
+// other paths; reject a conflict in the selected file before changing it.
+std::vector<std::vector<std::string>> gitDiscardFileArguments(const std::vector<GitStatusEntry>& entries, const std::string& path);
 // A decoded UTF-8 untracked file, represented as an addition in a patch list.
 std::string untrackedPatch(const std::string& path, std::string_view text);
 }

@@ -9,6 +9,7 @@
 #include <fstream>
 #include <initializer_list>
 #include <iostream>
+#include <iterator>
 #include <stdexcept>
 #include <string>
 
@@ -86,6 +87,11 @@ void writeFile(const fs::path& path) {
     file << "Poppy folder regression test\n";
     file.close();
     check(!file.fail(), "Could not create a test file");
+}
+std::string readText(const fs::path& path) {
+    std::ifstream file(path, std::ios::binary);
+    check(file.is_open(), "Could not read a test file");
+    return {std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>()};
 }
 void writeLines(const fs::path& path, int lines) {
     std::ofstream file(path);
@@ -168,26 +174,27 @@ void click(HWND window, int x, int y, bool middle = false) {
     send(window, middle ? WM_MBUTTONDOWN : WM_LBUTTONDOWN, middle ? MK_MBUTTON : MK_LBUTTON, MAKELPARAM(x, y));
     send(window, middle ? WM_MBUTTONUP : WM_LBUTTONUP, 0, MAKELPARAM(x, y));
 }
-void discardGroup(const Application& app, HWND changes, TreeItem group, int answer) {
-    expand(changes, group, false);
+void discardItem(const Application& app, HWND changes, TreeItem item, int answer, bool all) {
+    if (all) expand(changes, item, false);
     RECT rect{}; GetClientRect(changes, &rect);
-    const int x = rect.right - MulDiv(74, GetDpiForWindow(app.window), 96);
+    const int x = rect.right - MulDiv(all ? 74 : 46, GetDpiForWindow(app.window), 96);
     const int height = static_cast<int>(send(changes, treeGetRowHeight));
-    const int y = (static_cast<int>(send(changes, treeGetRow, group)) - scrollInfo(changes).nPos) * height + height / 2;
+    const int y = (static_cast<int>(send(changes, treeGetRow, item)) - scrollInfo(changes).nPos) * height + height / 2;
     // Post the click because its handler opens a modal confirmation.
     PostMessageW(changes, WM_MOUSEMOVE, 0, MAKELPARAM(x, y));
     PostMessageW(changes, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(x, y));
     PostMessageW(changes, WM_LBUTTONUP, 0, MAKELPARAM(x, y));
     HWND dialog = nullptr;
     waitFor([&] {
-        dialog = FindWindowW(L"#32770", L"Poppy — Discard All Changes");
+        dialog = FindWindowW(L"#32770", all ? L"Poppy — Discard All Changes" : L"Poppy — Discard Changes");
         DWORD pid = 0; if (dialog) GetWindowThreadProcessId(dialog, &pid);
         return dialog && pid == app.process.dwProcessId;
-    }, "Discard All Changes did not ask for confirmation from a collapsed group");
+    }, "Discard did not ask for confirmation");
     check(send(dialog, DM_GETDEFID) == MAKELONG(IDCANCEL, DC_HASDEFID), "Discard confirmation must default to Cancel");
     send(dialog, WM_COMMAND, answer);
     waitFor([&] { return !IsWindow(dialog); }, "Discard confirmation did not close");
 }
+void discardGroup(const Application& app, HWND changes, TreeItem group, int answer) { discardItem(app, changes, group, answer, true); }
 HWND tabTooltips(const Application& app) {
     HWND result = nullptr;
     struct Context { HWND owner; HWND& result; } context{app.window, result};
@@ -1489,15 +1496,49 @@ void branchSidebarTests(const fs::path& executable) {
         check(!GetDlgItem(app.window, 5) && !GetDlgItem(app.window, 6), "The separate Branch button or pane still exists");
         const auto staged = gitGroup(changes, true), working = nextItem(changes, TreeRelation::Next, staged);
         check(children(changes, staged) == 1 && children(changes, working) == 2, "Staged and unstaged groups contain the wrong files");
-        send(changes, treeSelect, staged); send(changes, WM_KEYDOWN, VK_F4); waitLines(viewer, 1);
+        const auto clickFileAction = [&](TreeItem item, int offset) {
+            RECT client{}; GetClientRect(changes, &client);
+            send(changes, treeSelect, item, 0);
+            const int height = static_cast<int>(send(changes, treeGetRowHeight));
+            const int y = (static_cast<int>(send(changes, treeGetRow, item)) - scrollInfo(changes).nPos) * height + height / 2;
+            const int x = client.right - MulDiv(offset, GetDpiForWindow(app.window), 96);
+            send(changes, WM_MOUSEMOVE, 0, MAKELPARAM(x, y)); click(changes, x, y); send(changes, WM_MOUSELEAVE);
+        };
+        const auto checkEditable = [&] {
+            // A diff can briefly have the same row count while the file loads.
+            waitFor([&] {
+                if (scrollInfo(viewer).nMax == 2) return true;
+                send(viewer, WM_CHAR, '\r'); return false;
+            }, "Open File did not open an editable working file");
+            send(viewer, WM_KEYDOWN, VK_BACK); waitLines(viewer, 1);
+        };
+        // File actions read left to right: Open File, Discard Changes, Stage.
+        const auto workingFile = nextItem(changes, TreeRelation::Child, working);
+        clickFileAction(workingFile, 74); waitLines(viewer, 1);
+        checkEditable();
+        // Staged rows open the working file beside Unstage, without discarding.
+        clickFileAction(nextItem(changes, TreeRelation::Child, staged), 46); waitLines(viewer, 1);
+        checkEditable();
+        discardItem(app, changes, nextItem(changes, TreeRelation::Child, gitGroup(changes, false)), IDCANCEL, false);
+        check(readText(fixture.root / L"src/file.txt") == "working\n" && readText(fixture.root / L"untracked.txt") == "untracked\n",
+              "Cancelling single-file discard changed working files");
+        discardItem(app, changes, nextItem(changes, TreeRelation::Child, gitGroup(changes, false)), IDOK, false);
+        waitFor([&] { return children(changes, gitGroup(changes, false)) == 1; }, "Single-file discard did not update Changes");
+        check(readText(fixture.root / L"src/file.txt") == "staged\n" && readText(fixture.root / L"untracked.txt") == "untracked\n",
+              "Single-file discard lost staged text or changed another file");
+        // Restore the fixture for the existing group-action tests.
+        write(L"src/file.txt", "working\n");
+        waitFor([&] { return children(changes, gitGroup(changes, false)) == 2; }, "Single-file discard fixture did not refresh");
+        const auto refreshedStaged = gitGroup(changes, true), refreshedWorking = gitGroup(changes, false);
+        send(changes, treeSelect, refreshedStaged); send(changes, WM_KEYDOWN, VK_F4); waitLines(viewer, 1);
         const auto rect = bounds(app.window, changes);
         const int height = static_cast<int>(send(changes, treeGetRowHeight));
-        const int row = static_cast<int>(send(changes, treeGetRow, working));
+        const int row = static_cast<int>(send(changes, treeGetRow, refreshedWorking));
         click(changes, rect.right - rect.left - MulDiv(18, GetDpiForWindow(app.window), 96), (row - scrollInfo(changes).nPos) * height + height / 2);
         waitLines(viewer, 4);
         // The group keeps its diff action and adds Stage All Changes beside it,
         // including when its file list is collapsed.
-        expand(changes, working, false);
+        expand(changes, refreshedWorking, false);
         const int stageX = rect.right - rect.left - MulDiv(46, GetDpiForWindow(app.window), 96);
         send(changes, WM_MOUSEMOVE, 0, MAKELPARAM(stageX, (row - scrollInfo(changes).nPos) * height + height / 2));
         click(changes, stageX, (row - scrollInfo(changes).nPos) * height + height / 2);
