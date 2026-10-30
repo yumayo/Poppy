@@ -77,8 +77,9 @@ HWND waitProject(const Application& app, const fs::path& path, size_t count) {
     waitFor([&] {
         window = app.window();
         wchar_t title[32768]{};
+        const auto project = window ? FindWindowExW(window, nullptr, L"PoppyProject", (L"Poppy — " + path.native()).c_str()) : nullptr;
         return window && IsWindowVisible(window) && projects(window) == count &&
-            GetWindowTextW(window, title, 32768) && std::wstring(title) == L"Poppy — " + path.native();
+            GetWindowTextW(window, title, 32768) && std::wstring(title) == L"Poppy" && project && IsWindowVisible(project);
     }, "The running Poppy did not add and select the requested project");
     return window;
 }

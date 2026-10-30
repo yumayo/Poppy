@@ -309,7 +309,6 @@ void Workspace::select(size_t index,bool attention){
     const auto rect=row(index);RECT client{};GetClientRect(window_,&client);
     if(rect.top<px(44))scroll_=std::min<int>(static_cast<int>(index),count-1);
     else if(rect.bottom>client.bottom-px(44))scroll_=std::max(0,static_cast<int>(index)-(static_cast<int>(client.bottom)-px(88))/px(48)+1);
-    SetWindowTextW(window_,(L"Poppy — "+projects_[active_].path.native()).c_str());
     appDirty_=true;appChanged_=GetTickCount64();updateTools();InvalidateRect(window_,nullptr,FALSE);
     checkFolder(projects_[active_]);
     trimDocuments();
