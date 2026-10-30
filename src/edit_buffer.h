@@ -16,6 +16,11 @@ public:
     void initialize(std::string bytes);
     void saved(std::string bytes, std::string text);
     bool replace(size_t begin, size_t end, std::string text);
+    // With no selection, cut the logical line, including its following newline.
+    // At EOF, remove the preceding newline without copying it.
+    struct CutRange { size_t begin, end; std::string text; };
+    CutRange cutRange(size_t anchor, size_t caret) const;
+    bool moveLines(size_t& anchor, size_t& caret, bool down);
     bool undo(size_t& anchor, size_t& caret);
     bool redo(size_t& anchor, size_t& caret);
     std::string encoded() const;

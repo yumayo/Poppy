@@ -10,6 +10,97 @@ EditBuffer load(std::string bytes) {
     check(decodeText(bytes, buffer.document.text, buffer.document.encoding, error));
     indexDocument(buffer.document); buffer.initialize(std::move(bytes)); return buffer;
 }
+void lineCutting() {
+    struct Case { std::string before; size_t anchor, caret, begin, end; std::string copied, after; };
+    const std::vector<Case> cases{
+        {"one\ntwo\nthree", 1, 1, 0, 4, "one\n", "two\nthree"},
+        {"one\ntwo\nthree", 5, 5, 4, 8, "two\n", "one\nthree"},
+        {"one\ntwo\nthree", 8, 8, 7, 13, "three", "one\ntwo"},
+        {"one\ntwo\nthree", 13, 13, 7, 13, "three", "one\ntwo"},
+        {"one\r\ntwo\r\nthree", 6, 6, 5, 10, "two\r\n", "one\r\nthree"},
+        {"one\r\ntwo\r\nthree", 15, 15, 8, 15, "three", "one\r\ntwo"},
+        {"one\n\ntwo", 4, 4, 4, 5, "\n", "one\ntwo"},
+        {"one\r\n\r\ntwo", 5, 5, 5, 7, "\r\n", "one\r\ntwo"},
+        {"one\n", 4, 4, 3, 4, "", "one"},
+        {"one\r\n", 5, 5, 3, 5, "", "one"},
+        {"only", 2, 2, 0, 4, "only", ""},
+        {"", 0, 0, 0, 0, "", ""},
+        {"one\ntwo", 1, 5, 1, 5, "ne\nt", "owo"},
+        {"one\ntwo", 5, 1, 1, 5, "ne\nt", "owo"},
+        {u8"日本😀\r\n最後", 3, 3, 0, 12, u8"日本😀\r\n", u8"最後"},
+        {std::string(2000, 'x') + "\ntail", 1000, 1000, 0, 2001, std::string(2000, 'x') + "\n", "tail"}
+    };
+    for (const auto& test : cases) {
+        auto buffer = load(test.before);
+        const auto range = buffer.cutRange(test.anchor, test.caret);
+        check(range.begin == test.begin && range.end == test.end && range.text == test.copied);
+        check(buffer.replace(range.begin, range.end, "") && buffer.document.text == test.after);
+        if (test.begin == test.end) { check(buffer.revision == 0 && !buffer.dirty()); continue; }
+        size_t anchor = 0, caret = 0;
+        check(buffer.undo(anchor, caret) && buffer.encoded() == test.before && !buffer.dirty());
+        check(!buffer.undo(anchor, caret));
+        check(buffer.redo(anchor, caret) && buffer.document.text == test.after);
+        check(buffer.document.lines == load(test.after).document.lines);
+    }
+}
+void lineMovement() {
+    struct Case { std::string before; size_t anchor, caret; bool down; std::string after; size_t movedAnchor, movedCaret; };
+    const std::vector<Case> cases{
+        {"a\nbb\nccc", 3, 3, false, "bb\na\nccc", 1, 1},
+        {"a\nbb\nccc", 3, 3, true, "a\nccc\nbb", 7, 7},
+        {"a\nbb\nccc", 7, 7, false, "a\nccc\nbb", 4, 4},
+        {"a\r\nbb\r\nccc", 4, 4, true, "a\r\nccc\r\nbb", 9, 9},
+        {"a\r\nbb\r\nccc", 9, 9, false, "a\r\nccc\r\nbb", 5, 5},
+        {"a\nbb\nccc\n", 3, 3, true, "a\nccc\nbb\n", 7, 7},
+        {"a\n", 2, 2, false, "\na", 0, 0},
+        {"a\n", 0, 0, true, "\na", 1, 1},
+        {"a\r\n", 3, 3, false, "\r\na", 0, 0},
+        {"a\n\nb", 2, 2, true, "a\nb\n", 4, 4},
+        {"a\nbb\nccc\ndddd", 3, 7, false, "bb\nccc\na\ndddd", 1, 5},
+        {"a\nbb\nccc\ndddd", 7, 3, false, "bb\nccc\na\ndddd", 5, 1},
+        {"a\nbb\nccc\ndddd", 3, 9, true, "a\ndddd\nbb\nccc", 8, 13},
+        {"a\nbb\nccc\ndddd", 9, 3, true, "a\ndddd\nbb\nccc", 13, 8},
+        {"a\nbb\nccc\ndddd", 2, 5, false, "bb\na\nccc\ndddd", 0, 3},
+        {"a\nbb\nccc\ndddd", 5, 2, false, "bb\na\nccc\ndddd", 3, 0},
+        {"a\r\nbb\nccc\r\nd", 4, 4, true, "a\r\nccc\nbb\r\nd", 8, 8},
+        {"a\r\nbb\nccc\r\nd", 4, 8, false, "bb\r\nccc\na\r\nd", 1, 6},
+        {u8"日本\r\n😀abc\r\n最後", 12, 12, true, u8"日本\r\n最後\r\n😀abc", 20, 20},
+        {std::string(2000, 'x') + "\nend", 1000, 1000, true, "end\n" + std::string(2000, 'x'), 1004, 1004}
+    };
+    for (const auto& test : cases) {
+        auto buffer = load(test.before);
+        size_t anchor = test.anchor, caret = test.caret;
+        check(buffer.moveLines(anchor, caret, test.down));
+        if (buffer.document.text != test.after || anchor != test.movedAnchor || caret != test.movedCaret) {
+            std::cerr << "Line movement failed at " << test.anchor << ',' << test.caret << " down=" << test.down
+                << ": got " << anchor << ',' << caret << " expected " << test.movedAnchor << ',' << test.movedCaret << '\n';
+            check(false);
+        }
+        check(buffer.document.lines == load(test.after).document.lines && buffer.revision == 1);
+        check(buffer.undo(anchor, caret) && buffer.encoded() == test.before && !buffer.dirty());
+        check(!buffer.undo(anchor, caret));
+        check(buffer.redo(anchor, caret) && buffer.document.text == test.after);
+    }
+    for (const auto& text : {"", "only", "a\nb\n", "a\r\nb"}) {
+        auto buffer = load(text);
+        size_t anchor = 0, caret = 0;
+        check(!buffer.moveLines(anchor, caret, false) && anchor == 0 && caret == 0);
+        anchor = caret = buffer.document.text.size();
+        check(!buffer.moveLines(anchor, caret, true) && anchor == caret && caret == buffer.document.text.size());
+        anchor = 0;
+        check(!buffer.moveLines(anchor, caret, false) && anchor == 0 && caret == buffer.document.text.size());
+        if (buffer.document.text.empty() || buffer.document.text.back() != '\n')
+            check(!buffer.moveLines(anchor, caret, true) && anchor == 0 && caret == buffer.document.text.size());
+        check(!buffer.dirty() && buffer.revision == 0 && !buffer.undo(anchor, caret));
+    }
+    for (const auto& bytes : {std::string("\xef\xbb\xbf") + u8"日本\r\n😀", std::string("\xff\xfe" "a\0\r\0\n\0b\0", 10), std::string("\xfe\xff\0a\0\n\0b", 8)}) {
+        auto buffer = load(bytes); const auto original = buffer.document.text;
+        size_t anchor = 0, caret = 0;
+        check(buffer.moveLines(anchor, caret, true));
+        check(load(buffer.encoded()).document.text == buffer.document.text);
+        check(buffer.undo(anchor, caret) && buffer.encoded() == bytes && buffer.document.text == original);
+    }
+}
 void wordMovement() {
     auto buffer = load("foo_bar42  += bar.baz\r\n\r\n  end \t");
     const std::vector<size_t> stops{0, 11, 14, 17, 18, 27, 32};
@@ -116,6 +207,8 @@ void selectionScrolling() {
     check(selectionScrollRows(100, 0, 80, 0) == 0);
 }
 int main() {
+    lineCutting();
+    lineMovement();
     selectionScrolling();
     wordMovement();
     wrapping();

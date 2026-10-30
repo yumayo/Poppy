@@ -269,6 +269,13 @@ void Viewer::copy() {
     if (diff_) copyText(window_, wide(diff_->selectedText(after_, start, end, inlineView_)));
     else copyText(window_, wide(std::string_view(document_->text).substr(start, end - start)));
 }
+void Viewer::cut() {
+    if (!edit_) return;
+    const auto range = edit_->cutRange(anchor_, caret_);
+    if (range.begin == range.end) return;
+    if (!copyText(window_, wide(range.text)) || !edit_->replace(range.begin, range.end, "")) { MessageBeep(MB_ICONWARNING); return; }
+    anchor_ = caret_ = range.begin; edited();
+}
 void Viewer::findLayout() {
     if (findBar_.window()) findBar_.layout(diff_ ? header_ : 0, Scrollbars::contentRect(window_).right, header_);
 }
@@ -649,14 +656,21 @@ LRESULT Viewer::handle(UINT m, WPARAM a, LPARAM b) {
         }
         scroll(0, 0); return 0;
     }
-    case WM_KEYDOWN:
+    case WM_SYSKEYDOWN: case WM_KEYDOWN:
+        if (edit_ && !(GetKeyState(VK_CONTROL) & 0x8000) && (GetKeyState(VK_SHIFT) & 0x8000) &&
+            (GetKeyState(VK_MENU) & 0x8000) && (a == VK_UP || a == VK_DOWN)) {
+            revealFind_ = false;
+            if (edit_->moveLines(anchor_, caret_, a == VK_DOWN)) edited();
+            return 0;
+        }
+        if (m == WM_SYSKEYDOWN) break;
         if (a == VK_ESCAPE && selecting_) { stopSelection(); return 0; }
         if (findKey(MSG{window_, m, a, b, 0, {0, 0}})) return 0;
         revealFind_ = false;
         if (edit_) {
             const bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0, shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
             if (ctrl && a == 'S') { if (save) save(); return 0; }
-            if (ctrl && a == 'X') { copy(); replace(""); return 0; }
+            if (ctrl && a == 'X') { cut(); return 0; }
             if ((ctrl && a == 'V') || (shift && a == VK_INSERT)) { replace(utf8(clipboardText(window_))); return 0; }
             if (ctrl && (a == 'Z' || a == 'Y')) { if (a == 'Y' || shift) edit_->redo(anchor_, caret_); else edit_->undo(anchor_, caret_); edited(); return 0; }
             if (a == VK_DELETE || a == VK_BACK) {
@@ -699,7 +713,7 @@ LRESULT Viewer::handle(UINT m, WPARAM a, LPARAM b) {
         POINT p{GET_X_LPARAM(b), GET_Y_LPARAM(b)}; if (p.x == -1) { p = {gutter_, header_}; ClientToScreen(window_, &p); }
         const UINT command = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, p.x, p.y, 0, window_, nullptr); DestroyMenu(menu);
         if (command == 1) copy(); else if (command == 2 && document_) { anchor_ = 0; caret_ = document_->text.size(); InvalidateRect(window_, nullptr, FALSE); }
-        else if (edit_) { if (command == 3) { copy(); replace(""); } else if (command == 4) replace(utf8(clipboardText(window_))); else if (command == 5) { edit_->undo(anchor_, caret_); edited(); } else if (command == 6) { edit_->redo(anchor_, caret_); edited(); } else if (command == 7 && save) save(); }
+        else if (edit_) { if (command == 3) cut(); else if (command == 4) replace(utf8(clipboardText(window_))); else if (command == 5) { edit_->undo(anchor_, caret_); edited(); } else if (command == 6) { edit_->redo(anchor_, caret_); edited(); } else if (command == 7 && save) save(); }
         return 0;
     }
     default: return DefWindowProcW(window_, m, a, b);

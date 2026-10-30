@@ -468,6 +468,83 @@ void editorWordMovement() {
     key(VK_LEFT, true, true); selection(0, 0);
     check(!buffer->dirty(), "Word selection modified the document");
 }
+void editorLineShortcuts() {
+    Viewer viewer;
+    const HWND parent = CreateWindowExW(0, L"STATIC", L"Editor line shortcuts test", WS_POPUP | WS_CLIPCHILDREN,
+        0, 0, 640, 360, nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
+    check(parent != nullptr, "Could not create the line shortcuts test window");
+    struct WindowOwner { HWND value; ~WindowOwner() { DestroyWindow(value); } } owner{parent};
+    viewer.create(parent, GetModuleHandleW(nullptr));
+    const HWND window = viewer.window(); MoveWindow(window, 0, 0, 640, 360, FALSE);
+    struct KeyboardState {
+        BYTE original[256]{};
+        KeyboardState() { check(GetKeyboardState(original) != FALSE, "Could not save keyboard state"); }
+        ~KeyboardState() { SetKeyboardState(original); }
+    } keyboard;
+    const auto key = [&](UINT message, WPARAM code, bool ctrl, bool shift, bool alt) {
+        BYTE keys[256]{};
+        keys[VK_CONTROL] = ctrl ? 0x80 : 0; keys[VK_SHIFT] = shift ? 0x80 : 0; keys[VK_MENU] = alt ? 0x80 : 0;
+        check(SetKeyboardState(keys) != FALSE, "Could not set line shortcut modifiers");
+        SendMessageW(window, message, code, alt ? 1LL << 29 : 0);
+    };
+    const auto selection = [&](size_t anchor, size_t caret) {
+        check(viewer.state().anchor == anchor && viewer.state().caret == caret, "Line shortcut lost the caret or selection direction");
+    };
+    auto buffer = std::make_shared<EditBuffer>();
+    const auto load = [&](const std::string& text, size_t anchor, size_t caret) {
+        buffer->document.text = text; indexDocument(buffer->document); buffer->initialize(text);
+        viewer.edit(buffer, L"lines.txt"); viewer.restore({0, 0, anchor, caret}); SetFocus(window);
+    };
+    const std::string original = u8"first\r\n日本😀\r\nlast";
+    for (const bool wrap : {false, true}) for (const UINT dpi : {96u, 144u}) {
+        viewer.setWordWrap(wrap); viewer.setDpi(dpi);
+        load(original, 10, 10);
+        key(WM_KEYDOWN, 'X', true, false, false);
+        check(buffer->document.text == "first\r\nlast" && clipboardText(window) == L"日本😀\r\n", "Ctrl+X did not cut the entire logical line");
+        selection(7, 7);
+        key(WM_KEYDOWN, 'Z', true, false, false);
+        check(buffer->document.text == original && !buffer->dirty(), "Undo did not restore the cut line");
+        key(WM_KEYDOWN, 'Y', true, false, false);
+        check(buffer->document.text == "first\r\nlast", "Redo did not repeat the line cut");
+
+        load(original, 10, 10);
+        key(WM_SYSKEYDOWN, VK_UP, false, true, true);
+        check(buffer->document.text == u8"日本😀\r\nfirst\r\nlast", "Shift+Alt+Up did not swap lines through WM_SYSKEYDOWN");
+        selection(3, 3);
+        key(WM_SYSKEYDOWN, VK_DOWN, false, true, true);
+        check(buffer->document.text == original, "Shift+Alt+Down did not move the line back"); selection(10, 10);
+        key(WM_KEYDOWN, VK_DOWN, false, true, true);
+        check(buffer->document.text == u8"first\r\nlast\r\n日本😀", "Shift+Alt+Down did not handle WM_KEYDOWN"); selection(16, 16);
+        key(WM_KEYDOWN, 'Z', true, false, false);
+        check(buffer->document.text == original, "Undo did not restore swapped lines");
+
+        load("a\r\nbb\r\nccc\r\ndddd", 12, 4);
+        key(WM_SYSKEYDOWN, VK_UP, false, true, true);
+        check(buffer->document.text == "bb\r\nccc\r\na\r\ndddd", "Line movement included the line at the exclusive selection end"); selection(9, 1);
+        key(WM_SYSKEYDOWN, VK_DOWN, false, true, true);
+        check(buffer->document.text == "a\r\nbb\r\nccc\r\ndddd", "Selected lines did not move back as one block"); selection(12, 4);
+        key(WM_KEYDOWN, 'X', true, false, false);
+        check(buffer->document.text == "a\r\nbdddd" && clipboardText(window) == L"b\r\nccc\r\n", "Ctrl+X changed selected-text cutting");
+
+        load("only", 2, 2); key(WM_SYSKEYDOWN, VK_UP, false, true, true); selection(2, 2);
+        key(WM_SYSKEYDOWN, VK_DOWN, false, true, true);
+        check(!buffer->dirty() && buffer->revision == 0, "A line move at the document boundary created an edit");
+        viewer.show(std::make_shared<Document>(buffer->document), L"readonly.txt");
+        check(copyText(window, L"unchanged"), "Could not prepare the read-only clipboard test");
+        key(WM_KEYDOWN, 'X', true, false, false); key(WM_SYSKEYDOWN, VK_DOWN, false, true, true);
+        check(!viewer.buffer() && buffer->document.text == "only" && clipboardText(window) == L"unchanged", "Line shortcuts edited a read-only document");
+    }
+    viewer.setWordWrap(true);
+    load(std::string(2000, 'x') + "\nlast", 1000, 1000);
+    key(WM_SYSKEYDOWN, VK_DOWN, false, true, true);
+    check(buffer->document.text == "last\n" + std::string(2000, 'x'), "Line movement used a wrapped screen row"); selection(1005, 1005);
+    GUITHREADINFO info{}; info.cbSize = sizeof(info);
+    check(GetGUIThreadInfo(GetCurrentThreadId(), &info) && info.hwndCaret == window &&
+        info.rcCaret.top >= 0 && info.rcCaret.bottom <= Scrollbars::contentRect(window).bottom,
+        "Moving a wrapped line did not reveal the caret");
+    key(WM_KEYDOWN, 'X', true, false, false);
+    check(buffer->document.text == "last" && clipboardText(window) == std::wstring(2000, L'x'), "Ctrl+X cut a wrapped screen row or left the last line behind");
+}
 void editorWrapping() {
     Viewer viewer;
     const HWND parent = CreateWindowExW(0, L"STATIC", L"Editor wrapping test", WS_POPUP | WS_CLIPCHILDREN,
@@ -1175,7 +1252,7 @@ int main() {
     int result = 0;
     try {
         initializeRendering();
-        statusBarLimits(); inlineTreeInput(); cellPositions(); colorsAndClipping(); imagePreviews(); smoothIcons(); windowTargets(); editorCaret(); editorWordMovement(); editorWrapping(); diffWrapping(); documentFind(); horizontalWheelScrolling(); continuousViewerScrolling(); selectionAutoScrolling(); terminalSelectionAutoScrolling(); themedScrollbars(); quickOpenStability();
+        statusBarLimits(); inlineTreeInput(); cellPositions(); colorsAndClipping(); imagePreviews(); smoothIcons(); windowTargets(); editorCaret(); editorWordMovement(); editorLineShortcuts(); editorWrapping(); diffWrapping(); documentFind(); horizontalWheelScrolling(); continuousViewerScrolling(); selectionAutoScrolling(); terminalSelectionAutoScrolling(); themedScrollbars(); quickOpenStability();
         std::cout << "Direct2D rendering tests passed\n";
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; result = 1; }
     if (SUCCEEDED(com)) CoUninitialize();

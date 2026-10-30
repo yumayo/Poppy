@@ -58,6 +58,54 @@ size_t EditBuffer::nextWord(size_t p) const {
 std::string EditBuffer::newline() const {
     const auto p = document.text.find('\n'); return p != std::string::npos && p && document.text[p - 1] == '\r' ? "\r\n" : "\n";
 }
+EditBuffer::CutRange EditBuffer::cutRange(size_t anchor, size_t caret) const {
+    size_t begin = std::min({anchor, caret, document.text.size()});
+    size_t end = std::min(std::max(anchor, caret), document.text.size());
+    size_t textBegin = begin;
+    if (begin == end && !document.lines.empty()) {
+        const size_t row = static_cast<size_t>(std::upper_bound(document.lines.begin(), document.lines.end(), begin) - document.lines.begin() - 1);
+        textBegin = begin = document.lines[row];
+        if (row + 1 < document.lines.size()) end = document.lines[row + 1];
+        else { end = document.text.size(); begin = previous(begin); }
+    }
+    return {begin, end, document.text.substr(textBegin, end - textBegin)};
+}
+bool EditBuffer::moveLines(size_t& anchor, size_t& caret, bool down) {
+    if (document.lines.empty() || anchor > document.text.size() || caret > document.text.size()) return false;
+    const auto rowAt = [&](size_t p) { return static_cast<size_t>(std::upper_bound(document.lines.begin(), document.lines.end(), p) - document.lines.begin() - 1); };
+    const auto lineEnd = [&](size_t row) { return row + 1 < document.lines.size() ? previous(document.lines[row + 1]) : document.text.size(); };
+    const size_t begin = std::min(anchor, caret), end = std::max(anchor, caret);
+    const size_t first = rowAt(begin);
+    size_t last = rowAt(end);
+    // A selection ending at a line's start does not include that line.
+    const bool endAtStart = begin != end && end == document.lines[last];
+    if (endAtStart) --last;
+    if ((!down && first == 0) || (down && last + 1 == document.lines.size())) return false;
+    const size_t rangeFirst = down ? first : first - 1, rangeLast = down ? last + 1 : last;
+    const size_t replaceBegin = document.lines[rangeFirst], replaceEnd = lineEnd(rangeLast);
+    std::string text; text.reserve(replaceEnd - replaceBegin);
+    for (size_t row = rangeFirst; row <= rangeLast; ++row) {
+        const size_t source = down ? (row == rangeFirst ? rangeLast : row - 1) : (row == rangeLast ? rangeFirst : row + 1);
+        text.append(document.text, document.lines[source], lineEnd(source) - document.lines[source]);
+        // Keep every existing line separator at its row boundary, including
+        // mixed LF/CRLF and a final line without a newline.
+        if (row != rangeLast) text.append(document.text, lineEnd(row), document.lines[row + 1] - lineEnd(row));
+    }
+    const size_t anchorRow = rowAt(anchor), caretRow = rowAt(caret);
+    const size_t anchorColumn = anchor - document.lines[anchorRow], caretColumn = caret - document.lines[caretRow];
+    if (!replace(replaceBegin, replaceEnd, std::move(text))) return false;
+    const auto movedPosition = [&](size_t p, size_t row, size_t column) {
+        if (endAtStart && p == end) {
+            const size_t following = down ? last + 2 : last;
+            return following < document.lines.size() ? static_cast<size_t>(document.lines[following]) : document.text.size();
+        }
+        const size_t movedRow = down ? row + 1 : row - 1;
+        return document.lines[movedRow] + std::min(column, lineEnd(movedRow) - document.lines[movedRow]);
+    };
+    anchor = movedPosition(anchor, anchorRow, anchorColumn);
+    caret = movedPosition(caret, caretRow, caretColumn);
+    return true;
+}
 bool EditBuffer::replace(size_t begin, size_t end, std::string text) {
     if (begin > end || end > document.text.size() || document.text.size() - (end - begin) + text.size() > maxFileBytes) return false;
     const auto boundary = [&](size_t p) { return p == document.text.size() || (static_cast<unsigned char>(document.text[p]) & 0xc0) != 0x80; };

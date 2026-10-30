@@ -49,6 +49,7 @@ private:
     void restoreTop(const State& state);
     size_t position(int x, int y, bool* trailing = nullptr) const;
     void copy();
+    void cut();
     void replace(std::string text);
     void edited();
     void moveCaret(WPARAM key, bool shift, bool ctrl);
