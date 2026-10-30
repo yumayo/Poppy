@@ -47,7 +47,7 @@ private:
     void scrollSelection();
     void stopSelection();
     void restoreTop(const State& state);
-    size_t position(int x, int y, bool* trailing = nullptr) const;
+    size_t position(int x, int y, bool* trailing = nullptr, WordRange* word = nullptr) const;
     void copy();
     void cut();
     void replace(std::string text);

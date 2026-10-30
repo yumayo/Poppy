@@ -19,6 +19,21 @@ WordClass wordClass(std::string_view text, size_t offset) {
     return WordClass::Symbol;
 }
 }
+WordRange wordRange(std::string_view line, size_t offset) {
+    offset = std::min(offset, line.size());
+    if (offset == line.size()) return {offset, offset};
+    while (offset && (static_cast<unsigned char>(line[offset]) & 0xc0) == 0x80) --offset;
+    const auto kind = wordClass(line, offset);
+    size_t begin = offset, end = offset;
+    while (begin) {
+        size_t previous = begin - 1;
+        while (previous && (static_cast<unsigned char>(line[previous]) & 0xc0) == 0x80) --previous;
+        if (wordClass(line, previous) != kind) break;
+        begin = previous;
+    }
+    do { decodeUtf8(line, end); } while (end < line.size() && wordClass(line, end) == kind);
+    return {begin, end};
+}
 void EditBuffer::initialize(std::string bytes) {
     baseline = std::move(bytes); savedText_ = document.text;
     bom = baseline.compare(0, 3, "\xef\xbb\xbf") == 0;

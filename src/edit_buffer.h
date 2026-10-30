@@ -3,6 +3,10 @@
 #include <deque>
 
 namespace poppy {
+struct WordRange { size_t begin, end; };
+// Select the character class at a UTF-8 byte offset within one logical line.
+// Uses the same word boundaries as Ctrl+Left/Right, without skipping spaces.
+WordRange wordRange(std::string_view line, size_t offset);
 // Byte offsets always point to UTF-8 boundaries; CRLF is one cursor step.
 class EditBuffer {
 public:

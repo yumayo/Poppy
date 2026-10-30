@@ -145,6 +145,43 @@ void wordMovement() {
         check(buffer.previousWord(0) == 0 && buffer.nextWord(text.size()) == text.size());
     }
 }
+void wordSelection() {
+    const std::vector<std::vector<std::string>> cases{
+        {"foo_bar42", "  ", "+=", " ", "bar", ".", "baz"},
+        {u8"日本語", u8"　", u8"café_42", u8"、😀", " ", "next"},
+        {u8"naïve", "\t ", u8"e\u0301clair", u8"\u00a0\u2009", "end"},
+        {"\t  "}, {std::string(10000, 'x')}, {}
+    };
+    for (const auto& tokens : cases) {
+        std::string text;
+        for (const auto& token : tokens) text += token;
+        auto buffer = load(text);
+        size_t begin = 0;
+        for (const auto& token : tokens) {
+            for (size_t p = begin; p < begin + token.size(); ++p) {
+                const auto range = wordRange(buffer.document.line(0), p);
+                check(range.begin == begin && range.end == begin + token.size());
+                check(text.substr(range.begin, range.end - range.begin) == token);
+            }
+            begin += token.size();
+        }
+        for (const auto p : {text.size(), text.size() + 100}) {
+            const auto range = wordRange(buffer.document.line(0), p);
+            check(range.begin == text.size() && range.end == text.size());
+        }
+        check(!buffer.dirty() && buffer.revision == 0 && buffer.encoded() == text);
+    }
+    for (const auto& newline : {"\n", "\r\n"}) {
+        const auto buffer = load(std::string("first") + newline + newline + "last");
+        for (size_t row = 0; row < buffer.document.lines.size(); ++row) {
+            const auto line = buffer.document.line(row);
+            const auto range = wordRange(line, 0);
+            check(range.begin == 0 && range.end == line.size());
+            const auto end = wordRange(line, line.size());
+            check(end.begin == line.size() && end.end == line.size());
+        }
+    }
+}
 void wrapping() {
     auto buffer = load("abcdefgh\r\n\r\nxyz\r\n");
     const auto original = buffer.encoded();
@@ -211,6 +248,7 @@ int main() {
     lineMovement();
     selectionScrolling();
     wordMovement();
+    wordSelection();
     wrapping();
     for (const auto& bytes : {std::string("hello\r\nworld\r\n"), std::string("\xef\xbb\xbf") + u8"日本語\n😀", std::string("\xff\xfeh\0i\0\r\0\n\0", 10), std::string("\xfe\xff\0h\0i\0\n", 8)}) {
         auto buffer = load(bytes); check(!buffer.dirty()); check(buffer.encoded() == bytes);
@@ -228,5 +266,5 @@ int main() {
     check(!buffer.replace(0, 0, std::string(maxFileBytes, 'x')));
     check(buffer.replace(1, 5, "X")); check(buffer.document.text == u8"aX日本\r\nz");
     check(buffer.newline() == "\r\n"); check(buffer.document.lines.size() == 2);
-    std::cout << "Editor encoding, selection, word movement, Unicode, history, wrapping and limits passed\n";
+    std::cout << "Editor encoding, selection, word movement/selection, Unicode, history, wrapping and limits passed\n";
 }

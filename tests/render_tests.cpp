@@ -398,6 +398,96 @@ void editorCaret() {
     viewer.message(L"Loading");
     check(viewer.textStatus().empty(), "A loading message retained the previous file format");
 }
+void editorWordSelection() {
+    Viewer viewer;
+    const auto instance = GetModuleHandleW(nullptr);
+    const HWND parent = CreateWindowExW(0, L"STATIC", L"Editor word selection test", WS_POPUP | WS_CLIPCHILDREN,
+        0, 0, 700, 360, nullptr, nullptr, instance, nullptr);
+    check(parent != nullptr, "Could not create the word selection test window");
+    struct WindowOwner { HWND value; ~WindowOwner() { DestroyWindow(value); } } owner{parent};
+    viewer.create(parent, instance);
+    const HWND window = viewer.window(); MoveWindow(window, 0, 0, 700, 360, FALSE);
+    check((GetClassLongPtrW(window, GCL_STYLE) & CS_DBLCLKS) != 0, "The editor does not receive native double-click messages");
+    auto buffer = std::make_shared<EditBuffer>();
+    buffer->document.text = u8"foo_bar42  += bar.baz\r\n日本語　café_42、😀 next\r\n\r\n";
+    indexDocument(buffer->document); buffer->initialize(buffer->document.text);
+    Renderer metrics;
+    int width = 0, height = 0, gutter = 0;
+    const auto point = [&](int column, int row, int quarter = 3) {
+        return MAKELPARAM(gutter + column * width + width * quarter / 4, row * height + height / 2);
+    };
+    const auto doubleClick = [&](LPARAM location) {
+        SendMessageW(window, WM_LBUTTONDOWN, MK_LBUTTON, location);
+        SendMessageW(window, WM_LBUTTONUP, 0, location);
+        SendMessageW(window, WM_LBUTTONDBLCLK, MK_LBUTTON, location);
+        SendMessageW(window, WM_MOUSEMOVE, MK_LBUTTON, location);
+        SendMessageW(window, WM_LBUTTONUP, 0, location);
+        check(GetCapture() != window, "A double-click retained mouse capture");
+    };
+    const auto selection = [&](size_t begin, std::string_view text) {
+        const auto state = viewer.state();
+        check(state.anchor == begin && state.caret == begin + text.size(), "A double-click selected the wrong word or collapsed on release");
+    };
+    for (const bool readOnly : {false, true}) for (const bool wrap : {false, true}) for (const UINT dpi : {96u, 144u, 192u}) {
+        viewer.setDpi(dpi); viewer.setWordWrap(wrap); metrics.setDpi(dpi);
+        width = metrics.cellWidth(); height = metrics.textHeight() + MulDiv(3, dpi, 96); gutter = MulDiv(70, dpi, 96);
+        if (readOnly) viewer.show(std::make_shared<Document>(buffer->document), L"words.txt");
+        else viewer.edit(buffer, L"words.txt");
+        for (const int column : {0, 4, 8}) { doubleClick(point(column, 0)); selection(0, "foo_bar42"); }
+        doubleClick(point(10, 0)); selection(9, "  ");
+        doubleClick(point(12, 0)); selection(11, "+=");
+        doubleClick(point(16, 0)); selection(14, "bar");
+        doubleClick(point(17, 0)); selection(17, ".");
+        doubleClick(point(20, 0)); selection(18, "baz");
+        doubleClick(point(5, 1)); selection(23, u8"日本語");
+        doubleClick(point(7, 1)); selection(32, u8"　");
+        doubleClick(point(14, 1)); selection(35, u8"café_42");
+        doubleClick(point(18, 1)); selection(43, u8"、😀");
+        doubleClick(point(23, 1)); selection(51, "next");
+        doubleClick(point(25, 1)); selection(55, "");
+        doubleClick(point(2, 2)); selection(57, "");
+        SendMessageW(window, WM_LBUTTONDOWN, MK_LBUTTON, point(2, 0));
+        SendMessageW(window, WM_LBUTTONUP, 0, point(2, 0)); selection(3, "");
+        SendMessageW(window, WM_LBUTTONDOWN, MK_LBUTTON, point(1, 0, 1));
+        SendMessageW(window, WM_MOUSEMOVE, MK_LBUTTON, point(5, 0, 1));
+        SendMessageW(window, WM_LBUTTONUP, 0, point(5, 0, 1)); selection(1, "oo_b");
+    }
+    check(!buffer->dirty(), "Word selection modified the document");
+    // A word crossing visual rows is selected in full, using logical lines.
+    viewer.setDpi(96); metrics.setDpi(96); viewer.setWordWrap(true);
+    width = metrics.cellWidth(); height = metrics.textHeight() + 3; gutter = 70;
+    auto longWord = std::make_shared<EditBuffer>();
+    longWord->document.text = std::string(2000, 'x') + " tail";
+    indexDocument(longWord->document); longWord->initialize(longWord->document.text);
+    viewer.edit(longWord, L"wrapped-word.txt");
+    doubleClick(point(3, 1)); selection(0, std::string(2000, 'x'));
+    const int columns = (Scrollbars::contentRect(window).right - gutter - 2) / width;
+    doubleClick(MAKELPARAM(gutter + columns * width, height / 2)); selection(static_cast<size_t>(columns), "");
+    doubleClick(point(3, 1));
+    SendMessageW(window, WM_CHAR, 'z', 0);
+    check(longWord->document.text == "z tail", "Typing did not replace the double-clicked word");
+    viewer.setWordWrap(false);
+    longWord->document.text = std::string(200, 'x') + " tail";
+    indexDocument(longWord->document); longWord->initialize(longWord->document.text);
+    viewer.edit(longWord, L"scrolled-word.txt");
+    viewer.restore({0, 100, 0, 0});
+    doubleClick(point(3, 0)); selection(0, std::string(200, 'x'));
+    auto empty = std::make_shared<EditBuffer>();
+    indexDocument(empty->document); empty->initialize(""); viewer.edit(empty, L"empty.txt");
+    doubleClick(point(0, 0)); selection(0, "");
+    viewer.message(L"Loading"); doubleClick(point(0, 0)); selection(0, "");
+    auto diff = std::make_shared<DiffDocument>();
+    diff->patch.text = "@@ -1 +1 @@\n-old_name.\n+new_name.\n"; indexDiff(*diff);
+    for (const bool inlineView : {false, true}) for (const bool after : {false, true}) {
+        viewer.setDiffLayout(inlineView); viewer.showDiff(diff, L"words.diff");
+        const int origin = inlineView ? 140 : 70 + (after ? Scrollbars::contentRect(window).right / 2 + 1 : 0);
+        const int y = 34 + (inlineView && after ? height : 0) + height / 2;
+        doubleClick(MAKELPARAM(origin + 7 * width + width * 3 / 4, y));
+        const std::string word = after ? "new_name" : "old_name";
+        selection(diff->patch.text.find(word), word);
+        check(viewer.state().after == after, "A double-click selected the wrong diff side");
+    }
+}
 void editorWordMovement() {
     Viewer viewer;
     const HWND parent = CreateWindowExW(0, L"STATIC", L"Editor word movement test", WS_POPUP | WS_CLIPCHILDREN,
@@ -1252,7 +1342,7 @@ int main() {
     int result = 0;
     try {
         initializeRendering();
-        statusBarLimits(); inlineTreeInput(); cellPositions(); colorsAndClipping(); imagePreviews(); smoothIcons(); windowTargets(); editorCaret(); editorWordMovement(); editorLineShortcuts(); editorWrapping(); diffWrapping(); documentFind(); horizontalWheelScrolling(); continuousViewerScrolling(); selectionAutoScrolling(); terminalSelectionAutoScrolling(); themedScrollbars(); quickOpenStability();
+        statusBarLimits(); inlineTreeInput(); cellPositions(); colorsAndClipping(); imagePreviews(); smoothIcons(); windowTargets(); editorCaret(); editorWordSelection(); editorWordMovement(); editorLineShortcuts(); editorWrapping(); diffWrapping(); documentFind(); horizontalWheelScrolling(); continuousViewerScrolling(); selectionAutoScrolling(); terminalSelectionAutoScrolling(); themedScrollbars(); quickOpenStability();
         std::cout << "Direct2D rendering tests passed\n";
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; result = 1; }
     if (SUCCEEDED(com)) CoUninitialize();

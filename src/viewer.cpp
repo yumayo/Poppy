@@ -12,6 +12,7 @@ constexpr Color removedBackground = rgb(62, 39, 45), addedBackground = rgb(36, 5
 }
 void Viewer::create(HWND parent, HINSTANCE instance) {
     WNDCLASSW cls{}; cls.lpfnWndProc = procedure; cls.hInstance = instance; cls.lpszClassName = L"PoppyViewer"; cls.hCursor = LoadCursorW(nullptr, IDC_IBEAM);
+    cls.style = CS_DBLCLKS;
     RegisterClassW(&cls);
     window_ = CreateWindowExW(0, cls.lpszClassName, L"Code viewer", WS_CHILD | WS_VISIBLE | WS_CLIPCHILDREN | WS_VSCROLL | WS_HSCROLL | WS_TABSTOP, 0, 0, 0, 0, parent, nullptr, instance, this);
     findBar_.create(window_, instance);
@@ -214,7 +215,7 @@ void Viewer::stopSelection() {
     selecting_ = false;
     if (GetCapture() == window_) ReleaseCapture();
 }
-size_t Viewer::position(int x, int y, bool* trailing) const {
+size_t Viewer::position(int x, int y, bool* trailing, WordRange* word) const {
     if (trailing) *trailing = false;
     if (!document_ || !rowCount()) return 0;
     if (stickyFile()) y = std::max(y, contentTop() + cellHeight_);
@@ -252,13 +253,19 @@ size_t Viewer::position(int x, int y, bool* trailing) const {
         const size_t logicalRow = wrapping() ? wrapped.line : visualRow;
         line = document_->line(logicalRow); offset = document_->lines[logicalRow];
     }
-    const int target = std::max(0, (x - origin + cellWidth_ / 2) / cellWidth_ + left_) + (wrapping() ? wrapped.column : 0);
+    // A double-click targets the character under the pointer, including its
+    // right half, rather than rounding to the nearest insertion point.
+    const int target = std::max(0, (x - origin + (word ? 0 : cellWidth_ / 2)) / cellWidth_ + left_) + (wrapping() ? wrapped.column : 0);
     int col = wrapping() ? wrapped.column : 0; size_t p = wrapping() ? wrapped.begin : 0;
     const size_t end = wrapping() ? wrapped.end : line.size();
     while (p < end && col < target) {
         const size_t before = p; const char32_t c = decodeUtf8(line, p);
         const int width = c == '\t' ? 4 - col % 4 : std::max(1, cellWidth(c));
         if (col + width > target) { p = before; break; } col += width;
+    }
+    if (word) {
+        const auto range = p < end ? wordRange(line, p) : WordRange{p, p};
+        *word = {offset + range.begin, offset + range.end};
     }
     if (trailing && wrapping()) *trailing = p == wrapped.end && p < line.size();
     return offset + p;
@@ -619,7 +626,7 @@ LRESULT Viewer::handle(UINT m, WPARAM a, LPARAM b) {
         }
         return DefWindowProcW(window_, m, a, b);
     case WM_GETDLGCODE: return DLGC_WANTARROWS | DLGC_WANTCHARS;
-    case WM_LBUTTONDOWN: {
+    case WM_LBUTTONDOWN: case WM_LBUTTONDBLCLK: {
         SetFocus(window_);
         const POINT point{GET_X_LPARAM(b), GET_Y_LPARAM(b)};
         if (!document_) return 0;
@@ -636,6 +643,13 @@ LRESULT Viewer::handle(UINT m, WPARAM a, LPARAM b) {
         }
         const bool extend = (GetKeyState(VK_SHIFT) & 0x8000) && (!splitDiff() || after == after_);
         after_ = after;
+        if (m == WM_LBUTTONDBLCLK) {
+            stopSelection();
+            WordRange word{anchor_, caret_};
+            position(point.x, point.y, nullptr, &word);
+            anchor_ = word.begin; caret_ = word.end; caretTrailing_ = false;
+            caretPosition(); InvalidateRect(window_, nullptr, FALSE); return 0;
+        }
         if (!extend) anchor_ = position(GET_X_LPARAM(b), GET_Y_LPARAM(b));
         selecting_ = true; SetCapture(window_); SetTimer(window_, selectionTimer, 50, nullptr);
         extendSelection(point.x, point.y); return 0;
