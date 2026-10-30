@@ -1,6 +1,7 @@
 #include "diff.h"
 #include "diff_layout.h"
 #include "git_history.h"
+#include "edit_buffer.h"
 #include <cstdlib>
 #include <iostream>
 #include <stdexcept>
@@ -9,6 +10,69 @@
 using namespace poppy;
 namespace {
 void check(bool condition, const char* message) { if (!condition) throw std::runtime_error(message); }
+Document sourceDocument(std::string text) {
+    Document document; document.text = std::move(text); document.language = Language::CLike; indexDocument(document); return document;
+}
+void editableComparisons() {
+    const auto verify = [](const Document& before, const Document& after) {
+        const auto diff = workingDiff(before, after, "dir/日本語\nfile.cpp");
+        size_t old = 0, current = 0;
+        for (const auto& row : diff.rows) {
+            if (row.before.number) {
+                check(row.before.number == ++old && diff.line(row.before) == before.line(old - 1), "Working diff lost or reordered original source lines");
+                check(row.before.state == before.states[old - 1], "Original multiline lexer state changed");
+                if (!row.after.number || row.changed) check(!diff.workingOffset(diff.offset(row.before)), "Removed source became editable");
+            }
+            if (row.after.number) {
+                check(row.after.number == ++current && diff.line(row.after) == after.line(current - 1), "Working diff lost or reordered working source lines");
+                check(row.after.state == after.states[current - 1], "Working multiline lexer state changed");
+                const auto line = after.line(current - 1);
+                for (size_t byte = 0; byte <= line.size(); ++byte) {
+                    const auto patch = diff.offset(row.after) + byte, file = after.lines[current - 1] + byte;
+                    check(diff.workingOffset(patch) == file && diff.patchOffset(file) == patch, "Editable byte positions failed to round-trip");
+                }
+                for (const bool inlineView : {false, true}) {
+                    const auto displayed = diff.displayRow(diff.rowForLine(row.after, true, inlineView), inlineView);
+                    check(displayed.after.number == current, "Working caret lost its row when switching layouts");
+                }
+            }
+            if (!row.changed && row.before.number && row.after.number) check(before.line(old - 1) == after.line(current - 1), "Different lines were marked unchanged");
+        }
+        check(old == before.lines.size() && current == after.lines.size(), "Working comparisons must retain the entire source and EOF caret row");
+        check(!diff.workingOffset(0), "The filename heading became editable");
+    };
+    for (const auto& before : {"", "a", "a\n", "a\r\nb\r\n", "a\nb\nc", "/* old\ncomment */\n"})
+        for (const auto& after : {"", "a", "a\n", "new\na\nb\nc\n", "a\r\n日本😀\r\nb", "/* new\ncomment */\n"})
+            verify(sourceDocument(before), sourceDocument(after));
+    // Repeated lines and edits far apart exercise Myers backtracking, rather
+    // than only the common prefix/suffix fast path.
+    uint32_t random = 17;
+    for (int fixture = 0; fixture < 100; ++fixture) {
+        std::string before, after;
+        for (int row = 0; row < 35; ++row) {
+            random = random * 1664525u + 1013904223u;
+            before += std::to_string(random % 5) + "\n";
+            random = random * 1664525u + 1013904223u;
+            after += std::to_string(random % 5) + "\n";
+        }
+        verify(sourceDocument(before), sourceDocument(after));
+    }
+    std::string largeBefore, largeAfter;
+    for (int row = 0; row < 1000; ++row) { largeBefore += "old " + std::to_string(row) + "\n"; largeAfter += "new " + std::to_string(row) + "\n"; }
+    verify(sourceDocument(largeBefore), sourceDocument(largeAfter));
+
+    EditBuffer buffer; buffer.document = sourceDocument("keep\r\n日本😀\r\nend"); buffer.initialize(buffer.document.text);
+    const auto before = sourceDocument("keep\r\nold\r\nend");
+    auto diff = workingDiff(before, buffer.document, "file.cpp");
+    const auto begin = diff.workingOffset(diff.patchOffset(6)), end = diff.workingOffset(diff.patchOffset(16));
+    check(begin == 6 && end == 16 && buffer.replace(*begin, *end, "changed"), "A working selection could not replace Japanese and emoji text");
+    check(buffer.document.text == "keep\r\nchanged\r\nend" && buffer.dirty(), "Diff editing altered unrelated text or CRLF endings");
+    verify(before, buffer.document);
+    size_t anchor = 0, caret = 0;
+    check(buffer.undo(anchor, caret) && buffer.document.text == "keep\r\n日本😀\r\nend" && !buffer.dirty(), "Diff edits did not use the ordinary undo history");
+    check(buffer.redo(anchor, caret) && buffer.document.text == "keep\r\nchanged\r\nend", "Diff redo lost the working source");
+    verify(before, buffer.document);
+}
 DiffDocument parse(std::string patch) {
     DiffDocument result; result.patch.text = std::move(patch); indexDiff(result); return result;
 }
@@ -315,6 +379,6 @@ void wrapping() {
 }
 }
 int main() {
-    try { syntaxHighlighting(); multilineSyntax(); syntaxLanguages(); fileHeadings(); alignment(); additionsAndDeletions(); inlineLayout(); edgeCases(); viewPositions(); wrapping(); std::cout << "Diff tests passed.\n"; return EXIT_SUCCESS; }
+    try { editableComparisons(); syntaxHighlighting(); multilineSyntax(); syntaxLanguages(); fileHeadings(); alignment(); additionsAndDeletions(); inlineLayout(); edgeCases(); viewPositions(); wrapping(); std::cout << "Diff tests passed.\n"; return EXIT_SUCCESS; }
     catch (const std::exception& error) { std::cerr << error.what() << '\n'; return EXIT_FAILURE; }
 }

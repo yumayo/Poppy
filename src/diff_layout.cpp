@@ -24,10 +24,10 @@ WrappedRow DiffLayout::textRow(const DiffDocument& document, size_t visualRow, b
     auto result = wrappedLineRow(document.line(after ? change.after : change.before), columns_, display.continuation);
     result.line = display.row; return result;
 }
-size_t DiffLayout::rowForOffset(const DiffDocument& document, size_t logicalRow, size_t byte, bool after) const {
+size_t DiffLayout::rowForOffset(const DiffDocument& document, size_t logicalRow, size_t byte, bool after, bool trailing) const {
     if (!rows()) return 0;
     logicalRow = std::min(logicalRow, starts_.size() - 2);
     const auto change = document.displayRow(logicalRow, inlineView_);
-    return starts_[logicalRow] + (change.heading ? 0 : wrappedLineRowForOffset(document.line(after ? change.after : change.before), columns_, byte));
+    return starts_[logicalRow] + (change.heading ? 0 : wrappedLineRowForOffset(document.line(after ? change.after : change.before), columns_, byte, trailing));
 }
 }

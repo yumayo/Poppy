@@ -317,6 +317,65 @@ void windowTargets() {
     check(renderer.begin(window), "Could not recreate the HWND render target");
     finish(renderer);
 }
+void editableDiff() {
+    Viewer viewer;
+    const auto instance = GetModuleHandleW(nullptr);
+    const auto parent = CreateWindowExW(0, L"STATIC", L"Editable diff test", WS_POPUP | WS_CLIPCHILDREN, 0, 0, 960, 600, nullptr, nullptr, instance, nullptr);
+    check(parent != nullptr, "Could not create editable diff test window");
+    struct WindowOwner { HWND value; ~WindowOwner() { DestroyWindow(value); } } owner{parent};
+    viewer.create(parent, instance); MoveWindow(viewer.window(), 0, 0, 960, 600, FALSE);
+    BYTE original[256]{}; GetKeyboardState(original);
+    struct KeyboardOwner { BYTE* value; ~KeyboardOwner() { SetKeyboardState(value); } } keyboard{original};
+    const auto key = [&](WPARAM value, bool ctrl = false, bool shift = false, bool alt = false) {
+        BYTE keys[256]{}; keys[VK_CONTROL] = ctrl ? 0x80 : 0; keys[VK_SHIFT] = shift ? 0x80 : 0; keys[VK_MENU] = alt ? 0x80 : 0;
+        SetKeyboardState(keys); SendMessageW(viewer.window(), alt ? WM_SYSKEYDOWN : WM_KEYDOWN, value, 0); SetKeyboardState(original);
+    };
+    auto before = std::make_shared<Document>(); before->text = "head\r\nold\r\ntail"; before->language = Language::CLike; indexDocument(*before);
+    for (const bool inlineView : {false, true}) for (const bool wrap : {false, true}) for (const UINT dpi : {96u, 144u, 192u}) {
+        auto buffer = std::make_shared<EditBuffer>(); buffer->document.text = "head\r\n日本😀\r\ntail";
+        indexDocument(buffer->document); buffer->initialize(buffer->document.text);
+        viewer.setDpi(dpi); viewer.setWordWrap(wrap); viewer.setDiffLayout(inlineView);
+        viewer.editDiff(buffer, before, L"file.cpp"); SetFocus(viewer.window());
+        const auto select = [&](size_t anchor, size_t caret) {
+            const auto diff = workingDiff(*before, buffer->document, "file.cpp");
+            viewer.restore({0, 0, diff.patchOffset(anchor), diff.patchOffset(caret), true});
+        };
+        select(6, 16); SendMessageW(viewer.window(), WM_CHAR, 'x', 0);
+        check(buffer->document.text == "head\r\nx\r\ntail", "Editing a diff selection used patch offsets or corrupted CRLF");
+        key('Z', true); check(!buffer->dirty(), "Undo in a diff did not restore the saved working text");
+        key('Y', true); check(buffer->document.text == "head\r\nx\r\ntail", "Redo in a diff lost the working edit");
+        select(7, 7); key(VK_DELETE);
+        check(buffer->document.text == "head\r\nxtail", "Delete in a diff did not join source lines");
+        key('Z', true); select(9, 9); key(VK_BACK);
+        check(buffer->document.text == "head\r\nxtail", "Backspace in a diff split CRLF or targeted a patch prefix");
+        key('Z', true); select(6, 6); key('X', true);
+        check(buffer->document.text == "head\r\ntail" && clipboardText(viewer.window()) == L"x\r\n", "Cut in a diff did not use the working source line");
+        key('Z', true); select(6, 6); key(VK_DOWN, false, true, true);
+        check(buffer->document.text == "head\r\ntail\r\nx", "Moving a diff line used patch metadata"); key('Z', true);
+        key('A', true); SendMessageW(viewer.window(), WM_CHAR, 'z', 0);
+        check(buffer->document.text == "z", "Select All in a diff did not replace the entire working file"); key('Z', true);
+        const auto diff = workingDiff(*before, buffer->document, "file.cpp");
+        for (const auto& row : diff.rows) if (row.changed && row.before.number) {
+            viewer.restore({0, 0, diff.offset(row.before), diff.offset(row.before), false}); break;
+        }
+        const auto text = buffer->document.text;
+        SendMessageW(viewer.window(), WM_CHAR, '!', 0); key(VK_DELETE); key('Z', true);
+        check(buffer->document.text == text, "The Before side of a working diff accepted an edit");
+        select(6, 7);
+        auto changedBase = std::make_shared<Document>(*before); changedBase->text = "different\r\nhead\r\nold\r\ntail"; indexDocument(*changedBase);
+        viewer.editDiff(buffer, changedBase, L"file.cpp", true); SendMessageW(viewer.window(), WM_CHAR, 'q', 0);
+        check(buffer->document.text == "head\r\nq\r\ntail", "Refreshing the index moved a working selection to a different file offset");
+        int saves = 0; viewer.save = [&] { ++saves; }; key('S', true); check(saves == 1, "Ctrl+S in a diff did not request a save"); viewer.save = {};
+        viewer.showDiff(std::make_shared<DiffDocument>(diff), L"file.cpp"); SendMessageW(viewer.window(), WM_CHAR, '!', 0);
+        check(!viewer.buffer() && buffer->document.text == "head\r\nq\r\ntail", "Read-only comparisons retained an editable buffer");
+    }
+    auto buffer = std::make_shared<EditBuffer>(); buffer->document.text = std::string(1000, 'x'); indexDocument(buffer->document); buffer->initialize(buffer->document.text);
+    viewer.setWordWrap(true); viewer.setDpi(96); viewer.setDiffLayout(false); viewer.editDiff(buffer, before, L"file.cpp");
+    key(VK_END); const auto end = viewer.state(); key(VK_HOME); key(VK_END);
+    check(viewer.state().caret == end.caret, "End/Home crossed an editable diff wrap boundary");
+    key(VK_END, true); SendMessageW(viewer.window(), WM_CHAR, '\r', 0); SendMessageW(viewer.window(), WM_CHAR, 0x65e5, 0);
+    check(buffer->document.text == std::string(1000, 'x') + "\n日", "Typing at the wrapped diff EOF lost a newline or Unicode text");
+}
 void editorCaret() {
     Viewer viewer;
     const HWND parent = CreateWindowExW(0, L"STATIC", L"Editor caret test", WS_POPUP | WS_CLIPCHILDREN,
@@ -1450,7 +1509,7 @@ int main() {
     int result = 0;
     try {
         initializeRendering();
-        statusBarLimits(); inlineTreeInput(); cellPositions(); colorsAndClipping(); imagePreviews(); smoothIcons(); windowTargets(); editorCaret(); imePositions(); editorWordSelection(); editorWordMovement(); editorLineShortcuts(); editorWrapping(); diffWrapping(); documentFind(); horizontalWheelScrolling(); continuousViewerScrolling(); selectionAutoScrolling(); terminalSelectionAutoScrolling(); themedScrollbars(); quickOpenStability();
+        statusBarLimits(); inlineTreeInput(); cellPositions(); colorsAndClipping(); imagePreviews(); smoothIcons(); windowTargets(); editableDiff(); editorCaret(); imePositions(); editorWordSelection(); editorWordMovement(); editorLineShortcuts(); editorWrapping(); diffWrapping(); documentFind(); horizontalWheelScrolling(); continuousViewerScrolling(); selectionAutoScrolling(); terminalSelectionAutoScrolling(); themedScrollbars(); quickOpenStability();
         std::cout << "Direct2D rendering tests passed\n";
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; result = 1; }
     if (SUCCEEDED(com)) CoUninitialize();

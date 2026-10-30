@@ -1677,6 +1677,59 @@ void gitAutoRefreshTests(const fs::path& executable) {
     fs::remove(fixture.root / L"moved.txt");
     waitFor([&] { return badge(0) && IsWindowVisible(changes) && gitChangeCount(changes) == 2; }, "Deleting the last untracked file did not clear Source Control");
 }
+void editableGitDiffTests(const fs::path& executable) {
+    wchar_t git[MAX_PATH]{};
+    const auto length = SearchPathW(nullptr, L"git.exe", nullptr, MAX_PATH, git, nullptr);
+    if (!length || length >= MAX_PATH) { std::cout << "Editable Git diff tests skipped: Git for Windows is not on PATH.\n"; return; }
+    Fixture fixture; const auto path = fixture.root / L"file.txt";
+    const auto write = [&](const char* text) { std::ofstream file(path, std::ios::binary); file << text; check(file.good(), "Cannot write editable diff fixture"); };
+    const auto runGit = [&](const std::wstring& args) {
+        std::wstring command = L"\"" + std::wstring(git) + L"\" " + args;
+        STARTUPINFOW startup{}; startup.cb = sizeof(startup); PROCESS_INFORMATION process{};
+        check(CreateProcessW(git, command.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, fixture.root.c_str(), &startup, &process) != FALSE, "Cannot start editable diff fixture Git");
+        CloseHandle(process.hThread); const auto wait = WaitForSingleObject(process.hProcess, 5000);
+        if (wait != WAIT_OBJECT_0) { TerminateProcess(process.hProcess, 1); WaitForSingleObject(process.hProcess, 1000); }
+        DWORD code = 1; GetExitCodeProcess(process.hProcess, &code); CloseHandle(process.hProcess);
+        check(wait == WAIT_OBJECT_0 && !code, "Editable diff fixture Git failed");
+    };
+    write("base\r\n"); runGit(L"init -q"); runGit(L"config core.autocrlf false"); runGit(L"add file.txt");
+    runGit(L"-c user.name=Test -c user.email=test@example.invalid commit -qm base");
+    write("staged\r\n"); runGit(L"add file.txt"); write("working\r\n");
+    Application app(executable, fixture.root); const auto tree = app.tree();
+    const auto viewer = FindWindowExW(app.window, nullptr, L"PoppyViewer", nullptr), changes = GetDlgItem(app.window, 4);
+    waitFor([&] { return nextItem(tree, TreeRelation::Child, nextItem(tree, TreeRelation::Root)) != 0; }, "Editable fixture file did not load");
+    const auto file = nextItem(tree, TreeRelation::Child, nextItem(tree, TreeRelation::Root)); send(tree, treeSelect, file); waitLines(viewer, 1);
+    const auto key = [&](WPARAM value, bool ctrl = false) {
+        check(AttachThreadInput(GetCurrentThreadId(), app.process.dwThreadId, TRUE) != FALSE, "Cannot attach editable diff input");
+        BYTE previous[256]{}, keys[256]{}; GetKeyboardState(previous); if (ctrl) keys[VK_CONTROL] = keys[VK_LCONTROL] = 0x80;
+        SetFocus(viewer); SetKeyboardState(keys); send(viewer, WM_KEYDOWN, value); SetKeyboardState(previous);
+        AttachThreadInput(GetCurrentThreadId(), app.process.dwThreadId, FALSE);
+    };
+    const auto text = [&] {
+        key('A', true); key('C', true);
+        if (!OpenClipboard(app.host)) return std::wstring{};
+        const auto value = GetClipboardData(CF_UNICODETEXT); const auto data = value ? static_cast<const wchar_t*>(GlobalLock(value)) : nullptr;
+        const std::wstring result = data ? data : L""; if (data) GlobalUnlock(value); CloseClipboard(); return result;
+    };
+    send(GetDlgItem(app.window, 3), BM_CLICK);
+    waitFor([&] { return nextItem(changes, TreeRelation::Child, gitGroup(changes, false)) != 0; }, "Working Changes did not load");
+    send(changes, treeSelect, nextItem(changes, TreeRelation::Child, gitGroup(changes, false)));
+    waitFor([&] { return text() == L"working\r\n"; }, "Changes did not expose the editable working text");
+    send(viewer, WM_CHAR, '!'); check(readText(path) == "working\r\n", "Typing in Changes saved without Ctrl+S");
+    send(tree, treeSelect, file); waitFor([&] { return text() == L"!"; }, "The ordinary tab lost unsaved diff edits");
+    key(VK_END, true); send(viewer, WM_CHAR, 'n');
+    send(changes, treeSelect, nextItem(changes, TreeRelation::Child, gitGroup(changes, false)));
+    waitFor([&] { return text() == L"!n"; }, "Changes lost edits made in the ordinary tab");
+    const auto group = gitGroup(changes, false); PostMessageW(app.window, WM_KEYDOWN, VK_F5, 0);
+    waitFor([&] { return gitGroup(changes, false) != group; }, "F5 did not refresh the editable comparison");
+    check(text() == L"!n", "F5 overwrote unsaved diff text");
+    key('Z', true); check(text() == L"!", "Changes and ordinary tabs did not share Undo history");
+    key('S', true); waitFor([&] { return readText(path) == "!"; }, "Ctrl+S did not save the working file from Changes");
+    send(changes, treeSelect, nextItem(changes, TreeRelation::Child, gitGroup(changes, true)));
+    waitFor([&] { const auto current = text(); return current.find(L"base") != current.npos && current.find(L"staged") != current.npos; }, "Staged comparison lost the index content");
+    send(viewer, WM_CHAR, '?'); key('S', true);
+    check(readText(path) == "!", "Staged Changes accepted an edit or overwrote the working file");
+}
 void branchSidebarTests(const fs::path& executable) {
     wchar_t git[MAX_PATH]{};
     const auto length = SearchPathW(nullptr, L"git.exe", nullptr, MAX_PATH, git, nullptr);
@@ -2551,7 +2604,7 @@ int wmain(int argc, wchar_t** argv) {
         SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         for (const auto test : {folderTests, explorerSortTests, sidebarTests, treeInteractionTests, tabTests, pinnedTabTests,
                 bulkTabCloseTests, bulkTabSaveTests, bulkTabSplitTests,
-                tabDragTests, wrappingTabDragTests, wrappingTabTests, renameTests, explorerMoveTests, explorerDeleteTests, createItemTests, newFileShortcutTests, pasteImageTests, splitPaneTests, quickOpenTests, fullSearchTests, gitSidebarTests, gitIgnoredExplorerTests, gitAutoRefreshTests, branchSidebarTests, multiRepositoryTests, sessionTests, multiProjectTests, recentProjectTests, projectDragTests, scrollingProjectDragTests, terminalTitleTests, terminalShellTests, terminalShortcutTests, terminalBackspaceTests}) {
+                tabDragTests, wrappingTabDragTests, wrappingTabTests, renameTests, explorerMoveTests, explorerDeleteTests, createItemTests, newFileShortcutTests, pasteImageTests, splitPaneTests, quickOpenTests, fullSearchTests, gitSidebarTests, gitIgnoredExplorerTests, gitAutoRefreshTests, editableGitDiffTests, branchSidebarTests, multiRepositoryTests, sessionTests, multiProjectTests, recentProjectTests, projectDragTests, scrollingProjectDragTests, terminalTitleTests, terminalShellTests, terminalShortcutTests, terminalBackspaceTests}) {
             Fixture appData; AppDataEnvironment environment(appData.root);
             test(fs::absolute(argv[1]));
         }

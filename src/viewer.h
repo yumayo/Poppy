@@ -22,6 +22,8 @@ public:
     std::function<void()> changed, save, focused, diffLayoutChanged, statusChanged;
     std::wstring textStatus() const;
     void showDiff(std::shared_ptr<const DiffDocument> document, const ResourceId& path, bool preserve = false);
+    void editDiff(std::shared_ptr<EditBuffer> buffer, std::shared_ptr<const Document> before, const ResourceId& path, bool preserve = false);
+    void refreshBuffer();
     void toggleDiffLayout();
     void setDiffLayout(bool inlineView);
     bool diffInline() const { return inlineView_; }
@@ -52,6 +54,9 @@ private:
     void cut();
     void replace(std::string text);
     void edited();
+    bool editSelection(size_t& anchor, size_t& caret) const;
+    void undo(bool redo);
+    void selectAll();
     void moveCaret(WPARAM key, bool shift, bool ctrl);
     void caretPosition(bool reveal = false);
     void findLayout();
@@ -92,6 +97,7 @@ private:
     std::shared_ptr<EditBuffer> edit_;
     wchar_t highSurrogate_ = 0;
     std::shared_ptr<const DiffDocument> diff_;
+    std::shared_ptr<const Document> diffBefore_;
     ResourceId path_;
     std::wstring message_ = L"Open a folder to start\n\nSelect a file on the left. Run your AI CLI in the terminal below.";
 };

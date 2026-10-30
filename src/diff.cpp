@@ -161,7 +161,7 @@ std::string DiffDocument::selectedText(bool after, size_t start, size_t end, boo
 }
 void indexDiff(DiffDocument& d, bool fileHeadings) {
     d.patch.language = Language::Plain; indexDocument(d.patch);
-    d.rows.clear(); d.files.clear(); d.inlineOrder.clear(); d.maxColumns = 0;
+    d.rows.clear(); d.files.clear(); d.inlineOrder.clear(); d.workingLines.clear(); d.maxColumns = 0;
     std::vector<DiffLine> removed, added;
     auto flush = [&] {
         const size_t first = d.rows.size();
@@ -238,5 +238,105 @@ void indexDiff(DiffDocument& d, bool fileHeadings) {
         }
         d.maxColumns = std::max(d.maxColumns, columns);
     }
+}
+
+std::optional<size_t> DiffDocument::workingOffset(size_t offset) const {
+    const auto it = std::upper_bound(workingLines.begin(), workingLines.end(), offset,
+        [](size_t byte, const WorkingLine& line) { return byte < line.patch; });
+    if (it == workingLines.begin()) return {};
+    const auto& line = *std::prev(it);
+    if (offset > line.patch + line.length) return {};
+    return line.file + offset - line.patch;
+}
+size_t DiffDocument::patchOffset(size_t offset) const {
+    const auto it = std::upper_bound(workingLines.begin(), workingLines.end(), offset,
+        [](size_t byte, const WorkingLine& line) { return byte < line.file; });
+    if (it == workingLines.begin()) return workingLines.empty() ? 0 : workingLines.front().patch;
+    const auto& line = *std::prev(it);
+    return line.patch + std::min(offset - line.file, line.length);
+}
+DiffDocument workingDiff(const Document& before, const Document& after, const std::string& path) {
+    // Bounded Myers alignment: small edits in large files stay linear. For a
+    // wholesale rewrite, show the remaining middle as a replacement instead
+    // of spending unbounded time or memory on the UI thread.
+    using Match = std::pair<size_t, size_t>;
+    std::vector<Match> matches;
+    size_t first = 0, oldEnd = before.lines.size(), newEnd = after.lines.size();
+    while (first < oldEnd && first < newEnd && before.line(first) == after.line(first)) {
+        matches.emplace_back(first, first); ++first;
+    }
+    while (oldEnd > first && newEnd > first && before.line(oldEnd - 1) == after.line(newEnd - 1)) { --oldEnd; --newEnd; }
+    const int n = static_cast<int>(oldEnd - first), m = static_cast<int>(newEnd - first);
+    constexpr int distanceLimit = 256, origin = distanceLimit + 1;
+    std::vector<int> frontier(2 * origin + 1, 0);
+    std::vector<std::vector<int>> trace;
+    size_t work = 0;
+    bool found = false;
+    int distance = 0;
+    for (; distance <= distanceLimit && work < 2000000 && !found; ++distance) {
+        trace.push_back(frontier);
+        for (int diagonal = -distance; diagonal <= distance; diagonal += 2) {
+            int x = diagonal == -distance || (diagonal != distance && frontier[origin + diagonal - 1] < frontier[origin + diagonal + 1]) ?
+                frontier[origin + diagonal + 1] : frontier[origin + diagonal - 1] + 1;
+            int y = x - diagonal;
+            while (x < n && y < m && before.line(first + x) == after.line(first + y)) { ++x; ++y; ++work; }
+            frontier[origin + diagonal] = x; ++work;
+            if (x >= n && y >= m) { found = true; break; }
+        }
+    }
+    if (found) {
+        std::vector<Match> middle;
+        int x = n, y = m;
+        for (int d = distance - 1; d >= 0; --d) {
+            const auto& previous = trace[static_cast<size_t>(d)];
+            const int diagonal = x - y;
+            const int prior = diagonal == -d || (diagonal != d && previous[origin + diagonal - 1] < previous[origin + diagonal + 1]) ? diagonal + 1 : diagonal - 1;
+            const int priorX = previous[origin + prior], priorY = priorX - prior;
+            while (x > priorX && y > priorY) { --x; --y; middle.emplace_back(first + x, first + y); }
+            x = priorX; y = priorY;
+        }
+        matches.insert(matches.end(), middle.rbegin(), middle.rend());
+    }
+    for (size_t old = oldEnd, current = newEnd; old < before.lines.size() && current < after.lines.size(); ++old, ++current)
+        matches.emplace_back(old, current);
+    matches.emplace_back(before.lines.size(), after.lines.size());
+
+    DiffDocument result;
+    result.patch.text = "Working tree\n";
+    result.files.push_back({0, path}); result.rows.push_back({{}, {}, false, 1}); result.inlineOrder.push_back(0);
+    size_t patchRow = 1;
+    auto source = [&](const Document& document, size_t row, char prefix, bool working) {
+        const auto text = document.line(row);
+        const size_t offset = result.patch.text.size() + 1;
+        result.patch.text += prefix; result.patch.text.append(text); result.patch.text += '\n';
+        if (working) result.workingLines.push_back({offset, document.lines[row], text.size()});
+        return DiffLine{static_cast<uint32_t>(patchRow++), static_cast<uint32_t>(row + 1), document.language, document.states[row]};
+    };
+    size_t old = 0, current = 0;
+    for (const auto& match : matches) {
+        const size_t start = result.rows.size(), removed = match.first - old, added = match.second - current;
+        const size_t count = std::max(removed, added);
+        result.rows.resize(start + count);
+        for (size_t i = 0; i < count; ++i) result.rows[start + i].changed = true;
+        for (size_t i = 0; i < removed; ++i) {
+            result.rows[start + i].before = source(before, old++, '-', false);
+            result.inlineOrder.push_back(static_cast<uint32_t>((start + i) * 2));
+        }
+        for (size_t i = 0; i < added; ++i) {
+            result.rows[start + i].after = source(after, current++, '+', true);
+            result.inlineOrder.push_back(static_cast<uint32_t>((start + i) * 2 + 1));
+        }
+        if (old < before.lines.size() && current < after.lines.size()) {
+            auto original = source(before, old++, ' ', false), modified = original;
+            modified.number = static_cast<uint32_t>(current + 1); modified.language = after.language; modified.state = after.states[current];
+            result.workingLines.push_back({result.patch.text.size() - before.line(old - 1).size() - 1, after.lines[current], after.line(current).size()});
+            ++current;
+            result.inlineOrder.push_back(static_cast<uint32_t>(result.rows.size() * 2));
+            result.rows.push_back({original, modified, false});
+        }
+    }
+    indexDocument(result.patch);
+    result.maxColumns = std::max(before.maxColumns, after.maxColumns);
+    return result;
 }
 }

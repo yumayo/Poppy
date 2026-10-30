@@ -36,7 +36,7 @@ void Viewer::show(std::shared_ptr<const Document> d, const ResourceId& path, boo
     stopSelection();
     image_.reset(); renderer_.setImage({});
     const auto previous = preserve && document_ ? std::optional<State>(state()) : std::nullopt;
-    edit_.reset(); highSurrogate_ = 0;
+    edit_.reset(); diffBefore_.reset(); highSurrogate_ = 0;
     diffLayout_ = {}; layoutDirty_ = true; caretTrailing_ = false;
     diff_.reset(); document_ = std::move(d); path_ = path; message_.clear();
     if (!preserve) { top_ = left_ = 0; anchor_ = caret_ = 0; after_ = false; }
@@ -53,7 +53,7 @@ void Viewer::showDiff(std::shared_ptr<const DiffDocument> d, const ResourceId& p
     stopSelection();
     image_.reset(); renderer_.setImage({});
     const auto previous = preserve && document_ ? std::optional<State>(state()) : std::nullopt;
-    edit_.reset(); highSurrogate_ = 0;
+    edit_.reset(); diffBefore_.reset(); highSurrogate_ = 0;
     textLayout_ = {}; layoutDirty_ = true; caretTrailing_ = false;
     // Share the patch snapshot; both panes only keep references to its lines.
     document_ = std::shared_ptr<const Document>(d, &d->patch); diff_ = std::move(d); path_ = path; message_.clear();
@@ -63,11 +63,36 @@ void Viewer::showDiff(std::shared_ptr<const DiffDocument> d, const ResourceId& p
     if (previous) restore(*previous);
     if (statusChanged) statusChanged();
 }
+void Viewer::editDiff(std::shared_ptr<EditBuffer> buffer, std::shared_ptr<const Document> before, const ResourceId& path, bool preserve) {
+    const auto anchor = preserve && diff_ && edit_ == buffer && after_ ? diff_->workingOffset(anchor_) : std::nullopt;
+    const auto caret = preserve && diff_ && edit_ == buffer && after_ ? diff_->workingOffset(caret_) : std::nullopt;
+    auto comparison = std::make_shared<DiffDocument>(workingDiff(*before, buffer->document, path.filename().u8string()));
+    showDiff(std::move(comparison), path, preserve);
+    edit_ = std::move(buffer); diffBefore_ = std::move(before);
+    if (!preserve) { anchor_ = caret_ = diff_->patchOffset(0); after_ = true; }
+    else if (anchor && caret) { anchor_ = diff_->patchOffset(*anchor); caret_ = diff_->patchOffset(*caret); after_ = true; }
+    caretPosition();
+}
+void Viewer::refreshBuffer() {
+    if (!edit_) return;
+    if (diff_) {
+        const auto previous = state();
+        const auto anchor = diff_->workingOffset(anchor_), caret = diff_->workingOffset(caret_);
+        auto comparison = std::make_shared<DiffDocument>(workingDiff(*diffBefore_, edit_->document, path_.filename().u8string()));
+        document_ = std::shared_ptr<const Document>(comparison, &comparison->patch); diff_ = std::move(comparison);
+        anchor_ = anchor ? diff_->patchOffset(*anchor) : std::min(anchor_, document_->text.size());
+        caret_ = caret ? diff_->patchOffset(*caret) : std::min(caret_, document_->text.size());
+        layoutDirty_ = true; scrollbars(); restoreTop(previous);
+    } else {
+        anchor_ = std::min(anchor_, document_->text.size()); caret_ = std::min(caret_, document_->text.size());
+    }
+    layoutDirty_ = true; requestFind(false, false, false); scrollbars(); caretPosition(); InvalidateRect(window_, nullptr, FALSE);
+}
 void Viewer::message(const std::wstring& text, const ResourceId& path) {
     stopSelection();
     image_.reset(); renderer_.setImage({});
     findBar_.close(); KillTimer(window_, findTimer); search_.query("");
-    edit_.reset(); highSurrogate_ = 0;
+    edit_.reset(); diffBefore_.reset(); highSurrogate_ = 0;
     textLayout_ = {}; diffLayout_ = {}; layoutDirty_ = true; caretTrailing_ = false;
     diff_.reset(); document_.reset(); path_ = path; message_ = text; top_ = left_ = 0; anchor_ = caret_ = 0; after_ = false;
     scrollbars(); caretPosition(); InvalidateRect(window_, nullptr, FALSE);
@@ -124,6 +149,7 @@ void Viewer::restore(const State& state) {
     caretTrailing_ = false;
     left_ = state.left; after_ = state.after;
     anchor_ = std::min(state.anchor, document_->text.size()); caret_ = std::min(state.caret, document_->text.size());
+    if (diff_ && edit_ && !anchor_ && !caret_) { anchor_ = caret_ = diff_->patchOffset(0); after_ = true; }
     requestFind(false, false, false);
     scrollbars(); caretPosition(); InvalidateRect(window_, nullptr, FALSE);
 }
@@ -231,7 +257,7 @@ size_t Viewer::position(int x, int y, bool* trailing, WordRange* word) const {
             x = std::min(x, static_cast<int>(after_ ? rect.right : rect.right / 2));
         }
         auto change = diff_->displayRow(row, inlineView_);
-        const bool after = inlineView_ ? change.after.number != 0 : after_;
+        const bool after = inlineView_ && !(edit_ && after_) ? change.after.number != 0 : after_;
         auto source = after ? change.after : change.before;
         if (!source.number) {
             // Empty alignment cells map to the next source line's start, or
@@ -273,12 +299,15 @@ size_t Viewer::position(int x, int y, bool* trailing, WordRange* word) const {
 void Viewer::copy() {
     if (!document_ || anchor_ == caret_) return;
     const size_t start = std::min(anchor_, caret_), end = std::max(anchor_, caret_);
-    if (diff_) copyText(window_, wide(diff_->selectedText(after_, start, end, inlineView_)));
+    size_t anchor = 0, caret = 0;
+    if (diff_ && editSelection(anchor, caret)) copyText(window_, wide(std::string_view(edit_->document.text).substr(std::min(anchor, caret), std::max(anchor, caret) - std::min(anchor, caret))));
+    else if (diff_) copyText(window_, wide(diff_->selectedText(after_, start, end, inlineView_)));
     else copyText(window_, wide(std::string_view(document_->text).substr(start, end - start)));
 }
 void Viewer::cut() {
-    if (!edit_) return;
-    const auto range = edit_->cutRange(anchor_, caret_);
+    size_t anchor = 0, caret = 0;
+    if (!editSelection(anchor, caret)) return;
+    const auto range = edit_->cutRange(anchor, caret);
     if (range.begin == range.end) return;
     if (!copyText(window_, wide(range.text)) || !edit_->replace(range.begin, range.end, "")) { MessageBeep(MB_ICONWARNING); return; }
     anchor_ = caret_ = range.begin; edited();
@@ -379,6 +408,21 @@ void Viewer::revealRange(TextMatch match) {
 POINT Viewer::caretPoint() const {
     if (!edit_) return {gutter_, contentTop()};
     const auto& d = edit_->document;
+    if (diff_) {
+        const size_t patchRow = static_cast<size_t>(std::upper_bound(document_->lines.begin(), document_->lines.end(), caret_) - document_->lines.begin() - 1);
+        const DiffLine source{static_cast<uint32_t>(patchRow), 1};
+        size_t row = diff_->rowForLine(source, true, inlineView_);
+        const auto line = diff_->line(source); const auto offset = diff_->offset(source);
+        if (wrapping()) row = diffLayout_.rowForOffset(*diff_, row, caret_ - offset, true, caretTrailing_);
+        const auto wrapped = wrapping() ? diffLayout_.textRow(*diff_, row, true) : WrappedRow{};
+        int column = wrapping() ? wrapped.column : 0;
+        for (size_t p = wrapping() ? wrapped.begin : 0; p < line.size() && offset + p < caret_;) {
+            const auto c = decodeUtf8(line, p); column += c == '\t' ? 4 - column % 4 : std::max(1, cellWidth(c));
+        }
+        if (wrapping()) column -= wrapped.column;
+        const int origin = textGutter() + (splitDiff() ? Scrollbars::contentRect(window_).right / 2 + 1 : 0);
+        return {origin + (column - left_) * cellWidth_, contentTop() + (static_cast<int>(row) - top_) * cellHeight_};
+    }
     const size_t row = wrapping() ? textLayout_.rowForOffset(d, caret_, caretTrailing_) : static_cast<size_t>(std::upper_bound(d.lines.begin(), d.lines.end(), caret_) - d.lines.begin() - 1);
     const auto wrapped = wrapping() ? textLayout_.row(d, row) : WrappedRow{};
     const size_t logicalRow = wrapping() ? wrapped.line : row;
@@ -388,7 +432,8 @@ POINT Viewer::caretPoint() const {
     return {gutter_ + (col - left_) * cellWidth_, contentTop() + (static_cast<int>(row) - top_) * cellHeight_};
 }
 void Viewer::caretPosition(bool reveal) {
-    if (!edit_) {
+    size_t anchor = 0, caret = 0;
+    if (!editSelection(anchor, caret)) {
         KillTimer(window_, caretTimer); caretVisible_ = false;
         if (GetFocus() == window_) DestroyCaret();
         return;
@@ -396,10 +441,12 @@ void Viewer::caretPosition(bool reveal) {
     auto point = caretPoint();
     if (reveal) {
         const auto r = Scrollbars::contentRect(window_);
-        if (point.y < contentTop()) top_ -= (contentTop() - point.y + cellHeight_ - 1) / cellHeight_;
+        const int top = contentTop() + (stickyFile() ? cellHeight_ : 0);
+        const int origin = textGutter() + (splitDiff() ? r.right / 2 + 1 : 0);
+        if (point.y < top) top_ -= (top - point.y + cellHeight_ - 1) / cellHeight_;
         else if (point.y + cellHeight_ > r.bottom) top_ += (point.y + cellHeight_ - r.bottom + cellHeight_ - 1) / cellHeight_;
         if (!wrapping()) {
-            if (point.x < gutter_) left_ -= (gutter_ - point.x + cellWidth_ - 1) / cellWidth_;
+            if (point.x < origin) left_ -= (origin - point.x + cellWidth_ - 1) / cellWidth_;
             else if (point.x + cellWidth_ > r.right) left_ += (point.x + cellWidth_ - r.right + cellWidth_ - 1) / cellWidth_;
         }
         scrollbars(); point = caretPoint();
@@ -412,29 +459,63 @@ void Viewer::caretPosition(bool reveal) {
         InvalidateRect(window_, nullptr, FALSE);
     }
 }
-void Viewer::edited() { layoutDirty_ = true; caretTrailing_ = false; requestFind(false, false, false); scrollbars(); caretPosition(true); InvalidateRect(window_, nullptr, FALSE); if (changed) changed(); if (statusChanged) statusChanged(); }
+bool Viewer::editSelection(size_t& anchor, size_t& caret) const {
+    if (!edit_) return false;
+    if (!diff_) { anchor = anchor_; caret = caret_; return true; }
+    if (!after_) return false;
+    const auto first = diff_->workingOffset(anchor_), last = diff_->workingOffset(caret_);
+    if (!first || !last) return false;
+    anchor = *first; caret = *last; return true;
+}
+void Viewer::edited() {
+    if (diff_) {
+        auto comparison = std::make_shared<DiffDocument>(workingDiff(*diffBefore_, edit_->document, path_.filename().u8string()));
+        document_ = std::shared_ptr<const Document>(comparison, &comparison->patch); diff_ = std::move(comparison);
+        anchor_ = diff_->patchOffset(anchor_); caret_ = diff_->patchOffset(caret_); after_ = true;
+    }
+    layoutDirty_ = true; caretTrailing_ = false; requestFind(false, false, false); scrollbars(); caretPosition(true); InvalidateRect(window_, nullptr, FALSE); if (changed) changed(); if (statusChanged) statusChanged();
+}
+void Viewer::undo(bool redo) {
+    size_t anchor = 0, caret = 0;
+    if (!editSelection(anchor, caret)) return;
+    if (redo ? edit_->redo(anchor, caret) : edit_->undo(anchor, caret)) { anchor_ = anchor; caret_ = caret; edited(); }
+}
+void Viewer::selectAll() {
+    if (!document_) return;
+    anchor_ = 0; caret_ = document_->text.size();
+    if (diff_ && edit_) { anchor_ = diff_->patchOffset(0); caret_ = diff_->patchOffset(edit_->document.text.size()); after_ = true; }
+    caretPosition(); InvalidateRect(window_, nullptr, FALSE);
+}
 void Viewer::replace(std::string text) {
-    if (!edit_) return;
+    size_t anchor = 0, caret = 0;
+    if (!editSelection(anchor, caret)) return;
     std::string normalized; const auto newline = edit_->newline();
     for (size_t p = 0; p < text.size(); ++p) {
         if (text[p] == '\r' || text[p] == '\n') { if (text[p] == '\r' && p + 1 < text.size() && text[p + 1] == '\n') ++p; normalized += newline; }
         else normalized += text[p];
     }
-    const size_t begin = std::min(anchor_, caret_), end = std::max(anchor_, caret_), length = normalized.size();
+    const size_t begin = std::min(anchor, caret), end = std::max(anchor, caret), length = normalized.size();
     if (edit_->replace(begin, end, std::move(normalized))) { anchor_ = caret_ = begin + length; edited(); }
     else MessageBeep(MB_ICONWARNING);
 }
 void Viewer::moveCaret(WPARAM key, bool shift, bool ctrl) {
     revealFind_ = false;
+    size_t anchor = 0, caret = 0;
+    if (!editSelection(anchor, caret)) return;
     const auto& d = edit_->document;
-    const size_t row = static_cast<size_t>(std::upper_bound(d.lines.begin(), d.lines.end(), caret_) - d.lines.begin() - 1);
-    const size_t visualRow = wrapping() ? textLayout_.rowForOffset(d, caret_, caretTrailing_) : row;
-    const auto wrapped = wrapping() ? textLayout_.row(d, visualRow) : WrappedRow{};
+    const size_t row = static_cast<size_t>(std::upper_bound(d.lines.begin(), d.lines.end(), caret) - d.lines.begin() - 1);
+    size_t visualRow = wrapping() && !diff_ ? textLayout_.rowForOffset(d, caret, caretTrailing_) : row;
+    if (diff_) {
+        const size_t patchRow = static_cast<size_t>(std::upper_bound(document_->lines.begin(), document_->lines.end(), caret_) - document_->lines.begin() - 1);
+        visualRow = diff_->rowForLine(DiffLine{static_cast<uint32_t>(patchRow), 1}, true, inlineView_);
+        if (wrapping()) visualRow = diffLayout_.rowForOffset(*diff_, visualRow, caret - d.lines[row], true, caretTrailing_);
+    }
+    const auto wrapped = !wrapping() ? WrappedRow{} : diff_ ? diffLayout_.textRow(*diff_, visualRow, true) : textLayout_.row(d, visualRow);
     const auto point = caretPoint();
     caretTrailing_ = false;
-    size_t next = caret_;
-    if (key == VK_LEFT) next = !shift && anchor_ != caret_ ? std::min(anchor_, caret_) : ctrl ? edit_->previousWord(caret_) : edit_->previous(caret_);
-    else if (key == VK_RIGHT) next = !shift && anchor_ != caret_ ? std::max(anchor_, caret_) : ctrl ? edit_->nextWord(caret_) : edit_->next(caret_);
+    size_t next = caret;
+    if (key == VK_LEFT) next = !shift && anchor != caret ? std::min(anchor, caret) : ctrl ? edit_->previousWord(caret) : edit_->previous(caret);
+    else if (key == VK_RIGHT) next = !shift && anchor != caret ? std::max(anchor, caret) : ctrl ? edit_->nextWord(caret) : edit_->next(caret);
     else if (key == VK_HOME) next = ctrl ? 0 : d.lines[row] + (wrapping() ? wrapped.begin : 0);
     else if (key == VK_END) {
         next = ctrl ? d.text.size() : d.lines[row] + (wrapping() ? wrapped.end : d.line(row).size());
@@ -443,9 +524,16 @@ void Viewer::moveCaret(WPARAM key, bool shift, bool ctrl) {
     else {
         const int delta = key == VK_UP ? -1 : key == VK_DOWN ? 1 : key == VK_PRIOR ? -visibleRows() : visibleRows();
         const auto target = static_cast<size_t>(std::clamp<int>(static_cast<int>(visualRow) + delta, 0, static_cast<int>(rowCount()) - 1));
-        next = position(point.x, contentTop() + (static_cast<int>(target) - top_) * cellHeight_, &caretTrailing_);
+        if (diff_) {
+            for (int at = static_cast<int>(target); at >= 0 && at < static_cast<int>(rowCount()); at += delta < 0 ? -1 : 1) {
+                const auto change = diff_->displayRow(diffRow(static_cast<size_t>(at)), inlineView_);
+                if (!change.after.number) continue;
+                const auto offset = position(point.x, contentTop() + (at - top_) * cellHeight_, &caretTrailing_);
+                if (const auto file = diff_->workingOffset(offset)) { next = *file; break; }
+            }
+        } else next = position(point.x, contentTop() + (static_cast<int>(target) - top_) * cellHeight_, &caretTrailing_);
     }
-    caret_ = next; if (!shift) anchor_ = caret_; caretPosition(true); InvalidateRect(window_, nullptr, FALSE);
+    caret_ = diff_ ? diff_->patchOffset(next) : next; if (!shift) anchor_ = caret_; caretPosition(true); InvalidateRect(window_, nullptr, FALSE);
 }
 void Viewer::paint() {
     Renderer::Paint paint(renderer_, window_); if (!paint) return;
@@ -532,7 +620,8 @@ void Viewer::paint() {
                     const size_t offset = lineOffset + begin;
                     while (highlight && highlight->end <= begin) highlight = search_.pattern().next(line, highlightCursor, line.size());
                     const bool matched = highlight && begin >= highlight->begin && begin < highlight->end;
-                    const Color bg = (!splitDiff() || static_cast<bool>(side) == after_) && offset >= selectionStart && offset < selectionEnd ? rgb(50, 70, 94) : matched ? rgb(92, 73, 34) : rowBackground;
+                    const bool selectedSide = diff_ && edit_ && after_ ? (inlineView_ ? change.after.number != 0 : side != 0) : !splitDiff() || static_cast<bool>(side) == after_;
+                    const Color bg = selectedSide && offset >= selectionStart && offset < selectionEnd ? rgb(50, 70, 94) : matched ? rgb(92, 73, 34) : rowBackground;
                     if (c < 32) c = U' ';
                     for (int i = 0; i < width; ++i) {
                         const int x = col + i - firstColumn; if (x < 0 || x >= columns) continue;
@@ -577,7 +666,7 @@ void Viewer::paint() {
         if (edit_ && caretVisible_ && GetFocus() == window_) {
             const auto point = caretPoint();
             const RECT caret{point.x, point.y, point.x + 2, point.y + cellHeight_};
-            const RECT bodyRect{gutter_, body, r.right, r.bottom};
+            const RECT bodyRect{textGutter() + (splitDiff() ? middle + 1 : 0), body + (stickyFile() ? cellHeight_ : 0), r.right, r.bottom};
             RECT clipped{};
             if (IntersectRect(&clipped, &caret, &bodyRect)) dc.fill(clipped, foreground);
         }
@@ -670,7 +759,8 @@ LRESULT Viewer::handle(UINT m, WPARAM a, LPARAM b) {
         if (edit_ && !(GetKeyState(VK_CONTROL) & 0x8000) && (GetKeyState(VK_SHIFT) & 0x8000) &&
             (GetKeyState(VK_MENU) & 0x8000) && (a == VK_UP || a == VK_DOWN)) {
             revealFind_ = false;
-            if (edit_->moveLines(anchor_, caret_, a == VK_DOWN)) edited();
+            size_t anchor = 0, caret = 0;
+            if (editSelection(anchor, caret) && edit_->moveLines(anchor, caret, a == VK_DOWN)) { anchor_ = anchor; caret_ = caret; edited(); }
             return 0;
         }
         if (m == WM_SYSKEYDOWN) break;
@@ -682,16 +772,21 @@ LRESULT Viewer::handle(UINT m, WPARAM a, LPARAM b) {
             if (ctrl && a == 'S') { if (save) save(); return 0; }
             if (ctrl && a == 'X') { cut(); return 0; }
             if ((ctrl && a == 'V') || (shift && a == VK_INSERT)) { replace(utf8(clipboardText(window_))); return 0; }
-            if (ctrl && (a == 'Z' || a == 'Y')) { if (a == 'Y' || shift) edit_->redo(anchor_, caret_); else edit_->undo(anchor_, caret_); edited(); return 0; }
+            if (ctrl && (a == 'Z' || a == 'Y')) { undo(a == 'Y' || shift); return 0; }
             if (a == VK_DELETE || a == VK_BACK) {
-                if (anchor_ == caret_) { if (a == VK_BACK) anchor_ = edit_->previous(caret_); else caret_ = edit_->next(caret_); }
+                size_t anchor = 0, caret = 0;
+                if (!editSelection(anchor, caret)) return 0;
+                if (anchor == caret) {
+                    if (a == VK_BACK) anchor = edit_->previous(caret); else caret = edit_->next(caret);
+                    anchor_ = diff_ ? diff_->patchOffset(anchor) : anchor; caret_ = diff_ ? diff_->patchOffset(caret) : caret;
+                }
                 replace(""); return 0;
             }
             if (a == VK_TAB) { replace("\t"); return 0; }
             if (a == VK_LEFT || a == VK_RIGHT || a == VK_UP || a == VK_DOWN || a == VK_HOME || a == VK_END || a == VK_PRIOR || a == VK_NEXT) { moveCaret(a, shift, ctrl); return 0; }
         }
         if ((GetKeyState(VK_CONTROL) & 0x8000) && a == 'C') { copy(); return 0; }
-        if ((GetKeyState(VK_CONTROL) & 0x8000) && a == 'A' && document_) { anchor_ = 0; caret_ = document_->text.size(); InvalidateRect(window_, nullptr, FALSE); return 0; }
+        if ((GetKeyState(VK_CONTROL) & 0x8000) && a == 'A') { selectAll(); return 0; }
         if (a == VK_UP) scroll(-1, 0); else if (a == VK_DOWN) scroll(1, 0);
         else if (a == VK_LEFT) scroll(0, -4); else if (a == VK_RIGHT) scroll(0, 4);
         else if (a == VK_PRIOR) scroll(-visibleRows(), 0); else if (a == VK_NEXT) scroll(visibleRows(), 0);
@@ -728,11 +823,15 @@ LRESULT Viewer::handle(UINT m, WPARAM a, LPARAM b) {
         if (image_) return 0;
         revealFind_ = false;
         HMENU menu = CreatePopupMenu(); AppendMenuW(menu, MF_STRING | (anchor_ == caret_ ? MF_GRAYED : 0), 1, L"Copy\tCtrl+C"); AppendMenuW(menu, MF_STRING, 2, L"Select all\tCtrl+A");
-        if (edit_) { AppendMenuW(menu, MF_STRING, 3, L"Cut\tCtrl+X"); AppendMenuW(menu, MF_STRING, 4, L"Paste\tCtrl+V"); AppendMenuW(menu, MF_STRING, 5, L"Undo\tCtrl+Z"); AppendMenuW(menu, MF_STRING, 6, L"Redo\tCtrl+Y"); AppendMenuW(menu, MF_STRING, 7, L"Save\tCtrl+S"); }
+        if (edit_) {
+            size_t anchor = 0, caret = 0;
+            const auto flags = MF_STRING | (editSelection(anchor, caret) ? 0 : MF_GRAYED);
+            AppendMenuW(menu, flags, 3, L"Cut\tCtrl+X"); AppendMenuW(menu, flags, 4, L"Paste\tCtrl+V"); AppendMenuW(menu, flags, 5, L"Undo\tCtrl+Z"); AppendMenuW(menu, flags, 6, L"Redo\tCtrl+Y"); AppendMenuW(menu, MF_STRING, 7, L"Save\tCtrl+S");
+        }
         POINT p{GET_X_LPARAM(b), GET_Y_LPARAM(b)}; if (p.x == -1) { p = {gutter_, header_}; ClientToScreen(window_, &p); }
         const UINT command = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, p.x, p.y, 0, window_, nullptr); DestroyMenu(menu);
-        if (command == 1) copy(); else if (command == 2 && document_) { anchor_ = 0; caret_ = document_->text.size(); InvalidateRect(window_, nullptr, FALSE); }
-        else if (edit_) { if (command == 3) cut(); else if (command == 4) replace(utf8(clipboardText(window_))); else if (command == 5) { edit_->undo(anchor_, caret_); edited(); } else if (command == 6) { edit_->redo(anchor_, caret_); edited(); } else if (command == 7 && save) save(); }
+        if (command == 1) copy(); else if (command == 2) selectAll();
+        else if (edit_) { if (command == 3) cut(); else if (command == 4) replace(utf8(clipboardText(window_))); else if (command == 5 || command == 6) undo(command == 6); else if (command == 7 && save) save(); }
         return 0;
     }
     default: return DefWindowProcW(window_, m, a, b);
@@ -745,6 +844,9 @@ size_t poppy::Viewer::documentBytes() const {
     size_t bytes = textLayout_.bytes() + diffLayout_.bytes() + (document_ ? document_->text.capacity() + document_->lines.capacity() * sizeof(uint32_t) + document_->states.capacity() * sizeof(LexState) : 0);
     if (diff_) {
         bytes += diff_->rows.capacity() * sizeof(DiffRow) + diff_->inlineOrder.capacity() * sizeof(uint32_t) + diff_->files.capacity() * sizeof(DiffFile);
+        bytes += diff_->workingLines.capacity() * sizeof(DiffDocument::WorkingLine);
+        if (edit_) bytes += edit_->document.text.capacity() + edit_->baseline.capacity();
+        if (diffBefore_) bytes += diffBefore_->text.capacity() + diffBefore_->lines.capacity() * sizeof(uint32_t) + diffBefore_->states.capacity() * sizeof(LexState);
         for (const auto& file : diff_->files) bytes += file.path.capacity();
     }
     if (image_) bytes += image_->pixels.capacity() * 2; // CPU pixels and the device bitmap.

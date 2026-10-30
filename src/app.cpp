@@ -76,6 +76,7 @@ struct Tab {
     GitDiffKind diffKind = GitDiffKind::Automatic; std::string revision; bool allChanges = false;
     std::optional<ContentMatch> searchTarget; std::string searchQuery; bool searchMatchCase = false;
     ResourceId gitRoot = {};
+    std::shared_ptr<const Document> diffBefore = {};
 };
 std::wstring tabKey(const Tab& tab) {
     return pathKey(tab.path) + L"\n" + std::to_wstring(static_cast<int>(tab.diffKind)) + L"\n" + wide(tab.revision) + (tab.allChanges ? L"\nall" : L"") + (tab.gitRoot.empty() ? L"" : L"\n" + pathKey(tab.gitRoot));
@@ -146,6 +147,30 @@ std::shared_ptr<FileResult> readDocument(ProjectProvider& provider, const Resour
     if (static_cast<size_t>(std::count(document->text.begin(), document->text.end(), '\n')) >= maxLines) { result->error = L"This file exceeds the 1,000,000-line preview limit."; return result; }
     document->language = path.filename() == L"CMakeLists.txt" ? Language::Config : languageFor(utf8(path.extension().native()));
     indexDocument(*document); buffer->initialize(std::move(bytes)); buffer->fileVersion = std::move(file.version); result->buffer = std::move(buffer); result->document = std::move(document); return result;
+}
+std::shared_ptr<Document> readWorkingBase(ProjectProvider& provider, const ResourceId& root, const std::string& relative, Language language, const std::atomic<bool>* cancelled) {
+    const auto entries = provider.git({L"git.exe", L"--literal-pathspecs", L"--no-optional-locks", L"ls-files", L"--stage", L"-z", L"--", wide(relative)}, root, cancelled);
+    if (entries.code) return {};
+    std::string object;
+    for (size_t at = 0; at < entries.output.size();) {
+        const auto end = entries.output.find('\0', at);
+        if (end == std::string::npos) return {};
+        const auto entry = entries.output.substr(at, end - at); at = end + 1;
+        const auto space = entry.find(' '), stage = entry.find(' ', space + 1), tab = entry.find('\t', stage + 1);
+        if (space == entry.npos || stage == entry.npos || tab == entry.npos) return {};
+        if (entry.substr(stage + 1, tab - stage - 1) != "0" && entry.substr(stage + 1, tab - stage - 1) != "2") continue;
+        if (entry.substr(0, space) != "100644" && entry.substr(0, space) != "100755") return {};
+        object = entry.substr(space + 1, stage - space - 1); break;
+    }
+    auto document = std::make_shared<Document>(); document->language = language;
+    if (!object.empty()) {
+        if (object.find_first_not_of("0123456789abcdef") != object.npos) return {};
+        const auto blob = provider.git({L"git.exe", L"--no-optional-locks", L"cat-file", L"blob", wide(object)}, root, cancelled);
+        std::string error;
+        if (blob.code || !decodeText(blob.output, document->text, document->encoding, error) ||
+            static_cast<size_t>(std::count(document->text.begin(), document->text.end(), '\n')) >= maxLines) return {};
+    }
+    indexDocument(*document); return document;
 }
 std::wstring trimmed(std::string text) { while (!text.empty() && (text.back() == '\r' || text.back() == '\n')) text.pop_back(); return wide(text); }
 std::shared_ptr<GitResult> readGit(ProjectProvider& provider, const ResourceId& directory, const std::atomic<bool>* cancelled) {
@@ -296,6 +321,7 @@ private:
     void openWithDefaultApp(ResourceId path);
     void revealInFileExplorer(ResourceId path);
     void saveTab();
+    std::shared_ptr<EditBuffer> shareBuffer(const ResourceId& path, std::shared_ptr<EditBuffer> loaded = {});
     bool saveFile(size_t index, bool wait = false);
     bool confirmTab(size_t index);
     void selectTab(size_t index);
@@ -541,7 +567,11 @@ void ProjectRuntime::Impl::create() {
     }
     for (int group = 0; group < 2; ++group) {
         auto& view = viewers_[group]; view.create(window_, instance_);
-        view.changed = [this] { saveTab(); updateTabs(false); if (activeSidebar_ == Sidebar::Search) searchPane_.refresh(); if (owner_ && owner_->changed) owner_->changed(); };
+        view.changed = [this, group] {
+            saveTab();
+            if (viewers_[1 - group].buffer() && viewers_[1 - group].buffer() == viewers_[group].buffer()) viewers_[1 - group].refreshBuffer();
+            updateTabs(false); if (activeSidebar_ == Sidebar::Search) searchPane_.refresh(); if (owner_ && owner_->changed) owner_->changed();
+        };
         view.save = [this, group] { saveFile(groupTab(group)); };
         view.diffLayoutChanged = [this, group] { viewers_[1 - group].setDiffLayout(viewers_[group].diffInline()); };
         view.statusChanged = [this] { statusDirty_ = true; };
@@ -1870,8 +1900,19 @@ void ProjectRuntime::Impl::saveTab() {
         const auto index = groupTab(group); auto& view = viewers_[group];
         if (index >= tabs_.size() || !view.hasDocument()) continue;
         auto& tab = tabs_[index]; (tab.diff ? tab.diffView : tab.fileView) = view.state();
-        if (!tab.diff && view.buffer()) tab.buffer = view.buffer();
+        if (view.buffer()) tab.buffer = view.buffer();
     }
+}
+std::shared_ptr<EditBuffer> ProjectRuntime::Impl::shareBuffer(const ResourceId& path, std::shared_ptr<EditBuffer> loaded) {
+    std::shared_ptr<EditBuffer> buffer;
+    for (const auto& tab : tabs_) if (tab.path == path && tab.buffer) { buffer = tab.buffer; break; }
+    if (!buffer) buffer = std::move(loaded);
+    else if (loaded && !buffer->dirty() && !buffer->saving && (buffer->baseline != loaded->baseline || buffer->fileVersion != loaded->fileVersion)) {
+        *buffer = std::move(*loaded);
+        for (auto& view : viewers_) if (view.buffer() == buffer) view.refreshBuffer();
+    }
+    if (buffer) for (auto& tab : tabs_) if (tab.path == path && !tab.allChanges && (tab.diffKind == GitDiffKind::Automatic || tab.diffKind == GitDiffKind::Changes)) tab.buffer = buffer;
+    return buffer;
 }
 bool ProjectRuntime::Impl::saveFile(size_t index, bool wait) {
     if (gitDiscardPending_ || gitStashPending_) {
@@ -1967,7 +2008,8 @@ void ProjectRuntime::Impl::closeTabs(const std::vector<size_t>& indices) {
     if (std::none_of(closing.begin(), closing.end(), [](bool value) { return value; })) return;
     // Finish every save/discard decision before removing tabs. Cancel or a
     // failed save leaves the whole set open, including its unsaved buffers.
-    for (size_t i = 0; i < tabs_.size(); ++i) if (closing[i] && !confirmTab(i)) return;
+    std::set<const EditBuffer*> confirmed;
+    for (size_t i = 0; i < tabs_.size(); ++i) if (closing[i] && (!tabs_[i].buffer || confirmed.insert(tabs_[i].buffer.get()).second) && !confirmTab(i)) return;
     saveTab(); bool active = false;
     for (int group = 0; group < 2; ++group) {
         const auto selected = groupTab(group);
@@ -2055,11 +2097,16 @@ void ProjectRuntime::Impl::loadTab(bool preserve, int group) {
     const size_t index = groupTab(group); if (index >= tabs_.size()) { viewers_[group].message(L"Select a file."); return; }
     preserve = preserve && viewers_[group].hasDocument();
     const auto& tab = tabs_[index]; const auto path = tab.path;
+    if (!tab.allChanges && (tab.diffKind == GitDiffKind::Automatic || tab.diffKind == GitDiffKind::Changes)) shareBuffer(path);
     const auto state = tab.diff ? tab.diffView : tab.fileView;
     const auto serial = ++serial_[group], generation = generation_;
     if (!tab.diff && tab.buffer && (tab.buffer->dirty() || tab.buffer->saving)) {
         viewers_[group].edit(tab.buffer, path, preserve); if (!preserve) viewers_[group].restore(state);
         status(L"Unsaved changes kept  ·  Ctrl+S: save"); applyContentResult(index); return;
+    }
+    if (tab.diff && tab.buffer && tab.diffBefore && (tab.buffer->dirty() || tab.buffer->saving)) {
+        viewers_[group].editDiff(tab.buffer, tab.diffBefore, path, preserve); if (!preserve) viewers_[group].restore(state);
+        preserve = true;
     }
     if (root_.wsl() && !connected_) { if (!viewers_[group].hasDocument()) viewers_[group].message(connecting_ ? L"Connecting to WSL…" : L"WSL disconnected. Press F5 to reconnect.", path); return; }
     // Retain only tab metadata and view positions; reload the active document.
@@ -2076,8 +2123,8 @@ void ProjectRuntime::Impl::loadTab(bool preserve, int group) {
                     viewers_[group].showImage(result->image, path);
                     status(std::to_wstring(result->image->width) + L" × " + std::to_wstring(result->image->height) + L" px  ·  READ ONLY  ·  F6: diff");
                 } else if (result->document) {
-                    tabs_[groupTab(group)].buffer = result->buffer;
-                    viewers_[group].edit(result->buffer, path, preserve); if (!preserve) viewers_[group].restore(state);
+                    const auto buffer = shareBuffer(path, result->buffer);
+                    viewers_[group].edit(buffer, path, preserve); if (!preserve) viewers_[group].restore(state);
                     status(std::to_wstring(result->document->lines.size()) + L" lines  ·  Ctrl+S: save  ·  F6: diff");
                     applyContentResult(groupTab(group));
                 } else { viewers_[group].message(result->error, path); status(L"Preview unavailable"); }
@@ -2090,8 +2137,9 @@ void ProjectRuntime::Impl::loadTab(bool preserve, int group) {
     if (!repo || !repo->error.empty() || (!tab.gitRoot.empty() && pathKey(repo->root) != pathKey(tab.gitRoot))) { viewers_[group].message(L"Git repository unavailable for this file. Press F5 to refresh.", path); return; }
     const auto root = tab.gitRoot.empty() ? repo->root : tab.gitRoot;
     const auto kind = tab.diffKind; const auto revision = tab.revision; const auto allChanges = tab.allChanges;
+    const bool unsaved = tab.buffer && (tab.buffer->dirty() || tab.buffer->saving);
     const auto roots = git_->roots;
-    gitWorker_->submit(L"diff:" + std::to_wstring(group), [this, group, serial, generation, path, root, preserve, state, kind, revision, allChanges, roots] {
+    gitWorker_->submit(L"diff:" + std::to_wstring(group), [this, group, serial, generation, path, root, preserve, state, kind, revision, allChanges, roots, unsaved] {
         constexpr size_t maxPatchBytes = 4 * 1024 * 1024;
         const auto relative = allChanges ? std::string{} : path.lexically_relative(root).generic_u8string();
         auto readDiff = [&](GitDiffKind scope) {
@@ -2110,7 +2158,14 @@ void ProjectRuntime::Impl::loadTab(bool preserve, int group) {
         };
         auto scope = kind == GitDiffKind::Automatic ? GitDiffKind::Changes : kind;
         auto result = readDiff(scope);
-        if (kind == GitDiffKind::Automatic && result.code == 0 && result.output.empty()) { scope = GitDiffKind::Staged; result = readDiff(scope); }
+        if (kind == GitDiffKind::Automatic && !unsaved && result.code == 0 && result.output.empty()) { scope = GitDiffKind::Staged; result = readDiff(scope); }
+        std::shared_ptr<FileResult> working;
+        std::shared_ptr<Document> before;
+        if (!allChanges && scope == GitDiffKind::Changes) {
+            working = readDocument(*provider_, path);
+            // A missing working file remains a read-only deletion preview.
+            if (working->document) before = readWorkingBase(*provider_, root, relative, working->document->language, gitWorker_->cancellation());
+        }
         std::vector<ResourceId> untracked;
         if (!result.code && allChanges && kind == GitDiffKind::Changes) {
             auto status = provider_->git(gitArguments(gitStatusArguments()), root, gitWorker_->cancellation());
@@ -2138,8 +2193,16 @@ void ProjectRuntime::Impl::loadTab(bool preserve, int group) {
         if (result.code == 0 && static_cast<size_t>(std::count(result.output.begin(), result.output.end(), '\n')) >= maxLines) { result.code = 1; result.error = L"Diff exceeds the 1,000,000-line preview limit."; }
         if (result.code == 0) { doc->patch.text = std::move(result.output); indexDiff(*doc, true); }
         const auto error = result.error; const auto code = result.code;
-        gitWorker_->complete([this, group, serial, generation, path, doc, code, error, scope, preserve, state, allChanges] {
+        gitWorker_->complete([this, group, serial, generation, path, doc, code, error, scope, preserve, state, allChanges, working, before] {
             if (generation != generation_ || serial != serial_[group]) return;
+            const auto index = groupTab(group);
+            if (before && working && working->buffer) {
+                const auto buffer = shareBuffer(path, working->buffer); tabs_[index].diffBefore = before;
+                viewers_[group].editDiff(buffer, before, path, preserve); if (!preserve) viewers_[group].restore(state);
+                status(L"Working tree diff · Ctrl+S: save · F7: split / inline"); return;
+            }
+            // Failed or stale refreshes must not replace an unsaved editor.
+            if (viewers_[group].buffer() && (viewers_[group].buffer()->dirty() || viewers_[group].buffer()->saving)) return;
             if (code) viewers_[group].message(error, path);
             else if (doc->patch.text.empty()) viewers_[group].message(L"No changes to display.", path);
             else if (doc->rows.empty()) viewers_[group].message(L"No text changes to display.", path);
@@ -2462,7 +2525,14 @@ void ProjectRuntime::shutdown() {
     if (impl_->worker_) impl_->worker_->stop();
     impl_->terminal_.stop();
 }
-bool ProjectRuntime::canClose() { if (impl_->gitDiscardPending_ || impl_->gitStashPending_) { impl_->gitWorker_->drain(); impl_->gitWorker_->dispatch(); if (impl_->gitDiscardPending_ || impl_->gitStashPending_) return false; } if (impl_->renamePending_ || impl_->pastePending_ || impl_->createPending_) { impl_->worker_->drain(); impl_->worker_->dispatch(); } impl_->saveTab(); for (size_t i = 0; i < impl_->tabs_.size(); ++i) if (!impl_->confirmTab(i)) return false; return true; }
+bool ProjectRuntime::canClose() {
+    if (impl_->gitDiscardPending_ || impl_->gitStashPending_) { impl_->gitWorker_->drain(); impl_->gitWorker_->dispatch(); if (impl_->gitDiscardPending_ || impl_->gitStashPending_) return false; }
+    if (impl_->renamePending_ || impl_->pastePending_ || impl_->createPending_) { impl_->worker_->drain(); impl_->worker_->dispatch(); }
+    impl_->saveTab(); std::set<const EditBuffer*> confirmed;
+    for (size_t i = 0; i < impl_->tabs_.size(); ++i)
+        if ((!impl_->tabs_[i].buffer || confirmed.insert(impl_->tabs_[i].buffer.get()).second) && !impl_->confirmTab(i)) return false;
+    return true;
+}
 void ProjectRuntime::revalidate() { PostMessageW(window(), WM_APP+13, 0, 0); }
 void ProjectRuntime::initialize(const ResourceId& path, const ProjectSession& state, bool saved) { if (saved) impl_->initialState_ = state; impl_->openFolder(path); }
 void ProjectRuntime::activate(bool active) {
@@ -2503,7 +2573,7 @@ size_t ProjectRuntime::documentBytes() const {
 }
 void ProjectRuntime::releaseDocument() {
     impl_->saveTab(); if (std::any_of(impl_->tabs_.begin(), impl_->tabs_.end(), [](const Tab& tab) { return tab.buffer && (tab.buffer->dirty() || tab.buffer->saving); })) return;
-    for (auto& tab : impl_->tabs_) tab.buffer.reset();
+    for (auto& tab : impl_->tabs_) { tab.buffer.reset(); tab.diffBefore.reset(); }
     for (int group = 0; group < 2; ++group) { ++impl_->serial_[group]; impl_->waitingForGit_[group] = false; impl_->viewers_[group].message(L"Loading…"); }
 }
 HWND ProjectRuntime::window() const { return impl_->window_; }
