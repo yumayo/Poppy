@@ -99,6 +99,7 @@ private:
     TreeInput renameInput_;
     HWND actionTips_ = nullptr;
     TreeItem hotItem_ = 0;
+    int hotAction_ = -1;
     bool trackingMouse_ = false;
     std::wstring actionTip_;
     TreeItem renaming_ = 0;

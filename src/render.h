@@ -54,7 +54,7 @@ public:
     bool begin(IWICBitmap* bitmap);
     HRESULT end();
     void discard();
-    void fill(const RECT& rect, COLORREF color);
+    void fill(const RECT& rect, COLORREF color, float opacity = 1.0f);
     void fillRounded(const RECT& rect, COLORREF color, float radius);
     int textWidth(const std::wstring& text) const;
     void label(const RECT& rect, const std::wstring& text, COLORREF color,
@@ -69,7 +69,7 @@ public:
     bool drawImage(const RECT& bounds, int checkerSize);
 private:
     bool prepare(HRESULT result);
-    void color(COLORREF value);
+    void color(COLORREF value, float opacity = 1.0f);
     HWND window_ = nullptr;
     ComPtr<ID2D1HwndRenderTarget> windowTarget_;
     ComPtr<ID2D1RenderTarget> bitmapTarget_;

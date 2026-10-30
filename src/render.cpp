@@ -269,12 +269,12 @@ HRESULT Renderer::end() {
     }
     return result;
 }
-void Renderer::color(COLORREF value) {
-    brush_->SetColor(D2D1::ColorF(GetRValue(value) / 255.0f, GetGValue(value) / 255.0f, GetBValue(value) / 255.0f));
+void Renderer::color(COLORREF value, float opacity) {
+    brush_->SetColor(D2D1::ColorF(GetRValue(value) / 255.0f, GetGValue(value) / 255.0f, GetBValue(value) / 255.0f, opacity));
 }
-void Renderer::fill(const RECT& rect, COLORREF value) {
+void Renderer::fill(const RECT& rect, COLORREF value, float opacity) {
     if (empty(rect)) return;
-    color(value); target_->FillRectangle(rectangle(rect), brush_.get());
+    color(value, opacity); target_->FillRectangle(rectangle(rect), brush_.get());
 }
 void Renderer::fillRounded(const RECT& rect, COLORREF value, float radius) {
     if (empty(rect)) return;

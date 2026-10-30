@@ -222,8 +222,13 @@ bool Tree::actionVisible(TreeItem id, unsigned slot) const {
 void Tree::hover(POINT point) {
     const auto content = Scrollbars::contentRect(window_);
     const auto id = IsWindowVisible(window_) && PtInRect(&content, point) ? hit(point.y) : 0;
-    if (hotItem_ != id) {
-        hotItem_ = id;
+    int action = -1;
+    for (const unsigned slot : {0u, 1u, 2u, 3u}) {
+        const auto bounds = actionBounds(id, slot);
+        if (PtInRect(&bounds, point)) { action = static_cast<int>(slot); break; }
+    }
+    if (hotItem_ != id || hotAction_ != action) {
+        hotItem_ = id; hotAction_ = action;
         SendMessageW(actionTips_, TTM_POP, 0, 0);
         InvalidateRect(window_, nullptr, FALSE);
     }
@@ -272,7 +277,8 @@ void Tree::paint() {
             node->text, node->color, DT_LEFT | DT_VCENTER | DT_SINGLELINE | (action.right ? DT_END_ELLIPSIS : 0));
         for (const unsigned slot : {0u, 1u, 2u, 3u}) if (actionVisible(row.item, slot)) {
             const auto bounds = actionBounds(row.item, slot);
-            renderer_.fill(bounds, hotItem_ == row.item ? RGB(50, 70, 94) : background);
+            if (hotItem_ == row.item && hotAction_ == static_cast<int>(slot))
+                renderer_.fill(bounds, RGB(255, 255, 255), 0.1f);
             RECT icon = bounds; InflateRect(&icon, -MulDiv(3, dpi_, 96), -MulDiv(3, dpi_, 96));
             const auto& actionIconFor = slot == 3 ? quaternaryActionIcon : slot == 2 ? tertiaryActionIcon : slot == 1 ? secondaryActionIcon : actionIcon;
             renderer_.icon(actionIconFor ? actionIconFor(row.item) : Renderer::Icon::OpenAllChanges, icon, accent);
