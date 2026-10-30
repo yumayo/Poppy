@@ -489,6 +489,7 @@ LRESULT Tree::handle(UINT m, WPARAM a, LPARAM b) {
     case treeGetSelection: return static_cast<LRESULT>(selection());
     case treeGetRow: return row(static_cast<TreeItem>(a));
     case treeGetRowHeight: return rowHeight_;
+    case treeGetColor: { const auto node = item(static_cast<TreeItem>(a)); return node ? node->color : 0; }
     default: return DefWindowProcW(window_, m, a, b);
     }
 }

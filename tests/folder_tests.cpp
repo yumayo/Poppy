@@ -1366,6 +1366,49 @@ void gitSidebarTests(const fs::path& executable) {
         waitFor([&] { return IsWindowVisible(changes) && gitChangeCount(changes) == 5; }, "Restart lost the Git List layout");
     }
 }
+void gitIgnoredExplorerTests(const fs::path& executable) {
+    wchar_t git[MAX_PATH]{};
+    const auto length = SearchPathW(nullptr, L"git.exe", nullptr, MAX_PATH, git, nullptr);
+    if (!length || length >= MAX_PATH) { std::cout << "Git ignore GUI tests skipped: Git for Windows is not on PATH.\n"; return; }
+    Fixture fixture;
+    const auto runGit = [&](const std::wstring& args) {
+        std::wstring command = L"\"" + std::wstring(git) + L"\" " + args;
+        STARTUPINFOW startup{}; startup.cb = sizeof(startup); PROCESS_INFORMATION process{};
+        check(CreateProcessW(git, command.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, fixture.root.c_str(), &startup, &process) != FALSE, "Cannot start ignore fixture Git");
+        CloseHandle(process.hThread); const auto wait = WaitForSingleObject(process.hProcess, 5000);
+        if (wait != WAIT_OBJECT_0) { TerminateProcess(process.hProcess, 1); WaitForSingleObject(process.hProcess, 1000); }
+        DWORD code = 1; GetExitCodeProcess(process.hProcess, &code); CloseHandle(process.hProcess);
+        check(wait == WAIT_OBJECT_0 && !code, "Ignore fixture Git failed");
+    };
+    runGit(L"init --quiet --template=\"\""); runGit(L"config core.excludesFile \"\"");
+    writeLines(fixture.root / L"tracked.tmp", 100); runGit(L"add -- tracked.tmp");
+    fs::create_directory(fixture.root / L"a-ignored"); writeLines(fixture.root / L"a-ignored" / L"child.txt", 200);
+    for (const auto name : {L"a.tmp", L"keep.tmp", L"visible.txt"}) writeLines(fixture.root / name, 100);
+    const auto rules = [&](const char* text) { std::ofstream file(fixture.root / L".gitignore", std::ios::binary); file << text; file.close(); check(!file.fail(), "Cannot write ignore rules"); };
+    rules("*.tmp\n!keep.tmp\na-ignored/\n");
+    Application app(executable, fixture.root); const auto tree = app.tree();
+    const auto root = nextItem(tree, TreeRelation::Root);
+    std::vector<TreeItem> items;
+    waitFor([&] {
+        items.clear();
+        for (auto item = nextItem(tree, TreeRelation::Child, root); item; item = nextItem(tree, TreeRelation::Next, item)) items.push_back(item);
+        return items.size() == 7;
+    }, "Ignore fixture did not load");
+    const auto dimmed = [&](TreeItem item) { return send(tree, treeGetColor, item) == RGB(132, 145, 164); };
+    // Folders precede files: .git, a-ignored, .gitignore, a.tmp, keep.tmp,
+    // tracked.tmp, visible.txt. Tracked names retain their Git status colors.
+    waitFor([&] { return dimmed(items[1]) && dimmed(items[3]) && !dimmed(items[4]) && !dimmed(items[5]) && !dimmed(items[6]); }, "Ignored Explorer names did not use the muted color");
+    expand(tree, items[1]); TreeItem child = 0;
+    waitFor([&] { child = nextItem(tree, TreeRelation::Child, items[1]); return child && dimmed(child); }, "An ignored folder's child was not dimmed");
+    send(tree, treeSelect, child); waitLines(FindWindowExW(app.window, nullptr, L"PoppyViewer", nullptr), 200);
+    rules("*.tmp\n");
+    waitFor([&] { return !dimmed(items[1]) && !dimmed(child) && dimmed(items[4]); }, "Editing ignore rules did not update retained Explorer names");
+    check(expanded(tree, items[1]) && send(tree, treeGetSelection) == static_cast<LRESULT>(child), "Recoloring changed expansion or selection");
+    runGit(L"add --force -- a.tmp");
+    waitFor([&] { return !dimmed(items[3]); }, "A newly tracked ignored file stayed dimmed");
+    rules("");
+    waitFor([&] { return !dimmed(items[4]); }, "Removing ignore rules left a file dimmed");
+}
 void gitAutoRefreshTests(const fs::path& executable) {
     wchar_t git[MAX_PATH]{};
     const auto length = SearchPathW(nullptr, L"git.exe", nullptr, MAX_PATH, git, nullptr);
@@ -2325,7 +2368,7 @@ int wmain(int argc, wchar_t** argv) {
         check(argc == 2, "Pass the path to Poppy.exe");
         SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         for (const auto test : {folderTests, sidebarTests, treeInteractionTests, tabTests, pinnedTabTests,
-                tabDragTests, wrappingTabDragTests, wrappingTabTests, renameTests, explorerMoveTests, explorerDeleteTests, createItemTests, newFileShortcutTests, pasteImageTests, splitPaneTests, quickOpenTests, fullSearchTests, gitSidebarTests, gitAutoRefreshTests, branchSidebarTests, multiRepositoryTests, sessionTests, multiProjectTests, recentProjectTests, projectDragTests, scrollingProjectDragTests, terminalTitleTests, terminalShellTests, terminalShortcutTests, terminalBackspaceTests}) {
+                tabDragTests, wrappingTabDragTests, wrappingTabTests, renameTests, explorerMoveTests, explorerDeleteTests, createItemTests, newFileShortcutTests, pasteImageTests, splitPaneTests, quickOpenTests, fullSearchTests, gitSidebarTests, gitIgnoredExplorerTests, gitAutoRefreshTests, branchSidebarTests, multiRepositoryTests, sessionTests, multiProjectTests, recentProjectTests, projectDragTests, scrollingProjectDragTests, terminalTitleTests, terminalShellTests, terminalShortcutTests, terminalBackspaceTests}) {
             Fixture appData; AppDataEnvironment environment(appData.root);
             test(fs::absolute(argv[1]));
         }

@@ -1,5 +1,6 @@
 #include "git_history.h"
 #include "git_repositories.h"
+#include "git_ignore.h"
 #include "diff.h"
 #include <algorithm>
 #include <chrono>
@@ -55,6 +56,35 @@ void repositoryOwnership() {
     check(gitRepositoryFor({client}, app / std::string_view("App-client/same.txt")).empty(), "Repository lookup folded a WSL path's case");
     check(gitRepositoryFor(roots, server) == server, "All Changes selected the wrong repository");
 }
+void ignoredNameBatches() {
+    size_t calls = 0;
+    check(gitIgnoredNames({}, [&](const auto&) -> std::optional<std::string> { ++calls; return {}; }).empty() && !calls,
+        "An empty directory launched Git");
+    const std::vector<std::string> special{"日本語.tmp", "tab\t.tmp", "line\n.tmp", "back\\slash.tmp", "quote\".tmp", "-option.tmp"};
+    const auto parsed = gitIgnoredNames(special, [&](const auto& args) -> std::optional<std::string> {
+        check(args[5] == "--" && args.back() == "./-option.tmp", "A filename became a Git option");
+        return "\"./\\346\\227\\245\\346\\234\\254\\350\\252\\236.tmp\"\n\"./tab\\t.tmp\"\n\"./line\\n.tmp\"\n\"./back\\\\slash.tmp\"\n\"./quote\\\".tmp\"\n./-option.tmp\n";
+    });
+    check(parsed == std::unordered_set<std::string>(special.begin(), special.end()), "Quoted Git paths lost Unicode or control characters");
+    std::vector<std::string> many;
+    for (size_t i = 0; i < 120; ++i) many.push_back(std::to_string(i) + std::string(245, 'a'));
+    calls = 0;
+    const auto ignored = gitIgnoredNames(many, [&](const auto& args) -> std::optional<std::string> {
+        ++calls; size_t bytes = 0; std::string output;
+        check(args.size() <= 54, "Ignore queries exceeded the WSL Git argument limit");
+        for (size_t i = 6; i < args.size(); ++i) { bytes += args[i].size() + 1; output += args[i] + "\r\n"; }
+        check(bytes <= 8000, "Ignore queries exceeded the Windows command-line budget");
+        return output;
+    });
+    check(calls > 1 && calls < many.size() && ignored.size() == many.size(), "Ignore batching dropped names or launched Git per file");
+    calls = 0;
+    check(gitIgnoredNames(many, [&](const auto&) -> std::optional<std::string> {
+        if (++calls == 1) return "./" + many.front() + "\n";
+        return std::nullopt;
+    }).empty() && calls == 2, "A failed query left a partially dimmed directory");
+    check(gitIgnoredNames({"partial"}, [](const auto&) -> std::optional<std::string> { return "./partial"; }).empty(),
+        "Truncated Git output was used as an ignore decision");
+}
 void patchLists() {
     DiffDocument diff;
     diff.patch.text = "diff --git a/one b/one\n@@ -1 +1 @@\n-old\n+new\n" + untrackedPatch("two 日本語.txt", "hello\nlast") +
@@ -76,7 +106,7 @@ struct Repository {
     fs::path path = fs::temp_directory_path() / ("poppy-git-history-" + std::to_string(getpid()) + "-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
     Repository() { fs::create_directories(path); }
     ~Repository() { std::error_code error; fs::remove_all(path, error); }
-    std::string git(std::vector<std::string> args) const {
+    std::string git(std::vector<std::string> args, bool allowNoMatches = false) const {
         if (!args.empty() && args.front() == "git.exe") args.erase(args.begin());
         args.insert(args.begin(), {"git", "-C", path.string()});
         std::vector<char*> argv;
@@ -91,7 +121,7 @@ struct Repository {
         close(pipes[1]); std::string output; char buffer[4096]; ssize_t count;
         while ((count = read(pipes[0], buffer, sizeof(buffer))) > 0) output.append(buffer, static_cast<size_t>(count));
         close(pipes[0]); int status = 0; waitpid(child, &status, 0);
-        if (!WIFEXITED(status) || WEXITSTATUS(status)) throw std::runtime_error("Git fixture command failed: " + output);
+        if (!WIFEXITED(status) || (WEXITSTATUS(status) && !(allowNoMatches && WEXITSTATUS(status) == 1))) throw std::runtime_error("Git fixture command failed: " + output);
         return output;
     }
     void write(const std::string& name, const std::string& text) const {
@@ -121,6 +151,38 @@ struct Repository {
         if (!args.empty()) git(args);
     }
 };
+void repositoryIgnores() {
+    Repository repo;
+    repo.git({"init", "-q", "--template="});
+    repo.git({"config", "core.excludesFile", "/dev/null"});
+    repo.write("tracked.tmp", "tracked\n"); repo.git({"add", "--", "tracked.tmp"});
+    repo.write(".gitignore", "*.tmp\n!keep.tmp\nignored/\n/root-only.dat\n");
+    repo.write("nested/.gitignore", "*.dat\n!important.dat\n");
+    const std::vector<std::string> unusual{"日本語.tmp", "with space.tmp", "tab\t.tmp", "line\n.tmp", "carriage\r.tmp", "back\\slash.tmp", "quote\".tmp", "-option.tmp", "[literal].tmp"};
+    for (const auto& name : unusual) repo.write(name, "ignored\n");
+    repo.write("keep.tmp", "exception\n"); repo.write("visible.txt", "visible\n");
+    repo.write("ignored/child.txt", "inherited\n"); repo.write("root-only.dat", "root\n");
+    auto query = [&](const std::string& directory, const std::vector<std::string>& names) {
+        return gitIgnoredNames(names, [&](auto args) -> std::optional<std::string> {
+            args.insert(args.begin() + 1, {"-C", (repo.path / directory).string()});
+            return repo.git(std::move(args), true);
+        });
+    };
+    auto names = unusual; names.insert(names.end(), {"tracked.tmp", "keep.tmp", "visible.txt", "ignored", "nested", "root-only.dat"});
+    auto expected = std::unordered_set<std::string>(unusual.begin(), unusual.end()); expected.insert("ignored"); expected.insert("root-only.dat");
+    check(query("", names) == expected, "Git ignores lost names, directory rules, exceptions, or tracked-file protection");
+    check(query("ignored", {"child.txt"}) == std::unordered_set<std::string>{"child.txt"}, "Children of an ignored directory were not dimmed");
+    repo.write("nested/local.dat", "nested rule\n"); repo.write("nested/important.dat", "nested exception\n"); repo.write("nested/child.tmp", "parent rule\n");
+    check(query("nested", {"local.dat", "important.dat", "child.tmp"}) == std::unordered_set<std::string>{"local.dat", "child.tmp"},
+        "Nested ignore rules or inherited file patterns were lost");
+    repo.git({"-C", (repo.path / "nested").string(), "init", "-q", "--template="});
+    check(query("nested", {"local.dat", "important.dat", "child.tmp"}) == std::unordered_set<std::string>{"local.dat"},
+        "An inner repository inherited its parent's ignore rules");
+    repo.write(".gitignore", "");
+    check(query("", names).empty() && query("ignored", {"child.txt"}).empty(), "Removing ignore rules left stale ignored names");
+    repo.write(".git/info/exclude", "visible.txt\n");
+    check(query("", {"visible.txt", "keep.tmp"}) == std::unordered_set<std::string>{"visible.txt"}, "Repository excludes were not respected");
+}
 void multipleRepositories() {
     Repository fixture;
     const auto app = fixture.path / "app", client = app / "app-client", server = app / "app-server";
@@ -679,9 +741,9 @@ void repositoryHistory() {
 }
 int main() {
     try {
-        statusGroups(); records(); patchLists(); repositoryOwnership();
+        statusGroups(); records(); patchLists(); repositoryOwnership(); ignoredNameBatches();
 #ifndef _WIN32
-        repositoryStaging(); repositoryStageAll(); repositoryUnstageAll(); repositoryDiscardAll(); repositoryDiscardFile(); repositoryStashUnstaged(); repositoryStashStaged(); repositorySyntax(); repositoryHistory(); multipleRepositories();
+        repositoryIgnores(); repositoryStaging(); repositoryStageAll(); repositoryUnstageAll(); repositoryDiscardAll(); repositoryDiscardFile(); repositoryStashUnstaged(); repositoryStashStaged(); repositorySyntax(); repositoryHistory(); multipleRepositories();
 #endif
         std::cout << "Git history tests passed.\n"; return 0;
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }

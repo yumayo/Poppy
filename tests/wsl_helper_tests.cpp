@@ -1,5 +1,6 @@
 #include "wsl_protocol.h"
 #include "git_history.h"
+#include "git_ignore.h"
 #include "content_search_protocol.h"
 #include "wsl_bootstrap.h"
 #include "explorer_history.h"
@@ -512,6 +513,12 @@ void gitAndCancellation(const std::string& executable) {
             write(fixture.root/"tracked 日本語.txt","discard this\n");
             git({"config","core.excludesFile","/dev/null"});
             write(fixture.root/".git/info/exclude","ignored.txt\n"); write(fixture.root/"ignored.txt","keep\n");
+            const auto ignoredNames = poppy::gitIgnoredNames({"ignored.txt", "tracked 日本語.txt", "untracked \\ '$.txt"}, [&](auto args) -> std::optional<std::string> {
+                args.erase(args.begin()); const auto result = git(std::move(args));
+                if (number(result.metadata, "exitCode") > 1) return std::nullopt;
+                return result.bytes;
+            });
+            check(ignoredNames == std::unordered_set<std::string>{"ignored.txt"}, "WSL Git ignore classification changed tracked or visible names");
             const auto discardStatus = git({"status","--porcelain=v1","-z","--untracked-files=all"});
             for (auto command : poppy::gitDiscardAllArguments(poppy::parseGitStatus(discardStatus.bytes))) {
                 command.erase(command.begin());

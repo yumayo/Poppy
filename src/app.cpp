@@ -4,6 +4,7 @@
 #include "tree.h"
 #include "git_changes.h"
 #include "git_history.h"
+#include "git_ignore.h"
 #include "activity_button.h"
 #include "quick_open.h"
 #include "search_pane.h"
@@ -40,9 +41,22 @@ struct Node {
     bool directory, loaded = false, loading = false, reparse = false;
     // Keep expansion intent while loading, even when an empty item cannot expand.
     bool expandRequested = false;
-    bool unsupported = false, truncated = false; std::wstring label;
+    bool unsupported = false, truncated = false, ignored = false; std::wstring label;
 };
-using DirectoryResult = ProviderListing;
+struct DirectoryResult : ProviderListing { std::unordered_set<std::string> ignored; };
+
+std::unordered_set<std::string> ignoredNames(ProjectProvider& provider, const ResourceId& directory, const std::vector<std::string>& names,
+    const std::atomic<bool>* cancelled) {
+    return gitIgnoredNames(names, [&](const std::vector<std::string>& arguments) -> std::optional<std::string> {
+        std::vector<std::wstring> args;
+        for (const auto& arg : arguments) args.push_back(wide(arg));
+        const auto result = provider.git(args, directory, cancelled);
+        if (result.code > 1) return std::nullopt;
+        // Process-launch/timeout failures also use code 1, with an error.
+        if (result.code == 1 && !result.error.empty()) return std::nullopt;
+        return result.output;
+    });
+}
 struct FileResult { std::shared_ptr<EditBuffer> buffer; std::shared_ptr<Document> document; std::wstring error; std::shared_ptr<const ImagePreview> image; };
 struct Tab {
     ResourceId path; bool diff = false; Viewer::State fileView, diffView; bool pinned = false;
@@ -1252,7 +1266,7 @@ void ProjectRuntime::Impl::updateLabel(TreeItem item) {
     std::wstring text = n->unsupported ? n->label + L"  [unsupported encoding]" : n->path.filename().empty() ? n->path.native() : n->path.filename().native();
     if (n->directory && n->reparse) text += L"  [link]";
     const auto state = stateFor(n->path);
-    explorer_.label(item, std::move(text), state ? stateColor(state) : foreground);
+    explorer_.label(item, std::move(text), n->ignored ? muted : state ? stateColor(state) : foreground);
 }
 bool ProjectRuntime::Impl::canPasteImage(TreeItem item) const {
     const auto n = node(item ? item : rootItem_);
@@ -1671,7 +1685,13 @@ void ProjectRuntime::Impl::requestDirectory(TreeItem item) {
     if (n->loading) return;
     n->loading = true; const auto path = n->path; const auto id = n->id, generation = generation_;
     worker_->submit(L"dir:" + std::to_wstring(id), [this, path, id, generation] {
-        auto result = std::make_shared<DirectoryResult>(provider_->listDirectory(path));
+        auto result = std::make_shared<DirectoryResult>();
+        static_cast<ProviderListing&>(*result) = provider_->listDirectory(path);
+        if (result->error.empty()) {
+            std::vector<std::string> names;
+            for (const auto& entry : result->entries) if (!entry.unsupported) names.push_back(entry.path.filename().u8string());
+            result->ignored = ignoredNames(*provider_, path, names, worker_->cancellation());
+        }
         worker_->complete([this, result, id, generation] {
             if (generation != generation_) return;
             const auto found = nodes_.find(id); if (found == nodes_.end()) return;
@@ -1697,11 +1717,16 @@ void ProjectRuntime::Impl::applyDirectory(TreeItem item, Node* directory, const 
         const auto found = existing.find(entry.unsupported ? L"unsupported:" + entry.label : pathKey(entry.path));
         if (found != existing.end()) {
             auto n = node(found->second);
-            if (n && n->directory == entry.directory && n->reparse == entry.reparse && n->unsupported == entry.unsupported) { existing.erase(found); continue; }
+            if (n && n->directory == entry.directory && n->reparse == entry.reparse && n->unsupported == entry.unsupported) {
+                n->ignored = !entry.unsupported && result.ignored.count(entry.path.filename().u8string());
+                updateLabel(found->second); existing.erase(found); continue;
+            }
             if (n) forgetExpanded(n->path);
             explorer_.erase(found->second); existing.erase(found);
         }
-        if (!insert(item, entry)) truncated = true;
+        const auto child = insert(item, entry);
+        if (!child) truncated = true;
+        else { node(child)->ignored = !entry.unsupported && result.ignored.count(entry.path.filename().u8string()); updateLabel(child); }
     }
     for (const auto& stale : existing) { if (const auto n = node(stale.second)) forgetExpanded(n->path); explorer_.erase(stale.second); }
     explorer_.sort(item, [](uintptr_t a, uintptr_t b) {
@@ -2099,9 +2124,24 @@ void ProjectRuntime::Impl::refreshGit(bool rescan) {
     if (rescan) { gitScanDirty_ = true; ++gitScanRevision_; }
     const auto scanRevision = gitScanRevision_;
     const auto generation = generation_; const auto root = root_; const auto cached = gitScanDirty_ ? nullptr : git_;
-    gitWorker_->submit(L"git", [this, root, generation, cached, scanRevision] {
+    // Directory refreshes classify new entries themselves. Git-only updates
+    // must also recheck retained entries (ignore rules or the index may change).
+    struct IgnoreGroup { ResourceId directory; std::vector<std::string> names; std::vector<uint64_t> ids; };
+    std::map<std::wstring, IgnoreGroup> ignoreGroups;
+    if (!rescan) for (const auto& pair : nodes_) if (const auto n = node(pair.second); n && !n->unsupported && pair.second != rootItem_) {
+        const auto directory = n->path.parent_path();
+        auto& group = ignoreGroups[pathKey(directory)]; group.directory = directory;
+        group.names.push_back(n->path.filename().u8string()); group.ids.push_back(n->id);
+    }
+    gitWorker_->submit(L"git", [this, root, generation, cached, scanRevision, ignoreGroups = std::move(ignoreGroups)] {
         auto result = readGitWorkspace(*provider_, root, gitWorker_->cancellation(), cached ? &cached->scan : nullptr);
-        gitWorker_->complete([this, generation, result, scanRevision] {
+        std::vector<std::pair<uint64_t, bool>> ignored;
+        for (const auto& pair : ignoreGroups) {
+            const auto& group = pair.second;
+            const auto names = ignoredNames(*provider_, group.directory, group.names, gitWorker_->cancellation());
+            for (size_t i = 0; i < group.names.size(); ++i) ignored.emplace_back(group.ids[i], names.count(group.names[i]) != 0);
+        }
+        gitWorker_->complete([this, generation, result, scanRevision, ignored = std::move(ignored)] {
             if (generation != generation_) return;
             if (scanRevision == gitScanRevision_) gitScanDirty_ = false;
             git_ = result;
@@ -2109,7 +2149,14 @@ void ProjectRuntime::Impl::refreshGit(bool rescan) {
             if (result->repositories.empty()) {
                 changes_.clear(); branchesLoaded_ = branchesLoading_ = false; branchError_.clear(); ++branchRequest_;
             }
-            { Tree::Batch batch(explorer_); for (const auto& pair : nodes_) updateLabel(pair.second); }
+            {
+                Tree::Batch batch(explorer_);
+                for (const auto& value : ignored) {
+                    const auto found = nodes_.find(value.first);
+                    if (found != nodes_.end()) if (const auto n = node(found->second)) n->ignored = value.second;
+                }
+                for (const auto& pair : nodes_) updateLabel(pair.second);
+            }
             updateGitFiles();
             refreshBranches();
             for (int group = 0; group < 2; ++group) if (waitingForGit_[group]) loadTab(false, group);

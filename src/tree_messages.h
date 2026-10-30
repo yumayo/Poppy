@@ -12,5 +12,5 @@ constexpr UINT treeGetNext = WM_USER + 1, treeGetCount = WM_USER + 2,
     treeGetExpanded = WM_USER + 3, treeSelect = WM_USER + 4,
     treeGetSelection = WM_USER + 5, treeGetRow = WM_USER + 6,
     treeGetRowHeight = WM_USER + 7, treeCanUndo = WM_USER + 8,
-    treeCanRedo = WM_USER + 9;
+    treeCanRedo = WM_USER + 9, treeGetColor = WM_USER + 10;
 }
