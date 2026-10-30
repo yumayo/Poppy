@@ -53,6 +53,8 @@ public:
     std::function<void(TreeItem)> revealInFileExplorerRequested;
     std::function<bool(TreeItem)> canPasteImage;
     std::function<void(TreeItem)> pasteImageRequested;
+    std::function<bool()> canUndo, canRedo;
+    std::function<void()> undoRequested, redoRequested;
     std::function<void(TreeItem)> activated;
     std::function<void(TreeItem, bool)> expanded;
     std::function<void(uintptr_t)> removed;

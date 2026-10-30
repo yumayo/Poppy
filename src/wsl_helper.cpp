@@ -457,7 +457,7 @@ void Server::execute(const std::shared_ptr<Request>& r) {
         if (op == "hello") {
             if (number(r->message, "protocolVersion") != protocolVersion) throw std::runtime_error("WSL protocol version mismatch");
             utsname system{}; if (uname(&system)) failure("Cannot detect architecture");
-            reply(*r, {{"protocolVersion", std::to_string(protocolVersion)}, {"helperVersion", helperVersion}, {"uid", std::to_string(getuid())}, {"home", home()}, {"shell", shell()}, {"executable", real("/proc/self/exe")}, {"architecture", system.machine}, {"capabilities", "list,read,save,create,mkdir,rename,index,git,repositories,inotify,terminal,search"}, {"done", "1"}});
+            reply(*r, {{"protocolVersion", std::to_string(protocolVersion)}, {"helperVersion", helperVersion}, {"uid", std::to_string(getuid())}, {"home", home()}, {"shell", shell()}, {"executable", real("/proc/self/exe")}, {"architecture", system.machine}, {"capabilities", "list,read,save,create,mkdir,rename,remove,index,git,repositories,inotify,terminal,search"}, {"done", "1"}});
         } else if (op == "connect") {
             const auto p = real(path(r->message)); struct stat info{}; if (stat(p.c_str(), &info)) failure("Cannot inspect project"); if (!S_ISDIR(info.st_mode)) throw std::runtime_error("The project path is not a directory"); watch(p); reply(*r, {{"path", p}, {"done", "1"}});
         } else if (op == "stat") {
@@ -473,15 +473,23 @@ void Server::execute(const std::shared_ptr<Request>& r) {
             reply(*r, {{"body", "1"}, {"size", std::to_string(snapshot.bytes.size())}, {"version", snapshot.version}}); body(*r, snapshot.bytes); reply(*r, {{"done", "1"}});
         } else if (op == "saveFile") save(*r);
         else if (op == "createFile") create(*r);
+        else if (op == "removeResource") {
+            std::error_code error;
+            std::filesystem::remove_all(std::filesystem::path(path(r->message)), error);
+            if (error) throw std::runtime_error("Cannot remove Undo backup: " + error.message());
+            reply(*r, {{"done", "1"}});
+        }
         else if (op == "createDirectory") {
             const auto p = path(r->message);
+            bool created = true;
             if (mkdir(p.c_str(), 0777)) {
                 if (errno != EEXIST || field(r->message, "allowExisting") != "1") failure("Cannot create folder without overwriting");
                 struct stat info{};
                 if (lstat(p.c_str(), &info)) failure("Cannot inspect intermediate folder");
                 if (!S_ISDIR(info.st_mode)) throw std::runtime_error("An intermediate path component is not a folder or is a link");
+                created = false;
             }
-            reply(*r, {{"done", "1"}});
+            reply(*r, {{"created", created ? "1" : "0"}, {"done", "1"}});
         }
         else if (op == "renameResource") {
             const auto p = path(r->message); const auto name = field(r->message, "name");

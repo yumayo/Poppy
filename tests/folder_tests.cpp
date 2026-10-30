@@ -145,6 +145,17 @@ RECT bounds(HWND parent, HWND child) {
     MapWindowPoints(nullptr, parent, reinterpret_cast<POINT*>(&rect), 2);
     return rect;
 }
+void controlKey(const Application& app, HWND target, WPARAM key, bool shift = false) {
+    const bool redo = key == 'Y' || shift;
+    waitFor([&] { return send(target, redo ? treeCanRedo : treeCanUndo) != 0; }, "Explorer operation did not become available");
+    check(AttachThreadInput(GetCurrentThreadId(), app.process.dwThreadId, TRUE) != FALSE, "Cannot attach Explorer history input");
+    BYTE previous[256]{}, keys[256]{}; GetKeyboardState(previous);
+    keys[VK_CONTROL] = keys[VK_LCONTROL] = 0x80;
+    if (shift) keys[VK_SHIFT] = keys[VK_LSHIFT] = 0x80;
+    SetKeyboardState(keys); send(target, WM_KEYDOWN, key); SetKeyboardState(previous);
+    AttachThreadInput(GetCurrentThreadId(), app.process.dwThreadId, FALSE);
+    waitFor([&] { return send(target, redo ? treeCanUndo : treeCanRedo) != 0; }, "Explorer Undo/Redo did not finish");
+}
 SCROLLINFO scrollInfo(HWND window, int bar = SB_VERT) {
     SCROLLINFO info{}; info.cbSize = sizeof(info); info.fMask = SIF_ALL;
     check(GetScrollInfo(window, bar, &info) != FALSE, "Could not read the viewer's scroll position");
@@ -592,6 +603,11 @@ void createItemTests(const fs::path& executable) {
     edit = start(folder, true, L"空 フォルダー"); send(edit, WM_KEYDOWN, VK_RETURN);
     waitFor([&] { return fs::is_directory(created.parent_path() / L"空 フォルダー") && send(tree, treeGetCount) == 5; }, "New Folder did not create and display a folder");
     check(visibleTabCount(app) == 1, "Creating a folder opened a file tab");
+    writeFile(created.parent_path() / L"空 フォルダー" / L"child.txt");
+    controlKey(app, tree, 'Z');
+    waitFor([&] { return !fs::exists(created.parent_path() / L"空 フォルダー"); }, "Undo did not remove a created folder and its children");
+    controlKey(app, tree, 'Y');
+    waitFor([&] { return fs::exists(created.parent_path() / L"空 フォルダー" / L"child.txt") && send(tree, treeGetCount) == 5; }, "Redo did not restore the created folder's contents");
     edit = start(root, true, L"cancelled"); send(edit, WM_KEYDOWN, VK_ESCAPE);
     check(!fs::exists(fixture.root / L"cancelled"), "Escape created a folder");
     start(root, false, L"focus-cancelled.txt"); click(tree, 30, 10);
@@ -636,6 +652,11 @@ void newFileShortcutTests(const fs::path& executable) {
     const auto file = fixture.root / L"chosen 日本語" / L"path" / L"to" / L"file.md";
     waitFor([&] { return fs::is_regular_file(file) && send(tree, treeGetCount) == 6; }, "Ctrl+N did not create and reveal nested parents");
     check(fs::file_size(file) == 0 && visibleTabCount(app) == 1, "New file was not empty or did not open a tab");
+    controlKey(app, tree, 'Z');
+    waitFor([&] { return !fs::exists(fixture.root / L"chosen 日本語" / L"path") && send(tree, treeGetCount) == 3; }, "Undo did not remove automatically created intermediate folders");
+    check(fs::exists(fixture.root / L"chosen 日本語" / L"existing.txt"), "Undo removed a preexisting parent or sibling");
+    controlKey(app, tree, 'Z', true);
+    waitFor([&] { return fs::is_regular_file(file) && send(tree, treeGetCount) == 6; }, "Ctrl+Shift+Z did not restore the nested creation");
     const auto to = nextItem(tree, TreeRelation::Parent, selected());
     check(to && nextItem(tree, TreeRelation::Child, to) == selected(), "Nested new file was not selected");
     // With a file selected, a trailing slash creates a sibling folder.
@@ -688,6 +709,11 @@ void pasteImageTests(const fs::path& executable) {
     std::ifstream png(created,std::ios::binary); char signature[8]{}; png.read(signature,8);
     check(std::string(signature,8)==std::string("\x89PNG\r\n\x1a\n",8),"Explorer paste did not write a PNG");
     waitFor([&]{return send(tree,treeGetCount)==4 && send(tree,treeGetSelection)!=static_cast<LRESULT>(folder);},"Pasted image was not revealed and selected");
+    png.close();
+    controlKey(app, tree, 'Z');
+    waitFor([&] { return !fs::exists(created) && send(tree, treeGetCount) == 3; }, "Undo did not remove the pasted image");
+    controlKey(app, tree, 'Y');
+    waitFor([&] { return fs::exists(created) && send(tree, treeGetCount) == 4; }, "Redo did not restore the pasted image");
     // A selected file uses its parent folder. Start in a later second so both
     // names follow the exact timestamp format without a collision suffix.
     const auto selected = send(tree,treeGetSelection);
@@ -710,6 +736,11 @@ void renameTests(const fs::path& executable) {
         check(SetWindowTextW(edit,L"修正.py"),"Could not enter a Unicode filename");
         send(edit,WM_KEYDOWN,VK_RETURN);
         waitFor([&]{return fs::exists(fixture.root/L"修正.py")&&!fs::exists(fixture.root/L"a.txt");},"Rename did not move the file");
+        controlKey(app, tree, 'Z');
+        waitFor([&] { return fs::exists(fixture.root / L"a.txt") && !fs::exists(fixture.root / L"修正.py"); }, "Undo did not reverse a rename");
+        waitLines(viewer, 121);
+        controlKey(app, tree, 'Y');
+        waitFor([&] { return fs::exists(fixture.root / L"修正.py") && !fs::exists(fixture.root / L"a.txt"); }, "Redo did not reapply a rename");
         waitLines(viewer,121);send(viewer,WM_KEYDOWN,VK_BACK);waitLines(viewer,120);
         check(visibleTabCount(app)==1,"Rename duplicated or closed the open tab");
         send(tree,WM_KEYDOWN,VK_F2);const auto cancel=FindWindowExW(tree,nullptr,treeInputClassName,nullptr);
@@ -784,6 +815,12 @@ void explorerMoveTests(const fs::path& executable) {
             "Moving did not preserve the subtree or expand its destination");
         waitLines(viewer, 121);
         check(visibleTabCount(app) == 1, "Moving a folder closed or duplicated its edited tab");
+        controlKey(app, tree, 'Z');
+        waitFor([&] { return fs::exists(source / L"nested" / L"edited.txt") && nextItem(tree, TreeRelation::Parent, nested) == from; }, "Undo did not reverse a folder move in the filesystem and tree");
+        waitLines(viewer, 121);
+        controlKey(app, tree, 'Z', true);
+        waitFor([&] { return fs::exists(movedFile) && nextItem(tree, TreeRelation::Parent, nested) == to; }, "Redo did not restore the folder move");
+        waitLines(viewer, 121);
         {
             check(AttachThreadInput(GetCurrentThreadId(), app.process.dwThreadId, TRUE) != FALSE, "Cannot attach save input");
             BYTE previous[256]{}, keys[256]{}; GetKeyboardState(previous); keys[VK_CONTROL] = keys[VK_LCONTROL] = 0x80;
@@ -807,6 +844,10 @@ void explorerMoveTests(const fs::path& executable) {
         waitFor([&] { return fs::exists(fixture.root / L"edited.txt") && !fs::exists(movedFile); }, "Cannot drag a file back to the project root");
         waitFor([&] { return nextItem(tree, TreeRelation::Parent, file) == root; }, "File move left the tree under the old parent");
         waitLines(viewer, 121); check(visibleTabCount(app) == 1, "File move duplicated its tab");
+        controlKey(app, tree, 'Z');
+        waitFor([&] { return fs::exists(movedFile) && nextItem(tree, TreeRelation::Parent, file) == nested; }, "Undo did not reverse a file move");
+        controlKey(app, tree, 'Y');
+        waitFor([&] { return fs::exists(fixture.root / L"edited.txt") && nextItem(tree, TreeRelation::Parent, file) == root; }, "Redo did not restore the file move");
         drag(nested, point(root));
         waitFor([&] { return fs::is_directory(fixture.root / L"nested") && !fs::exists(target / L"nested"); }, "Cannot drop a folder onto the root row");
     }

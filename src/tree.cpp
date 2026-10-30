@@ -351,7 +351,14 @@ LRESULT Tree::handle(UINT m, WPARAM a, LPARAM b) {
         if (canOpen) AppendMenuW(menu, MF_STRING, 2, L"Open with Default Application");
         if (id && renameRequested) AppendMenuW(menu, MF_STRING | (canRename && !canRename(id) ? MF_GRAYED : 0), 1, L"Rename\tF2");
         if (pasteImageRequested) AppendMenuW(menu, MF_STRING | (canPasteImage && !canPasteImage(id) ? MF_GRAYED : 0), 3, L"Paste Image\tCtrl+V");
+        if (undoRequested || redoRequested) {
+            AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+            AppendMenuW(menu, MF_STRING | (!canUndo || !canUndo() ? MF_GRAYED : 0), 7, L"Undo\tCtrl+Z");
+            AppendMenuW(menu, MF_STRING | (!canRedo || !canRedo() ? MF_GRAYED : 0), 8, L"Redo\tCtrl+Y");
+        }
         const auto command = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, screen.x, screen.y, 0, window_, nullptr); DestroyMenu(menu);
+        if (command == 7 && undoRequested && canUndo && canUndo()) { undoRequested(); return 0; }
+        if (command == 8 && redoRequested && canRedo && canRedo()) { redoRequested(); return 0; }
         if (command == 3 && pasteImageRequested && (!canPasteImage || canPasteImage(id))) { pasteImageRequested(id); return 0; }
         if (!item(id)) return 0;
         if (command == 4 || command == 5) createItem(id, command == 5);
@@ -410,6 +417,16 @@ LRESULT Tree::handle(UINT m, WPARAM a, LPARAM b) {
         changed(); return 0;
     }
     case WM_KEYDOWN: {
+        if ((GetKeyState(VK_CONTROL) & 0x8000) && !(GetKeyState(VK_MENU) & 0x8000)) {
+            const bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+            if (a == 'Z' || (a == 'Y' && !shift)) {
+                const bool redo = a == 'Y' || shift;
+                const auto& allowed = redo ? canRedo : canUndo;
+                const auto& action = redo ? redoRequested : undoRequested;
+                if (action && allowed && allowed()) action();
+                return 0;
+            }
+        }
         if (a == 'V' && (GetKeyState(VK_CONTROL) & 0x8000) && !(GetKeyState(VK_SHIFT) & 0x8000) && !(GetKeyState(VK_MENU) & 0x8000)) {
             SendMessageW(window_, WM_PASTE, 0, 0); return 0;
         }
@@ -446,6 +463,8 @@ LRESULT Tree::handle(UINT m, WPARAM a, LPARAM b) {
         }
         return 0;
     }
+    case treeCanUndo: return canUndo && canUndo();
+    case treeCanRedo: return canRedo && canRedo();
     case treeGetNext: switch (static_cast<TreeRelation>(a)) {
         case TreeRelation::Root: return static_cast<LRESULT>(child());
         case TreeRelation::Child: return static_cast<LRESULT>(child(static_cast<TreeItem>(b)));

@@ -2,6 +2,7 @@
 #include "git_history.h"
 #include "content_search_protocol.h"
 #include "wsl_bootstrap.h"
+#include "explorer_history.h"
 #include "text.h"
 #include <algorithm>
 #include <chrono>
@@ -205,7 +206,7 @@ void creation(const std::string& executable) {
     Fixture fixture; Helper helper(executable); helper.hello(); helper.call("connect", fixture.root);
     const auto folder = fixture.root / "新規 フォルダー", file = folder / "空のファイル.txt";
     const std::string empty, replacement = "must not overwrite";
-    helper.call("createDirectory", folder);
+    check(field(helper.call("createDirectory", folder).metadata, "created") == "1", "New folder did not report creation");
     check(fs::is_directory(folder) && fs::is_empty(folder), "New folder was not empty or used the wrong path");
     helper.call("createFile", file, {{"size", "0"}}, &empty);
     check(fs::is_regular_file(file) && fs::file_size(file) == 0, "New text file was not empty");
@@ -230,7 +231,7 @@ void creation(const std::string& executable) {
     // Nested creation reuses real intermediate directories, while the final
     // component retains the existing no-overwrite behavior.
     const Message intermediate{{"allowExisting", "1"}};
-    helper.call("createDirectory", folder, intermediate);
+    check(field(helper.call("createDirectory", folder, intermediate).metadata, "created") == "0", "Existing intermediate folder was reported as newly created");
     const auto nested = folder / "path" / "to";
     helper.call("createDirectory", nested.parent_path(), intermediate);
     helper.call("createDirectory", nested, intermediate);
@@ -363,6 +364,46 @@ void moving(const std::string& executable) {
     check(!fs::exists(source / "folder") && disk(target / "folder" / "nested" / "child.txt") == "child", "Folder move lost descendants");
     move(target / "folder", fixture.root);
     check(disk(fixture.root / "folder" / "nested" / "child.txt") == "child", "Cannot move a folder back to the project root");
+    helper.eof();
+}
+void explorerHistory(const std::string& executable) {
+    Fixture fixture, outside; const auto root = fixture.root / "project";
+    fs::create_directory(root);
+    Helper helper(executable); helper.hello(); helper.call("connect", root);
+    poppy::ExplorerHistory history;
+    const auto resource = [](const fs::path& path) { return poppy::ResourceId::wsl("Ubuntu", path.string()); };
+    const auto rename = [&](const poppy::ResourceId& from, const poppy::ResourceId& to) -> std::wstring {
+        const auto info = helper.call("stat", fs::path(from.u8string()));
+        const auto result = helper.call("renameResource", fs::path(from.u8string()),
+            {{"name", to.filename().u8string()}, {"parent", to.parent_path().u8string()}, {"version", version(info)}}, nullptr, !fs::exists(fs::path(to.u8string())));
+        return field(result.metadata, "error").empty() ? L"" : L"Collision";
+    };
+    const auto folder = root / "new 日本語", backup = fixture.root / ".poppy-undo-folder", file = folder / "child.txt";
+    helper.call("createDirectory", folder); const std::string bytes = "preserved contents\r\n";
+    helper.call("createFile", file, {{"size", std::to_string(bytes.size())}}, &bytes);
+    chmod(file.c_str(), 0751);
+    write(outside.root / "keep", "outside link target"); fs::create_directory_symlink(outside.root, folder / "link");
+    history.record({resource(backup), resource(folder), true});
+    check(history.replay(false, rename).empty() && !fs::exists(folder) && disk(backup / "child.txt") == bytes, "WSL folder undo did not remove/preserve descendants");
+    fs::create_directory(folder);
+    check(!history.replay(true, rename).empty() && fs::is_empty(folder) && history.next(true), "WSL redo overwrote an existing folder or discarded history");
+    fs::remove(folder);
+    check(history.replay(true, rename).empty() && disk(file) == bytes && fs::is_symlink(folder / "link"), "WSL redo lost contents or links");
+    struct stat info{}; stat(file.c_str(), &info); check((info.st_mode & 0777) == 0751, "WSL undo/redo changed file permissions");
+    history.replay(false, rename);
+    for (const auto& path : history.clear()) helper.call("removeResource", fs::path(path.u8string()));
+    check(!fs::exists(backup) && disk(outside.root / "keep") == "outside link target", "WSL backup cleanup leaked a folder or followed a link");
+    const auto single = root / "single.txt", fileBackup = fixture.root / ".poppy-undo-file";
+    helper.call("createFile", single, {{"size", std::to_string(bytes.size())}}, &bytes);
+    history.record({resource(fileBackup), resource(single), true});
+    check(history.replay(false, rename).empty() && !fs::exists(single), "WSL file creation undo failed");
+    check(history.replay(true, rename).empty() && disk(single) == bytes, "WSL file creation redo failed");
+    const auto baseline = helper.call("readFile", single); const std::string edited = "saved after redo";
+    helper.call("saveFile", single, {{"version", version(baseline)}, {"size", std::to_string(edited.size())}}, &edited);
+    history.replay(false, rename);
+    for (const auto& path : history.clear()) helper.call("removeResource", fs::path(path.u8string()));
+    check(!fs::exists(fileBackup), "WSL file backup cleanup failed");
+    helper.call("removeResource", fileBackup); // Missing backups are already clean.
     helper.eof();
 }
 void repositories(const std::string& executable) {
@@ -566,6 +607,6 @@ void terminals(const std::string& executable) {
 }
 int main(int argc,char** argv) {
     signal(SIGPIPE,SIG_IGN);
-    try { check(argc == 2,"Expected helper executable argument"); const std::string executable = argv[1]; installation(executable); watching(executable); watchLimitIdle(executable); creation(executable); batchedListings(executable); files(executable); moving(executable); repositories(executable); protocolFailures(executable); gitAndCancellation(executable); contentSearch(executable); terminals(executable); std::cout << "WSL helper integration tests passed\n"; }
+    try { check(argc == 2,"Expected helper executable argument"); const std::string executable = argv[1]; installation(executable); watching(executable); watchLimitIdle(executable); creation(executable); batchedListings(executable); files(executable); moving(executable); explorerHistory(executable); repositories(executable); protocolFailures(executable); gitAndCancellation(executable); contentSearch(executable); terminals(executable); std::cout << "WSL helper integration tests passed\n"; }
     catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
 }

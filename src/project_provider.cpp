@@ -7,6 +7,25 @@
 namespace poppy {
 std::shared_ptr<ProjectProvider> createWslProvider(const ResourceId& root);
 namespace {
+std::wstring removeBackup(const fs::path& path) {
+    const auto attributes = GetFileAttributesW(path.c_str());
+    if (attributes == INVALID_FILE_ATTRIBUTES) {
+        const auto code = GetLastError();
+        return code == ERROR_FILE_NOT_FOUND || code == ERROR_PATH_NOT_FOUND ? std::wstring{} : winError(code);
+    }
+    if ((attributes & FILE_ATTRIBUTE_DIRECTORY) && !(attributes & FILE_ATTRIBUTE_REPARSE_POINT)) {
+        std::error_code error;
+        fs::directory_iterator iterator(path, error), end;
+        if (error) return wide(error.message());
+        for (; iterator != end; iterator.increment(error)) {
+            if (error) return wide(error.message());
+            const auto failure = removeBackup(iterator->path()); if (!failure.empty()) return failure;
+        }
+        if (error) return wide(error.message());
+    }
+    if (attributes & FILE_ATTRIBUTE_READONLY) SetFileAttributesW(path.c_str(), attributes & ~FILE_ATTRIBUTE_READONLY);
+    return (attributes & FILE_ATTRIBUTE_DIRECTORY ? RemoveDirectoryW(path.c_str()) : DeleteFileW(path.c_str())) ? std::wstring{} : winError();
+}
 class WindowsProvider final : public ProjectProvider {
 public:
     ResourceId connect(const ResourceId& root) override { return root; }
@@ -70,8 +89,9 @@ public:
         if (!error.empty()) DeleteFileW(temporary.c_str());
         return error;
     }
-    std::wstring createDirectory(const ResourceId& path, bool allowExisting) override {
-        if (CreateDirectoryW(path.local().c_str(), nullptr)) return {};
+    std::wstring createDirectory(const ResourceId& path, bool allowExisting, bool* created) override {
+        if (created) *created = false;
+        if (CreateDirectoryW(path.local().c_str(), nullptr)) { if (created) *created = true; return {}; }
         const auto code = GetLastError();
         if (allowExisting && code == ERROR_ALREADY_EXISTS) {
             const auto attributes = GetFileAttributesW(path.local().c_str());
@@ -81,6 +101,7 @@ public:
         return winError(code);
     }
     std::wstring renameResource(const ResourceId& source, const ResourceId& destination) override { return MoveFileExW(source.local().c_str(), destination.local().c_str(), MOVEFILE_WRITE_THROUGH) ? std::wstring{} : winError(); }
+    std::wstring removeResource(const ResourceId& path) override { return removeBackup(path.local()); }
     FileIndex indexFiles(const ResourceId& root, const std::function<bool()>& cancelled) override { return poppy::indexFiles(root.local(), cancelled); }
     ContentSearchSummary searchContent(const ResourceId& root, const ContentSearchOptions& options,
         const ContentPublish& publish, const std::function<bool()>& cancelled) override { return searchContents(root.local(), options, publish, cancelled); }

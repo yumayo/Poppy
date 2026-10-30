@@ -163,7 +163,7 @@ void Connection::ensure() {
         if (field(hello.metadata, "protocolVersion") != std::to_string(protocolVersion) || field(hello.metadata, "helperVersion") != helperVersion || field(hello.metadata, "architecture") != "x86_64") throw std::runtime_error("Unsupported WSL helper protocol, version or architecture");
         number(hello.metadata, "uid");
         const auto capabilities = ',' + field(hello.metadata, "capabilities") + ',';
-        for (const auto& capability : {"list", "read", "save", "create", "mkdir", "rename", "index", "git", "inotify", "terminal", "search"}) if (capabilities.find(',' + std::string(capability) + ',') == capabilities.npos) throw std::runtime_error("The WSL helper is missing a required capability");
+        for (const auto& capability : {"list", "read", "save", "create", "mkdir", "rename", "remove", "index", "git", "inotify", "terminal", "search"}) if (capabilities.find(',' + std::string(capability) + ',') == capabilities.npos) throw std::runtime_error("The WSL helper is missing a required capability");
         const auto homePath = field(hello.metadata, "home");
         { std::lock_guard<std::mutex> stateLock(mutex_); shell_ = field(hello.metadata, "shell"); uid_ = field(hello.metadata, "uid"); helperPath_ = field(hello.metadata, "executable"); }
         if (homePath.empty() || homePath[0] != '/' || shell_.empty() || shell_[0] != '/' || helperPath_.empty() || helperPath_[0] != '/' || homePath.find('\0') != homePath.npos || shell_.find('\0') != shell_.npos || helperPath_.find('\0') != helperPath_.npos) throw std::runtime_error("Invalid WSL handshake paths");
@@ -302,8 +302,13 @@ public:
             call("createFile", path, {{"size", std::to_string(bytes.size())}}, &bytes); return {};
         } catch (const std::exception& error) { return wide(error.what()); }
     }
-    std::wstring createDirectory(const ResourceId& path, bool allowExisting) override {
-        try { call("createDirectory", path, {{"allowExisting", allowExisting ? "1" : "0"}}); return {}; }
+    std::wstring createDirectory(const ResourceId& path, bool allowExisting, bool* created) override {
+        if (created) *created = false;
+        try { const auto result = call("createDirectory", path, {{"allowExisting", allowExisting ? "1" : "0"}}); if (created) *created = field(result.metadata, "created") == "1"; return {}; }
+        catch (const std::exception& error) { return wide(error.what()); }
+    }
+    std::wstring removeResource(const ResourceId& path) override {
+        try { call("removeResource", path); return {}; }
         catch (const std::exception& error) { return wide(error.what()); }
     }
     std::wstring renameResource(const ResourceId& source, const ResourceId& destination) override {
