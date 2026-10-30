@@ -17,6 +17,7 @@ public:
     void setDpi(UINT dpi);
     void show(std::shared_ptr<const Document> document, const ResourceId& path, bool preserve = false);
     void edit(std::shared_ptr<EditBuffer> buffer, const ResourceId& path, bool preserve = false);
+    void setGitBase(std::shared_ptr<const Document> before);
     void showImage(std::shared_ptr<const ImagePreview> image, const ResourceId& path);
     std::shared_ptr<EditBuffer> buffer() const { return edit_; }
     std::function<void()> changed, save, focused, diffLayoutChanged, statusChanged;
@@ -54,6 +55,7 @@ private:
     void cut();
     void replace(std::string text);
     void edited();
+    void updateGitLines();
     bool editSelection(size_t& anchor, size_t& caret) const;
     void undo(bool redo);
     void selectAll();
@@ -98,6 +100,8 @@ private:
     wchar_t highSurrogate_ = 0;
     std::shared_ptr<const DiffDocument> diff_;
     std::shared_ptr<const Document> diffBefore_;
+    std::shared_ptr<const Document> gitBefore_;
+    std::vector<bool> gitChangedLines_;
     ResourceId path_;
     std::wstring message_ = L"Open a folder to start\n\nSelect a file on the left. Run your AI CLI in the terminal below.";
 };

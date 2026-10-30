@@ -330,6 +330,7 @@ private:
     void toggleTabPin(size_t index);
     void tabMenu(POINT screen);
     void loadTab(bool preserve = false, int group = -1);
+    void refreshEditorGit(int group);
     void updateTabs(bool reveal = true);
     bool tabVisible(size_t index) const;
     bool tabOverflow() const { return editorGroups_[focusedGroup_].overflow(); }
@@ -411,7 +412,7 @@ private:
 
     std::optional<TabDrag> tabDrag_;
     TreeItem rootItem_ = 0;
-    uint64_t generation_ = 0, serial_[2]{}, nextId_ = 1;
+    uint64_t generation_ = 0, serial_[2]{}, editorGitSerial_[2]{}, nextId_ = 1;
     std::map<uint64_t, TreeItem> nodes_;
     std::shared_ptr<GitWorkspace> git_;
     bool gitScanDirty_ = true;
@@ -2102,6 +2103,7 @@ void ProjectRuntime::Impl::loadTab(bool preserve, int group) {
     const auto serial = ++serial_[group], generation = generation_;
     if (!tab.diff && tab.buffer && (tab.buffer->dirty() || tab.buffer->saving)) {
         viewers_[group].edit(tab.buffer, path, preserve); if (!preserve) viewers_[group].restore(state);
+        refreshEditorGit(group);
         status(L"Unsaved changes kept  ·  Ctrl+S: save"); applyContentResult(index); return;
     }
     if (tab.diff && tab.buffer && tab.diffBefore && (tab.buffer->dirty() || tab.buffer->saving)) {
@@ -2125,6 +2127,7 @@ void ProjectRuntime::Impl::loadTab(bool preserve, int group) {
                 } else if (result->document) {
                     const auto buffer = shareBuffer(path, result->buffer);
                     viewers_[group].edit(buffer, path, preserve); if (!preserve) viewers_[group].restore(state);
+                    refreshEditorGit(group);
                     status(std::to_wstring(result->document->lines.size()) + L" lines  ·  Ctrl+S: save  ·  F6: diff");
                     applyContentResult(groupTab(group));
                 } else { viewers_[group].message(result->error, path); status(L"Preview unavailable"); }
@@ -2212,6 +2215,41 @@ void ProjectRuntime::Impl::loadTab(bool preserve, int group) {
         });
     });
 }
+void ProjectRuntime::Impl::refreshEditorGit(int group) {
+    const auto request = ++editorGitSerial_[group];
+    const auto index = groupTab(group);
+    if (index >= tabs_.size() || tabs_[index].diff || !viewers_[group].buffer()) return;
+    const auto path = tabs_[index].path;
+    const auto repo = git_ ? git_->repository(path) : nullptr;
+    if (!repo || !repo->error.empty() || (root_.wsl() && !connected_)) { viewers_[group].setGitBase({}); return; }
+    GitStatusEntry entry; entry.path = path.lexically_relative(repo->root).generic_u8string();
+    for (const auto& change : repo->entries) if (change.path == path) {
+        entry.index = change.index; entry.worktree = change.worktree; entry.previousPath = change.previousPath; break;
+    }
+    const auto serial = serial_[group], generation = generation_;
+    const auto root = repo->root;
+    const auto language = viewers_[group].buffer()->document.language;
+    gitWorker_->submit(L"editor-git:" + std::to_wstring(group), [this, group, path, root, entry, language, serial, generation, request] {
+        const auto bytes = gitEditorBase(entry, [&](const auto& args) -> std::optional<std::string> {
+            const auto result = provider_->git(gitArguments(args), root, gitWorker_->cancellation());
+            if (result.code) return {};
+            return result.output;
+        });
+        std::shared_ptr<Document> before;
+        if (bytes) {
+            auto document = std::make_shared<Document>(); document->language = language; std::string error;
+            if (decodeText(*bytes, document->text, document->encoding, error) &&
+                static_cast<size_t>(std::count(document->text.begin(), document->text.end(), '\n')) < maxLines) {
+                indexDocument(*document); before = std::move(document);
+            }
+        }
+        gitWorker_->complete([this, group, path, serial, generation, request, before] {
+            if (generation != generation_ || serial != serial_[group] || request != editorGitSerial_[group]) return;
+            const auto index = groupTab(group);
+            if (index < tabs_.size() && !tabs_[index].diff && tabs_[index].path == path) viewers_[group].setGitBase(before);
+        });
+    });
+}
 void ProjectRuntime::Impl::showDiff() {
     if (tabs_.empty()) { status(L"Select a file to view its Git diff."); return; }
     auto& tab = tabs_[activeTab_];
@@ -2263,7 +2301,10 @@ void ProjectRuntime::Impl::refreshGit(bool rescan) {
             }
             updateGitFiles();
             refreshBranches();
-            for (int group = 0; group < 2; ++group) if (waitingForGit_[group]) loadTab(false, group);
+            for (int group = 0; group < 2; ++group) {
+                if (waitingForGit_[group]) loadTab(false, group);
+                else refreshEditorGit(group);
+            }
             if (!result->error.empty()) status(L"Git: " + result->error);
             else if (!result->warning.empty()) status(L"Git repository scan: " + result->warning);
             else if (result->unsupportedNames) status(L"Some Git filenames are not UTF-8 and cannot be opened.");

@@ -39,4 +39,7 @@ struct DiffDocument {
 };
 void indexDiff(DiffDocument& document, bool fileHeadings = false);
 DiffDocument workingDiff(const Document& before, const Document& after, const std::string& path);
+// One flag per working line, using the same alignment as the editable diff.
+// Deleted lines have no working row; unchanged EOF caret rows stay unmarked.
+std::vector<bool> changedWorkingLines(const Document& before, const Document& after);
 }

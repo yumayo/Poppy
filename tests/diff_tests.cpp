@@ -13,9 +13,38 @@ void check(bool condition, const char* message) { if (!condition) throw std::run
 Document sourceDocument(std::string text) {
     Document document; document.text = std::move(text); document.language = Language::CLike; indexDocument(document); return document;
 }
+void editorLineChanges() {
+    struct Case { std::string before, after; std::vector<bool> changed; };
+    const std::vector<Case> cases{
+        {"head\nold\ntail", "head\nnew\ntail", {false, true, false}},
+        {"head\ntail\n", "head\nadded\ntail\n", {false, true, false, false}},
+        {"head\nremoved\ntail\n", "head\ntail\n", {false, false, false}},
+        {"head\r\nold\r\n日本😀", "head\r\n新規😀\r\n日本😀", {false, true, false}},
+        {"head\r\ntail\r\n", "head\ntail\n", {false, false, false}},
+        {"", "new\nfile\n", {true, true, false}},
+        {"", "\nnew\n", {true, true, false}},
+        {"", "new", {true}},
+        {"", "", {false}},
+        {"head\ntail", "", {true}},
+        {"same\nold\nsame\nold\nend", "same\nnew\nsame\nnew\nend", {false, true, false, true, false}}
+    };
+    for (const auto& test : cases)
+        check(changedWorkingLines(sourceDocument(test.before), sourceDocument(test.after)) == test.changed,
+            "Editor line backgrounds marked unchanged/deleted rows or missed additions/replacements");
+    auto buffer = EditBuffer{}; buffer.document = sourceDocument("head\nold\ntail"); buffer.initialize(buffer.document.text);
+    const auto before = buffer.document;
+    check(buffer.replace(5, 8, "new\nextra"), "Cannot edit line-background fixture");
+    const auto changed = changedWorkingLines(before, buffer.document);
+    check(changed == std::vector<bool>({false, true, true, false}), "An unsaved multiline edit lost its changed rows");
+    size_t anchor = 0, caret = 0;
+    check(buffer.undo(anchor, caret) && changedWorkingLines(before, buffer.document) == std::vector<bool>({false, false, false}), "Undo left stale changed rows");
+    check(buffer.redo(anchor, caret) && changedWorkingLines(before, buffer.document) == changed, "Redo did not restore changed rows");
+    check(changedWorkingLines(buffer.document, buffer.document) == std::vector<bool>({false, false, false, false}), "Refreshing HEAD after a commit retained changed rows");
+}
 void editableComparisons() {
     const auto verify = [](const Document& before, const Document& after) {
         const auto diff = workingDiff(before, after, "dir/日本語\nfile.cpp");
+        const auto changed = changedWorkingLines(before, after);
         size_t old = 0, current = 0;
         for (const auto& row : diff.rows) {
             if (row.before.number) {
@@ -25,6 +54,7 @@ void editableComparisons() {
             }
             if (row.after.number) {
                 check(row.after.number == ++current && diff.line(row.after) == after.line(current - 1), "Working diff lost or reordered working source lines");
+                check(changed[current - 1] == row.changed, "Editor and diff changed-line alignment disagree");
                 check(row.after.state == after.states[current - 1], "Working multiline lexer state changed");
                 const auto line = after.line(current - 1);
                 for (size_t byte = 0; byte <= line.size(); ++byte) {
@@ -42,7 +72,7 @@ void editableComparisons() {
         check(!diff.workingOffset(0), "The filename heading became editable");
     };
     for (const auto& before : {"", "a", "a\n", "a\r\nb\r\n", "a\nb\nc", "/* old\ncomment */\n"})
-        for (const auto& after : {"", "a", "a\n", "new\na\nb\nc\n", "a\r\n日本😀\r\nb", "/* new\ncomment */\n"})
+        for (const auto& after : {"", "a", "a\n", "\nnew\n", "new\na\nb\nc\n", "a\r\n日本😀\r\nb", "/* new\ncomment */\n"})
             verify(sourceDocument(before), sourceDocument(after));
     // Repeated lines and edits far apart exercise Myers backtracking, rather
     // than only the common prefix/suffix fast path.
@@ -379,6 +409,6 @@ void wrapping() {
 }
 }
 int main() {
-    try { editableComparisons(); syntaxHighlighting(); multilineSyntax(); syntaxLanguages(); fileHeadings(); alignment(); additionsAndDeletions(); inlineLayout(); edgeCases(); viewPositions(); wrapping(); std::cout << "Diff tests passed.\n"; return EXIT_SUCCESS; }
+    try { editorLineChanges(); editableComparisons(); syntaxHighlighting(); multilineSyntax(); syntaxLanguages(); fileHeadings(); alignment(); additionsAndDeletions(); inlineLayout(); edgeCases(); viewPositions(); wrapping(); std::cout << "Diff tests passed.\n"; return EXIT_SUCCESS; }
     catch (const std::exception& error) { std::cerr << error.what() << '\n'; return EXIT_FAILURE; }
 }

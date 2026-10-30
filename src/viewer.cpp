@@ -36,7 +36,7 @@ void Viewer::show(std::shared_ptr<const Document> d, const ResourceId& path, boo
     stopSelection();
     image_.reset(); renderer_.setImage({});
     const auto previous = preserve && document_ ? std::optional<State>(state()) : std::nullopt;
-    edit_.reset(); diffBefore_.reset(); highSurrogate_ = 0;
+    edit_.reset(); diffBefore_.reset(); gitBefore_.reset(); gitChangedLines_ = {}; highSurrogate_ = 0;
     diffLayout_ = {}; layoutDirty_ = true; caretTrailing_ = false;
     diff_.reset(); document_ = std::move(d); path_ = path; message_.clear();
     if (!preserve) { top_ = left_ = 0; anchor_ = caret_ = 0; after_ = false; }
@@ -46,14 +46,23 @@ void Viewer::show(std::shared_ptr<const Document> d, const ResourceId& path, boo
     if (statusChanged) statusChanged();
 }
 void Viewer::edit(std::shared_ptr<EditBuffer> buffer, const ResourceId& path, bool preserve) {
+    const auto before = edit_ == buffer && path_ == path ? gitBefore_ : nullptr;
     show(std::shared_ptr<const Document>(buffer, &buffer->document), path, preserve);
     edit_ = std::move(buffer); caretPosition();
+    setGitBase(before);
+}
+void Viewer::setGitBase(std::shared_ptr<const Document> before) {
+    gitBefore_ = std::move(before); updateGitLines();
+    InvalidateRect(window_, nullptr, FALSE);
+}
+void Viewer::updateGitLines() {
+    gitChangedLines_ = gitBefore_ && document_ && !diff_ ? changedWorkingLines(*gitBefore_, *document_) : std::vector<bool>{};
 }
 void Viewer::showDiff(std::shared_ptr<const DiffDocument> d, const ResourceId& path, bool preserve) {
     stopSelection();
     image_.reset(); renderer_.setImage({});
     const auto previous = preserve && document_ ? std::optional<State>(state()) : std::nullopt;
-    edit_.reset(); diffBefore_.reset(); highSurrogate_ = 0;
+    edit_.reset(); diffBefore_.reset(); gitBefore_.reset(); gitChangedLines_ = {}; highSurrogate_ = 0;
     textLayout_ = {}; layoutDirty_ = true; caretTrailing_ = false;
     // Share the patch snapshot; both panes only keep references to its lines.
     document_ = std::shared_ptr<const Document>(d, &d->patch); diff_ = std::move(d); path_ = path; message_.clear();
@@ -85,6 +94,7 @@ void Viewer::refreshBuffer() {
         layoutDirty_ = true; scrollbars(); restoreTop(previous);
     } else {
         anchor_ = std::min(anchor_, document_->text.size()); caret_ = std::min(caret_, document_->text.size());
+        updateGitLines();
     }
     layoutDirty_ = true; requestFind(false, false, false); scrollbars(); caretPosition(); InvalidateRect(window_, nullptr, FALSE);
 }
@@ -92,7 +102,7 @@ void Viewer::message(const std::wstring& text, const ResourceId& path) {
     stopSelection();
     image_.reset(); renderer_.setImage({});
     findBar_.close(); KillTimer(window_, findTimer); search_.query("");
-    edit_.reset(); diffBefore_.reset(); highSurrogate_ = 0;
+    edit_.reset(); diffBefore_.reset(); gitBefore_.reset(); gitChangedLines_ = {}; highSurrogate_ = 0;
     textLayout_ = {}; diffLayout_ = {}; layoutDirty_ = true; caretTrailing_ = false;
     diff_.reset(); document_.reset(); path_ = path; message_ = text; top_ = left_ = 0; anchor_ = caret_ = 0; after_ = false;
     scrollbars(); caretPosition(); InvalidateRect(window_, nullptr, FALSE);
@@ -473,6 +483,7 @@ void Viewer::edited() {
         document_ = std::shared_ptr<const Document>(comparison, &comparison->patch); diff_ = std::move(comparison);
         anchor_ = diff_->patchOffset(anchor_); caret_ = diff_->patchOffset(caret_); after_ = true;
     }
+    updateGitLines();
     layoutDirty_ = true; caretTrailing_ = false; requestFind(false, false, false); scrollbars(); caretPosition(true); InvalidateRect(window_, nullptr, FALSE); if (changed) changed(); if (statusChanged) statusChanged();
 }
 void Viewer::undo(bool redo) {
@@ -588,7 +599,7 @@ void Viewer::paint() {
                     }
                     if (source.number && change.changed) rowBackground = after ? addedBackground : removedBackground;
                     else if (!source.number) rowBackground = panel;
-                }
+                } else if (!diff_ && row < rowCount() && logicalRow < gitChangedLines_.size() && gitChangedLines_[logicalRow]) rowBackground = addedBackground;
                 dc.fill({paneLeft, y, paneRight, y + cellHeight_}, rowBackground);
                 if (change.heading) continue;
                 if (row >= rowCount() || (diff_ && !source.number)) continue;
@@ -842,6 +853,8 @@ LRESULT Viewer::handle(UINT m, WPARAM a, LPARAM b) {
 
 size_t poppy::Viewer::documentBytes() const {
     size_t bytes = textLayout_.bytes() + diffLayout_.bytes() + (document_ ? document_->text.capacity() + document_->lines.capacity() * sizeof(uint32_t) + document_->states.capacity() * sizeof(LexState) : 0);
+    bytes += gitChangedLines_.capacity() / 8;
+    if (gitBefore_) bytes += gitBefore_->text.capacity() + gitBefore_->lines.capacity() * sizeof(uint32_t) + gitBefore_->states.capacity() * sizeof(LexState);
     if (diff_) {
         bytes += diff_->rows.capacity() * sizeof(DiffRow) + diff_->inlineOrder.capacity() * sizeof(uint32_t) + diff_->files.capacity() * sizeof(DiffFile);
         bytes += diff_->workingLines.capacity() * sizeof(DiffDocument::WorkingLine);

@@ -1,5 +1,7 @@
 #pragma once
 #include <cstddef>
+#include <functional>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -22,6 +24,12 @@ std::vector<GitCommit> parseGitCommits(std::string_view output);
 std::vector<GitStatusEntry> parseGitStatus(std::string_view output);
 std::vector<GitCommitFile> parseGitCommitFiles(std::string_view output);
 std::vector<std::string> gitStatusArguments();
+// Read-only commands run in the owning repository; failures return nullopt.
+using GitBaseRun = std::function<std::optional<std::string>(const std::vector<std::string>&)>;
+// HEAD content for normal editor line backgrounds, including staged changes.
+// Added/untracked files use an empty base; ignored/missing/nonregular files and
+// Git failures return nullopt. A rename compares with its original HEAD path.
+std::optional<std::string> gitEditorBase(const GitStatusEntry& entry, const GitBaseRun& run);
 std::vector<std::string> gitLogArguments(const std::string& tip, size_t skip);
 std::vector<std::string> gitCommitFilesArguments(const std::string& hash);
 // Include both paths of a rename: filtering on its destination alone makes

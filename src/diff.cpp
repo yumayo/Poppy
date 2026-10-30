@@ -255,17 +255,23 @@ size_t DiffDocument::patchOffset(size_t offset) const {
     const auto& line = *std::prev(it);
     return line.patch + std::min(offset - line.file, line.length);
 }
-DiffDocument workingDiff(const Document& before, const Document& after, const std::string& path) {
+namespace {
+std::vector<std::pair<size_t, size_t>> matchingLines(const Document& before, const Document& after) {
     // Bounded Myers alignment: small edits in large files stay linear. For a
     // wholesale rewrite, show the remaining middle as a replacement instead
     // of spending unbounded time or memory on the UI thread.
     using Match = std::pair<size_t, size_t>;
     std::vector<Match> matches;
+    const auto equal = [&](size_t old, size_t current) {
+        // The virtual EOF caret row must not hide an added empty source line.
+        return before.line(old) == after.line(current) &&
+            (before.lines[old] == before.text.size()) == (after.lines[current] == after.text.size());
+    };
     size_t first = 0, oldEnd = before.lines.size(), newEnd = after.lines.size();
-    while (first < oldEnd && first < newEnd && before.line(first) == after.line(first)) {
+    while (first < oldEnd && first < newEnd && equal(first, first)) {
         matches.emplace_back(first, first); ++first;
     }
-    while (oldEnd > first && newEnd > first && before.line(oldEnd - 1) == after.line(newEnd - 1)) { --oldEnd; --newEnd; }
+    while (oldEnd > first && newEnd > first && equal(oldEnd - 1, newEnd - 1)) { --oldEnd; --newEnd; }
     const int n = static_cast<int>(oldEnd - first), m = static_cast<int>(newEnd - first);
     constexpr int distanceLimit = 256, origin = distanceLimit + 1;
     std::vector<int> frontier(2 * origin + 1, 0);
@@ -279,7 +285,7 @@ DiffDocument workingDiff(const Document& before, const Document& after, const st
             int x = diagonal == -distance || (diagonal != distance && frontier[origin + diagonal - 1] < frontier[origin + diagonal + 1]) ?
                 frontier[origin + diagonal + 1] : frontier[origin + diagonal - 1] + 1;
             int y = x - diagonal;
-            while (x < n && y < m && before.line(first + x) == after.line(first + y)) { ++x; ++y; ++work; }
+            while (x < n && y < m && equal(first + x, first + y)) { ++x; ++y; ++work; }
             frontier[origin + diagonal] = x; ++work;
             if (x >= n && y >= m) { found = true; break; }
         }
@@ -300,7 +306,19 @@ DiffDocument workingDiff(const Document& before, const Document& after, const st
     for (size_t old = oldEnd, current = newEnd; old < before.lines.size() && current < after.lines.size(); ++old, ++current)
         matches.emplace_back(old, current);
     matches.emplace_back(before.lines.size(), after.lines.size());
+    return matches;
+}
+}
 
+std::vector<bool> changedWorkingLines(const Document& before, const Document& after) {
+    std::vector<bool> changed(after.lines.size(), true);
+    for (const auto& match : matchingLines(before, after))
+        if (match.second < changed.size()) changed[match.second] = false;
+    return changed;
+}
+
+DiffDocument workingDiff(const Document& before, const Document& after, const std::string& path) {
+    const auto matches = matchingLines(before, after);
     DiffDocument result;
     result.patch.text = "Working tree\n";
     result.files.push_back({0, path}); result.rows.push_back({{}, {}, false, 1}); result.inlineOrder.push_back(0);

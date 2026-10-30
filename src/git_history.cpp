@@ -62,6 +62,19 @@ std::vector<GitCommitFile> parseGitCommitFiles(std::string_view output) {
 std::vector<std::string> gitStatusArguments() {
     return {"git.exe", "--no-optional-locks", "-c", "core.fsmonitor=false", "status", "--porcelain=v1", "-z", "--untracked-files=all", "--renames"};
 }
+std::optional<std::string> gitEditorBase(const GitStatusEntry& entry, const GitBaseRun& run) {
+    if (entry.index == '?' || entry.index == 'A') return std::string{};
+    const auto& path = (entry.index == 'R' || entry.worktree == 'R') && !entry.previousPath.empty() ? entry.previousPath : entry.path;
+    const auto tree = run({"git.exe", "--literal-pathspecs", "--no-optional-locks", "ls-tree", "-z", "HEAD", "--", path});
+    if (!tree) return {};
+    const auto tab = tree->find('\t'), end = tree->find('\0');
+    if (tab == tree->npos || end == tree->npos || end <= tab || tree->substr(tab + 1, end - tab - 1) != path) return {};
+    const auto record = tree->substr(0, tab);
+    if (record.compare(0, 12, "100644 blob ") != 0 && record.compare(0, 12, "100755 blob ") != 0) return {};
+    const auto object = record.substr(12);
+    if ((object.size() != 40 && object.size() != 64) || object.find_first_not_of("0123456789abcdef") != object.npos) return {};
+    return run({"git.exe", "--no-optional-locks", "cat-file", "blob", object});
+}
 std::vector<std::string> gitLogArguments(const std::string& tip, size_t skip) {
     return {"git.exe", "--no-optional-locks", "log", "--no-decorate", "--encoding=UTF-8", "-z",
         "--format=%H%x00%h%x00%s%x00%an%x00%aI", "-n" + std::to_string(gitCommitPageSize + 1),

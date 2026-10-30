@@ -108,6 +108,21 @@ void patchLists() {
     const auto empty = untrackedPatch("empty", ""), binary = untrackedPatch("image", std::string_view("\0", 1));
     check(empty.find("@@") == empty.npos && binary.find("Binary") != binary.npos, "Empty or binary additions were rendered as source text");
 }
+void editorBaseFailures() {
+    const GitStatusEntry entry{"file.txt"};
+    check(!gitEditorBase(entry, [](const auto&) -> std::optional<std::string> { return {}; }), "A Git failure became an empty editor base");
+    for (const auto& tree : {std::string{}, nul({"100644 blob invalid\tfile.txt"}),
+        nul({"120000 blob " + std::string(40, 'a') + "\tfile.txt"}), nul({"100644 blob " + std::string(40, 'a') + "\tother.txt"})}) {
+        size_t calls = 0;
+        check(!gitEditorBase(entry, [&](const auto&) -> std::optional<std::string> { ++calls; return tree; }) && calls == 1,
+            "A missing, malformed, symlink or mismatched tree entry became an editor base");
+    }
+    size_t calls = 0;
+    check(!gitEditorBase(entry, [&](const auto&) -> std::optional<std::string> {
+        if (++calls == 1) return nul({"100644 blob " + std::string(40, 'a') + "\tfile.txt"});
+        return {};
+    }) && calls == 2, "A failed blob read marked the entire editor as added");
+}
 #ifndef _WIN32
 namespace fs = std::filesystem;
 struct Repository {
@@ -159,6 +174,36 @@ struct Repository {
         if (!args.empty()) git(args);
     }
 };
+void repositoryEditorBase() {
+    Repository repo; repo.git({"init", "-q", "--template="});
+    repo.git({"config", "user.name", "Poppy Test"}); repo.git({"config", "user.email", "poppy@example.invalid"});
+    repo.git({"config", "core.autocrlf", "false"});
+    const std::string name = "日本語 [1]\tfile.txt", original = "head unchanged context\nold\ntail unchanged context\n";
+    repo.write(name, original); repo.write(".gitignore", "ignored.txt\n");
+    auto base = [&](const std::string& path) {
+        GitStatusEntry entry{path};
+        for (const auto& status : parseGitStatus(repo.git(gitStatusArguments()))) if (status.path == path) { entry = status; break; }
+        return gitEditorBase(entry, [&](const auto& args) -> std::optional<std::string> { return repo.git(args); });
+    };
+    check(base(name) == std::optional<std::string>(""), "An untracked file before the first commit did not use an empty base");
+    repo.git({"add", "--", name, ".gitignore"});
+    check(base(name) == std::optional<std::string>(""), "A staged addition before the first commit did not use an empty base");
+    repo.git({"commit", "-qm", "initial"});
+    check(base(name) == original, "A clean file or literal Unicode path lost its HEAD base");
+    repo.write(name, "head unchanged context\nstaged\ntail unchanged context\n"); repo.git({"add", "--", name});
+    check(base(name) == original, "Staging changes replaced the editor's HEAD base with the index");
+    repo.write(name, "head unchanged context\nstaged\nunstaged\ntail unchanged context\n");
+    check(base(name) == original, "A partially staged file lost its HEAD base");
+    const std::string renamed = "renamed 日本語.txt";
+    repo.git({"mv", "--", name, renamed});
+    check(base(renamed) == original, "A rename compared against an empty base instead of its HEAD source");
+    repo.write("ignored.txt", "ignored\n");
+    check(!base("ignored.txt") && !base("missing.txt"), "An ignored or absent file received Git line backgrounds");
+    repo.write("new.txt", "new\n");
+    check(base("new.txt") == std::optional<std::string>(""), "An untracked file did not use an empty base");
+    repo.git({"add", "--", renamed, "new.txt"}); repo.git({"commit", "-qm", "updated"});
+    check(base(renamed) == repo.readFile(renamed) && base("new.txt") == "new\n", "A commit did not refresh the editor base");
+}
 void repositoryIgnores() {
     Repository repo;
     repo.git({"init", "-q", "--template="});
@@ -814,9 +859,9 @@ void repositoryHistory() {
 }
 int main() {
     try {
-        statusGroups(); records(); patchLists(); repositoryOwnership(); ignoredNameBatches();
+        statusGroups(); records(); patchLists(); repositoryOwnership(); ignoredNameBatches(); editorBaseFailures();
 #ifndef _WIN32
-        repositoryIgnores(); repositoryStaging(); repositoryStageAll(); repositoryUnstageAll(); repositoryDiscardAll(); repositoryDiscardFile(); repositoryStashUnstaged(); repositoryStashStaged(); repositorySyntax(); repositoryRenames(); repositoryHistory(); multipleRepositories();
+        repositoryEditorBase(); repositoryIgnores(); repositoryStaging(); repositoryStageAll(); repositoryUnstageAll(); repositoryDiscardAll(); repositoryDiscardFile(); repositoryStashUnstaged(); repositoryStashStaged(); repositorySyntax(); repositoryRenames(); repositoryHistory(); multipleRepositories();
 #endif
         std::cout << "Git history tests passed.\n"; return 0;
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
