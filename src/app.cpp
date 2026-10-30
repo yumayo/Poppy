@@ -300,6 +300,7 @@ private:
     bool confirmTab(size_t index);
     void selectTab(size_t index);
     void closeTab(size_t index);
+    void closeTabs(const std::vector<size_t>& indices);
     void toggleTabPin(size_t index);
     void tabMenu(POINT screen);
     void loadTab(bool preserve = false, int group = -1);
@@ -1957,18 +1958,27 @@ void ProjectRuntime::Impl::selectTab(size_t index) {
     saveTab(); focusedGroup_ = tabs_[index].group; for (auto& tab : tabs_) if (tab.group == focusedGroup_) tab.displayed = false; tabs_[index].displayed = true; activeTab_ = index; updateTabs(); loadTab();
 }
 void ProjectRuntime::Impl::closeTab(size_t index) {
+    closeTabs({index});
+}
+void ProjectRuntime::Impl::closeTabs(const std::vector<size_t>& indices) {
     endTabDrag();
-    if (index >= tabs_.size() || tabs_[index].pinned || !confirmTab(index)) return;
-    saveTab(); const bool active = tabs_[index].displayed; const int group = tabs_[index].group;
-    tabs_.erase(tabs_.begin() + static_cast<std::ptrdiff_t>(index));
-    if (activeSidebar_ == Sidebar::Search) searchPane_.refresh();
-    if (index < activeTab_) --activeTab_;
-    else if (activeTab_ >= tabs_.size()) activeTab_ = tabs_.empty() ? 0 : tabs_.size() - 1;
-    if (active && !tabs_.empty()) {
+    std::vector<bool> closing(tabs_.size(), false);
+    for (const auto index : indices) if (index < tabs_.size() && !tabs_[index].pinned) closing[index] = true;
+    if (std::none_of(closing.begin(), closing.end(), [](bool value) { return value; })) return;
+    // Finish every save/discard decision before removing tabs. Cancel or a
+    // failed save leaves the whole set open, including its unsaved buffers.
+    for (size_t i = 0; i < tabs_.size(); ++i) if (closing[i] && !confirmTab(i)) return;
+    saveTab(); bool active = false;
+    for (int group = 0; group < 2; ++group) {
+        const auto selected = groupTab(group);
+        if (selected >= tabs_.size() || !closing[selected]) continue;
+        active = true;
         size_t replacement = tabs_.size();
-        for (size_t i = 0; i < tabs_.size(); ++i) if (tabs_[i].group == group) { replacement = i; if (i >= index) break; }
+        for (size_t i = 0; i < tabs_.size(); ++i) if (tabs_[i].group == group && !closing[i]) { replacement = i; if (i >= selected) break; }
         if (replacement < tabs_.size()) tabs_[replacement].displayed = true;
     }
+    for (size_t i = tabs_.size(); i-- > 0;) if (closing[i]) tabs_.erase(tabs_.begin() + static_cast<std::ptrdiff_t>(i));
+    if (activeSidebar_ == Sidebar::Search) searchPane_.refresh();
     layout();
     if (active) {
         ++serial_[0]; ++serial_[1];
@@ -2005,6 +2015,12 @@ void ProjectRuntime::Impl::tabMenu(POINT screen) {
     const auto path = tabs_[index].path;
     const auto key = tabKey(tabs_[index]);
     const bool pinned = tabs_[index].pinned;
+    const int group = tabs_[index].group;
+    bool closeOthers = false, closeAll = false;
+    for (size_t i = 0; i < tabs_.size(); ++i) if (tabs_[i].group == group && !tabs_[i].pinned) {
+        closeAll = true;
+        if (i != index) closeOthers = true;
+    }
     HMENU menu = CreatePopupMenu();
     if (!menu) return;
     AppendMenuW(menu, MF_STRING, 1, pinned ? L"Unpin tab" : L"Pin tab");
@@ -2014,6 +2030,8 @@ void ProjectRuntime::Impl::tabMenu(POINT screen) {
     }
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING | (pinned ? MF_GRAYED : 0), 2, L"Close tab");
+    AppendMenuW(menu, MF_STRING | (closeOthers ? 0 : MF_GRAYED), 5, L"Close Others");
+    AppendMenuW(menu, MF_STRING | (closeAll ? 0 : MF_GRAYED), 6, L"Close All");
     const UINT command = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, screen.x, screen.y, 0, window_, nullptr);
     DestroyMenu(menu);
     const auto found = std::find_if(tabs_.begin(), tabs_.end(), [&](const Tab& tab) { return tabKey(tab) == key; });
@@ -2023,6 +2041,12 @@ void ProjectRuntime::Impl::tabMenu(POINT screen) {
         else if (command == 2) closeTab(index);
         else if (command == 3) openWithDefaultApp(path);
         else if (command == 4) revealInFileExplorer(path);
+        else if (command == 5 || command == 6) {
+            std::vector<size_t> indices;
+            for (size_t i = 0; i < tabs_.size(); ++i)
+                if (tabs_[i].group == tabs_[index].group && (command == 6 || i != index)) indices.push_back(i);
+            closeTabs(indices);
+        }
     }
 }
 void ProjectRuntime::Impl::loadTab(bool preserve, int group) {

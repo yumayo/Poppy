@@ -241,7 +241,8 @@ void dragTab(const Application& app, int visibleIndex, POINT target, UINT cancel
     if (cancel) send(app.window, cancel);
     send(app.window, WM_LBUTTONUP, 0, MAKELPARAM(target.x, target.y));
 }
-void toggleTabPin(const Application& app, int visibleIndex) {
+enum class TabMenuCommand { Pin, CloseOthers, CloseAll };
+void tabMenuCommand(const Application& app, int visibleIndex, TabMenuCommand command, bool wait = true) {
     const auto rect = tabBounds(app, visibleIndex);
     POINT point{rect.left + 1, (rect.top + rect.bottom) / 2}; ClientToScreen(app.window, &point);
     check(PostMessageW(app.window, WM_CONTEXTMENU, reinterpret_cast<WPARAM>(app.window), MAKELPARAM(point.x, point.y)) != FALSE,
@@ -252,11 +253,143 @@ void toggleTabPin(const Application& app, int visibleIndex) {
         return (info.flags & GUI_INMENUMODE) != 0;
     };
     waitFor(menuOpen, "The tab context menu did not open");
-    // Select the first item (Pin tab / Unpin tab) through the native menu loop.
-    PostMessageW(app.window, WM_KEYDOWN, VK_HOME, 0);
+    // Pin is first; Close Others and Close All are the last two entries.
+    PostMessageW(app.window, WM_KEYDOWN, command == TabMenuCommand::Pin ? VK_HOME : VK_END, 0);
+    if (command == TabMenuCommand::CloseOthers) PostMessageW(app.window, WM_KEYDOWN, VK_UP, 0);
     PostMessageW(app.window, WM_KEYDOWN, VK_RETURN, 0);
     waitFor([&] { return !menuOpen(); }, "The tab context menu did not close");
+    // A save confirmation keeps the original context-menu handler running.
+    if (wait) send(app.window, WM_NULL);
+}
+void toggleTabPin(const Application& app, int visibleIndex) {
+    tabMenuCommand(app, visibleIndex, TabMenuCommand::Pin);
+}
+void answerTabSave(const Application& app, const std::wstring& filename, int answer) {
+    HWND dialog = nullptr;
+    waitFor([&] {
+        dialog = FindWindowW(L"#32770", L"Poppy");
+        DWORD pid = 0; if (dialog) GetWindowThreadProcessId(dialog, &pid);
+        return dialog && pid == app.process.dwProcessId;
+    }, "Closing tabs did not ask about unsaved edits");
+    check(FindWindowExW(dialog, nullptr, L"Static", (L"Save changes to " + filename + L"?").c_str()) != nullptr,
+          "Bulk close asked about a protected tab or the wrong file");
+    send(dialog, WM_COMMAND, answer);
+    waitFor([&] { return !IsWindow(dialog); }, "The tab save confirmation did not close");
+}
+void bulkTabCloseTests(const fs::path& executable) {
+    Fixture fixture;
+    for (int i = 0; i < 4; ++i) writeLines(fixture.root / (std::wstring(1, L'a' + i) + L".txt"), 200 + i * 100);
+    {
+        Application app(executable, fixture.root);
+        const auto tree = app.tree(), viewer = FindWindowExW(app.window, nullptr, L"PoppyViewer", nullptr);
+        waitFor([&] { return send(tree, treeGetCount) == 5; }, "Bulk close fixture did not load");
+        auto item = nextItem(tree, TreeRelation::Child, nextItem(tree, TreeRelation::Root));
+        TreeItem third = 0;
+        for (int i = 0; i < 4; ++i) {
+            if (i == 2) third = item;
+            send(tree, treeSelect, item); waitLines(viewer, 200 + i * 100);
+            item = nextItem(tree, TreeRelation::Next, item);
+        }
+        toggleTabPin(app, 0); toggleTabPin(app, 1);
+        clickTab(app, 2); waitLines(viewer, 400);
+        send(viewer, WM_VSCROLL, SB_LINEDOWN); const auto top = scrollInfo(viewer).nPos;
+        clickTab(app, 3); waitLines(viewer, 500);
+        tabMenuCommand(app, 2, TabMenuCommand::CloseOthers); waitLines(viewer, 400);
+        check(visibleTabCount(app) == 3 && scrollInfo(viewer).nPos == top,
+              "Close Others lost its inactive target, pinned tabs or scroll position");
+        tabMenuCommand(app, 0, TabMenuCommand::CloseOthers); waitLines(viewer, 300);
+        check(visibleTabCount(app) == 2, "Close Others on a pinned tab did not preserve all pinned tabs");
+        send(tree, treeSelect, third); waitLines(viewer, 400);
+        tabMenuCommand(app, 0, TabMenuCommand::CloseAll); waitLines(viewer, 300);
+        check(visibleTabCount(app) == 2, "Close All closed a pinned tab");
+        clickTab(app, 0); waitLines(viewer, 200);
+        clickTab(app, 1); waitLines(viewer, 300);
+        toggleTabPin(app, 0); toggleTabPin(app, 0);
+        tabMenuCommand(app, 0, TabMenuCommand::CloseAll);
+        check(visibleTabCount(app) == 0 && scrollInfo(viewer).nMax == 0, "Close All did not clear the last regular tabs");
+        // Repeat while the reopened document may still be loading.
+        send(tree, WM_KEYDOWN, VK_RETURN);
+        tabMenuCommand(app, 0, TabMenuCommand::CloseAll);
+        check(visibleTabCount(app) == 0 && scrollInfo(viewer).nMax == 0, "A pending load survived Close All");
+    }
+    {
+        Application app(executable, fixture.root); app.tree();
+        const auto viewer = FindWindowExW(app.window, nullptr, L"PoppyViewer", nullptr);
+        check(visibleTabCount(app) == 0 && scrollInfo(viewer).nMax == 0, "Restart restored bulk-closed tabs");
+    }
+}
+void bulkTabSaveTests(const fs::path& executable) {
+    Fixture fixture;
+    for (int i = 0; i < 4; ++i) writeLines(fixture.root / (std::wstring(1, L'a' + i) + L".txt"), 200 + i * 100);
+    Application app(executable, fixture.root);
+    const auto tree = app.tree(), viewer = FindWindowExW(app.window, nullptr, L"PoppyViewer", nullptr);
+    waitFor([&] { return send(tree, treeGetCount) == 5; }, "Bulk save fixture did not load");
+    auto item = nextItem(tree, TreeRelation::Child, nextItem(tree, TreeRelation::Root));
+    for (int i = 0; i < 4; ++i) {
+        send(tree, treeSelect, item); waitLines(viewer, 200 + i * 100);
+        if (i < 3) send(viewer, WM_CHAR, '!');
+        item = nextItem(tree, TreeRelation::Next, item);
+    }
+    toggleTabPin(app, 0);
+    tabMenuCommand(app, 3, TabMenuCommand::CloseOthers, false);
+    answerTabSave(app, L"b.txt", IDNO); answerTabSave(app, L"c.txt", IDCANCEL);
     send(app.window, WM_NULL);
+    check(visibleTabCount(app) == 4 && scrollInfo(viewer).nMax == 500,
+          "Cancel after a discard decision partially closed the tabs");
+    check(readText(fixture.root / L"b.txt").front() != '!', "Discard or Cancel unexpectedly saved edits");
+
+    // A conflicting external edit makes the second save fail after the first
+    // succeeds. All tabs and the remaining unsaved buffers must stay open.
+    writeLines(fixture.root / L"c.txt", 600); const auto external = readText(fixture.root / L"c.txt");
+    tabMenuCommand(app, 0, TabMenuCommand::CloseAll, false);
+    answerTabSave(app, L"b.txt", IDYES); answerTabSave(app, L"c.txt", IDYES);
+    HWND error = nullptr;
+    waitFor([&] {
+        error = FindWindowW(L"#32770", L"Poppy — Save");
+        DWORD pid = 0; if (error) GetWindowThreadProcessId(error, &pid);
+        return error && pid == app.process.dwProcessId;
+    }, "A failed bulk-close save did not report its error");
+    send(error, WM_COMMAND, IDOK); send(app.window, WM_NULL);
+    check(visibleTabCount(app) == 4, "A failed save partially closed the tabs");
+    check(readText(fixture.root / L"b.txt").front() == '!', "Cancel lost the first unsaved buffer or Save did not persist it");
+    check(readText(fixture.root / L"c.txt") == external, "A failed save overwrote external edits");
+    clickTab(app, 2); waitLines(viewer, 400);
+    tabMenuCommand(app, 0, TabMenuCommand::CloseAll, false);
+    answerTabSave(app, L"c.txt", IDNO); send(app.window, WM_NULL); waitLines(viewer, 200);
+    check(visibleTabCount(app) == 1 && readText(fixture.root / L"a.txt").front() != '!',
+          "Close All prompted, saved or closed a dirty pinned tab");
+    toggleTabPin(app, 0);
+    tabMenuCommand(app, 0, TabMenuCommand::CloseAll, false);
+    answerTabSave(app, L"a.txt", IDNO); send(app.window, WM_NULL);
+    check(visibleTabCount(app) == 0, "Discard did not finish closing the last unpinned tab");
+}
+void bulkTabSplitTests(const fs::path& executable) {
+    Fixture fixture;
+    for (int i = 0; i < 3; ++i) writeLines(fixture.root / (std::wstring(1, L'a' + i) + L".txt"), 200 + i * 100);
+    Application app(executable, fixture.root);
+    const auto tree = app.tree(), left = FindWindowExW(app.window, nullptr, L"PoppyViewer", nullptr);
+    const auto right = FindWindowExW(app.window, left, L"PoppyViewer", nullptr);
+    waitFor([&] { return send(tree, treeGetCount) == 4; }, "Bulk split fixture did not load");
+    auto item = nextItem(tree, TreeRelation::Child, nextItem(tree, TreeRelation::Root));
+    for (int i = 0; i < 3; ++i) {
+        send(tree, treeSelect, item); waitLines(left, 200 + i * 100);
+        item = nextItem(tree, TreeRelation::Next, item);
+    }
+    const auto original = bounds(app.window, left);
+    dragTab(app, 2, {original.left + (original.right - original.left) * 3 / 4, original.top + 60});
+    waitLines(left, 300); waitLines(right, 400);
+    send(right, WM_VSCROLL, SB_LINEDOWN); const auto top = scrollInfo(right).nPos;
+    tabMenuCommand(app, 0, TabMenuCommand::CloseOthers); waitLines(left, 200); waitLines(right, 400);
+    check(visibleTabCount(app) == 2 && IsWindowVisible(right) && scrollInfo(right).nPos == top,
+          "Close Others affected the other editor group");
+    // Close the left group while the right one has focus. It must migrate to
+    // the remaining viewer without losing its document or position.
+    clickTab(app, 1); waitLines(right, 400);
+    tabMenuCommand(app, 0, TabMenuCommand::CloseAll); waitLines(left, 400);
+    check(visibleTabCount(app) == 1 && !IsWindowVisible(right) && scrollInfo(left).nPos == top,
+          "Close All crossed editor groups or failed to collapse the empty left group");
+    tabMenuCommand(app, 0, TabMenuCommand::CloseAll);
+    check(visibleTabCount(app) == 0 && scrollInfo(left).nMax == 0, "Close All left an empty split document");
 }
 void tabTests(const fs::path& executable) {
     Fixture fixture;
@@ -2417,6 +2550,7 @@ int wmain(int argc, wchar_t** argv) {
         check(argc == 2, "Pass the path to Poppy.exe");
         SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         for (const auto test : {folderTests, explorerSortTests, sidebarTests, treeInteractionTests, tabTests, pinnedTabTests,
+                bulkTabCloseTests, bulkTabSaveTests, bulkTabSplitTests,
                 tabDragTests, wrappingTabDragTests, wrappingTabTests, renameTests, explorerMoveTests, explorerDeleteTests, createItemTests, newFileShortcutTests, pasteImageTests, splitPaneTests, quickOpenTests, fullSearchTests, gitSidebarTests, gitIgnoredExplorerTests, gitAutoRefreshTests, branchSidebarTests, multiRepositoryTests, sessionTests, multiProjectTests, recentProjectTests, projectDragTests, scrollingProjectDragTests, terminalTitleTests, terminalShellTests, terminalShortcutTests, terminalBackspaceTests}) {
             Fixture appData; AppDataEnvironment environment(appData.root);
             test(fs::absolute(argv[1]));
