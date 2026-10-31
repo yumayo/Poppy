@@ -30,12 +30,17 @@ public:
     void reparent(TreeItem id, TreeItem parent) { if (model_.reparent(id, parent)) changed(); }
     void expand(TreeItem id, bool expanded);
     void select(TreeItem id, bool activate = true);
+    void addSelection(TreeItem id) { if (!model_.selected(id) && model_.select(id, true, false)) changed(); }
+    void showSelection() { ensureVisible(); changed(); }
+    std::function<void()> selectionChanged;
     TreeItem child(TreeItem parent = 0) const { return model_.child(parent); }
     TreeItem next(TreeItem id) const { return model_.next(id); }
     int top() const { return top_; }
     int left() const { return MulDiv(left_, 96, dpi_); }
     void restoreScroll(int top, int left) { top_ = top; left_ = MulDiv(left, dpi_, 96); changed(); }
     TreeItem selection() const { return model_.selection(); }
+    std::vector<TreeItem> selections(bool rootsOnly = false) const { return model_.selections(rootsOnly); }
+    bool multipleSelection = false;
     bool dragging() const { return drag_.has_value(); }
     void rename(TreeItem item, const std::wstring& name);
     void createItem(TreeItem parent, bool directory);
@@ -45,10 +50,14 @@ public:
     std::function<void(TreeItem)> renameRequested;
     std::function<void(TreeItem, const std::wstring&)> renameCommitted;
     std::function<bool(TreeItem)> canDelete;
-    std::function<void(TreeItem)> deleteRequested;
+    std::function<void(const std::vector<TreeItem>&)> deleteRequested;
+    std::function<bool(TreeItem)> canCopy;
+    std::function<void(const std::vector<TreeItem>&, bool)> copyRequested;
+    std::function<bool(TreeItem)> canPasteFiles;
+    std::function<void(TreeItem)> pasteFilesRequested;
     std::function<bool(TreeItem)> canDrag;
     std::function<bool(TreeItem, TreeItem)> canDrop;
-    std::function<void(TreeItem, TreeItem)> moveCommitted;
+    std::function<void(const std::vector<TreeItem>&, TreeItem)> moveCommitted;
     std::function<bool(TreeItem)> canOpenWithDefaultApp;
     std::function<void(TreeItem)> openWithDefaultAppRequested;
     std::function<bool(TreeItem)> canRevealInFileExplorer;
@@ -79,6 +88,7 @@ private:
     void updateDrag(POINT point);
     void tickDrag();
     void endDrag(bool drop = false);
+    bool selectionAllowed(const std::function<bool(TreeItem)>& allowed) const;
     void layoutRename();
     LRESULT handle(UINT, WPARAM, LPARAM);
     void paint();

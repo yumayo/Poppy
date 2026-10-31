@@ -13,6 +13,7 @@
 #include "project_provider.h"
 #include "file_changes.h"
 #include "explorer_history.h"
+#include "explorer_clipboard.h"
 #include "status_bar.h"
 #include <commctrl.h>
 #include <dwmapi.h>
@@ -301,11 +302,15 @@ private:
     void newFile();
     void createItem(TreeItem parent, const std::wstring& name, bool directory);
     void renameFile(TreeItem item, const std::wstring& name);
-    void deleteItem(TreeItem item);
+    void deleteItems(const std::vector<TreeItem>& items);
+    void copyItems(const std::vector<TreeItem>& items, bool cut);
+    void pasteFiles(TreeItem item);
+    void moveItems(const std::vector<TreeItem>& items, TreeItem parent);
+    void executeExplorerBatch(std::vector<ExplorerEdit> edits, std::vector<ResourceId> copies = {}, ExplorerClipboard clipboard = {});
+    void applyExplorerBatch(const std::vector<ExplorerEdit>& edits, bool redo);
     bool canMoveFile(TreeItem item, TreeItem parent) const;
     void relocateFile(TreeItem item, const ResourceId& destination, TreeItem parent = 0);
-    void applyRelocation(const ResourceId& source, const ResourceId& destination);
-    void applyExplorerPresence(const ExplorerEdit& edit, bool restore);
+    void applyRelocation(const ResourceId& source, const ResourceId& destination, bool refreshView = true);
     bool canReplayExplorer(bool redo) const;
     void replayExplorer(bool redo);
     void recordExplorer(ExplorerEdit edit);
@@ -404,6 +409,7 @@ private:
     ResourceId root_;
     std::map<std::wstring, ResourceId> expandedPaths_;
     ResourceId pendingTreeSelection_;
+    std::map<std::wstring, ResourceId> pendingTreeSelections_;
     bool waitingForGit_[2]{};
     std::vector<Tab> tabs_;
     std::vector<RECT> tabRects_;
@@ -435,8 +441,11 @@ void ProjectRuntime::Impl::create() {
     gitWorker_ = std::make_unique<Worker>(window_);
     explorer_.create(window_, instance_, L"Files", 1); tree_ = explorer_.window();
     changes_.create(window_, instance_, L"Source Control", 4); gitTree_ = changes_.window();
+    explorer_.multipleSelection = true;
+    explorer_.selectionChanged = [this] { pendingTreeSelection_.clear(); pendingTreeSelections_.clear(); };
     explorer_.activated = [this](TreeItem item) {
         pendingTreeSelection_.clear();
+        pendingTreeSelections_.clear();
         if (const auto n = node(item); n && !n->directory) openFile(n->path);
     };
     explorer_.expanded = [this](TreeItem item, bool value) {
@@ -451,12 +460,14 @@ void ProjectRuntime::Impl::create() {
     explorer_.renameRequested = [this](TreeItem item) { if (const auto n = node(item); n && item != rootItem_ && !renamePending_) explorer_.rename(item, n->path.filename().native()); };
     explorer_.renameCommitted = [this](TreeItem item, const std::wstring& name) { renameFile(item, name); };
     explorer_.canDelete = [this](TreeItem item) { const auto n = node(item); return explorer_.canRename(item) && !gitStagePending_ && n && root_.contains(n->path) && pathKey(n->path) != pathKey(root_); };
-    explorer_.deleteRequested = [this](TreeItem item) { deleteItem(item); };
+    explorer_.deleteRequested = [this](const std::vector<TreeItem>& items) { deleteItems(items); };
+    explorer_.canCopy = [this](TreeItem item) { return explorer_.canDelete(item); };
+    explorer_.copyRequested = [this](const std::vector<TreeItem>& items, bool cut) { copyItems(items, cut); };
+    explorer_.canPasteFiles = [this](TreeItem item) { return canPasteImage(item) && !gitStagePending_ && clipboardHasFiles(); };
+    explorer_.pasteFilesRequested = [this](TreeItem item) { pasteFiles(item); };
     explorer_.canDrag = [this](TreeItem item) { return explorer_.canRename(item) && !gitStagePending_; };
     explorer_.canDrop = [this](TreeItem item, TreeItem parent) { return canMoveFile(item, parent); };
-    explorer_.moveCommitted = [this](TreeItem item, TreeItem parent) {
-        if (canMoveFile(item, parent)) relocateFile(item, node(parent)->path / node(item)->path.filename().native(), parent);
-    };
+    explorer_.moveCommitted = [this](const std::vector<TreeItem>& items, TreeItem parent) { moveItems(items, parent); };
     explorer_.canOpenWithDefaultApp = [this](TreeItem item) { const auto n = node(item); return n && !n->directory && !n->unsupported && !root_.wsl(); };
     explorer_.openWithDefaultAppRequested = [this](TreeItem item) { if (const auto n = node(item); n && !n->directory) openWithDefaultApp(n->path); };
     explorer_.canRevealInFileExplorer = [this](TreeItem item) { const auto n = node(item); return n && !n->unsupported; };
@@ -1418,30 +1429,181 @@ bool ProjectRuntime::Impl::canMoveFile(TreeItem item, TreeItem parent) const {
         root_.contains(source->path) && root_.contains(target->path) && !source->path.contains(target->path) &&
         pathKey(source->path.parent_path()) != pathKey(target->path);
 }
-void ProjectRuntime::Impl::deleteItem(TreeItem item) {
-    if (!explorer_.canDelete(item)) return;
-    const auto source = node(item)->path;
-    const auto backup = root_.parent_path() / (L".poppy-undo-" + wide(newSessionId()));
-    ExplorerEdit edit{source, backup, ExplorerEditKind::Delete, source};
-    for (const auto& pair : expandedPaths_) if (source.contains(pair.second)) edit.expanded.push_back(pair.second);
-    saveTab(); endTabDrag(); renamePending_ = true; status(L"Deleting " + source.filename().native() + L"…");
-    const auto provider = provider_;
-    worker_->submit(L"delete-item", [this, provider, edit] {
+void ProjectRuntime::Impl::deleteItems(const std::vector<TreeItem>& items) {
+    if (items.empty() || !std::all_of(items.begin(), items.end(), [this](TreeItem item) { return explorer_.canDelete(item); })) return;
+    std::vector<ExplorerEdit> edits;
+    for (const auto item : items) {
+        const auto source = node(item)->path;
+        ExplorerEdit edit{source, root_.parent_path() / (L".poppy-undo-" + wide(newSessionId())), ExplorerEditKind::Delete, source};
+        for (const auto& pair : expandedPaths_) if (source.contains(pair.second)) edit.expanded.push_back(pair.second);
+        edits.push_back(std::move(edit));
+    }
+    executeExplorerBatch(std::move(edits));
+}
+void ProjectRuntime::Impl::copyItems(const std::vector<TreeItem>& items, bool cut) {
+    if (items.empty() || !std::all_of(items.begin(), items.end(), [this, cut](TreeItem item) { return cut ? explorer_.canDrag(item) : explorer_.canCopy(item); })) return;
+    std::vector<ResourceId> paths;
+    for (const auto item : items) paths.push_back(node(item)->path);
+    if (!writeExplorerClipboard(window_, paths, cut)) {
+        MessageBoxW(window_, L"Cannot write files to the clipboard.", L"Poppy — Clipboard", MB_OK | MB_ICONWARNING); return;
+    }
+    status(std::to_wstring(paths.size()) + (cut ? L" item(s) cut" : L" item(s) copied"));
+}
+void ProjectRuntime::Impl::pasteFiles(TreeItem item) {
+    if (!explorer_.canPasteFiles(item)) return;
+    auto clipboard = readExplorerClipboard(window_);
+    if (clipboard.paths.empty()) return;
+    const auto target = node(item ? item : rootItem_);
+    if (!target) return;
+    const auto directory = target->directory ? target->path : target->path.parent_path();
+    const auto parentItem = target->directory ? (item ? item : rootItem_) : explorer_.item(item)->parent;
+    if (!canCreateItem(parentItem)) return;
+    std::vector<ExplorerEdit> edits;
+    std::vector<ResourceId> copies;
+    std::set<std::wstring> clipboardPaths, sources;
+    for (auto& source : clipboard.paths) { source = source.lexically_normal(); clipboardPaths.insert(pathKey(source)); }
+    for (const auto& source : clipboard.paths) {
+        if (!source.is_absolute() || !source.sameAuthority(directory) || source.filename().empty() ||
+            pathKey(source) == pathKey(root_) || source.contains(directory)) {
+            MessageBoxW(window_, L"Choose files or folders from the same Windows or WSL connection. A folder cannot be pasted into itself or its descendants.", L"Poppy — Paste", MB_OK | MB_ICONWARNING); return;
+        }
+        bool covered = false;
+        for (auto parent = source.parent_path(); !parent.empty(); parent = parent.parent_path()) {
+            if (clipboardPaths.count(pathKey(parent))) { covered = true; break; }
+            if (parent == parent.parent_path()) break;
+        }
+        if (covered || !sources.insert(pathKey(source)).second) continue;
+        if (clipboard.cut && pathKey(source.parent_path()) == pathKey(directory)) continue;
+        const auto destination = directory / source.filename().native();
+        if (clipboard.cut) edits.push_back({source, destination, ExplorerEditKind::Move});
+        else {
+            const auto backup = root_.parent_path() / (L".poppy-undo-" + wide(newSessionId()));
+            edits.push_back({backup, destination, ExplorerEditKind::Create, destination}); copies.push_back(source);
+        }
+    }
+    if (edits.empty()) return;
+    expandedPaths_[pathKey(directory)] = directory;
+    executeExplorerBatch(std::move(edits), std::move(copies), std::move(clipboard));
+}
+void ProjectRuntime::Impl::moveItems(const std::vector<TreeItem>& items, TreeItem parent) {
+    if (items.empty() || !std::all_of(items.begin(), items.end(), [this, parent](TreeItem item) { return canMoveFile(item, parent); })) return;
+    std::vector<ExplorerEdit> edits;
+    for (const auto item : items) edits.push_back({node(item)->path, node(parent)->path / node(item)->path.filename().native(), ExplorerEditKind::Move});
+    executeExplorerBatch(std::move(edits));
+}
+void ProjectRuntime::Impl::executeExplorerBatch(std::vector<ExplorerEdit> edits, std::vector<ResourceId> copies, ExplorerClipboard clipboard) {
+    if (edits.empty()) return;
+    saveTab(); endTabDrag(); renamePending_ = true;
+    const std::wstring action = edits.front().kind == ExplorerEditKind::Delete ? L"Delete" : copies.empty() ? L"Move" : L"Paste";
+    status(action + L" — " + std::to_wstring(edits.size()) + L" item(s)…");
+    struct BufferVersion { ResourceId path; std::shared_ptr<EditBuffer> buffer; std::string baseline, version; };
+    std::vector<BufferVersion> buffers;
+    if (root_.wsl() && copies.empty()) for (const auto& edit : edits) if (edit.kind == ExplorerEditKind::Move)
+        for (const auto& tab : tabs_) if (tab.buffer && edit.before.contains(tab.path))
+            buffers.push_back({relocateResource(tab.path, edit.before, edit.after), tab.buffer, tab.buffer->baseline, {}});
+    worker_->submit(L"explorer-batch", [this, edits = std::move(edits), copies = std::move(copies), clipboard = std::move(clipboard), action, buffers = std::move(buffers)]() mutable {
         std::wstring error;
-        try { error = provider->renameResource(edit.before, edit.after); }
-        catch (const std::exception& failure) { error = wide(failure.what()); }
-        worker_->complete([this, edit, error] {
+        std::vector<ExplorerEdit> applied;
+        std::map<std::wstring, std::set<std::wstring>> copyNames;
+        std::set<std::wstring> copyDirectories;
+        for (size_t i = 0; i < edits.size(); ++i) {
+            auto edit = edits[i];
+            try {
+                if (!copies.empty()) {
+                    // Pasting into the source folder creates a new sibling.
+                    // Other name collisions report an error without overwriting.
+                    if (pathKey(copies[i].parent_path()) == pathKey(edit.after.parent_path())) {
+                        const auto key = pathKey(edit.after.parent_path());
+                        if (!copyNames.count(key)) {
+                            const auto listing = provider_->listDirectory(edit.after.parent_path());
+                            if (!listing.error.empty()) throw std::runtime_error(utf8(listing.error));
+                            auto& names = copyNames[key];
+                            for (const auto& entry : listing.entries) {
+                                names.insert(pathKey(entry.path));
+                                if (entry.directory) copyDirectories.insert(pathKey(entry.path));
+                            }
+                        }
+                        auto& existing = copyNames[key];
+                        const bool directory = copyDirectories.count(pathKey(copies[i])) != 0;
+                        const auto name = copies[i].filename().native(), extension = directory ? std::wstring{} : copies[i].extension().native();
+                        const auto base = name.substr(0, name.size() - extension.size());
+                        unsigned suffix = 1;
+                        do {
+                            edit.after = copies[i].parent_path() / (base + L" - Copy" + (suffix == 1 ? std::wstring{} : L" (" + std::to_wstring(suffix) + L")") + extension);
+                            ++suffix;
+                        } while (existing.count(pathKey(edit.after)));
+                        existing.insert(pathKey(edit.after));
+                        edit.selection = edit.after;
+                    }
+                    error = provider_->copyResource(copies[i], edit.after);
+                } else error = provider_->renameResource(edit.before, edit.after);
+            } catch (const std::exception& failure) { error = wide(failure.what()); }
+            if (!error.empty()) { error = (copies.empty() ? edit.before : copies[i]).native() + L"\n\n" + error; break; }
+            applied.push_back(std::move(edit));
+        }
+        for (auto& buffer : buffers) if (std::any_of(applied.begin(), applied.end(), [&](const ExplorerEdit& edit) { return edit.kind == ExplorerEditKind::Move && edit.after.contains(buffer.path); })) {
+            try { const auto file = provider_->readFile(buffer.path); if (file.error.empty() && file.bytes == buffer.baseline) buffer.version = file.version; }
+            catch (const std::exception&) { /* Preserve successful moves even if the version cannot be read. */ }
+        }
+        worker_->complete([this, applied = std::move(applied), error, action, clipboard = std::move(clipboard), buffers = std::move(buffers)] {
             renamePending_ = false;
-            if (!error.empty()) {
-                status(L"Delete failed");
-                MessageBoxW(window_, (edit.before.native() + L"\n\n" + error).c_str(), L"Poppy — Delete", MB_OK | MB_ICONWARNING); return;
+            for (const auto& buffer : buffers) if (!buffer.version.empty() && buffer.buffer->baseline == buffer.baseline) buffer.buffer->fileVersion = buffer.version;
+            if (!applied.empty()) {
+                discardBackups(explorerHistory_.recordBatch(applied));
+                applyExplorerBatch(applied, true);
+                if (clipboard.cut && GetClipboardSequenceNumber() == clipboard.sequence) {
+                    std::vector<ResourceId> remaining;
+                    for (const auto& path : clipboard.paths) if (std::none_of(applied.begin(), applied.end(), [&](const ExplorerEdit& edit) { return edit.before.contains(path); })) remaining.push_back(path);
+                    writeExplorerClipboard(window_, remaining, true);
+                }
+                if (owner_ && owner_->changed) owner_->changed();
             }
-            recordExplorer(edit);
-            applyExplorerPresence(edit, false);
-            status(L"Deleted " + edit.before.filename().native());
-            if (owner_ && owner_->changed) owner_->changed();
+            if (!error.empty()) {
+                status(action + L" failed");
+                MessageBoxW(window_, error.c_str(), (L"Poppy — " + action).c_str(), MB_OK | MB_ICONWARNING);
+            } else status(action + L" completed — " + std::to_wstring(applied.size()) + L" item(s)");
         });
     });
+}
+void ProjectRuntime::Impl::applyExplorerBatch(const std::vector<ExplorerEdit>& edits, bool redo) {
+    if (edits.empty()) return;
+    Tree::Batch batch(explorer_);
+    pendingTreeSelections_.clear();
+    std::map<std::wstring, TreeItem> items;
+    for (const auto& pair : nodes_) if (const auto n = node(pair.second)) items[pathKey(n->path)] = pair.second;
+    std::vector<ResourceId> selected;
+    ++generation_; ++serial_[0]; ++serial_[1];
+    for (const auto& edit : edits) {
+        if (edit.kind == ExplorerEditKind::Move) {
+            const auto source = redo ? edit.before : edit.after, destination = redo ? edit.after : edit.before;
+            applyRelocation(source, destination, false); selected.push_back(destination);
+        } else if (edit.restores(redo)) {
+            for (const auto& path : edit.expanded) expandedPaths_[pathKey(path)] = path;
+            selected.push_back(edit.selection.empty() ? edit.resource() : edit.selection);
+        } else {
+            const auto& resource = edit.resource();
+            forgetExpanded(resource);
+            const auto found = items.find(pathKey(resource));
+            if (found != items.end()) explorer_.erase(found->second);
+            pendingTreeSelection_ = resource.parent_path();
+        }
+    }
+    for (const auto& pair : nodes_) if (auto n = node(pair.second)) n->loading = false;
+    if (!selected.empty()) {
+        pendingTreeSelection_.clear(); explorer_.select(0, false);
+        for (const auto& path : selected) pendingTreeSelections_[pathKey(path)] = path;
+        for (const auto& pair : nodes_) if (const auto n = node(pair.second); n && pendingTreeSelections_.erase(pathKey(n->path))) explorer_.addSelection(pair.second);
+        explorer_.showSelection();
+    } else {
+        const auto found = items.find(pathKey(pendingTreeSelection_));
+        if (found != items.end() && explorer_.item(found->second)) { explorer_.select(found->second, false); pendingTreeSelection_.clear(); }
+    }
+    if (!pendingTreeSelection_.empty()) selected.push_back(pendingTreeSelection_);
+    for (const auto& selection : selected) for (auto path = selection.parent_path(); root_.contains(path); path = path.parent_path()) {
+        expandedPaths_[pathKey(path)] = path;
+        if (path == root_ || path == path.parent_path()) break;
+    }
+    layout(); refresh();
 }
 void ProjectRuntime::Impl::relocateFile(TreeItem item, const ResourceId& destination, TreeItem parent) {
     const auto n = node(item); if (!n) return;
@@ -1468,7 +1630,7 @@ void ProjectRuntime::Impl::relocateFile(TreeItem item, const ResourceId& destina
         });
     });
 }
-void ProjectRuntime::Impl::applyRelocation(const ResourceId& source, const ResourceId& destination) {
+void ProjectRuntime::Impl::applyRelocation(const ResourceId& source, const ResourceId& destination, bool refreshView) {
     TreeItem item = 0, parent = 0;
     for (const auto& pair : nodes_) if (const auto n = node(pair.second)) {
         if (pathKey(n->path) == pathKey(source)) item = pair.second;
@@ -1493,7 +1655,7 @@ void ProjectRuntime::Impl::applyRelocation(const ResourceId& source, const Resou
             current->path = relocateResource(current->path, source, destination); current->loading = false; updateLabel(pair.second);
         }
         for (const auto& pair : nodes_) if (const auto current = node(pair.second); current && current->directory) explorer_.sort(pair.second, explorerLess);
-        if (moving && node(parent)) requestDirectory(parent);
+        if (refreshView && moving && node(parent)) requestDirectory(parent);
     }
     for (auto& tab : tabs_) {
         const auto gitRoot = relocateResource(tab.gitRoot, source, destination);
@@ -1506,28 +1668,7 @@ void ProjectRuntime::Impl::applyRelocation(const ResourceId& source, const Resou
         if (tab.buffer) { tab.buffer->document.language = path.filename() == L"CMakeLists.txt" ? Language::Config : languageFor(utf8(path.extension().native())); indexDocument(tab.buffer->document); }
     }
     terminal_.relocate(source, destination);
-    layout(); refresh();
-}
-void ProjectRuntime::Impl::applyExplorerPresence(const ExplorerEdit& edit, bool restore) {
-    const auto& resource = edit.resource();
-    ++generation_; ++serial_[0]; ++serial_[1];
-    if (!restore) {
-        forgetExpanded(resource);
-        TreeItem removed = 0;
-        for (const auto& pair : nodes_) if (const auto n = node(pair.second); n && pathKey(n->path) == pathKey(resource)) { removed = pair.second; break; }
-        if (removed) explorer_.erase(removed);
-    }
-    for (const auto& pair : nodes_) if (auto n = node(pair.second)) n->loading = false;
-    pendingTreeSelection_ = restore ? edit.selection : resource.parent_path();
-    if (restore) for (const auto& path : edit.expanded) expandedPaths_[pathKey(path)] = path;
-    for (auto path = pendingTreeSelection_.parent_path(); root_.contains(path); path = path.parent_path()) {
-        expandedPaths_[pathKey(path)] = path;
-        if (path == root_ || path == path.parent_path()) break;
-    }
-    for (const auto& pair : nodes_) if (const auto n = node(pair.second); n && pathKey(n->path) == pathKey(pendingTreeSelection_)) {
-        explorer_.select(pair.second, false); pendingTreeSelection_.clear(); break;
-    }
-    refresh();
+    if (refreshView) { layout(); refresh(); }
 }
 void ProjectRuntime::Impl::discardBackups(std::vector<ResourceId> paths) {
     if (paths.empty()) return;
@@ -1560,43 +1701,41 @@ bool ProjectRuntime::Impl::canReplayExplorer(bool redo) const {
 void ProjectRuntime::Impl::replayExplorer(bool redo) {
     if (!canReplayExplorer(redo)) return;
     saveTab(); endTabDrag();
-    auto pending = explorerHistory_.next(redo);
-    if (pending->kind != ExplorerEditKind::Move && !pending->restores(redo)) {
-        pending->expanded.clear();
-        for (const auto& pair : expandedPaths_) if (pending->resource().contains(pair.second)) pending->expanded.push_back(pair.second);
-        if (const auto selected = node(explorer_.selection()); selected && pending->resource().contains(selected->path)) pending->selection = selected->path;
+    auto pending = explorerHistory_.nextBatch(redo);
+    for (auto& edit : *pending) if (edit.kind != ExplorerEditKind::Move && !edit.restores(redo)) {
+        edit.expanded.clear();
+        for (const auto& pair : expandedPaths_) if (edit.resource().contains(pair.second)) edit.expanded.push_back(pair.second);
+        if (const auto selected = node(explorer_.selection()); selected && edit.resource().contains(selected->path)) edit.selection = selected->path;
     }
-    const auto edit = *pending;
-    const auto source = redo ? edit.before : edit.after, destination = redo ? edit.after : edit.before;
     struct BufferVersion { ResourceId path; std::shared_ptr<EditBuffer> buffer; std::string baseline, version; };
     std::vector<BufferVersion> buffers;
-    // Absent resources keep open tabs at their logical paths. Unsaved edits
-    // survive, and WSL versions are rebound when the resource is restored.
-    if (root_.wsl()) for (const auto& tab : tabs_) if (tab.buffer) {
+    if (root_.wsl()) for (const auto& edit : *pending) for (const auto& tab : tabs_) if (tab.buffer) {
+        const auto source = redo ? edit.before : edit.after, destination = redo ? edit.after : edit.before;
         if (edit.kind == ExplorerEditKind::Move && source.contains(tab.path)) buffers.push_back({relocateResource(tab.path, source, destination), tab.buffer, tab.buffer->baseline, {}});
         else if (edit.kind != ExplorerEditKind::Move && edit.restores(redo) && destination.contains(tab.path)) buffers.push_back({tab.path, tab.buffer, tab.buffer->baseline, {}});
     }
     renamePending_ = true; status(redo ? L"Redoing Explorer operation…" : L"Undoing Explorer operation…");
-    worker_->submit(L"explorer-history", [this, redo, edit, source, destination, buffers = std::move(buffers)]() mutable {
-        std::wstring error;
-        try {
-            error = explorerHistory_.replay(redo, [this](const ResourceId& from, const ResourceId& to) { return provider_->renameResource(from, to); });
-        } catch (const std::exception& failure) { error = wide(failure.what()); }
-        if (error.empty()) for (auto& buffer : buffers) {
+    worker_->submit(L"explorer-history", [this, redo, buffers = std::move(buffers)]() mutable {
+        std::vector<ExplorerEdit> applied;
+        const auto error = explorerHistory_.replay(redo, [this](const ResourceId& from, const ResourceId& to) { return provider_->renameResource(from, to); }, &applied);
+        for (auto& buffer : buffers) if (std::any_of(applied.begin(), applied.end(), [&](const ExplorerEdit& edit) {
+            return (edit.kind == ExplorerEditKind::Move || edit.restores(redo)) && (redo ? edit.after : edit.before).contains(buffer.path);
+        })) {
             try { const auto file = provider_->readFile(buffer.path); if (file.error.empty() && file.bytes == buffer.baseline) buffer.version = file.version; }
-            catch (const std::exception&) { /* A read failure must not undo a successful filesystem operation. */ }
+            catch (const std::exception&) { /* Keep successful filesystem operations when a version read fails. */ }
         }
-        worker_->complete([this, redo, edit, source, destination, error, buffers = std::move(buffers)] {
+        worker_->complete([this, redo, applied = std::move(applied), error, buffers = std::move(buffers)] {
             renamePending_ = false;
+            for (const auto& buffer : buffers) if (!buffer.version.empty() && buffer.buffer->baseline == buffer.baseline) buffer.buffer->fileVersion = buffer.version;
+            if (!applied.empty()) {
+                applyExplorerBatch(applied, redo);
+                if (owner_ && owner_->changed) owner_->changed();
+            }
             if (!error.empty()) {
                 status(L"Explorer Undo/Redo failed");
-                MessageBoxW(window_, (source.native() + L"\n\n" + error).c_str(), L"Poppy — Explorer Undo/Redo", MB_OK | MB_ICONWARNING); return;
+                MessageBoxW(window_, error.c_str(), L"Poppy — Explorer Undo/Redo", MB_OK | MB_ICONWARNING); return;
             }
-            for (const auto& buffer : buffers) if (!buffer.version.empty() && buffer.buffer->baseline == buffer.baseline) buffer.buffer->fileVersion = buffer.version;
-            if (edit.kind == ExplorerEditKind::Move) applyRelocation(source, destination);
-            else applyExplorerPresence(edit, edit.restores(redo));
             status(redo ? L"Explorer operation redone" : L"Explorer operation undone");
-            if (owner_ && owner_->changed) owner_->changed();
         });
     });
 }
@@ -1770,13 +1909,16 @@ void ProjectRuntime::Impl::applyDirectory(TreeItem item, Node* directory, const 
     }
     for (const auto& stale : existing) { if (const auto n = node(stale.second)) forgetExpanded(n->path); explorer_.erase(stale.second); }
     explorer_.sort(item, explorerLess);
+    bool selectionAdded = false;
     for (auto child = explorer_.child(item); child; child = explorer_.next(child)) {
         const auto n = node(child); if (!n) continue;
         if (n->directory && !n->loaded && !n->loading && expandedPaths_.count(pathKey(n->path))) requestDirectory(child);
+        if (pendingTreeSelections_.erase(pathKey(n->path))) { explorer_.addSelection(child); selectionAdded = true; }
         if (!pendingTreeSelection_.empty() && pathKey(n->path) == pathKey(pendingTreeSelection_)) {
             explorer_.select(child, false); pendingTreeSelection_.clear();
         }
     }
+    if (selectionAdded) explorer_.showSelection();
     if (directory->truncated != truncated) { if (truncated) ++partialFolders_; else --partialFolders_; directory->truncated = truncated; }
     if (truncated || nodes_.size() >= maxTreeNodes) status(L"Explorer limit: 10,000 items/folder, 50,000 retained nodes.");
 }

@@ -108,6 +108,40 @@ void movingSubtrees() {
     check(tree.erase(target).size() == 4 && tree.get(nested) && tree.selection() == nested,
         "Removing the old parent removed a moved subtree");
 }
+void multipleSelection() {
+    TreeModel tree;
+    const auto root = tree.insert(0, L"root", true, 0, 0);
+    const auto folder = tree.insert(root, L"folder", true, 1, 0);
+    const auto nested = tree.insert(folder, L"nested", false, 2, 0);
+    const auto a = tree.insert(root, L"a", false, 3, 0);
+    const auto b = tree.insert(root, L"b", false, 4, 0);
+    const auto c = tree.insert(root, L"c", false, 5, 0);
+    tree.expand(root, true); tree.expand(folder, true);
+    tree.select(a); tree.select(c, true, false);
+    check(tree.selections() == std::vector<TreeItem>({a, c}), "Ctrl selection did not add a disjoint row");
+    tree.select(c, true, false);
+    check(!tree.selected(c) && tree.selected(a) && tree.selection() == c, "Ctrl selection did not remove a row while keeping focus");
+    tree.select(a); tree.select(c, false, true);
+    check(tree.selections() == std::vector<TreeItem>({a, b, c}), "Shift selection did not include the visible range");
+    tree.select(b, false, true);
+    check(tree.selections() == std::vector<TreeItem>({a, b}), "Shrinking a range moved its anchor or retained its old end");
+    tree.select(folder, true, true);
+    check(tree.selections() == std::vector<TreeItem>({folder, nested, a, b}) &&
+        tree.selections(true) == std::vector<TreeItem>({folder, a, b}), "Ctrl+Shift selection lost existing rows or processed a descendant twice");
+    tree.expand(folder, false);
+    check(tree.selections() == std::vector<TreeItem>({folder, a, b}), "Collapsing a folder retained hidden selections or cleared siblings");
+    tree.erase(folder);
+    check(tree.selections() == std::vector<TreeItem>({a, b}), "Deleting a selected folder discarded surviving selections");
+    tree.selectAll(false);
+    check(tree.selections() == std::vector<TreeItem>({a, b, c}) && !tree.selected(root), "Select all included the protected project root");
+    tree.sort(root, [](uintptr_t x, uintptr_t y) { return x > y; });
+    check(tree.selections() == std::vector<TreeItem>({c, b, a}), "Sorting lost selections or returned stale ordering");
+    tree.select(b); tree.select(c, false, true);
+    check(tree.selections() == std::vector<TreeItem>({c, b}), "Reverse range did not follow the sorted visible order");
+    check(!tree.select(99999, true, true) && tree.selections().size() == 2, "An invalid range changed selection");
+    tree.clear();
+    check(tree.selections().empty() && !tree.selection(), "Clear retained multiple selections");
+}
 void gitChangeLayouts() {
     const std::vector<std::wstring> paths{L"z.txt", L"src/z.cpp", L"src/nested/same.cpp", L"src/A.cpp",
         L"docs/same.cpp", L"docs/日本語 file.txt", L"a.txt"};
@@ -151,6 +185,6 @@ void gitChangeLayouts() {
 }
 }
 int main() {
-    try { hierarchy(); orderingAndRemoval(); largeAndDeepTrees(); movingSubtrees(); gitChangeLayouts(); std::cout << "Tree model tests passed.\n"; return 0; }
+    try { hierarchy(); orderingAndRemoval(); largeAndDeepTrees(); movingSubtrees(); multipleSelection(); gitChangeLayouts(); std::cout << "Tree model tests passed.\n"; return 0; }
     catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
 }

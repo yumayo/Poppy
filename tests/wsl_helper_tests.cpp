@@ -367,6 +367,25 @@ void moving(const std::string& executable) {
     check(disk(fixture.root / "folder" / "nested" / "child.txt") == "child", "Cannot move a folder back to the project root");
     helper.eof();
 }
+void copying(const std::string& executable) {
+    Fixture fixture;
+    const auto source = fixture.root / "source 日本語", target = fixture.root / "target";
+    fs::create_directories(source / "nested"); fs::create_directory(target);
+    write(source / "nested" / "data\\name.txt", "copied bytes");
+    chmod((source / "nested" / "data\\name.txt").c_str(), 0751);
+    fs::create_symlink("nested/data\\name.txt", source / "link");
+    Helper helper(executable); helper.hello(); helper.call("connect", fixture.root);
+    helper.call("copyResource", source, {{"destination", (target / "copy 日本語").string()}});
+    check(disk(target / "copy 日本語" / "nested" / "data\\name.txt") == "copied bytes" &&
+        fs::is_symlink(target / "copy 日本語" / "link") && fs::exists(source / "nested" / "data\\name.txt"), "WSL copy lost contents, a link or its source");
+    struct stat info{}; stat((target / "copy 日本語" / "nested" / "data\\name.txt").c_str(), &info);
+    check((info.st_mode & 0777) == 0751, "WSL copy lost file permissions");
+    helper.call("copyResource", source, {{"destination", (target / "copy 日本語").string()}}, nullptr, false);
+    helper.call("copyResource", source, {{"destination", (source / "nested" / "recursive").string()}}, nullptr, false);
+    helper.call("copyResource", source, {{"destination", "relative"}}, nullptr, false);
+    check(!fs::exists(source / "nested" / "recursive"), "Rejected WSL copy created a recursive destination");
+    helper.eof();
+}
 void explorerHistory(const std::string& executable) {
     Fixture fixture, outside; const auto root = fixture.root / "project";
     fs::create_directory(root);
@@ -626,6 +645,6 @@ void terminals(const std::string& executable) {
 }
 int main(int argc,char** argv) {
     signal(SIGPIPE,SIG_IGN);
-    try { check(argc == 2,"Expected helper executable argument"); const std::string executable = argv[1]; installation(executable); watching(executable); watchLimitIdle(executable); creation(executable); batchedListings(executable); files(executable); moving(executable); explorerHistory(executable); repositories(executable); protocolFailures(executable); gitAndCancellation(executable); contentSearch(executable); terminals(executable); std::cout << "WSL helper integration tests passed\n"; }
+    try { check(argc == 2,"Expected helper executable argument"); const std::string executable = argv[1]; installation(executable); watching(executable); watchLimitIdle(executable); creation(executable); batchedListings(executable); files(executable); moving(executable); copying(executable); explorerHistory(executable); repositories(executable); protocolFailures(executable); gitAndCancellation(executable); contentSearch(executable); terminals(executable); std::cout << "WSL helper integration tests passed\n"; }
     catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
 }

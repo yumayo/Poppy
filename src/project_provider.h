@@ -32,6 +32,7 @@ public:
     // Intermediate components may reuse an existing directory, never a link.
     virtual std::wstring createDirectory(const ResourceId& path, bool allowExisting = false, bool* created = nullptr) = 0;
     virtual std::wstring renameResource(const ResourceId& source, const ResourceId& destination) = 0;
+    virtual std::wstring copyResource(const ResourceId& source, const ResourceId& destination) = 0;
     // Only used for abandoned, app-owned Undo backups. Never follow links.
     virtual std::wstring removeResource(const ResourceId& path) = 0;
     virtual FileIndex indexFiles(const ResourceId& root, const std::function<bool()>& cancelled) = 0;

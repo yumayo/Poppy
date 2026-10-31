@@ -84,6 +84,64 @@ struct Bitmap {
     }
 };
 void finish(Renderer& renderer) { check(SUCCEEDED(renderer.end()), "Direct2D drawing failed"); }
+void treeMultipleSelection() {
+    INITCOMMONCONTROLSEX controls{sizeof(controls), ICC_WIN95_CLASSES}; InitCommonControlsEx(&controls);
+    const auto instance = GetModuleHandleW(nullptr);
+    const auto parent = CreateWindowExW(0, L"STATIC", L"Multiple selection test", WS_POPUP | WS_CLIPCHILDREN, 0, 0, 640, 320, nullptr, nullptr, instance, nullptr);
+    check(parent != nullptr, "Cannot create the multiple selection test window");
+    Tree tree;
+    struct WindowOwner { HWND value; ~WindowOwner() { DestroyWindow(value); } } owner{parent};
+    tree.create(parent, instance, L"EXPLORER", 1); tree.multipleSelection = true;
+    SetWindowPos(tree.window(), nullptr, 0, 0, 640, 320, SWP_NOZORDER | SWP_SHOWWINDOW); ShowWindow(parent, SW_SHOWNOACTIVATE);
+    const auto root = tree.insert(0, L"project", true, 0), target = tree.insert(root, L"target", true, 0);
+    const auto a = tree.insert(root, L"a.txt", false, 0), b = tree.insert(root, L"b.txt", false, 0), c = tree.insert(root, L"c.txt", false, 0);
+    tree.expand(root, true);
+    std::vector<TreeItem> deleted, copied, moved; bool cut = false; TreeItem renamed = 0; unsigned activations = 0;
+    tree.activated = [&](TreeItem) { ++activations; };
+    tree.canDelete = tree.canCopy = tree.canDrag = [&](TreeItem id) { return id != root; };
+    tree.deleteRequested = [&](const auto& ids) { deleted = ids; };
+    tree.copyRequested = [&](const auto& ids, bool value) { copied = ids; cut = value; };
+    tree.renameRequested = [&](TreeItem id) { renamed = id; };
+    tree.canDrop = [&](TreeItem id, TreeItem parent) { return parent == target && id != target; };
+    tree.moveCommitted = [&](const auto& ids, TreeItem parent) { check(parent == target, "Multiple drag chose another folder"); moved = ids; };
+    const auto point = [&](TreeItem id) { return POINT{100, static_cast<LONG>(SendMessageW(tree.window(), treeGetRow, id, 0) * SendMessageW(tree.window(), treeGetRowHeight, 0, 0) + 5)}; };
+    const auto clickRow = [&](TreeItem id, WPARAM modifiers) {
+        const auto p = point(id);
+        SendMessageW(tree.window(), WM_LBUTTONDOWN, MK_LBUTTON | modifiers, MAKELPARAM(p.x, p.y));
+        SendMessageW(tree.window(), WM_LBUTTONUP, modifiers, MAKELPARAM(p.x, p.y));
+    };
+    const auto key = [&](WPARAM code) {
+        BYTE previous[256]{}, keys[256]{}; GetKeyboardState(previous); keys[VK_CONTROL] = keys[VK_LCONTROL] = 0x80;
+        SetKeyboardState(keys); SendMessageW(tree.window(), WM_KEYDOWN, code, 0); SetKeyboardState(previous);
+    };
+    clickRow(a, 0); check(activations == 1, "A normal file click did not activate it");
+    clickRow(c, MK_CONTROL);
+    check(tree.selections() == std::vector<TreeItem>({a, c}) && activations == 1, "Ctrl click activated a file or lost existing selection");
+    key('C'); check(copied == std::vector<TreeItem>({a, c}) && !cut, "Copy did not receive the whole selection");
+    key('X'); check(copied == std::vector<TreeItem>({a, c}) && cut, "Cut did not receive the whole selection");
+    SendMessageW(tree.window(), WM_KEYDOWN, VK_DELETE, 0);
+    check(deleted == std::vector<TreeItem>({a, c}), "Delete did not receive the whole selection");
+    auto menuPoint = point(c); ClientToScreen(tree.window(), &menuPoint);
+    check(SetTimer(tree.window(), 99, 10, [](HWND window, UINT, UINT_PTR id, DWORD) { EndMenu(); KillTimer(window, id); }) != 0, "Cannot schedule menu cancellation");
+    SendMessageW(tree.window(), WM_CONTEXTMENU, reinterpret_cast<WPARAM>(tree.window()), MAKELPARAM(menuPoint.x, menuPoint.y));
+    KillTimer(tree.window(), 99);
+    check(tree.selections() == std::vector<TreeItem>({a, c}), "Right click collapsed multiple selection");
+    const auto origin = point(a), destination = point(target);
+    SendMessageW(tree.window(), WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(origin.x, origin.y));
+    SendMessageW(tree.window(), WM_MOUSEMOVE, MK_LBUTTON, MAKELPARAM(destination.x, destination.y));
+    SendMessageW(tree.window(), WM_LBUTTONUP, 0, MAKELPARAM(destination.x, destination.y));
+    check(moved == std::vector<TreeItem>({a, c}), "Dragging a selected row did not move the whole selection");
+    clickRow(a, 0); clickRow(c, MK_SHIFT);
+    check(tree.selections() == std::vector<TreeItem>({a, b, c}), "Shift click did not select the visible range");
+    clickRow(c, MK_CONTROL); clickRow(b, MK_CONTROL);
+    check(tree.selections() == std::vector<TreeItem>({a}), "Ctrl clicks did not remove rows");
+    SendMessageW(tree.window(), WM_KEYDOWN, VK_F2, 0);
+    check(renamed == a, "Rename targeted a deselected focused row");
+    key('A'); check(tree.selections().size() == 4 && !SendMessageW(tree.window(), treeIsSelected, root, 0), "Select all included the project root");
+    SendMessageW(tree.window(), WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(100, 300));
+    SendMessageW(tree.window(), WM_LBUTTONUP, 0, MAKELPARAM(100, 300));
+    check(tree.selections().empty(), "Clicking empty space did not clear multiple selection");
+}
 void inlineTreeInput() {
     INITCOMMONCONTROLSEX controls{sizeof(controls), ICC_WIN95_CLASSES}; InitCommonControlsEx(&controls);
     const auto instance = GetModuleHandleW(nullptr);
@@ -1519,7 +1577,7 @@ int main() {
     int result = 0;
     try {
         initializeRendering();
-        statusBarLimits(); inlineTreeInput(); cellPositions(); colorsAndClipping(); imagePreviews(); smoothIcons(); windowTargets(); editableDiff(); editorCaret(); imePositions(); editorWordSelection(); editorWordMovement(); editorLineShortcuts(); editorWrapping(); diffWrapping(); documentFind(); horizontalWheelScrolling(); continuousViewerScrolling(); selectionAutoScrolling(); terminalSelectionAutoScrolling(); themedScrollbars(); quickOpenStability();
+        statusBarLimits(); treeMultipleSelection(); inlineTreeInput(); cellPositions(); colorsAndClipping(); imagePreviews(); smoothIcons(); windowTargets(); editableDiff(); editorCaret(); imePositions(); editorWordSelection(); editorWordMovement(); editorLineShortcuts(); editorWrapping(); diffWrapping(); documentFind(); horizontalWheelScrolling(); continuousViewerScrolling(); selectionAutoScrolling(); terminalSelectionAutoScrolling(); themedScrollbars(); quickOpenStability();
         std::cout << "Direct2D rendering tests passed\n";
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; result = 1; }
     if (SUCCEEDED(com)) CoUninitialize();

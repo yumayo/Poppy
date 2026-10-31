@@ -2,6 +2,7 @@
 #include "text.h"
 #include "ai_status_win.h"
 #include "wsl_protocol.h"
+#include "resource_copy.h"
 #include <algorithm>
 
 namespace poppy {
@@ -101,6 +102,10 @@ public:
         return winError(code);
     }
     std::wstring renameResource(const ResourceId& source, const ResourceId& destination) override { return MoveFileExW(source.local().c_str(), destination.local().c_str(), MOVEFILE_WRITE_THROUGH) ? std::wstring{} : winError(); }
+    std::wstring copyResource(const ResourceId& source, const ResourceId& destination) override {
+        try { copyResourcePath(source.local(), destination.local()); return {}; }
+        catch (const std::exception& error) { return wide(error.what()); }
+    }
     std::wstring removeResource(const ResourceId& path) override { return removeBackup(path.local()); }
     FileIndex indexFiles(const ResourceId& root, const std::function<bool()>& cancelled) override { return poppy::indexFiles(root.local(), cancelled); }
     ContentSearchSummary searchContent(const ResourceId& root, const ContentSearchOptions& options,

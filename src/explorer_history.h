@@ -19,12 +19,17 @@ public:
     using Rename = std::function<std::wstring(const ResourceId&, const ResourceId&)>;
     const ExplorerEdit* next(bool redo) const;
     ExplorerEdit* next(bool redo);
-    std::wstring replay(bool redo, const Rename& rename);
+    const std::vector<ExplorerEdit>* nextBatch(bool redo) const;
+    std::vector<ExplorerEdit>* nextBatch(bool redo);
+    // A failed batch retains completed edits on the opposite side of the
+    // cursor, so a partial operation can still be undone or retried safely.
+    std::wstring replay(bool redo, const Rename& rename, std::vector<ExplorerEdit>* applied = nullptr);
     // Return abandoned backups for deletion by the provider, outside the UI.
     std::vector<ResourceId> record(ExplorerEdit edit);
+    std::vector<ResourceId> recordBatch(std::vector<ExplorerEdit> edits);
     std::vector<ResourceId> clear();
 private:
-    std::vector<ExplorerEdit> edits_;
+    std::vector<std::vector<ExplorerEdit>> edits_;
     size_t cursor_ = 0;
 };
 }

@@ -111,8 +111,41 @@ void deletionCleanup() {
     abandoned = history.clear();
     check(abandoned.size() == 2 && abandoned[0] == backup && abandoned[1] == newBackup, "Mixed history cleanup missed applied deletions or undone creations");
 }
+void batches() {
+    Fixture fixture;
+    const ResourceId a = fixture.root / "a", b = fixture.root / "b";
+    const ResourceId backupA = fixture.root / "backup-a", backupB = fixture.root / "backup-b";
+    write(a.local(), "first"); write(b.local(), "second");
+    check(renameResource(a, backupA).empty() && renameResource(b, backupB).empty(), "Cannot prepare batch deletion");
+    ExplorerHistory history;
+    history.recordBatch({{a, backupA, ExplorerEditKind::Delete, a}, {b, backupB, ExplorerEditKind::Delete, b}});
+    std::vector<ExplorerEdit> applied;
+    check(history.replay(false, renameResource, &applied).empty() && applied.size() == 2 &&
+        read(a.local()) == "first" && read(b.local()) == "second" && !history.next(false), "One undo did not restore the whole batch");
+    check(history.replay(true, renameResource, &applied).empty() && applied.size() == 2 && !fs::exists(a.local()) && !fs::exists(b.local()), "One redo did not repeat the whole batch");
+    write(a.local(), "collision");
+    check(!history.replay(false, renameResource, &applied).empty() && applied.size() == 1 &&
+        read(a.local()) == "collision" && read(b.local()) == "second" && history.nextBatch(false)->size() == 1 &&
+        history.nextBatch(true)->size() == 1, "A partially failed undo lost completed work, the collision or retry history");
+    fs::remove(a.local());
+    check(history.replay(false, renameResource).empty() && read(a.local()) == "first", "A partial batch could not be retried");
+    check(history.replay(true, renameResource).empty() && history.replay(true, renameResource).empty(), "Partial undo history could not be redone");
+    const auto abandoned = history.clear();
+    check(abandoned.size() == 2 && fs::exists(backupA.local()) && fs::exists(backupB.local()), "Batch cleanup missed a deletion backup");
+
+    history.recordBatch({{backupA, a, ExplorerEditKind::Create}, {backupB, b, ExplorerEditKind::Create}});
+    history.replay(false, [](const auto&, const auto&) { return L""; });
+    const auto discarded = history.record({a, b, ExplorerEditKind::Move});
+    check(discarded.size() == 2, "Branching history leaked batch creation backups");
+    history.clear();
+    history.recordBatch({{backupA, a, ExplorerEditKind::Create}, {backupB, b, ExplorerEditKind::Create}});
+    history.replay(false, [](const auto&, const auto&) { return L""; });
+    int count = 0;
+    check(!history.replay(true, [&](const auto&, const auto&) -> std::wstring { if (++count == 2) throw std::runtime_error("Disconnected"); return {}; }, &applied).empty() &&
+        applied.size() == 1 && history.nextBatch(false)->size() == 1 && history.nextBatch(true)->size() == 1, "A partially failed redo lost completed work or advanced past a failed edit");
+}
 }
 int main() {
-    try { filesAndFolders(); branchingAndFailures(); deletions(); deletionCleanup(); std::cout << "Explorer history tests passed\n"; return 0; }
+    try { filesAndFolders(); branchingAndFailures(); deletions(); deletionCleanup(); batches(); std::cout << "Explorer history tests passed\n"; return 0; }
     catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
 }

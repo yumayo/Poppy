@@ -62,6 +62,10 @@ void Tree::select(TreeItem id, bool activate) {
     ensureVisible(); changed();
     if (id && activate && activated) activated(id);
 }
+bool Tree::selectionAllowed(const std::function<bool(TreeItem)>& allowed) const {
+    const auto ids = selections(true);
+    return !ids.empty() && std::all_of(ids.begin(), ids.end(), [&](TreeItem id) { return !allowed || allowed(id); });
+}
 int Tree::row(TreeItem id) const {
     const auto& rows = model_.visible();
     const auto found = std::find_if(rows.begin(), rows.end(), [&](const TreeModel::Row& row) { return row.item == id; });
@@ -170,7 +174,9 @@ void Tree::updateDrag(POINT point) {
     auto target = PtInRect(&content, point) ? hit(point.y) : 0;
     // Empty space below the rows belongs to the project root.
     if (!target && PtInRect(&content, point)) target = child();
-    if (!canDrag || !canDrag(drag.source) || !canDrop || !canDrop(drag.source, target)) target = 0;
+    const auto sources = selections(true);
+    if (!canDrag || !selectionAllowed(canDrag) || !canDrop || sources.empty() ||
+        !std::all_of(sources.begin(), sources.end(), [&](TreeItem id) { return canDrop(id, target); })) target = 0;
     if (target != drag.target) { drag.target = target; drag.hoverTime = GetTickCount64(); }
     SetCursor(LoadCursorW(nullptr, target ? IDC_SIZEALL : IDC_NO));
     InvalidateRect(window_, nullptr, FALSE);
@@ -196,12 +202,15 @@ void Tree::endDrag(bool drop) {
     if (!drop || !item(drag.source)) return;
     if (!drag.active) {
         const auto node = item(drag.source);
+        select(drag.source, false);
         if (node->expandable) expand(drag.source, !node->expanded);
         else select(drag.source);
         return;
     }
-    if (drag.target && canDrag && canDrag(drag.source) && canDrop && canDrop(drag.source, drag.target) && moveCommitted)
-        moveCommitted(drag.source, drag.target);
+    const auto sources = selections(true);
+    if (drag.target && canDrag && selectionAllowed(canDrag) && canDrop && moveCommitted &&
+        std::all_of(sources.begin(), sources.end(), [&](TreeItem id) { return canDrop(id, drag.target); }))
+        moveCommitted(sources, drag.target);
 }
 const std::function<std::wstring(TreeItem)>& Tree::actionLabelFor(unsigned slot) const {
     return slot == 3 ? quaternaryActionLabel : slot == 2 ? tertiaryActionLabel : slot == 1 ? secondaryActionLabel : actionLabel;
@@ -248,7 +257,7 @@ void Tree::paint() {
     for (int index = top_; index < static_cast<int>(rows.size()) && (index - top_) * rowHeight_ < r.bottom; ++index) {
         const auto& row = rows[index]; const auto node = item(row.item);
         const int y = (index - top_) * rowHeight_, x = static_cast<int>(row.depth) * indent_ - left_;
-        const bool selected = selection() == row.item;
+        const bool selected = model_.selected(row.item);
         if (selected) {
             renderer_.fill({0, y, r.right, y + rowHeight_}, focus ? RGB(50, 70, 94) : RGB(40, 47, 58));
             if (focus) renderer_.fill({0, y, MulDiv(2, dpi_, 96), y + rowHeight_}, accent);
@@ -338,15 +347,17 @@ LRESULT Tree::handle(UINT m, WPARAM a, LPARAM b) {
     }
     case WM_DESTROY: endDrag(); finishRename(false); renderer_.discard(); return 0;
     case WM_CONTEXTMENU: {
-        if (!renameRequested && !deleteRequested && !openWithDefaultAppRequested && !revealInFileExplorerRequested && !pasteImageRequested && !createCommitted) return 0;
+        if (!renameRequested && !deleteRequested && !copyRequested && !pasteFilesRequested && !openWithDefaultAppRequested && !revealInFileExplorerRequested && !pasteImageRequested && !createCommitted) return 0;
+        SetFocus(window_);
         POINT screen{GET_X_LPARAM(b), GET_Y_LPARAM(b)}; auto id = selection();
+        if (!model_.selected(id) && !selections().empty()) id = selections().front();
         if (screen.x == -1 && screen.y == -1) { screen = {indent_, (row(id) - top_ + 1) * rowHeight_}; ClientToScreen(window_, &screen); }
-        else { auto point = screen; ScreenToClient(window_, &point); id = hit(point.y); if (id) select(id, false); }
-        if (!id && !pasteImageRequested) return 0;
-        const bool canOpen = id && openWithDefaultAppRequested && (!canOpenWithDefaultApp || canOpenWithDefaultApp(id));
-        const bool canReveal = id && revealInFileExplorerRequested && (!canRevealInFileExplorer || canRevealInFileExplorer(id));
-        const bool create = id && createCommitted && canCreate && canCreate(id);
-        if (!renameRequested && !deleteRequested && !canOpen && !canReveal && !pasteImageRequested && !create) return 0;
+        else { auto point = screen; ScreenToClient(window_, &point); id = hit(point.y); if (id && !model_.selected(id)) { if (selectionChanged) selectionChanged(); select(id, false); } }
+        if (!id && !pasteImageRequested && !pasteFilesRequested) return 0;
+        const bool single = selections().size() == 1;
+        const bool canOpen = single && id && openWithDefaultAppRequested && (!canOpenWithDefaultApp || canOpenWithDefaultApp(id));
+        const bool canReveal = single && id && revealInFileExplorerRequested && (!canRevealInFileExplorer || canRevealInFileExplorer(id));
+        const bool create = single && id && createCommitted && canCreate && canCreate(id);
         HMENU menu = CreatePopupMenu(); if (!menu) return 0;
         if (create) {
             AppendMenuW(menu, MF_STRING, 4, L"New File…");
@@ -355,9 +366,15 @@ LRESULT Tree::handle(UINT m, WPARAM a, LPARAM b) {
         }
         if (canReveal) AppendMenuW(menu, MF_STRING, 6, L"Reveal in File Explorer");
         if (canOpen) AppendMenuW(menu, MF_STRING, 2, L"Open with Default Application");
-        if (id && renameRequested) AppendMenuW(menu, MF_STRING | (canRename && !canRename(id) ? MF_GRAYED : 0), 1, L"Rename\tF2");
-        if (id && deleteRequested) AppendMenuW(menu, MF_STRING | (canDelete && !canDelete(id) ? MF_GRAYED : 0), 9, L"Delete\tDel");
-        if (pasteImageRequested) AppendMenuW(menu, MF_STRING | (canPasteImage && !canPasteImage(id) ? MF_GRAYED : 0), 3, L"Paste Image\tCtrl+V");
+        if (single && id && renameRequested) AppendMenuW(menu, MF_STRING | (canRename && !canRename(id) ? MF_GRAYED : 0), 1, L"Rename\tF2");
+        if (id && copyRequested) {
+            AppendMenuW(menu, MF_STRING | (!selectionAllowed(canCopy) ? MF_GRAYED : 0), 10, L"Copy\tCtrl+C");
+            AppendMenuW(menu, MF_STRING | (!selectionAllowed(canDrag) ? MF_GRAYED : 0), 11, L"Cut\tCtrl+X");
+        }
+        if (id && deleteRequested) AppendMenuW(menu, MF_STRING | (!selectionAllowed(canDelete) ? MF_GRAYED : 0), 9, L"Delete\tDel");
+        const bool pasteFiles = pasteFilesRequested && canPasteFiles && canPasteFiles(id);
+        if (pasteFilesRequested) AppendMenuW(menu, MF_STRING | (!pasteFiles ? MF_GRAYED : 0), 12, L"Paste\tCtrl+V");
+        if (pasteImageRequested && !pasteFiles) AppendMenuW(menu, MF_STRING | (canPasteImage && !canPasteImage(id) ? MF_GRAYED : 0), 3, L"Paste Image\tCtrl+V");
         if (undoRequested || redoRequested) {
             AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
             AppendMenuW(menu, MF_STRING | (!canUndo || !canUndo() ? MF_GRAYED : 0), 7, L"Undo\tCtrl+Z");
@@ -367,12 +384,14 @@ LRESULT Tree::handle(UINT m, WPARAM a, LPARAM b) {
         if (command == 7 && undoRequested && canUndo && canUndo()) { undoRequested(); return 0; }
         if (command == 8 && redoRequested && canRedo && canRedo()) { redoRequested(); return 0; }
         if (command == 3 && pasteImageRequested && (!canPasteImage || canPasteImage(id))) { pasteImageRequested(id); return 0; }
+        if (command == 12 && pasteFilesRequested && canPasteFiles && canPasteFiles(id)) { pasteFilesRequested(id); return 0; }
         if (!item(id)) return 0;
         if (command == 4 || command == 5) createItem(id, command == 5);
         else if (command == 6 && revealInFileExplorerRequested && (!canRevealInFileExplorer || canRevealInFileExplorer(id))) revealInFileExplorerRequested(id);
         else if (command == 2 && openWithDefaultAppRequested && (!canOpenWithDefaultApp || canOpenWithDefaultApp(id))) openWithDefaultAppRequested(id);
         else if (command == 1 && renameRequested && (!canRename || canRename(id))) renameRequested(id);
-        else if (command == 9 && deleteRequested && (!canDelete || canDelete(id))) deleteRequested(id);
+        else if (command == 9 && deleteRequested && selectionAllowed(canDelete)) deleteRequested(selections(true));
+        else if ((command == 10 || command == 11) && copyRequested && selectionAllowed(command == 11 ? canDrag : canCopy)) copyRequested(selections(true), command == 11);
         return 0;
     }
     case WM_GETDLGCODE: return DLGC_WANTARROWS | DLGC_WANTCHARS;
@@ -382,7 +401,8 @@ LRESULT Tree::handle(UINT m, WPARAM a, LPARAM b) {
     case WM_LBUTTONDOWN: case WM_LBUTTONDBLCLK: {
         SetFocus(window_);
         hover({GET_X_LPARAM(b), GET_Y_LPARAM(b)});
-        const auto id = hit(GET_Y_LPARAM(b)); if (!id) return 0;
+        if (selectionChanged) selectionChanged();
+        const auto id = hit(GET_Y_LPARAM(b)); if (!id) { if (multipleSelection) select(0, false); return 0; }
         for (const unsigned slot : {0u, 1u, 2u, 3u}) {
             const auto action = actionBounds(id, slot);
             if (actionVisible(id, slot) && PtInRect(&action, {GET_X_LPARAM(b), GET_Y_LPARAM(b)})) {
@@ -394,10 +414,14 @@ LRESULT Tree::handle(UINT m, WPARAM a, LPARAM b) {
             }
         }
         if (m == WM_LBUTTONDBLCLK && !item(id)->expandable) return 0;
+        if (multipleSelection && (a & (MK_CONTROL | MK_SHIFT))) {
+            model_.select(id, (a & MK_CONTROL) != 0, (a & MK_SHIFT) != 0);
+            ensureVisible(); changed(); return 0;
+        }
         // The entire folder row, including its arrow, has one click target.
         // Commit on release so a drag or cancellation does not toggle it.
         if (item(id)->expandable || (canDrag && canDrag(id))) {
-            select(id, false);
+            if (!multipleSelection || !model_.selected(id)) select(id, false);
             drag_ = Drag{id, 0, {GET_X_LPARAM(b), GET_Y_LPARAM(b)}, {GET_X_LPARAM(b), GET_Y_LPARAM(b)}};
             SetCapture(window_);
         } else select(id);
@@ -427,6 +451,11 @@ LRESULT Tree::handle(UINT m, WPARAM a, LPARAM b) {
     case WM_KEYDOWN: {
         if ((GetKeyState(VK_CONTROL) & 0x8000) && !(GetKeyState(VK_MENU) & 0x8000)) {
             const bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+            if (!shift && a == 'A' && multipleSelection) { if (selectionChanged) selectionChanged(); model_.selectAll(false); changed(); return 0; }
+            if (!shift && (a == 'C' || a == 'X')) {
+                if (copyRequested && selectionAllowed(a == 'X' ? canDrag : canCopy)) copyRequested(selections(true), a == 'X');
+                return 0;
+            }
             if (a == 'Z' || (a == 'Y' && !shift)) {
                 const bool redo = a == 'Y' || shift;
                 const auto& allowed = redo ? canRedo : canUndo;
@@ -444,9 +473,13 @@ LRESULT Tree::handle(UINT m, WPARAM a, LPARAM b) {
         switch (a) {
         case VK_DELETE:
             if (!(GetKeyState(VK_CONTROL) & 0x8000) && !(GetKeyState(VK_MENU) & 0x8000) &&
-                !(b & (1LL << 30)) && id && deleteRequested && (!canDelete || canDelete(id))) deleteRequested(id);
+                !(b & (1LL << 30)) && deleteRequested && selectionAllowed(canDelete)) deleteRequested(selections(true));
             return 0;
-        case VK_F2: if (id && renameRequested && (!canRename || canRename(id))) renameRequested(id); return 0;
+        case VK_F2: {
+            const auto ids = selections();
+            if (ids.size() == 1 && renameRequested && (!canRename || canRename(ids.front()))) renameRequested(ids.front());
+            return 0;
+        }
         case VK_F4: if (id && actionClicked && actionLabel && !actionLabel(id).empty()) actionClicked(id); return 0;
         case VK_LEFT: if (node && node->expanded) expand(id, false); else if (node && node->parent) select(node->parent); return 0;
         case VK_RIGHT: if (node && node->expandable) { if (!node->expanded) expand(id, true); else if (child(id)) select(child(id)); } return 0;
@@ -456,10 +489,16 @@ LRESULT Tree::handle(UINT m, WPARAM a, LPARAM b) {
         case VK_HOME: index = 0; break; case VK_END: index = static_cast<int>(rows.size()) - 1; break;
         default: return 0;
         }
-        select(rows[static_cast<size_t>(std::clamp(index, 0, static_cast<int>(rows.size()) - 1))].item); return 0;
+        const auto target = rows[static_cast<size_t>(std::clamp(index, 0, static_cast<int>(rows.size()) - 1))].item;
+        if (selectionChanged) selectionChanged();
+        if (multipleSelection && (GetKeyState(VK_SHIFT) & 0x8000)) {
+            model_.select(target, (GetKeyState(VK_CONTROL) & 0x8000) != 0, true); ensureVisible(); changed();
+        } else select(target);
+        return 0;
     }
     case WM_PASTE:
-        if (pasteImageRequested && (!canPasteImage || canPasteImage(selection()))) pasteImageRequested(selection());
+        if (pasteFilesRequested && canPasteFiles && canPasteFiles(selection())) pasteFilesRequested(selection());
+        else if (pasteImageRequested && (!canPasteImage || canPasteImage(selection()))) pasteImageRequested(selection());
         return 0;
     case WM_CHAR: {
         if (a <= 32 || a == 127) return 0;
@@ -487,6 +526,8 @@ LRESULT Tree::handle(UINT m, WPARAM a, LPARAM b) {
     case treeGetExpanded: { const auto node = item(static_cast<TreeItem>(a)); return node && node->expanded; }
     case treeSelect: select(static_cast<TreeItem>(a)); return selection() == static_cast<TreeItem>(a);
     case treeGetSelection: return static_cast<LRESULT>(selection());
+    case treeGetSelectionCount: return static_cast<LRESULT>(selections().size());
+    case treeIsSelected: return model_.selected(static_cast<TreeItem>(a));
     case treeGetRow: return row(static_cast<TreeItem>(a));
     case treeGetRowHeight: return rowHeight_;
     case treeGetColor: { const auto node = item(static_cast<TreeItem>(a)); return node ? node->color : 0; }

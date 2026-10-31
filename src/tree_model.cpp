@@ -39,12 +39,61 @@ bool TreeModel::expand(TreeItem item, bool expanded) {
     const auto found = nodes_.find(item);
     if (found == nodes_.end() || !found->second.expandable || found->second.expanded == expanded) return false;
     found->second.expanded = expanded;
-    if (!expanded && descendant(selection_, item)) selection_ = item;
+    if (!expanded) {
+        bool hidden = false;
+        for (auto it = selected_.begin(); it != selected_.end();) {
+            if (descendant(*it, item)) { it = selected_.erase(it); hidden = true; }
+            else ++it;
+        }
+        if (hidden) selected_.insert(item);
+        if (descendant(selection_, item)) selection_ = item;
+        if (descendant(anchor_, item)) anchor_ = item;
+    }
     dirty_ = true; return true;
 }
 bool TreeModel::select(TreeItem item) {
+    return select(item, false, false);
+}
+bool TreeModel::select(TreeItem item, bool toggle, bool range) {
     if (item && !get(item)) return false;
+    if (range && item) {
+        const auto& rows = visible();
+        auto first = std::find_if(rows.begin(), rows.end(), [&](const Row& row) { return row.item == anchor_; });
+        auto last = std::find_if(rows.begin(), rows.end(), [&](const Row& row) { return row.item == item; });
+        if (last == rows.end()) return false;
+        if (first == rows.end()) { anchor_ = selection_ ? selection_ : item; first = std::find_if(rows.begin(), rows.end(), [&](const Row& row) { return row.item == anchor_; }); }
+        if (first == rows.end()) { first = last; anchor_ = item; }
+        if (!toggle) selected_.clear();
+        if (first > last) std::swap(first, last);
+        for (auto it = first; it != last + 1; ++it) selected_.insert(it->item);
+    } else {
+        if (!toggle) selected_.clear();
+        if (item && (!toggle || !selected_.erase(item))) selected_.insert(item);
+        anchor_ = item;
+    }
     selection_ = item; return true;
+}
+void TreeModel::selectAll(bool includeRoots) {
+    selected_.clear();
+    for (const auto& row : visible()) if (includeRoots || row.depth) selected_.insert(row.item);
+    if (!selected(selection_)) {
+        selection_ = 0;
+        for (const auto& row : visible()) if (selected(row.item)) { selection_ = row.item; break; }
+    }
+    anchor_ = selection_;
+}
+std::vector<TreeItem> TreeModel::selections(bool rootsOnly) const {
+    std::vector<TreeItem> result;
+    size_t coveredDepth = static_cast<size_t>(-1);
+    for (const auto& row : visible()) {
+        if (rootsOnly && row.depth > coveredDepth) continue;
+        coveredDepth = static_cast<size_t>(-1);
+        if (selected(row.item)) {
+            result.push_back(row.item);
+            if (rootsOnly) coveredDepth = row.depth;
+        }
+    }
+    return result;
 }
 TreeItem TreeModel::child(TreeItem parent) const {
     const auto node = get(parent);
@@ -71,13 +120,16 @@ const std::vector<TreeModel::Row>& TreeModel::visible() const {
 std::vector<std::pair<TreeItem, uintptr_t>> TreeModel::erase(TreeItem item) {
     const auto node = get(item); if (!node) return {};
     const auto parent = node->parent;
-    if (selection_ == item || descendant(selection_, item)) selection_ = parent;
+    const bool focusRemoved = selection_ == item || descendant(selection_, item);
+    if (focusRemoved) selection_ = parent;
+    if (anchor_ == item || descendant(anchor_, item)) anchor_ = parent;
     auto& siblings = parent ? nodes_.at(parent).children : roots_;
     const auto found = std::find(siblings.begin(), siblings.end(), item);
     if (found != siblings.begin()) nodes_.at(*(found - 1)).next = node->next;
     siblings.erase(found);
     std::vector<std::pair<TreeItem, uintptr_t>> removed;
     eraseSubtree(item, removed);
+    if (focusRemoved && selected_.empty() && parent) selected_.insert(parent);
     dirty_ = true; return removed;
 }
 void TreeModel::eraseSubtree(TreeItem item, std::vector<std::pair<TreeItem, uintptr_t>>& removed) {
@@ -86,20 +138,24 @@ void TreeModel::eraseSubtree(TreeItem item, std::vector<std::pair<TreeItem, uint
         const auto current = pending.back(); pending.pop_back();
         const auto found = nodes_.find(current);
         pending.insert(pending.end(), found->second.children.begin(), found->second.children.end());
+        selected_.erase(current);
         removed.emplace_back(current, found->second.data); nodes_.erase(found);
     }
 }
 std::vector<std::pair<TreeItem, uintptr_t>> TreeModel::eraseChildren(TreeItem parent) {
     const auto found = nodes_.find(parent); if (found == nodes_.end()) return {};
-    if (descendant(selection_, parent)) selection_ = parent;
+    const bool focusRemoved = descendant(selection_, parent);
+    if (focusRemoved) selection_ = parent;
+    if (descendant(anchor_, parent)) anchor_ = parent;
     std::vector<std::pair<TreeItem, uintptr_t>> removed;
     for (const auto child : found->second.children) eraseSubtree(child, removed);
+    if (focusRemoved && selected_.empty()) selected_.insert(parent);
     found->second.children.clear(); dirty_ = true; return removed;
 }
 std::vector<std::pair<TreeItem, uintptr_t>> TreeModel::clear() {
     std::vector<std::pair<TreeItem, uintptr_t>> removed; removed.reserve(nodes_.size());
     for (const auto& pair : nodes_) removed.emplace_back(pair.first, pair.second.data);
-    nodes_.clear(); roots_.clear(); rows_.clear(); selection_ = 0; dirty_ = true; return removed;
+    nodes_.clear(); roots_.clear(); rows_.clear(); selected_.clear(); selection_ = anchor_ = 0; dirty_ = true; return removed;
 }
 void TreeModel::sort(TreeItem parent, const std::function<bool(uintptr_t, uintptr_t)>& compare) {
     const auto found = nodes_.find(parent);

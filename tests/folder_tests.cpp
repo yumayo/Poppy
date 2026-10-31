@@ -953,6 +953,79 @@ void explorerDeleteTests(const fs::path& executable) {
     CloseHandle(locked); send(dialog, WM_COMMAND, IDOK);
     check(fs::exists(keep) && fs::exists(single) && fs::exists(folder), "Failed deletion changed a live resource");
 }
+void explorerMultipleSelectionTests(const fs::path& executable) {
+    Fixture fixture;
+    const auto target = fixture.root / L"a target", source = fixture.root / L"b folder";
+    fs::create_directory(target); fs::create_directory(source);
+    writeLines(source / L"child.txt", 200);
+    const auto c = fixture.root / L"c.txt", d = fixture.root / L"d.txt", e = fixture.root / L"e.txt";
+    writeLines(c, 120); writeLines(d, 140); writeLines(e, 160);
+    Application app(executable, fixture.root); const auto tree = app.tree();
+    const auto viewer = FindWindowExW(app.window, nullptr, L"PoppyViewer", nullptr);
+    waitFor([&] { return send(tree, treeGetCount) == 6; }, "Multiple selection fixture did not load");
+    const auto root = nextItem(tree, TreeRelation::Root);
+    const auto itemAt = [&](int index) {
+        auto item = nextItem(tree, TreeRelation::Child, root);
+        while (index-- && item) item = nextItem(tree, TreeRelation::Next, item);
+        return item;
+    };
+    const auto rowClick = [&](TreeItem item, WPARAM modifiers = 0) {
+        const int height = static_cast<int>(send(tree, treeGetRowHeight));
+        const auto x = MulDiv(100, GetDpiForWindow(tree), 96);
+        const auto y = (static_cast<int>(send(tree, treeGetRow, item)) - scrollInfo(tree).nPos) * height + height / 2;
+        send(tree, WM_LBUTTONDOWN, MK_LBUTTON | modifiers, MAKELPARAM(x, y));
+        send(tree, WM_LBUTTONUP, modifiers, MAKELPARAM(x, y));
+    };
+    const auto shortcut = [&](WPARAM key) {
+        check(AttachThreadInput(GetCurrentThreadId(), app.process.dwThreadId, TRUE) != FALSE, "Cannot attach Explorer clipboard input");
+        BYTE previous[256]{}, keys[256]{}; GetKeyboardState(previous);
+        keys[VK_CONTROL] = keys[VK_LCONTROL] = 0x80;
+        SetKeyboardState(keys); send(tree, WM_KEYDOWN, key); SetKeyboardState(previous);
+        AttachThreadInput(GetCurrentThreadId(), app.process.dwThreadId, FALSE);
+    };
+    send(tree, treeSelect, itemAt(2)); waitLines(viewer, 120);
+    rowClick(itemAt(4), MK_SHIFT);
+    check(send(tree, treeGetSelectionCount) == 3 && send(tree, treeIsSelected, itemAt(3)) && scrollInfo(viewer).nMax == 120,
+        "Shift click did not select the range or opened its last file");
+    rowClick(itemAt(3), MK_CONTROL);
+    check(send(tree, treeGetSelectionCount) == 2 && !send(tree, treeIsSelected, itemAt(3)), "Ctrl click did not remove a row");
+    rowClick(itemAt(3), MK_CONTROL);
+    check(send(tree, treeGetSelectionCount) == 3, "Ctrl click did not add a row");
+    send(tree, WM_KEYDOWN, VK_F2);
+    check(!FindWindowExW(tree, nullptr, treeInputClassName, nullptr), "Multiple selection renamed only one of its files");
+    PostMessageW(tree, WM_KEYDOWN, VK_DELETE, 0);
+    waitFor([&] { return !fs::exists(c) && !fs::exists(d) && !fs::exists(e) && send(tree, treeGetCount) == 3; }, "Delete did not remove the entire selection");
+    controlKey(app, tree, 'Z');
+    waitFor([&] { return fs::exists(c) && fs::exists(d) && fs::exists(e) && send(tree, treeGetSelectionCount) == 3; }, "One undo did not restore and select all deleted files");
+    controlKey(app, tree, 'Y');
+    waitFor([&] { return !fs::exists(c) && !fs::exists(d) && !fs::exists(e); }, "One redo did not delete all files");
+    controlKey(app, tree, 'Z');
+    waitFor([&] { return send(tree, treeGetCount) == 6 && send(tree, treeGetSelectionCount) == 3; }, "Batch delete could not be undone again");
+    shortcut('C'); check(IsClipboardFormatAvailable(CF_HDROP), "Explorer copy did not publish Windows file clipboard data");
+    send(tree, treeSelect, itemAt(0)); shortcut('V');
+    waitFor([&] { return fs::exists(target / L"c.txt") && fs::exists(target / L"d.txt") && fs::exists(target / L"e.txt") && send(tree, treeGetSelectionCount) == 3; }, "Paste did not copy and select all files");
+    check(fs::exists(c) && fs::exists(d) && fs::exists(e), "Copy removed its sources");
+    controlKey(app, tree, 'Z');
+    waitFor([&] { return fs::is_empty(target); }, "One undo did not remove the whole pasted batch");
+    controlKey(app, tree, 'Y');
+    waitFor([&] { return fs::exists(target / L"c.txt") && fs::exists(target / L"d.txt") && fs::exists(target / L"e.txt"); }, "One redo did not restore the pasted batch");
+    controlKey(app, tree, 'Z');
+    waitFor([&] { return fs::is_empty(target) && send(tree, treeGetCount) == 6; }, "Pasted files were not removed before the next test");
+    send(tree, treeSelect, itemAt(2)); shortcut('C'); shortcut('V');
+    waitFor([&] { return fs::exists(fixture.root / L"c - Copy.txt") && send(tree, treeGetCount) == 7; }, "Copy in the source folder did not create a sibling with its extension");
+    controlKey(app, tree, 'Z');
+    waitFor([&] { return !fs::exists(fixture.root / L"c - Copy.txt") && send(tree, treeGetCount) == 6; }, "Undo did not remove the duplicate");
+    const auto folder = itemAt(1); expand(tree, folder);
+    waitFor([&] { return nextItem(tree, TreeRelation::Child, folder) != 0; }, "Copy source folder did not load");
+    send(tree, treeSelect, folder); rowClick(nextItem(tree, TreeRelation::Child, folder), MK_CONTROL); rowClick(itemAt(2), MK_CONTROL);
+    check(send(tree, treeGetSelectionCount) == 3, "Folder and child could not be selected together");
+    shortcut('X'); send(tree, treeSelect, itemAt(0)); shortcut('V');
+    waitFor([&] { return !fs::exists(source) && !fs::exists(c) && fs::exists(target / L"b folder" / L"child.txt") && fs::exists(target / L"c.txt"); }, "Cut did not move a folder and file or processed the child twice");
+    controlKey(app, tree, 'Z');
+    waitFor([&] { return fs::exists(source / L"child.txt") && fs::exists(c) && fs::is_empty(target); }, "One undo did not restore the cut batch");
+    shortcut('A');
+    check(!send(tree, treeIsSelected, root) && send(tree, treeGetSelectionCount) >= 5, "Select all included the protected project root");
+}
 void explorerMoveTests(const fs::path& executable) {
     Fixture fixture;
     const auto source = fixture.root / L"a source", target = fixture.root / L"b target 日本語";
@@ -2604,7 +2677,7 @@ int wmain(int argc, wchar_t** argv) {
         SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         for (const auto test : {folderTests, explorerSortTests, sidebarTests, treeInteractionTests, tabTests, pinnedTabTests,
                 bulkTabCloseTests, bulkTabSaveTests, bulkTabSplitTests,
-                tabDragTests, wrappingTabDragTests, wrappingTabTests, renameTests, explorerMoveTests, explorerDeleteTests, createItemTests, newFileShortcutTests, pasteImageTests, splitPaneTests, quickOpenTests, fullSearchTests, gitSidebarTests, gitIgnoredExplorerTests, gitAutoRefreshTests, editableGitDiffTests, branchSidebarTests, multiRepositoryTests, sessionTests, multiProjectTests, recentProjectTests, projectDragTests, scrollingProjectDragTests, terminalTitleTests, terminalShellTests, terminalShortcutTests, terminalBackspaceTests}) {
+                tabDragTests, wrappingTabDragTests, wrappingTabTests, renameTests, explorerMoveTests, explorerDeleteTests, explorerMultipleSelectionTests, createItemTests, newFileShortcutTests, pasteImageTests, splitPaneTests, quickOpenTests, fullSearchTests, gitSidebarTests, gitIgnoredExplorerTests, gitAutoRefreshTests, editableGitDiffTests, branchSidebarTests, multiRepositoryTests, sessionTests, multiProjectTests, recentProjectTests, projectDragTests, scrollingProjectDragTests, terminalTitleTests, terminalShellTests, terminalShortcutTests, terminalBackspaceTests}) {
             Fixture appData; AppDataEnvironment environment(appData.root);
             test(fs::absolute(argv[1]));
         }

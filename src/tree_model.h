@@ -3,6 +3,7 @@
 #include <functional>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -27,6 +28,10 @@ public:
     void label(TreeItem item, std::wstring text, uint32_t color);
     bool expand(TreeItem item, bool expanded);
     bool select(TreeItem item);
+    bool select(TreeItem item, bool toggle, bool range);
+    void selectAll(bool includeRoots = true);
+    bool selected(TreeItem item) const { return selected_.count(item) != 0; }
+    std::vector<TreeItem> selections(bool rootsOnly = false) const;
     TreeItem selection() const { return selection_; }
     TreeItem child(TreeItem parent = 0) const;
     TreeItem next(TreeItem item) const;
@@ -44,6 +49,8 @@ private:
     std::unordered_map<TreeItem, Node> nodes_;
     std::vector<TreeItem> roots_;
     TreeItem next_ = 1, selection_ = 0;
+    TreeItem anchor_ = 0;
+    std::unordered_set<TreeItem> selected_;
     mutable bool dirty_ = true;
     mutable std::vector<Row> rows_;
 };
