@@ -192,6 +192,16 @@ void Renderer::setDpi(UINT dpi) {
     cellWidth_ = std::max(1, static_cast<int>(std::ceil(metrics.widthIncludingTrailingWhitespace)));
     textHeight_ = std::max(1, static_cast<int>(std::ceil(metrics.height)));
     check(codeFont_->SetLineSpacing(DWRITE_LINE_SPACING_METHOD_UNIFORM, static_cast<float>(textHeight_), std::ceil(line.baseline)), "Code line spacing setup failed");
+    // IMM uses physical-pixel LOGFONT metrics. Use the em size rather than
+    // the padded editor/terminal row height, and match our rounded cell width.
+    compositionFont_ = {};
+    check(codeFont_->GetFontFamilyName(compositionFont_.lfFaceName, LF_FACESIZE), "IME font name lookup failed");
+    compositionFont_.lfHeight = -static_cast<LONG>(std::lround(codeFont_->GetFontSize()));
+    compositionFont_.lfWidth = cellWidth_;
+    compositionFont_.lfWeight = static_cast<LONG>(codeFont_->GetFontWeight());
+    compositionFont_.lfItalic = codeFont_->GetFontStyle() != DWRITE_FONT_STYLE_NORMAL;
+    compositionFont_.lfCharSet = DEFAULT_CHARSET;
+    compositionFont_.lfPitchAndFamily = FIXED_PITCH | FF_MODERN;
     // Geometry and fonts use the existing Win32 physical-pixel layout. Keeping
     // targets at 96 DPI avoids scaling it twice on per-monitor DPI changes.
 }

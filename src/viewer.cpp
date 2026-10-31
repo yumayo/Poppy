@@ -462,7 +462,7 @@ void Viewer::caretPosition(bool reveal) {
         scrollbars(); point = caretPoint();
     }
     if (GetFocus() == window_) {
-        positionIme(window_, point, cellHeight_);
+        positionIme(window_, point, cellHeight_, renderer_.compositionFont());
         caretVisible_ = true; KillTimer(window_, caretTimer);
         const UINT blink = GetCaretBlinkTime();
         if (blink != INFINITE) SetTimer(window_, caretTimer, blink ? blink : 500, nullptr);

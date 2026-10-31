@@ -298,7 +298,7 @@ void Terminal::stopSelection() {
     if (GetCapture() == window_) ReleaseCapture();
 }
 void Terminal::imePosition() {
-    positionIme(window_, {6 + display_.cursorX() * cellWidth_, 4 + display_.cursorY() * cellHeight_}, cellHeight_);
+    positionIme(window_, {6 + display_.cursorX() * cellWidth_, 4 + display_.cursorY() * cellHeight_}, cellHeight_, renderer_.compositionFont());
 }
 void Terminal::paste() {
     auto text = utf8(clipboardText(window_)); if (text.empty()) return;

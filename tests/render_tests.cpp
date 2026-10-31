@@ -496,7 +496,8 @@ void imePositions() {
         check(!(info.flags & GUI_CARETBLINKING), "The native IME caret draws over Direct2D");
         return info.rcCaret;
     };
-    const auto checkPosition = [&](HWND window) {
+    Renderer metrics;
+    const auto checkPosition = [&](HWND window, UINT dpi) {
         const auto rect = caret(window);
         COMPOSITIONFORM composition{}; CANDIDATEFORM candidate{};
         check(ImmGetCompositionWindow(context.value, &composition) && ImmGetCandidateWindow(context.value, 0, &candidate),
@@ -505,14 +506,22 @@ void imePositions() {
             "The IME composition is detached from the insertion point");
         check(candidate.dwStyle == CFS_CANDIDATEPOS && candidate.ptCurrentPos.x == rect.left && candidate.ptCurrentPos.y == rect.bottom,
             "The IME candidate position is detached from the insertion point");
+        LOGFONTW font{};
+        check(ImmGetCompositionFontW(context.value, &font) != FALSE, "Cannot inspect the IME composition font");
+        metrics.setDpi(dpi);
+        check(std::wstring(font.lfFaceName) == L"Consolas" && font.lfHeight == -MulDiv(15, dpi, 96) &&
+            font.lfWidth == metrics.cellWidth() && font.lfWeight == FW_NORMAL && !font.lfItalic,
+            "The IME composition font does not match the code font and cell width at this DPI");
     };
     const auto resetPosition = [&] {
         COMPOSITIONFORM composition{}; composition.dwStyle = CFS_POINT;
         CANDIDATEFORM candidate{}; candidate.dwStyle = CFS_CANDIDATEPOS;
         check(ImmSetCompositionWindow(context.value, &composition) && ImmSetCandidateWindow(context.value, &candidate),
             "Cannot simulate an IME position reset");
+        LOGFONTW font{}; font.lfHeight = -8; lstrcpyW(font.lfFaceName, L"Arial");
+        check(ImmSetCompositionFontW(context.value, &font) != FALSE, "Cannot simulate an IME font reset");
     };
-    const auto refresh = [&](HWND window) {
+    const auto refresh = [&](HWND window, UINT dpi) {
         const MSG events[] = {
             {window, WM_IME_SETCONTEXT, TRUE, 0, 0, {0, 0}},
             {window, WM_INPUTLANGCHANGE, 0, reinterpret_cast<LPARAM>(GetKeyboardLayout(0)), 0, {0, 0}},
@@ -524,7 +533,7 @@ void imePositions() {
         for (const auto& event : events) {
             resetPosition();
             SendMessageW(window, event.message, event.wParam, event.lParam);
-            checkPosition(window);
+            checkPosition(window, dpi);
         }
         SendMessageW(window, WM_IME_ENDCOMPOSITION, 0, 0);
     };
@@ -532,33 +541,34 @@ void imePositions() {
     buffer->document.text = "first\n\t" + std::string(400, 'a') + u8"日本語\nlast";
     indexDocument(buffer->document); buffer->initialize(buffer->document.text);
     viewer.edit(buffer, L"ime.txt");
-    for (const UINT dpi : {96u, 144u, 192u}) for (const bool wrap : {true, false}) {
+    for (const UINT dpi : {96u, 120u, 144u, 192u}) for (const bool wrap : {true, false}) {
+        const UINT otherDpi = dpi == 96 ? 144 : 96;
         SetFocus(editor); viewer.setDpi(dpi); viewer.setWordWrap(wrap);
         viewer.restore({0, 0, 8, 8});
         SendMessageW(editor, WM_KEYDOWN, VK_END, 0);
-        checkPosition(editor);
+        checkPosition(editor, dpi);
         for (int i = 0; i < 8; ++i) {
-            terminal.setDpi(dpi); backgroundTerminal.setDpi(dpi);
+            terminal.setDpi(dpi); backgroundTerminal.setDpi(otherDpi);
             SendMessageW(input, WM_VSCROLL, SB_BOTTOM, 0);
             SendMessageW(background, WM_VSCROLL, SB_BOTTOM, 0);
             SendMessageW(find, WM_SIZE, 0, 0);
             SendMessageW(quickOpen.window(), WM_SIZE, 0, 0);
             Terminal::pump();
-            checkPosition(editor);
+            checkPosition(editor, dpi);
         }
-        refresh(editor);
-        SendMessageW(editor, WM_CHAR, '!', 0); checkPosition(editor);
-        SetFocus(input); checkPosition(input); refresh(input);
+        refresh(editor, dpi);
+        SendMessageW(editor, WM_CHAR, '!', 0); checkPosition(editor, dpi);
+        SetFocus(input); checkPosition(input, dpi); refresh(input, dpi);
         const auto before = caret(input);
-        viewer.setDpi(dpi); backgroundTerminal.setDpi(dpi);
+        viewer.setDpi(dpi); backgroundTerminal.setDpi(otherDpi);
         SendMessageW(quickOpen.window(), WM_SIZE, 0, 0);
         SendMessageW(background, WM_VSCROLL, SB_BOTTOM, 0);
-        checkPosition(input);
-        terminal.setDpi(dpi == 96 ? 144 : 96); checkPosition(input);
+        checkPosition(input, dpi);
+        terminal.setDpi(otherDpi); checkPosition(input, otherDpi);
         check(caret(input).bottom - caret(input).top != before.bottom - before.top,
             "A terminal DPI change did not resize its native IME caret");
-        SetFocus(background); checkPosition(background);
-        SetFocus(editor); checkPosition(editor);
+        SetFocus(background); checkPosition(background, otherDpi);
+        SetFocus(editor); checkPosition(editor, dpi);
     }
     SetFocus(parent);
     GUITHREADINFO info{}; info.cbSize = sizeof(info);

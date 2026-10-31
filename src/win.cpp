@@ -10,7 +10,7 @@
 #include <system_error>
 
 namespace poppy {
-void positionIme(HWND window, POINT point, int height) {
+void positionIme(HWND window, POINT point, int height, const LOGFONTW& font) {
     // Windows share the thread's default input context. Background output must
     // never replace the composition/candidate position of the focused control.
     if (!window || GetFocus() != window) return;
@@ -22,6 +22,12 @@ void positionIme(HWND window, POINT point, int height) {
     // it across moves so IME/accessibility can always query an insertion point.
     SetCaretPos(point.x, point.y);
     const auto context = ImmGetContext(window); if (!context) return;
+    LOGFONTW current{};
+    // Avoid resetting an active composition when the font already matches.
+    if (!ImmGetCompositionFontW(context, &current) || std::memcmp(&current, &font, sizeof(font)) != 0) {
+        auto updated = font;
+        ImmSetCompositionFontW(context, &updated);
+    }
     COMPOSITIONFORM form{}; form.dwStyle = CFS_POINT; form.ptCurrentPos = point;
     ImmSetCompositionWindow(context, &form);
     CANDIDATEFORM candidate{}; candidate.dwStyle = CFS_CANDIDATEPOS;

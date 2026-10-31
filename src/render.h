@@ -49,6 +49,7 @@ public:
     void setDpi(UINT dpi);
     int cellWidth() const { return cellWidth_; }
     int textHeight() const { return textHeight_; }
+    const LOGFONTW& compositionFont() const { return compositionFont_; }
     void font(Font value) { font_ = value; }
     bool begin(HWND window);
     // Offscreen rendering uses WIC, including the pixel regression tests.
@@ -83,6 +84,7 @@ private:
     D2D1_PRESENT_OPTIONS presentOptions_;
     Font font_ = Font::Ui;
     int cellWidth_ = 8, textHeight_ = 18;
+    LOGFONTW compositionFont_{};
 };
 
 // A child overlay keeps the drop target visible above the editor/ConPTY views.

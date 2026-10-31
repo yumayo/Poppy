@@ -61,7 +61,7 @@ inline std::wstring pathKey(const ResourceId& path) { return resourceWide(path.k
 fs::path relocatePath(const fs::path& path, const fs::path& source, const fs::path& destination);
 bool copyText(HWND owner, const std::wstring& text);
 std::wstring clipboardText(HWND owner);
-void positionIme(HWND window, POINT point, int height);
+void positionIme(HWND window, POINT point, int height, const LOGFONTW& font);
 
 struct ProcessResult { DWORD code = 1; std::string output; std::wstring error; };
 ProcessResult runProcess(const std::vector<std::wstring>& args, const fs::path& directory, DWORD timeoutMs = 5000, const std::atomic<bool>* cancelled = nullptr);
