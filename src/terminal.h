@@ -39,7 +39,7 @@ private:
     void imePosition();
     int point(int x, int y) const;
     HWND window_ = nullptr;
-    Renderer renderer_;
+    Renderer renderer_{D2D1_PRESENT_OPTIONS_IMMEDIATELY};
     Scrollbars scrollbars_;
     int cellWidth_ = 8, cellHeight_ = 20, header_ = 30;
     fs::path directory_;
@@ -57,7 +57,7 @@ private:
     std::string received_;
     std::deque<std::string> writes_;
     size_t writeBytes_ = 0;
-    bool notified_ = false, started_ = false, endedNotified_ = false;
+    bool notified_ = false, started_ = false, endedNotified_ = false, continuationPosted_ = false;
     bool resizePending_ = false;
     int requestedColumns_ = 80, requestedRows_ = 24;
     std::wstring error_;

@@ -113,7 +113,12 @@ int Workspace::run(HINSTANCE instance,int show,const StartupOptions& options,Sin
     if(!window_)return 1;
     try { singleInstance.publish(window_); } catch (...) { DestroyWindow(window_); throw; }
     MSG message{};
-    while(GetMessageW(&message,nullptr,0,0)>0) {
+    for (;;) {
+        // Queued terminal output can continue immediately. Give input, paints
+        // and timers a turn before taking another posted output notification.
+        constexpr UINT uiMessages = PM_REMOVE | ((QS_INPUT | QS_PAINT | QS_TIMER) << 16);
+        if (!PeekMessageW(&message, nullptr, 0, 0, uiMessages) && GetMessageW(&message, nullptr, 0, 0) <= 0) break;
+        if (message.message == WM_QUIT) break;
         if(recent_.visible() && message.hwnd!=recent_.window() &&
             (message.message==WM_LBUTTONDOWN || message.message==WM_MBUTTONDOWN || message.message==WM_RBUTTONDOWN))recent_.close();
         // Application shortcuts must not intercept input destined for a terminal.

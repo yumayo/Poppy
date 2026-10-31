@@ -27,6 +27,7 @@ void initializeRendering();
 
 class Renderer {
 public:
+    explicit Renderer(D2D1_PRESENT_OPTIONS presentOptions = D2D1_PRESENT_OPTIONS_NONE) : presentOptions_(presentOptions) {}
     enum class Font { Ui, Code };
     enum class Icon { Explorer, SourceControl, Branch, OpenAllChanges, Search, StageChanges, UnstageChanges, DiscardChanges, StashChanges, OpenFile };
     // Keeps both the Win32 paint validation and the Direct2D drawing balanced,
@@ -79,6 +80,7 @@ private:
     std::shared_ptr<const ImagePreview> image_;
     ComPtr<ID2D1Bitmap> imageBitmap_;
     ComPtr<IDWriteTextFormat> uiFont_, codeFont_;
+    D2D1_PRESENT_OPTIONS presentOptions_;
     Font font_ = Font::Ui;
     int cellWidth_ = 8, textHeight_ = 18;
 };

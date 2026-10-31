@@ -42,7 +42,7 @@ bool Terminal::start() {
     error_.clear(); model_ = TerminalModel(model_.columns(), model_.rows()); model_.reply = [this](std::string s) { send(std::move(s), false); };
     scroll_ = 0; display_.clearSelection();
     endedNotified_ = false;
-    display_ = TerminalDisplay{}; display_.update(model_, scroll_, GetTickCount64(), false, true);
+    display_ = TerminalDisplay{}; display_.update(model_, scroll_, GetTickCount64(), true);
     scrollbars(); imePosition();
     if (titleChanged) titleChanged();
     HANDLE read = nullptr, write = nullptr;
@@ -149,7 +149,8 @@ void Terminal::stop() {
     if (reader_.joinable()) { CancelSynchronousIo(reader_.native_handle()); reader_.join(); }
     input_.reset(); output_.reset(); process_.reset(); job_.reset(); started_ = false;
     { std::lock_guard<std::mutex> lock(mutex_); received_.clear(); writes_.clear(); writeBytes_ = 0; notified_ = resizePending_ = false; }
-    display_.update(model_, scroll_, GetTickCount64(), false, true);
+    continuationPosted_ = false;
+    display_.update(model_, scroll_, GetTickCount64(), true);
     scrollbars();
 }
 void Terminal::send(std::string text, bool userInput) {
@@ -158,7 +159,6 @@ void Terminal::send(std::string text, bool userInput) {
     condition_.notify_all();
     if (userInput) {
         stopSelection();
-        display_.input(GetTickCount64());
         const bool selected = hasSelection();
         scroll_ = 0; display_.clearSelection();
         // Echo will invalidate the new frame. Avoid painting the old screen on
@@ -179,16 +179,15 @@ bool Terminal::receive() {
     const auto previousTitle = model_.title();
     model_.feed(text); scroll_ = std::min(scroll_, model_.historySize());
     if (model_.title() != previousTitle && titleChanged) titleChanged();
-    display_.changed(GetTickCount64());
+    display_.changed();
     return true;
 }
 void Terminal::pump() {
-    static LONGLONG cycleStart = 0, spent = 0;
-    LARGE_INTEGER now{}, frequency{}; QueryPerformanceCounter(&now); QueryPerformanceFrequency(&frequency);
-    if (now.QuadPart - cycleStart >= frequency.QuadPart / 60) { cycleStart = now.QuadPart; spent = 0; }
+    LONGLONG spent = 0;
+    LARGE_INTEGER frequency{}; QueryPerformanceFrequency(&frequency);
     HWND root = nullptr;
-    // Take another round when time remains: one 8 KiB chunk per timer tick made
-    // replaying a long conversation unnecessarily slow, even on an idle UI.
+    // Drain available chunks fairly across sessions, yielding to the message
+    // loop after 5 ms of parsing without imposing a delay on the next dispatch.
     size_t idle = 0;
     while (idle < liveTerminals.size() && spent < frequency.QuadPart / 200) {
         if (nextTerminal >= liveTerminals.size()) nextTerminal = 0;
@@ -200,7 +199,7 @@ void Terminal::pump() {
         QueryPerformanceCounter(&end); spent += end.QuadPart - begin.QuadPart;
         if (received) idle = 0; else ++idle;
     }
-    bool pending = false;
+    uint64_t syncDeadline = 0;
     for (const auto terminal : liveTerminals) {
         if (!terminal->window_) continue;
         root = GetAncestor(terminal->window_, GA_ROOT);
@@ -209,10 +208,10 @@ void Terminal::pump() {
         const bool finished = terminal->started_ && !terminal->running();
         if (finished && !terminal->endedNotified_) {
             terminal->endedNotified_ = true;
-            terminal->display_.changed(GetTickCount64());
+            terminal->display_.changed();
             if (terminal->ended) terminal->ended();
         }
-        if (terminal->display_.update(terminal->model_, terminal->scroll_, GetTickCount64(), queued,
+        if (terminal->display_.update(terminal->model_, terminal->scroll_, GetTickCount64(),
             finished && !queued && terminal->display_.pending())) {
             terminal->scrollbars();
             terminal->imePosition();
@@ -222,16 +221,21 @@ void Terminal::pump() {
                 UpdateWindow(terminal->window_);
             }
         }
-        // Keep the reader notification latched throughout a burst, including
-        // the quiet period and sync timeout after the receive queue runs dry.
+        const auto deadline = terminal->display_.synchronizationDeadline();
+        if (deadline && (!syncDeadline || deadline < syncDeadline)) syncDeadline = deadline;
+        // Continue queued parsing through the message queue without a frame
+        // timer. Once drained, let the reader notify new output immediately,
+        // including an application's synchronized-output end marker.
         std::lock_guard<std::mutex> lock(terminal->mutex_);
-        terminal->notified_ = !terminal->received_.empty() || terminal->display_.pending();
-        pending |= terminal->notified_;
+        terminal->notified_ = !terminal->received_.empty();
+        if (terminal->notified_ && !terminal->continuationPosted_)
+            terminal->continuationPosted_ = PostMessageW(terminal->window_, wmTerminal, 1, 0) != FALSE;
     }
-    if (pumpTimerRoot && (!pending || pumpTimerRoot != root)) { KillTimer(pumpTimerRoot, 77); pumpTimerRoot = nullptr; }
-    // Keep the cadence when more input arrives; resetting an existing timer
-    // would postpone the next echo frame on every keystroke.
-    if (root && pending && !pumpTimerRoot && SetTimer(root, 77, 16, nullptr)) pumpTimerRoot = root;
+    if (pumpTimerRoot) { KillTimer(pumpTimerRoot, 77); pumpTimerRoot = nullptr; }
+    // This timer only releases an explicit synchronized update whose end
+    // marker never arrives. Ordinary output never waits for a timer.
+    const auto now = GetTickCount64();
+    if (root && syncDeadline && SetTimer(root, 77, static_cast<UINT>(syncDeadline > now ? syncDeadline - now : 1), nullptr)) pumpTimerRoot = root;
 }
 void Terminal::resize() {
     if (!window_) return;
@@ -243,12 +247,12 @@ void Terminal::resize() {
     stopSelection();
     model_.resize(columns, rows); scroll_ = 0; display_.clearSelection();
     scrollbars();
-    display_.resized(GetTickCount64());
+    display_.changed();
     if (console_) {
         { std::lock_guard<std::mutex> lock(mutex_); requestedColumns_ = columns; requestedRows_ = rows; resizePending_ = true; }
         condition_.notify_all();
     }
-    else display_.update(model_, scroll_, GetTickCount64(), false, true);
+    else display_.update(model_, scroll_, GetTickCount64(), true);
     imePosition();
     InvalidateRect(window_, nullptr, FALSE);
     if (console_) pump();
@@ -367,7 +371,7 @@ LRESULT Terminal::handle(UINT m, WPARAM a, LPARAM b) {
     case WM_PAINT: paint(); return 0;
     case WM_ERASEBKGND: return 1;
     case WM_SIZE: resize(); return 0;
-    case wmTerminal: pump(); return 0;
+    case wmTerminal: if (a == 1) continuationPosted_ = false; pump(); return 0;
     case WM_TIMER:
         if (a == selectionTimer) scrollSelection();
         else if (a == 2) pump();

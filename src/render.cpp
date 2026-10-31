@@ -238,7 +238,7 @@ bool Renderer::begin(HWND window) {
     if (!windowTarget_) {
         auto properties = D2D1::RenderTargetProperties(D2D1_RENDER_TARGET_TYPE_DEFAULT,
             D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_IGNORE), 96.0f, 96.0f);
-        const auto windowProperties = D2D1::HwndRenderTargetProperties(window, size);
+        const auto windowProperties = D2D1::HwndRenderTargetProperties(window, size, presentOptions_);
         result = factories().drawing->CreateHwndRenderTarget(properties, windowProperties, windowTarget_.put());
         if (FAILED(result)) {
             properties.type = D2D1_RENDER_TARGET_TYPE_SOFTWARE;

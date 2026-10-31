@@ -2,17 +2,9 @@
 #include <algorithm>
 
 namespace poppy {
-void TerminalDisplay::changed(uint64_t now) {
-    if (!dirty_) firstChange_ = now;
-    dirty_ = true; lastChange_ = now;
-}
-void TerminalDisplay::resized(uint64_t now) {
-    changed(now); resizeUntil_ = now + 100;
-}
-bool TerminalDisplay::update(TerminalModel& model, size_t scroll, uint64_t now, bool queued, bool force) {
+bool TerminalDisplay::update(TerminalModel& model, size_t scroll, uint64_t now, bool force) {
     scroll = std::min(scroll, model.historySize());
     const bool scrollChanged = scroll != scroll_;
-    const bool completedSync = synchronizing_ && !model.synchronizedOutput();
     if (model.synchronizedOutput()) {
         if (!synchronizing_) { synchronizing_ = true; syncSince_ = now; }
         // A missing end marker must not leave the display frozen indefinitely.
@@ -22,12 +14,6 @@ bool TerminalDisplay::update(TerminalModel& model, size_t scroll, uint64_t now, 
     }
     synchronizing_ = false;
     if (!dirty_ && !force && !scrollChanged) return false;
-    // Echo uses a frame deadline from the first chunk: a quiet-period debounce
-    // keeps restarting during key repeat. Still let queued/resize bursts settle.
-    const bool waitForEcho = now < inputUntil_ ? now - firstChange_ < 16 : now - lastChange_ < 32;
-    // User scrolling bypasses batching, while the sync guard above still holds.
-    if (!force && !completedSync && !scrollChanged && now - firstChange_ < 120 &&
-        (queued || now < resizeUntil_ || waitForEcho)) return false;
 
     if (generation_ != model.generation() ||
         (anchor_ >= 0 && std::min(anchor_, caret_) < model.firstRow() * model.columns())) clearSelection();
@@ -39,7 +25,7 @@ bool TerminalDisplay::update(TerminalModel& model, size_t scroll, uint64_t now, 
         cells_[y] = model.row(y, scroll_); cells_[y].resize(static_cast<size_t>(columns_));
     }
     cursorX_ = model.cursorX(); cursorY_ = model.cursorY(); cursorVisible_ = model.cursorVisible();
-    dirty_ = false; resizeUntil_ = 0;
+    dirty_ = false;
     return true;
 }
 std::pair<int, int> TerminalDisplay::selectionRange(int anchor, int caret) const {

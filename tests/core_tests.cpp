@@ -172,13 +172,13 @@ void terminalDisplayTests() {
     query.feed("\x1b[?2026h\x1b" "c"); check(!query.synchronizedOutput(), "terminal reset releases synchronized output");
 
     TerminalModel model(12, 3); TerminalDisplay display;
-    model.feed("old"); display.update(model, 0, 0, false, true);
-    model.feed("\x1b[?2026h\x1b[H\x1b[2J\x1b[31m途中\x1b[?25l"); display.changed(10);
+    model.feed("old"); display.update(model, 0, 0, true);
+    model.feed("\x1b[?2026h\x1b[H\x1b[2J\x1b[31m途中\x1b[?25l"); display.changed();
     check(!display.update(model, 0, 10) && display.pending(), "begin marker defers presentation");
     check(!display.update(model, 0, 500) && line(display, 0) == "old" && display.cursorX() == 3 && display.cursorVisible(), "incidental paints retain committed text and cursor");
-    model.feed("\x1b[H\x1b[2J完成\x1b[?25h\x1b[?2026"); display.changed(501);
+    model.feed("\x1b[H\x1b[2J完成\x1b[?25h\x1b[?2026"); display.changed();
     check(!display.update(model, 0, 501) && line(display, 0) == "old", "split end marker does not expose intermediate text");
-    model.feed("l"); display.changed(502);
+    model.feed("l"); display.changed();
     check(display.update(model, 0, 502) && line(display, 0) == "完成" && display.cursorX() == 4 && !display.pending(), "completed frame is presented with its cursor");
     check(display.row(0)[0].fg == model.row(0)[0].fg && display.row(0)[1].continuation, "committed frame retains colors and wide cells");
 
@@ -188,83 +188,73 @@ void terminalDisplayTests() {
     replay += "\x1b[H\x1b[2Jready\x1b[?2026l";
     uint64_t tick = 600;
     for (size_t offset = 0; offset < replay.size(); offset += 8192) {
-        model.feed(std::string_view(replay).substr(offset, 8192)); display.changed(tick);
+        model.feed(std::string_view(replay).substr(offset, 8192)); display.changed();
         const bool last = offset + 8192 >= replay.size();
-        check(display.update(model, 0, tick, !last) == last, "replayed history is only presented after its end marker");
+        check(display.update(model, 0, tick) == last, "replayed history is only presented after its end marker");
         check(line(display, 0) == (last ? "ready" : "完成"), "resume does not flash replayed history");
         ++tick;
     }
 
-    model.feed("\x1b[?2026h\rtimeout"); display.changed(1000);
+    model.feed("\x1b[?2026h\rtimeout"); display.changed();
     check(!display.update(model, 0, 1000), "incomplete synchronized output waits");
-    model.feed("\x1b[?2026h"); display.changed(1900);
+    model.feed("\x1b[?2026h"); display.changed();
     check(!display.update(model, 0, 1999), "repeated begin marker does not restart the timeout");
     check(display.update(model, 0, 2000) && !model.synchronizedOutput() && !display.pending(), "missing end marker is released after one second without more output");
-    model.feed("\x1b[?2026h\rended"); display.changed(2010); display.update(model, 0, 2010);
-    check(display.update(model, 0, 2011, false, true) && !model.synchronizedOutput() && line(display, 0).substr(0, 5) == "ended", "process exit forces the final frame without waiting for a marker");
-
-    TerminalModel burst(16, 2); TerminalDisplay batched;
-    batched.update(burst, 0, 0, false, true);
-    burst.feed("first"); batched.changed(0);
-    check(!batched.update(burst, 0, 16) && line(batched, 0).empty(), "ordinary output waits briefly for adjacent chunks");
-    check(!batched.update(burst, 0, 32, true), "queued bytes defer a partial burst");
-    check(batched.update(burst, 0, 32) && line(batched, 0) == "first", "quiet output is presented promptly");
-    for (uint64_t now = 100; now < 220; now += 10) {
-        burst.feed("\rprogress"); batched.changed(now);
-        check(!batched.update(burst, 0, now, true), "continuous output is coalesced within the delay bound");
-    }
-    check(batched.update(burst, 0, 220, true) && line(batched, 0) == "progress", "continuous output still presents progress within 120 ms");
-    burst.resize(8, 3); batched.resized(300);
-    check(!batched.update(burst, 0, 350) && batched.columns() == 16 && batched.rows() == 2, "resize paints retain a coherent previous frame");
-    check(batched.update(burst, 0, 400) && batched.columns() == 8 && batched.rows() == 3, "resize settles even if the application emits no more output");
-    for (uint64_t now = 500; now < 620; now += 10) {
-        burst.resize(now % 20 ? 9 : 8, 3); batched.resized(now);
-        check(!batched.update(burst, 0, now), "consecutive resizes are coalesced");
-    }
-    check(batched.update(burst, 0, 620), "continuous resizing cannot defer presentation forever");
-    burst.feed("\r\na\r\nb\r\nc"); batched.changed(700);
-    check(batched.update(burst, 1, 732) && !batched.cursorVisible() && line(batched, 0) == line(burst, 0, 1), "scrollback is captured with its cursor hidden");
+    model.feed("\x1b[?2026h\rended"); display.changed(); display.update(model, 0, 2010);
+    check(display.update(model, 0, 2011, true) && !model.synchronizedOutput() && line(display, 0).substr(0, 5) == "ended", "process exit forces the final frame without waiting for a marker");
 }
 void terminalInputTests() {
     TerminalModel model(80, 3); TerminalDisplay display;
     model.feed(std::string(60, 'x'));
-    display.update(model, 0, 0, false, true);
-    for (uint64_t now = 100; now < 400; now += 30) {
-        display.input(now);
+    display.update(model, 0, 0, true);
+    for (uint64_t now = 1; now <= 10; ++now) {
         check(!display.pending() && !display.update(model, 0, now), "typing alone does not redraw an unchanged frame");
-        model.feed("\b"); display.changed(now);
-        check(!display.update(model, 0, now), "echo chunks are coalesced for one frame");
-        model.feed("\x1b[K"); display.changed(now + 10);
-        check(!display.update(model, 0, now + 15), "split echo waits for its frame deadline");
-        check(display.update(model, 0, now + 16), "held backspace presents each repeat without waiting for quiet output");
-        check(line(display, 0) == std::string(static_cast<size_t>(model.cursorX()), 'x') && display.cursorX() == model.cursorX(), "backspace echo commits the erased text and cursor together");
+        model.feed("\b"); display.changed();
+        check(display.update(model, 0, now) && display.cursorX() == model.cursorX(), "backspace moves the displayed cursor immediately");
+        model.feed("\x1b[K"); display.changed();
+        check(display.update(model, 0, now), "a split erase is presented in the same clock tick without a frame delay");
+        check(line(display, 0) == std::string(static_cast<size_t>(model.cursorX()), 'x'), "backspace immediately presents the erased text");
     }
 
-    // A delayed echo still gets a single-frame wait after its first byte.
-    model.feed("!"); display.changed(500);
-    check(!display.update(model, 0, 500) && display.update(model, 0, 516), "recent input covers delayed echo");
-    model.feed("?"); display.changed(700);
-    check(!display.update(model, 0, 716) && display.update(model, 0, 732), "ordinary output batching resumes after input stops");
-
-    display.input(800);
-    model.feed("queued"); display.changed(800);
-    check(!display.update(model, 0, 816, true), "typing does not expose queued partial output");
-    check(display.update(model, 0, 820), "drained echo need not wait for a new quiet period");
-    model.resize(40, 3); display.resized(850);
-    check(!display.update(model, 0, 866) && display.columns() == 80, "typing preserves resize settling");
-    check(display.update(model, 0, 950) && display.columns() == 40, "resized input frame commits once settled");
+    model.feed("!"); display.changed();
+    check(display.update(model, 0, 500), "delayed echo is presented as soon as it arrives");
+    model.feed("?"); display.changed();
+    check(display.update(model, 0, 500), "ordinary output is also immediate in the same clock tick");
+    for (uint64_t now = 501; now <= 550; ++now) {
+        model.feed("\r\x1b[Kprogress " + std::to_string(now)); display.changed();
+        check(display.update(model, 0, now) && line(display, 0) == "progress " + std::to_string(now), "continuous output never waits for quiet or a frame deadline");
+    }
+    for (uint64_t now = 551; now <= 570; ++now) {
+        const int columns = now % 2 ? 40 : 80;
+        model.resize(columns, 3); display.changed();
+        check(display.update(model, 0, now) && display.columns() == columns && display.rows() == 3, "each resize is presented immediately without a settling timer");
+    }
+    check(!display.pending() && !display.update(model, 0, 600), "an idle terminal does not keep repainting");
 
     const std::string beforeSync = line(display, 0);
-    display.input(1000);
-    model.feed("\x1b[?2026h\r\x1b[Kincomplete"); display.changed(1000);
-    check(!display.update(model, 0, 1016) && line(display, 0) == beforeSync && model.synchronizedOutput(), "typing cannot release synchronized output or expose partial text");
-    model.feed("\r\x1b[Kcomplete\x1b[?2026l"); display.changed(1017);
-    check(display.update(model, 0, 1017) && line(display, 0) == "complete", "synchronized echo commits as soon as its frame completes");
+    model.feed("\x1b[?2026h\r\x1b[Kincomplete"); display.changed();
+    check(!display.update(model, 0, 1000) && line(display, 0) == beforeSync && model.synchronizedOutput(), "immediate output still honors an application's synchronized frame");
+    check(display.synchronizationDeadline() == 2000, "only explicit synchronized output schedules a timeout");
+    model.feed("\r\x1b[Kcomplete\x1b[?2026l"); display.changed();
+    check(display.update(model, 0, 1000) && line(display, 0) == "complete" && !display.synchronizationDeadline(), "a synchronized frame commits in the same clock tick as its end marker");
+
+    for (const auto* prefix : {"$ ", "PS C:> ", "user@host:~$ "}) {
+        TerminalModel shell(40, 3); TerminalDisplay prompt;
+        shell.feed(prefix); prompt.update(shell, 0, 0, true);
+        for (uint64_t now = 1; now <= 10; ++now) {
+            shell.feed("\r\n"); prompt.changed();
+            check(prompt.update(shell, 0, now) && prompt.cursorY() == shell.cursorY(), "each Enter immediately advances the displayed shell cursor");
+            // Shells can send the prompt separately after evaluating its contents.
+            shell.feed("\x1b[32m" + std::string(prefix) + "\x1b[0m"); prompt.changed();
+            check(prompt.update(shell, 0, now) && line(prompt, prompt.cursorY()) == line(shell, shell.cursorY()) && prompt.cursorX() == shell.cursorX(),
+                "every shell prompt is presented in the same clock tick as Enter without another debounce");
+        }
+    }
 }
 void terminalScrollTests() {
     TerminalModel model(16, 3); TerminalDisplay display;
     for (int i = 0; i < 12; ++i) model.feed("line " + std::to_string(i) + "\r\n");
-    display.update(model, 0, 0, false, true);
+    display.update(model, 0, 0, true);
     uint64_t now = 1;
     for (size_t scroll : {1u, 2u, 3u, 4u, 3u, 2u, 1u, 0u}) {
         check(display.update(model, scroll, now++), "each scroll position is presented immediately during continuous wheel input");
@@ -272,23 +262,23 @@ void terminalScrollTests() {
         check(!display.pending(), "scrolling alone does not start an output batching timer");
     }
 
-    model.feed("new"); display.changed(20);
-    check(!display.update(model, 0, 21, true), "new output is still batched before scrolling");
-    check(display.update(model, 1, 21, true) && line(display, 0) == line(model, 0, 1), "scrolling bypasses the output wait even with queued output");
-    model.feed("!"); display.changed(22);
-    check(!display.update(model, 1, 23, true), "subsequent output remains batched at the same scroll position");
+    model.feed("new"); display.changed();
+    check(display.update(model, 0, 20), "new output is immediate before scrolling");
+    check(display.update(model, 1, 21) && line(display, 0) == line(model, 0, 1), "scrolling immediately presents the requested history");
+    model.feed("!"); display.changed();
+    check(display.update(model, 1, 22), "new output is immediate at the same scroll position");
     check(display.update(model, 0, 23) && line(display, 2) == line(model, 2), "returning to the live screen is immediate");
 
     const std::string beforeSync = line(display, 0);
-    model.feed("\x1b[?2026h\x1b[H\x1b[2Jincomplete"); display.changed(30);
+    model.feed("\x1b[?2026h\x1b[H\x1b[2Jincomplete"); display.changed();
     check(!display.update(model, 2, 31) && model.synchronizedOutput() && line(display, 0) == beforeSync, "scrolling cannot release synchronized output or expose a partial frame");
-    model.feed("\x1b[?2026l"); display.changed(32);
+    model.feed("\x1b[?2026l"); display.changed();
     check(display.update(model, 2, 32) && line(display, 0) == line(model, 0, 2), "a scroll requested during synchronized output appears when the frame completes");
 }
 void terminalCopyTests() {
     TerminalModel model(12, 3); TerminalDisplay display;
     model.feed("A日本😀Z\r\n  two  \r\nlast");
-    display.update(model, 0, 0, false, true);
+    display.update(model, 0, 0, true);
     check(display.selectedText(0, 1) == "A", "copy can select exactly one character");
     check(display.selectedText(8, 0) == "A日本😀Z", "backward selection copies in reading order");
     check(display.selectedText(2, 3) == "日" && display.selectedText(1, 2) == "日", "copy includes a whole CJK character from either half");
@@ -298,17 +288,17 @@ void terminalCopyTests() {
     check(display.selectedText(-1, 3).empty() && display.selectedText(1000, 1001).empty(), "absent and out-of-view selections are empty");
     check(display.selectedText(0, 19) == "A日本😀Z\r\n  two", "multiline copy uses CRLF, keeps indentation and drops row padding");
     check(display.selectedText(0, 1000) == "A日本😀Z\r\n  two\r\nlast", "selection extending past the screen is bounded");
-    model.feed("\x1b[?2026h\x1b[H\x1b[2Jincomplete"); display.changed(10); display.update(model, 0, 10);
+    model.feed("\x1b[?2026h\x1b[H\x1b[2Jincomplete"); display.changed(); display.update(model, 0, 10);
     check(display.selectedText(0, 8) == "A日本😀Z", "copy uses the displayed frame during synchronized output");
 
     TerminalModel history(8, 2); TerminalDisplay scrolled;
-    history.feed("first\r\nsecond\r\nthird"); scrolled.update(history, 1, 0, false, true);
+    history.feed("first\r\nsecond\r\nthird"); scrolled.update(history, 1, 0, true);
     check(scrolled.selectedText(0, 16) == "first\r\nsecond", "copy uses the visible scrollback rather than the live screen");
 }
 void terminalSelectionScrollTests() {
     TerminalModel model(8, 2); TerminalDisplay display;
     model.feed("first\r\nsecond\r\nthird\r\nfourth\r\nfifth");
-    display.update(model, 0, 0, false, true);
+    display.update(model, 0, 0, true);
     display.beginSelection(0); display.extendSelection(model, 6);
     check(display.hasSelection() && display.selectedText() == "fourth", "drag selects the committed terminal text");
     display.update(model, 1, 1);
@@ -330,40 +320,40 @@ void terminalSelectionScrollTests() {
     check(!display.hasSelection() && display.selectedText().empty(), "a click still does not select text");
 
     TerminalModel unicode(12, 2); TerminalDisplay wide;
-    unicode.feed("A日本😀Z\r\nnext"); wide.update(unicode, 0, 0, false, true);
+    unicode.feed("A日本😀Z\r\nnext"); wide.update(unicode, 0, 0, true);
     wide.beginSelection(2); wide.extendSelection(unicode, 6);
-    unicode.feed("\r\nlast"); wide.changed(1); wide.update(unicode, 0, 40);
+    unicode.feed("\r\nlast"); wide.changed(); wide.update(unicode, 0, 40);
     check(wide.hasSelection() && wide.selectionRange() == std::make_pair(0, 0) && wide.selectedText() == "日本😀", "output scroll keeps the selected Unicode text off screen");
     wide.update(unicode, 1, 41);
     check(wide.selectionRange() == std::make_pair(1, 7) && wide.selectedText() == "日本😀", "wide-character highlight is restored on returning to history");
-    unicode.feed("\x1b[?2026h\x1b[H\x1b[2Jpartial"); wide.changed(42);
+    unicode.feed("\x1b[?2026h\x1b[H\x1b[2Jpartial"); wide.changed();
     check(!wide.update(unicode, 0, 42), "selection scrolling respects a synchronized frame");
     wide.beginSelection(2); wide.extendSelection(unicode, 6);
     check(wide.selectedText() == "日本😀", "selecting during synchronized output reads the displayed cells");
-    unicode.feed("\x1b[?2026l"); wide.changed(43); wide.update(unicode, 0, 43);
+    unicode.feed("\x1b[?2026l"); wide.changed(); wide.update(unicode, 0, 43);
     check(wide.hasSelection() && wide.selectedText() == "日本😀", "a delayed scroll commit preserves selected text");
 
     TerminalModel bounded(8, 2); TerminalDisplay history;
     for (int i = 0; i < 1002; ++i) bounded.feed("row\r\n");
-    history.update(bounded, 0, 0, false, true);
+    history.update(bounded, 0, 0, true);
     history.beginSelection(0); history.extendSelection(bounded, 3);
-    bounded.feed("next\r\n"); history.changed(1); history.update(bounded, 1, 40);
+    bounded.feed("next\r\n"); history.changed(); history.update(bounded, 1, 40);
     check(history.selectionRange() == std::make_pair(0, 3) && history.selectedText() == "row", "history eviction does not shift the selection onto a different row");
     history.update(bounded, bounded.historySize(), 41);
     history.beginSelection(0); history.extendSelection(bounded, 3);
-    bounded.feed("drop\r\n"); history.changed(42); history.update(bounded, bounded.historySize(), 80);
+    bounded.feed("drop\r\n"); history.changed(); history.update(bounded, bounded.historySize(), 80);
     check(!history.hasSelection(), "selection is cleared when its text leaves the history budget");
     history.beginSelection(0); history.extendSelection(bounded, 3);
-    bounded.feed("\x1b[3J"); history.changed(81); history.update(bounded, 0, 120);
+    bounded.feed("\x1b[3J"); history.changed(); history.update(bounded, 0, 120);
     check(!history.hasSelection(), "erasing selected history clears its selection");
     history.beginSelection(0); history.extendSelection(bounded, 3);
-    bounded.feed("\x1b[?1049hALT\x1b[?1049l"); history.changed(121); history.update(bounded, 0, 160);
+    bounded.feed("\x1b[?1049hALT\x1b[?1049l"); history.changed(); history.update(bounded, 0, 160);
     check(!history.hasSelection(), "switching terminal buffers invalidates old selection coordinates");
     history.beginSelection(0); history.extendSelection(bounded, 3);
-    bounded.resize(10, 3); history.resized(161); history.update(bounded, 0, 300);
+    bounded.resize(10, 3); history.changed(); history.update(bounded, 0, 300);
     check(!history.hasSelection(), "resizing invalidates the selected cell coordinates");
     history.beginSelection(0); history.extendSelection(bounded, 3);
-    bounded.feed("\x1b" "c"); history.changed(301); history.update(bounded, 0, 340);
+    bounded.feed("\x1b" "c"); history.changed(); history.update(bounded, 0, 340);
     check(!history.hasSelection(), "terminal reset clears selection without reusing old row coordinates");
 }
 }

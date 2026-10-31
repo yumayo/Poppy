@@ -4,16 +4,14 @@
 #include <utility>
 
 namespace poppy {
-// Only the committed visible cells reach the renderer, including incidental
-// paints caused by focus, exposure or resizing while output is incomplete.
+// Present parsed output immediately; retain the last complete frame only when
+// the application explicitly requests synchronized output.
 class TerminalDisplay {
 public:
-    // Keep echo responsive briefly after typing, including delayed replies.
-    void input(uint64_t now) { inputUntil_ = now + 250; }
-    void changed(uint64_t now);
-    void resized(uint64_t now);
-    bool update(TerminalModel& model, size_t scroll, uint64_t now, bool queued = false, bool force = false);
+    void changed() { dirty_ = true; }
+    bool update(TerminalModel& model, size_t scroll, uint64_t now, bool force = false);
     bool pending() const { return dirty_ || synchronizing_; }
+    uint64_t synchronizationDeadline() const { return synchronizing_ ? syncSince_ + 1000 : 0; }
     int columns() const { return columns_; }
     int rows() const { return static_cast<int>(cells_.size()); }
     const std::vector<Cell>& row(int y) const { return cells_.at(static_cast<size_t>(y)); }
@@ -38,6 +36,6 @@ private:
     uint64_t generation_ = 0;
     std::string selectionText_;
     bool cursorVisible_ = false, dirty_ = false, synchronizing_ = false;
-    uint64_t firstChange_ = 0, lastChange_ = 0, resizeUntil_ = 0, syncSince_ = 0, inputUntil_ = 0;
+    uint64_t syncSince_ = 0;
 };
 }
