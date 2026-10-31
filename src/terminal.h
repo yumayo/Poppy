@@ -41,7 +41,7 @@ private:
     HWND window_ = nullptr;
     Renderer renderer_{D2D1_PRESENT_OPTIONS_IMMEDIATELY};
     Scrollbars scrollbars_;
-    int cellWidth_ = 8, cellHeight_ = 20, header_ = 30;
+    int cellWidth_ = 8, cellHeight_ = 20;
     fs::path directory_;
     std::wstring displayDirectory_;
     std::vector<std::pair<std::wstring, std::wstring>> environment_;

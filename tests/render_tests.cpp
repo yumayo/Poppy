@@ -1340,7 +1340,7 @@ void terminalSelectionAutoScrolling() {
     const auto upward = clipboardText(window);
     check(upward.find(L"ROW001") != std::wstring::npos && upward.find(L"ROW090") != std::wstring::npos,
         "Upward auto-scrolling lost text across terminal history pages");
-    SendMessageW(window, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(6, 34));
+    SendMessageW(window, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(6, 4));
     SendMessageW(window, WM_MOUSEMOVE, MK_LBUTTON, MAKELPARAM(6, 500)); selectionTicks(window, 100);
     check(GetScrollPos(window, SB_VERT) == bottom, "Terminal drag did not scroll back to the live screen");
     SendMessageW(window, WM_LBUTTONUP, 0, MAKELPARAM(6, 500)); SendMessageW(window, WM_COPY, 0, 0);

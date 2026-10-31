@@ -26,7 +26,7 @@ void Terminal::create(HWND parent, HINSTANCE instance) {
 }
 void Terminal::setDpi(UINT dpi) {
     renderer_.setDpi(dpi);
-    cellWidth_ = renderer_.cellWidth(); cellHeight_ = renderer_.textHeight() + MulDiv(2, dpi, 96); header_ = MulDiv(30, dpi, 96);
+    cellWidth_ = renderer_.cellWidth(); cellHeight_ = renderer_.textHeight() + MulDiv(2, dpi, 96);
     scrollbars(); resize(); imePosition(); InvalidateRect(window_, nullptr, FALSE);
 }
 void Terminal::setDirectory(const fs::path& directory) {
@@ -240,9 +240,9 @@ void Terminal::pump() {
 void Terminal::resize() {
     if (!window_) return;
     const auto rect = Scrollbars::contentRect(window_);
-    if (rect.right < cellWidth_ * 2 || rect.bottom <= header_) return;
+    if (rect.right < cellWidth_ * 2 || rect.bottom <= 0) return;
     const int columns = std::clamp((static_cast<int>(rect.right) - 12) / cellWidth_, 2, 500);
-    const int rows = std::clamp((static_cast<int>(rect.bottom) - header_ - 8) / cellHeight_, 1, 200);
+    const int rows = std::clamp((static_cast<int>(rect.bottom) - 8) / cellHeight_, 1, 200);
     if (columns == model_.columns() && rows == model_.rows()) return;
     stopSelection();
     model_.resize(columns, rows); scroll_ = 0; display_.clearSelection();
@@ -282,7 +282,7 @@ void Terminal::extendSelection(int x, int y) {
 void Terminal::scrollSelection() {
     if (!selecting_ || GetCapture() != window_) { stopSelection(); return; }
     const auto rect = Scrollbars::contentRect(window_);
-    const int top = header_ + 4, bottom = std::min(static_cast<int>(rect.bottom), top + display_.rows() * cellHeight_);
+    const int top = 4, bottom = std::min(static_cast<int>(rect.bottom), top + display_.rows() * cellHeight_);
     const int rows = selectionScrollRows(selectionPoint_.y, top, bottom, cellHeight_);
     const int offset = std::clamp(static_cast<int>(scroll_) - rows, 0, static_cast<int>(model_.historySize()));
     if (!rows || offset == static_cast<int>(scroll_)) return;
@@ -298,7 +298,7 @@ void Terminal::stopSelection() {
     if (GetCapture() == window_) ReleaseCapture();
 }
 void Terminal::imePosition() {
-    positionIme(window_, {6 + display_.cursorX() * cellWidth_, header_ + 4 + display_.cursorY() * cellHeight_}, cellHeight_);
+    positionIme(window_, {6 + display_.cursorX() * cellWidth_, 4 + display_.cursorY() * cellHeight_}, cellHeight_);
 }
 void Terminal::paste() {
     auto text = utf8(clipboardText(window_)); if (text.empty()) return;
@@ -313,9 +313,9 @@ void Terminal::paste() {
 }
 int Terminal::point(int x, int y) const {
     const int columns = std::max(1, display_.columns()), rows = std::max(1, display_.rows());
-    if (y < header_ + 4) return 0;
-    if (y >= header_ + 4 + rows * cellHeight_) return rows * columns;
-    return ((y - header_ - 4) / cellHeight_) * columns + std::clamp((x - 6 + cellWidth_ / 2) / cellWidth_, 0, columns);
+    if (y < 4) return 0;
+    if (y >= 4 + rows * cellHeight_) return rows * columns;
+    return ((y - 4) / cellHeight_) * columns + std::clamp((x - 6 + cellWidth_ / 2) / cellWidth_, 0, columns);
 }
 void Terminal::copy() {
     if (!hasSelection()) return;
@@ -331,30 +331,25 @@ void Terminal::paint() {
     Renderer::Paint paint(renderer_, window_); if (!paint) return;
     auto& dc = renderer_; dc.font(Renderer::Font::Ui);
     const auto rect = Scrollbars::contentRect(window_);
-    dc.fill({0, 0, rect.right, header_}, panel);
-    dc.label({12, 0, rect.right - 12, header_}, L"TERMINAL", muted);
-    dc.fill({0, header_ - 1, rect.right, header_}, border);
+    dc.fill(rect, background);
     if (!started_) {
-        dc.fill({0, header_, rect.right, rect.bottom}, background);
-        RECT text{20, header_ + 18, std::max<LONG>(20, rect.right - 20), rect.bottom};
+        RECT text{20, 18, std::max<LONG>(20, rect.right - 20), rect.bottom};
         dc.label(text, error_.empty() ? !displayDirectory_.empty() ? L"Click to start the WSL shell.\nThe shell starts only when needed." : L"Click to start PowerShell, then run your AI CLI.\nThe shell starts only when needed." : error_ + L"\nClick to retry.", muted, DT_LEFT | DT_TOP | DT_WORDBREAK);
     } else {
-        RECT clip{6, header_ + 4, rect.right - 6, rect.bottom};
-        dc.fill({0, header_, rect.right, rect.bottom}, background);
+        RECT clip{6, 4, rect.right - 6, rect.bottom};
         const auto [begin, end] = display_.selectionRange();
         std::vector<Cell> visible;
         for (int y = 0; y < display_.rows(); ++y) {
             visible = display_.row(y);
             if (begin < end) for (int x = 0; x < display_.columns(); ++x) { const int index = y * display_.columns() + x; if (index >= begin && index < end) visible[x].bg = rgb(50,70,94); }
-            const int sy = header_ + 4 + y * cellHeight_;
+            const int sy = 4 + y * cellHeight_;
             dc.cells(6, sy, cellWidth_, cellHeight_, visible, display_.columns(), clip);
         }
         if (running() && display_.cursorVisible() && GetFocus() == window_) {
-            const int x = 6 + display_.cursorX() * cellWidth_, y = header_ + 4 + display_.cursorY() * cellHeight_;
+            const int x = 6 + display_.cursorX() * cellWidth_, y = 4 + display_.cursorY() * cellHeight_;
             if (x + cellWidth_ <= clip.right && y + cellHeight_ <= clip.bottom)
                 dc.fill({x, y + cellHeight_ - 2, x + cellWidth_, y + cellHeight_}, accent);
         }
-        if (!running()) dc.label({12, 0, rect.right - 12, header_}, L"SESSION ENDED  ·  Click header to restart", accent, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
     }
     scrollbars_.paint(window_, dc, background);
 }
@@ -384,13 +379,12 @@ LRESULT Terminal::handle(UINT m, WPARAM a, LPARAM b) {
     case WM_KILLFOCUS: stopSelection(); highSurrogate_ = 0; DestroyCaret(); InvalidateRect(window_, nullptr, FALSE); return 0;
     case WM_LBUTTONDOWN:
         SetFocus(window_);
-        if (!started_ || (!running() && GET_Y_LPARAM(b) < header_)) { start(); InvalidateRect(window_, nullptr, FALSE); return 0; }
-        if (GET_Y_LPARAM(b) >= header_) {
-            selectionPoint_ = {GET_X_LPARAM(b), GET_Y_LPARAM(b)};
-            display_.beginSelection(point(selectionPoint_.x, selectionPoint_.y));
-            selecting_ = true; SetCapture(window_); SetTimer(window_, selectionTimer, 50, nullptr);
-            InvalidateRect(window_, nullptr, FALSE);
-        } return 0;
+        if (!started_) { start(); InvalidateRect(window_, nullptr, FALSE); return 0; }
+        selectionPoint_ = {GET_X_LPARAM(b), GET_Y_LPARAM(b)};
+        display_.beginSelection(point(selectionPoint_.x, selectionPoint_.y));
+        selecting_ = true; SetCapture(window_); SetTimer(window_, selectionTimer, 50, nullptr);
+        InvalidateRect(window_, nullptr, FALSE);
+        return 0;
     case WM_MOUSEMOVE: if (selecting_) extendSelection(GET_X_LPARAM(b), GET_Y_LPARAM(b)); return 0;
     case WM_LBUTTONUP: if (selecting_) { extendSelection(GET_X_LPARAM(b), GET_Y_LPARAM(b)); stopSelection(); } return 0;
     case WM_CANCELMODE: case WM_CAPTURECHANGED: stopSelection(); return 0;
@@ -418,6 +412,7 @@ LRESULT Terminal::handle(UINT m, WPARAM a, LPARAM b) {
     }
     case WM_KEYDOWN: case WM_SYSKEYDOWN: {
         const bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0, shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0, alt = (GetKeyState(VK_MENU) & 0x8000) != 0;
+        if (started_ && !running() && a == VK_RETURN && !ctrl && !shift && !alt) { start(); InvalidateRect(window_, nullptr, FALSE); return 0; }
         if (ctrl && shift && !alt && a == 'C') { copy(); return 0; }
         if ((ctrl && shift && a == 'V') || (shift && a == VK_INSERT)) { if (!started_) start(); paste(); return 0; }
         if (!started_ && a != VK_CONTROL && a != VK_SHIFT && a != VK_MENU) { start(); }
