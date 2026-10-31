@@ -1321,7 +1321,9 @@ void ProjectRuntime::Impl::updateLabel(TreeItem item) {
     std::wstring text = n->unsupported ? n->label + L"  [unsupported encoding]" : n->path.filename().empty() ? n->path.native() : n->path.filename().native();
     if (n->directory && n->reparse) text += L"  [link]";
     const auto state = stateFor(n->path);
-    explorer_.label(item, std::move(text), n->ignored ? muted : state ? stateColor(state) : foreground);
+    const auto path = "/" + n->path.generic_u8string() + "/";
+    const bool gitMetadata = path.find("/.git/") != std::string::npos;
+    explorer_.label(item, std::move(text), n->ignored || gitMetadata ? muted : state ? stateColor(state) : foreground);
 }
 bool ProjectRuntime::Impl::canPasteImage(TreeItem item) const {
     const auto n = node(item ? item : rootItem_);
