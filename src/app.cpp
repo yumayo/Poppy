@@ -3064,7 +3064,8 @@ void ProjectRuntime::activate(bool active) {
     }
 }
 void ProjectRuntime::setDpi(UINT dpi) { impl_->dpi(dpi); }
-void ProjectRuntime::poll() { if (ready()) impl_->pollWatch(); if (IsWindowVisible(impl_->terminal_.container())) { impl_->terminal_.acknowledge(); if (summary().counts[static_cast<size_t>(AiState::Running)]) InvalidateRect(impl_->terminal_.container(), nullptr, FALSE); } }
+void ProjectRuntime::poll() { if (ready()) impl_->pollWatch(); if (IsWindowVisible(impl_->terminal_.container())) impl_->terminal_.acknowledge(); }
+bool ProjectRuntime::animateAiStatus() { return impl_->terminal_.animateAiStatus(); }
 bool ProjectRuntime::key(const MSG& message) { return impl_->key(message); }
 bool ProjectRuntime::terminalInput(HWND window) const { return impl_->terminal_.contains(window); }
 ProjectSession ProjectRuntime::snapshot() { return impl_->saveSession(); }

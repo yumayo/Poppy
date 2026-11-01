@@ -19,6 +19,7 @@
 namespace poppy {
 namespace {
 constexpr UINT wmStartup = WM_APP + 22;
+constexpr UINT_PTR aiAnimationTimerId = 2;
 fs::path stateDirectory() {
     const DWORD length = GetEnvironmentVariableW(L"APPDATA", nullptr, 0);
     if (length) { std::wstring path(length, 0); const auto count = GetEnvironmentVariableW(L"APPDATA", path.data(), length); if (!count || count >= length) throw std::runtime_error("Cannot read APPDATA"); path.resize(count); return fs::path(path) / L"yumayo" / L"Poppy"; }
@@ -62,6 +63,7 @@ private:
     void select(size_t index, bool attention = false);
     void close(size_t index);
     void tick();
+    void animateAiStatus();
     void save(OpenProject& project);
     void saveApp();
     void saveAll();
@@ -82,7 +84,8 @@ private:
     HWND window_ = nullptr, tooltips_ = nullptr;
     HINSTANCE instance_ = nullptr;
     SingleInstance* singleInstance_ = nullptr;
-    Renderer renderer_;
+    // Present both indicator surfaces without serial waits for vertical sync.
+    Renderer renderer_{D2D1_PRESENT_OPTIONS_IMMEDIATELY};
     QuickOpen recent_;
     AiEventQueue events_{[this] { PostMessageW(window_, wmAiEvent, 0, 0); }};
     std::unique_ptr<Worker> storageWorker_;
@@ -97,6 +100,7 @@ private:
     size_t active_ = 0, tools_ = 0;
     uint64_t nextId_ = 1;
     UINT dpi_ = 96;
+    UINT_PTR aiAnimationTimer_ = 0;
     int initialShow_ = SW_SHOWNORMAL;
     int scroll_ = 0, wheel_ = 0;
     bool listingWsl_ = false;
@@ -364,7 +368,7 @@ void Workspace::finishClose(){
     closing_=true;
     endProjectDrag();recent_.close(false);
     if(GetCapture())ReleaseCapture();
-    KillTimer(window_,1);KillTimer(window_,77);
+    KillTimer(window_,1);KillTimer(window_,77);KillTimer(window_,aiAnimationTimerId);
     SendMessageW(tooltips_,TTM_ACTIVATE,FALSE,0);
     // Snapshot focus and session state before the modal window takes focus.
     for(auto& project:projects_)save(project);
@@ -417,13 +421,29 @@ void Workspace::checkFolder(OpenProject& project) {
 void Workspace::markDirty(){if(!projects_.empty()){projects_[active_].dirty=true;projects_[active_].changedAt=GetTickCount64();}}
 void Workspace::tick(){
     scrollProjectDrag();
-    const auto now=GetTickCount64();bool animate=false;
+    const auto now=GetTickCount64();
     for(size_t i=0;i<projects_.size();++i){auto& project=projects_[i];project.runtime->poll();if(project.dirty&&now-project.changedAt>=650)save(project);
-        RECT r{};GetClientRect(window_,&r);const auto item=row(i);if(item.bottom>px(44)&&item.top<r.bottom&&project.runtime->summary().state==AiState::Running)animate=true;
     }
     trimDocuments();
     if(appDirty_&&now-appChanged_>=650)saveApp();
-    if(animate&&!IsIconic(window_)&&IsWindowVisible(window_)) {RECT r{};GetClientRect(window_,&r);r.right=px(session_.projectListWidth);InvalidateRect(window_,&r,FALSE);}
+    animateAiStatus();
+}
+void Workspace::animateAiStatus() {
+    bool running = false;
+    if (!IsIconic(window_) && IsWindowVisible(window_)) {
+        RECT client{}; GetClientRect(window_, &client);
+        for (size_t i = 0; i < projects_.size(); ++i) {
+            const auto item = row(i);
+            if (item.top < px(44) || item.bottom > client.bottom || projects_[i].runtime->summary().state != AiState::Running) continue;
+            const RECT icon{px(4), item.top, px(30), item.bottom};
+            InvalidateRect(window_, &icon, FALSE); running = true;
+        }
+        if (!projects_.empty()) running = projects_[active_].runtime->animateAiStatus() || running;
+    }
+    // A 16 ms WM_TIMER can round up to two default Windows clock ticks.
+    // Request the minimum interval for roughly one update per display refresh.
+    if (running && !aiAnimationTimer_) aiAnimationTimer_ = SetTimer(window_, aiAnimationTimerId, USER_TIMER_MINIMUM, nullptr);
+    else if (!running && aiAnimationTimer_) { KillTimer(window_, aiAnimationTimer_); aiAnimationTimer_ = 0; }
 }
 RECT Workspace::addButtonBounds() const {return {px(session_.projectListWidth)-px(34),0,px(session_.projectListWidth),px(44)};}
 RECT Workspace::row(size_t index) const {const int top=px(44)+(static_cast<int>(index)-scroll_)*px(48);return {0,top,px(session_.projectListWidth),top+px(48)};}
@@ -513,7 +533,7 @@ void Workspace::paint(){
     renderer_.fill(addButton,panel);renderer_.label(addButton,L"+",accent,DT_CENTER|DT_VCENTER|DT_SINGLELINE);
     for(size_t i=0;i<projects_.size();++i){auto rect=row(i);if(rect.top<px(44)||rect.bottom>client.bottom)continue;
         const auto& project=projects_[i];const auto summary=project.runtime->summary();renderer_.fill(rect,i==active_?panel:background);if(i==active_)renderer_.fill({0,rect.top,px(3),rect.bottom},accent);
-        drawAiStatus(renderer_,{px(4),rect.top,px(30),rect.bottom},summary.state,dpi_,static_cast<unsigned>(GetTickCount64()/80));
+        drawAiStatus(renderer_,{px(4),rect.top,px(30),rect.bottom},summary.state,dpi_);
         const auto secondary=subtitle(i);const auto title=project.path.filename().empty()?project.path.native():project.path.filename().native();
         renderer_.label({px(32),rect.top,width-px(22),rect.top+(secondary.empty()?px(48):px(27))},title,project.missing?muted:foreground);
         if(!secondary.empty())renderer_.label({px(32),rect.top+px(24),width-px(8),rect.bottom},secondary,muted);
@@ -535,8 +555,8 @@ case WM_DPICHANGED:{endProjectDrag();dpi_=HIWORD(a);renderer_.setDpi(dpi_);recen
 case wmWork:if(!closing_&&storageWorker_)storageWorker_->dispatch();return 0;
 case wmStartup:applyStartupRequests();return 0;
 case WM_APP + 21:{ const auto project = find(static_cast<uint64_t>(a)); if (!project || project->runtime->hasUnsaved()) return 0; const bool active = project == &projects_[active_]; const auto index = static_cast<size_t>(project - projects_.data()); close(index); if (active) for (size_t i = 0; i < projects_.size(); ++i) if (projects_[i].id == static_cast<uint64_t>(b)) { select(i); break; } return 0; }
-case wmAiEvent:for(const auto& event:events_.drain())for(auto& project:projects_)if(project.runtime->apply(event))break;return 0;
-case WM_TIMER:if(closing_)return 0;if(a==77)Terminal::pump();else tick();return 0;
+case wmAiEvent:for(const auto& event:events_.drain())for(auto& project:projects_)if(project.runtime->apply(event))break;if(!closing_)animateAiStatus();return 0;
+case WM_TIMER:if(closing_)return 0;if(a==77)Terminal::pump();else if(a==aiAnimationTimerId)animateAiStatus();else if(a==1)tick();return 0;
 case WM_ACTIVATE:if(closing_)return 0;if(LOWORD(a)==WA_INACTIVE)endProjectDrag();else if(!projects_.empty())PostMessageW(projects_[active_].runtime->window(),WM_APP+12,0,0);return 0;
 case WM_SETFOCUS:if(closing_)return 0;if(!projects_.empty())projects_[active_].runtime->activate(true);return 0;
 case WM_LBUTTONDOWN:{recent_.close();endProjectDrag();const POINT point{GET_X_LPARAM(b),GET_Y_LPARAM(b)};const auto addButton=addButtonBounds();const int width=px(session_.projectListWidth);if(point.x>=width&&point.x<width+px(5)){dragging_=true;SetCapture(window_);}else if(PtInRect(&addButton,point))choose();else if(const auto index=hit(point);index<projects_.size()){select(index,point.x<px(30));projectDrag_=ProjectDrag{projects_[index].id,point,point,false,std::nullopt};SetCapture(window_);}return 0;}
@@ -573,7 +593,7 @@ case WM_COPYDATA:{
 case WM_QUERYENDSESSION:if(!closing_){for(auto& project:projects_)if(!project.runtime->canClose())return FALSE;saveAll();}return TRUE;
 case WM_ENDSESSION:if(a&&!closing_){closing_=true;saveAll();for(auto& project:projects_)project.runtime->shutdown();DestroyWindow(window_);}return 0;
 case WM_CLOSE:if(closing_)return 0;for(auto& project:projects_)if(!project.runtime->canClose())return 0;finishClose();return 0;
-case WM_DESTROY:singleInstance_->unpublish(window_);KillTimer(window_,1);projects_.clear();if(storageWorker_){storageWorker_->submit(L"release-storage",[this]{storage_.reset();});storageWorker_->drain();storageWorker_->stop();}PostQuitMessage(0);return 0;
+case WM_DESTROY:singleInstance_->unpublish(window_);KillTimer(window_,1);KillTimer(window_,aiAnimationTimerId);projects_.clear();if(storageWorker_){storageWorker_->submit(L"release-storage",[this]{storage_.reset();});storageWorker_->drain();storageWorker_->stop();}PostQuitMessage(0);return 0;
 }return DefWindowProcW(window_,m,a,b);}
 }
 }

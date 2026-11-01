@@ -22,6 +22,7 @@ public:
     void revalidate();
     void setDpi(UINT dpi);
     void poll();
+    bool animateAiStatus();
     bool key(const MSG& message);
     bool terminalInput(HWND window) const;
     ProjectSession snapshot();

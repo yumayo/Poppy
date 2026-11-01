@@ -138,6 +138,20 @@ void TerminalPane::focusAttention() {
     SetFocus(window());
 }
 void TerminalPane::acknowledge() { if(IsWindowVisible(window_) && GetForegroundWindow()==GetAncestor(window_,GA_ROOT) && !IsIconic(GetAncestor(window_,GA_ROOT))) for (const auto& session : sessions_) if (session->configuration.displayed) session->ai.acknowledge(); }
+bool TerminalPane::animateAiStatus() {
+    if (!IsWindowVisible(window_)) return false;
+    const auto rects = bounds();
+    const int unit = MulDiv(26, dpi_, 96);
+    bool running = false;
+    for (size_t i = 0; i < sessions_.size(); ++i) if (sessions_[i]->ai.state == AiState::Running) {
+        const auto pane = groupBounds(sessions_[i]->configuration.group);
+        RECT icon{std::max(rects[i].left, pane.left), 0, std::min<LONG>(rects[i].right, tabsRight(sessions_[i]->configuration.group)), header_};
+        if (icon.left >= icon.right) continue;
+        icon.right = std::min<LONG>(icon.right, icon.left + unit);
+        InvalidateRect(window_, &icon, FALSE); running = true;
+    }
+    return running;
+}
 AiSummary TerminalPane::summary() const { std::vector<AiStatus> states; for(const auto& s:sessions_)states.push_back(s->ai);return summarizeAi(states); }
 std::wstring TerminalPane::description() const {
     std::wstring text;
@@ -253,7 +267,7 @@ void TerminalPane::paint(){
     for(size_t i=0;i<rects.size();++i){auto rect=rects[i];const auto pane = groupBounds(sessions_[i]->configuration.group);rect.left=std::max(rect.left,pane.left);rect.right=std::min<LONG>(rect.right,tabsRight(sessions_[i]->configuration.group));if(rect.left>=rect.right)continue;
         const bool selected = sessions_[i]->configuration.displayed;
         renderer_.fill(rect,selected?panel:background);if(selected)renderer_.fill({rect.left,header_-2,rect.right,header_},accent);
-        drawAiStatus(renderer_,{rect.left,0,rect.left+unit,header_},sessions_[i]->ai.state,dpi_,static_cast<unsigned>(GetTickCount64()/80));
+        drawAiStatus(renderer_,{rect.left,0,rect.left+unit,header_},sessions_[i]->ai.state,dpi_);
         renderer_.label({rect.left+unit,0,rect.right-unit,header_},sessionName(*sessions_[i]),foreground);
         renderer_.label({rect.right-unit,0,rect.right,header_},L"×",muted,DT_CENTER|DT_VCENTER|DT_SINGLELINE);
         if(sessions_[i]->ai.unread)renderer_.fill({rect.left+unit-4,4,rect.left+unit,8},accent);

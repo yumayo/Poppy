@@ -35,6 +35,7 @@ public:
     void connect(AiEventQueue* hooks) { events_ = hooks; }
     bool apply(const AiEvent& event);
     void acknowledge();
+    bool animateAiStatus();
     void focusAttention();
     AiSummary summary() const;
     std::wstring description() const;
@@ -71,7 +72,7 @@ private:
     HWND window_ = nullptr, rename_ = nullptr, tooltips_ = nullptr;
     size_t renaming_ = 0, tools_ = 0;
     HINSTANCE instance_ = nullptr;
-    Renderer renderer_;
+    Renderer renderer_{D2D1_PRESENT_OPTIONS_IMMEDIATELY};
     TreeInput renameInput_;
     UINT dpi_ = 96;
     int header_ = 32, offset_[2]{}, ratio_ = 500;
