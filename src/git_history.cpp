@@ -112,6 +112,20 @@ std::vector<std::string> gitStageAllArguments() {
 std::vector<std::string> gitUnstageAllArguments() {
     return {"git.exe", "--literal-pathspecs", "--no-optional-locks", "reset", "--quiet", "--"};
 }
+std::vector<std::string> gitCommitArguments(const std::vector<GitStatusEntry>& entries, const std::string& message, bool amend) {
+    if (message.find('\0') != message.npos) throw std::invalid_argument("The commit message contains a NUL character.");
+    const bool blank = message.find_first_not_of(" \t\r\n") == message.npos;
+    if (!amend && blank) throw std::invalid_argument("Enter a commit message.");
+    if (std::any_of(entries.begin(), entries.end(), [](const GitStatusEntry& entry) { return entry.conflicted(); }))
+        throw std::invalid_argument("Resolve merge conflicts before committing.");
+    if (!amend && std::none_of(entries.begin(), entries.end(), [](const GitStatusEntry& entry) { return entry.staged(); }))
+        throw std::invalid_argument("Stage changes before committing.");
+    std::vector<std::string> args{"git.exe", "--no-optional-locks", "-c", "i18n.commitEncoding=UTF-8", "commit"};
+    if (amend) args.push_back("--amend");
+    if (blank) args.push_back("--no-edit");
+    else args.insert(args.end(), {"--cleanup=verbatim", "--message", message});
+    return args;
+}
 std::vector<std::string> gitStashUnstagedArguments(const std::vector<GitStatusEntry>& entries) {
     if (std::any_of(entries.begin(), entries.end(), [](const GitStatusEntry& entry) { return entry.conflicted(); }))
         throw std::invalid_argument("Resolve merge conflicts before stashing unstaged changes.");

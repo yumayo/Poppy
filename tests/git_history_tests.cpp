@@ -124,11 +124,23 @@ void editorBaseFailures() {
         return {};
     }) && calls == 2, "A failed blob read marked the entire editor as added");
 }
+void commitValidation() {
+    const auto rejected = [](const std::vector<GitStatusEntry>& entries, const std::string& message, bool amend) {
+        try { gitCommitArguments(entries, message, amend); return false; }
+        catch (const std::invalid_argument&) { return true; }
+    };
+    check(rejected({{"file", {}, 'M', ' '}}, " \r\n\t", false), "A blank normal commit message was accepted");
+    check(rejected({}, "message", false) && rejected({{"file", {}, '?', '?'}}, "message", false), "A normal commit did not require staged changes");
+    for (const auto conflict : {GitStatusEntry{"file", {}, 'U', 'U'}, GitStatusEntry{"file", {}, 'A', 'A'}})
+        check(rejected({conflict}, "message", false) && rejected({conflict}, "", true), "A commit accepted unresolved conflicts");
+    check(rejected({}, std::string("bad\0message", 11), true), "A NUL in a commit message was accepted");
+    check(!gitCommitArguments({}, "", true).empty(), "Amend without staged changes or a new message was rejected");
+}
 #ifndef _WIN32
 namespace fs = std::filesystem;
 struct Repository {
-    fs::path path = fs::temp_directory_path() / ("poppy-git-history-" + std::to_string(getpid()) + "-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
-    Repository() { fs::create_directories(path); }
+    fs::path path;
+    explicit Repository(const fs::path& base = fs::temp_directory_path()) : path(base / ("poppy-git-history-" + std::to_string(getpid()) + "-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()))) { fs::create_directories(path); }
     ~Repository() { std::error_code error; fs::remove_all(path, error); }
     std::string git(std::vector<std::string> args, bool allowNoMatches = false) const {
         if (!args.empty() && args.front() == "git.exe") args.erase(args.begin());
@@ -204,6 +216,55 @@ void repositoryEditorBase() {
     check(base("new.txt") == std::optional<std::string>(""), "An untracked file did not use an empty base");
     repo.git({"add", "--", renamed, "new.txt"}); repo.git({"commit", "-qm", "updated"});
     check(base(renamed) == repo.readFile(renamed) && base("new.txt") == "new\n", "A commit did not refresh the editor base");
+}
+void repositoryCommits() {
+    // The build directory supports executable hooks; Docker's /tmp is noexec.
+    Repository repo(fs::current_path()), sibling;
+    const auto initialize = [](const Repository& repo) {
+        repo.git({"init", "--quiet", "--template=", "--initial-branch=main"});
+        repo.git({"config", "user.name", "Poppy Test"}); repo.git({"config", "user.email", "poppy@example.invalid"});
+        repo.git({"config", "commit.gpgsign", "false"}); repo.git({"config", "core.autocrlf", "false"});
+        repo.git({"config", "core.hooksPath", ".git/hooks"});
+    };
+    initialize(repo); initialize(sibling);
+    sibling.write("file.txt", "sibling\n"); sibling.git({"add", "file.txt"}); sibling.git({"commit", "-qm", "sibling"});
+    const auto siblingHead = sibling.hash(); sibling.write("file.txt", "sibling staged\n"); sibling.git({"add", "file.txt"});
+    const auto siblingIndex = sibling.git({"write-tree"});
+    const auto commit = [&](const std::string& message, bool amend = false) {
+        return repo.git(gitCommitArguments(parseGitStatus(repo.git(gitStatusArguments())), message, amend));
+    };
+    repo.write("日本語.txt", "index\n"); repo.git({"add", "日本語.txt"});
+    repo.write("日本語.txt", "working\n"); repo.write("untracked.txt", "untracked\n");
+    const std::string message = "--日本語 \"quoted\" $(echo hi) `echo hi`\n\n# body\n";
+    commit(message);
+    const auto initial = repo.hash();
+    const auto object = repo.git({"cat-file", "commit", "HEAD"});
+    check(object.substr(object.find("\n\n") + 2) == message, "Commit lost Unicode, quotes, leading dashes, or comment lines");
+    check(repo.git({"show", "HEAD:日本語.txt"}) == "index\n" && repo.readFile("日本語.txt") == "working\n" &&
+          repo.git({"ls-tree", "--name-only", "HEAD"}).find("untracked.txt") == std::string::npos,
+          "An initial commit included unstaged/untracked content or changed the working tree");
+    repo.write("added.txt", "amended index\n"); repo.git({"add", "added.txt"});
+    commit("", true);
+    check(repo.hash() != initial && repo.git({"rev-list", "--count", "HEAD"}) == "1\n" && repo.git({"show", "HEAD:added.txt"}) == "amended index\n",
+          "Amend did not replace the initial commit with the staged content");
+    const auto amended = repo.git({"cat-file", "commit", "HEAD"});
+    check(amended.substr(amended.find("\n\n") + 2) == message, "A blank amend replaced the existing commit message");
+    commit("replacement 日本語", true);
+    check(repo.git({"log", "-1", "--format=%s"}) == "replacement 日本語\n" && repo.git({"rev-list", "--count", "HEAD"}) == "1\n",
+          "Message-only amend created another commit or kept the old message");
+    const auto parent = repo.hash(); repo.git({"add", "日本語.txt"}); commit("second");
+    check(repo.git({"rev-parse", "HEAD^"}) == parent + "\n" && repo.git({"rev-list", "--count", "HEAD"}) == "2\n",
+          "Normal commit rewrote history instead of adding a commit");
+    repo.write("日本語.txt", "rejected index\n"); repo.git({"add", "日本語.txt"});
+    repo.write(".git/hooks/pre-commit", "#!/bin/sh\necho rejected-by-hook >&2\nexit 1\n");
+    fs::permissions(repo.path / ".git/hooks/pre-commit", fs::perms::owner_all);
+    const auto head = repo.hash(), index = repo.git({"write-tree"});
+    std::string failure;
+    try { commit("rejected"); } catch (const std::exception& error) { failure = error.what(); }
+    if (failure.find("rejected-by-hook") == std::string::npos) throw std::runtime_error("A rejected commit did not report the hook error: " + failure);
+    check(repo.hash() == head && repo.git({"write-tree"}) == index && repo.readFile("日本語.txt") == "rejected index\n",
+          "A rejected commit changed HEAD, index, or working content");
+    check(sibling.hash() == siblingHead && sibling.git({"write-tree"}) == siblingIndex, "Committing affected a sibling repository");
 }
 void repositoryIgnores() {
     Repository repo;
@@ -902,9 +963,9 @@ void repositoryHistory() {
 }
 int main() {
     try {
-        statusGroups(); records(); patchLists(); repositoryOwnership(); ignoredNameBatches(); editorBaseFailures();
+        statusGroups(); records(); patchLists(); repositoryOwnership(); ignoredNameBatches(); editorBaseFailures(); commitValidation();
 #ifndef _WIN32
-        repositoryEditorBase(); repositoryIgnores(); repositoryStaging(); repositoryStageAll(); repositoryUnstageAll(); repositoryDiscardAll(); repositoryDiscardFile(); repositoryStashUnstaged(); repositoryStashStaged(); repositorySyntax(); repositoryRenames(); repositoryDiffOrdering(); repositoryHistory(); multipleRepositories();
+        repositoryEditorBase(); repositoryCommits(); repositoryIgnores(); repositoryStaging(); repositoryStageAll(); repositoryUnstageAll(); repositoryDiscardAll(); repositoryDiscardFile(); repositoryStashUnstaged(); repositoryStashStaged(); repositorySyntax(); repositoryRenames(); repositoryDiffOrdering(); repositoryHistory(); multipleRepositories();
 #endif
         std::cout << "Git history tests passed.\n"; return 0;
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }

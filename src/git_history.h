@@ -42,6 +42,9 @@ std::vector<std::string> gitStageAllArguments();
 // Reset the repository's entire index without changing HEAD or working files.
 // Omitting the revision also supports repositories before their first commit.
 std::vector<std::string> gitUnstageAllArguments();
+// Commit only the index. A blank amend message keeps the previous message.
+// Reject empty normal messages, an empty index, and unresolved conflicts.
+std::vector<std::string> gitCommitArguments(const std::vector<GitStatusEntry>& entries, const std::string& message, bool amend);
 // Stash unstaged and nonignored untracked files, keeping the index in place.
 // Git also records the index snapshot in the stash. No command for a clean
 // worktree; reject conflicts before modifying files.

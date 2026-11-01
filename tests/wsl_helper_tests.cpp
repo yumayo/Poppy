@@ -571,6 +571,26 @@ void gitAndCancellation(const std::string& executable) {
                   git({"show","stash@{0}:tracked 日本語.txt"}).bytes == "partially staged\n" &&
                   git({"show","stash@{0}:delete.txt"}).bytes == "delete\n",
                   "WSL Stash Staged Changes failed to clear the index, save staged text or preserve unstaged/untracked/ignored files");
+            git({"config", "commit.gpgsign", "false"});
+            const auto commit = [&](const std::string& message, bool amend) {
+                auto args = poppy::gitCommitArguments(poppy::parseGitStatus(git({"status", "--porcelain=v1", "-z", "--untracked-files=all"}).bytes), message, amend);
+                args.erase(args.begin()); return git(std::move(args));
+            };
+            write(fixture.root/"tracked 日本語.txt", "committed index\n"); git({"add", "--", "tracked 日本語.txt"});
+            write(fixture.root/"tracked 日本語.txt", "kept working\n");
+            const std::string message = "--日本語 \"quote\" ' $(echo hi) `echo hi`\n\n# body\n";
+            check(field(commit(message, false).metadata, "exitCode") == "0" &&
+                  git({"show", "HEAD:tracked 日本語.txt"}).bytes == "committed index\n" &&
+                  disk(fixture.root/"tracked 日本語.txt") == "kept working\n" && disk(fixture.root/"keep \\ '$.txt") == "keep untracked\n",
+                  "WSL commit included unstaged content or changed working/untracked files");
+            const auto object = git({"cat-file", "commit", "HEAD"}).bytes;
+            check(object.substr(object.find("\n\n") + 2) == message, "WSL commit changed Unicode or shell characters in its message");
+            const auto parent = git({"rev-parse", "HEAD^"}).bytes;
+            check(field(commit("amended 日本語", true).metadata, "exitCode") == "0" &&
+                  git({"rev-parse", "HEAD^"}).bytes == parent && git({"log", "-1", "--format=%s"}).bytes == "amended 日本語\n",
+                  "WSL amend did not replace the message while keeping the parent");
+            check(field(commit("", true).metadata, "exitCode") == "0" && git({"log", "-1", "--format=%s"}).bytes == "amended 日本語\n",
+                  "A blank WSL amend did not retain the previous message");
         }
         helper.eof();
     }
