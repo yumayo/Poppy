@@ -230,14 +230,6 @@ void Viewer::setDiffLayout(bool inlineView) {
     caretPosition(); InvalidateRect(window_, nullptr, FALSE);
     if (diffLayoutChanged) diffLayoutChanged();
 }
-RECT Viewer::layoutButton(bool inlineView) const {
-    if (!stickyFile()) return {};
-    const auto rect = Scrollbars::contentRect(window_);
-    const int right = std::max(0, static_cast<int>(rect.right) - header_ / 3);
-    const int width = std::min(header_ * 2, right / 2), top = contentTop();
-    return {right - width * (inlineView ? 1 : 2), top,
-        right - (inlineView ? 0 : width), top + cellHeight_};
-}
 int Viewer::visibleRows() const { const auto r = Scrollbars::contentRect(window_); return std::max(1, (static_cast<int>(r.bottom) - contentTop()) / cellHeight_); }
 void Viewer::scrollbars() {
     if (!window_) return;
@@ -375,7 +367,7 @@ void Viewer::cut() {
     anchor_ = caret_ = range.begin; edited();
 }
 void Viewer::findLayout() {
-    if (findBar_.window()) findBar_.layout(diff_ || htmlAvailable() ? header_ : 0, Scrollbars::contentRect(window_).right, header_);
+    if (findBar_.window()) findBar_.layout(htmlAvailable() ? header_ : 0, Scrollbars::contentRect(window_).right, header_);
 }
 void Viewer::find() {
     if (!document_) return;
@@ -625,18 +617,6 @@ void Viewer::paint() {
         if (!loadingDue_) dc.label(text, message_, muted, DT_LEFT | DT_TOP | DT_WORDBREAK);
     } else {
         const int body = contentTop(), middle = static_cast<int>(r.right) / 2;
-        if (diff_) {
-            const int diffBottom = header_;
-            dc.fill({0, 0, r.right, diffBottom}, panel);
-            if (inlineView_) {
-                dc.label({0, 0, gutter_ - 14, diffBottom}, L"Before", muted, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
-                dc.label({gutter_, 0, 2 * gutter_ - 14, diffBottom}, L"After", muted, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
-            } else {
-                dc.label({14, 0, middle, diffBottom}, L"Before", muted);
-                dc.label({middle + 14, 0, r.right, diffBottom}, L"After", muted);
-            }
-            dc.fill({0, diffBottom - 1, r.right, diffBottom}, border);
-        }
         dc.font(Renderer::Font::Code);
         const int rows = std::max(0, (static_cast<int>(r.bottom) - body + cellHeight_ - 1) / cellHeight_);
         const size_t selectionStart = std::min(anchor_, caret_), selectionEnd = std::max(anchor_, caret_);
@@ -728,12 +708,7 @@ void Viewer::paint() {
                 // wrapping and horizontal scrolling, above all source cells.
                 const int bottom = std::min(body + cellHeight_, static_cast<int>(r.bottom));
                 dc.fill({0, body, r.right, bottom}, panel);
-                dc.label({14, body, std::max(14L, layoutButton(false).left - 12), bottom}, wide(file->path), accent);
-                for (const bool inlineView : {false, true}) {
-                    const auto button = layoutButton(inlineView);
-                    dc.fill(button, inlineView == inlineView_ ? rgb(50, 70, 94) : background);
-                    dc.label(button, inlineView ? L"Inline" : L"Split", inlineView == inlineView_ ? foreground : muted, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-                }
+                dc.label({14, body, r.right - 12, bottom}, wide(file->path), accent);
                 dc.fill({0, bottom - 1, r.right, bottom}, border);
             }
         }
@@ -803,13 +778,6 @@ LRESULT Viewer::handle(UINT m, WPARAM a, LPARAM b) {
             for (int i = 0; i < 3; ++i) { const auto button = htmlButton(i); if (PtInRect(&button, point)) { SetCursor(LoadCursorW(nullptr, IDC_HAND)); return TRUE; } }
         }
         if (image_ && LOWORD(b) == HTCLIENT) { SetCursor(LoadCursorW(nullptr, IDC_ARROW)); return TRUE; }
-        if (diff_ && LOWORD(b) == HTCLIENT) {
-            POINT point{}; GetCursorPos(&point); ScreenToClient(window_, &point);
-            for (const bool inlineView : {false, true}) {
-                const auto button = layoutButton(inlineView);
-                if (PtInRect(&button, point)) { SetCursor(LoadCursorW(nullptr, IDC_HAND)); return TRUE; }
-            }
-        }
         return DefWindowProcW(window_, m, a, b);
     case WM_GETDLGCODE: return DLGC_WANTARROWS | DLGC_WANTCHARS;
     case WM_LBUTTONDOWN: case WM_LBUTTONDBLCLK: {
@@ -825,10 +793,6 @@ LRESULT Viewer::handle(UINT m, WPARAM a, LPARAM b) {
             }
         }
         if (html_.active()) return 0;
-        if (diff_) for (const bool inlineView : {false, true}) {
-            const auto button = layoutButton(inlineView);
-            if (PtInRect(&button, point)) { setDiffLayout(inlineView); return 0; }
-        }
         if (point.y < contentTop() + (stickyFile() ? cellHeight_ : 0)) return 0;
         revealFind_ = false;
         bool after = splitDiff() && point.x >= Scrollbars::contentRect(window_).right / 2;

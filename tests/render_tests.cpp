@@ -1205,7 +1205,7 @@ void editorWordSelection() {
     for (const bool inlineView : {false, true}) for (const bool after : {false, true}) {
         viewer.setDiffLayout(inlineView); viewer.showDiff(diff, L"words.diff");
         const int origin = inlineView ? 140 : 70 + (after ? Scrollbars::contentRect(window).right / 2 + 1 : 0);
-        const int y = 34 + (inlineView && after ? height : 0) + height / 2;
+        const int y = (inlineView && after ? height : 0) + height / 2;
         doubleClick(MAKELPARAM(origin + 7 * width + width * 3 / 4, y));
         const std::string word = after ? "new_name" : "old_name";
         selection(diff->patch.text.find(word), word);
@@ -1440,7 +1440,7 @@ void diffWrapping() {
     const auto info = [&] { SCROLLINFO value{sizeof(value), SIF_ALL, 0, 0, 0, 0, 0}; GetScrollInfo(window, SB_VERT, &value); return value; };
     const int columns = (Scrollbars::contentRect(window).right - 140 - 2) / cell;
     check(viewer.wordWrap() && !(GetWindowLongPtrW(window, GWL_STYLE) & WS_HSCROLL), "Inline diffs did not inherit word wrapping");
-    const auto point = [&](int column, int row) { return MAKELPARAM(140 + column * cell, 34 + row * height + height / 2); };
+    const auto point = [&](int column, int row) { return MAKELPARAM(140 + column * cell, row * height + height / 2); };
     SendMessageW(window, WM_LBUTTONDOWN, MK_LBUTTON, point(3, 2));
     SendMessageW(window, WM_MOUSEMOVE, MK_LBUTTON, point(5, 3));
     SendMessageW(window, WM_LBUTTONUP, 0, point(5, 3));
@@ -1462,12 +1462,12 @@ void diffWrapping() {
     // The top source row extends beyond the right side. Clicking that padding
     // maps to the right line's end while the viewport retains the longer side.
     const int right = Scrollbars::contentRect(window).right / 2 + 1;
-    SendMessageW(window, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(right + 70, 34 + height / 2));
-    SendMessageW(window, WM_LBUTTONUP, 0, MAKELPARAM(right + 70, 34 + height / 2));
+    SendMessageW(window, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(right + 70, height / 2));
+    SendMessageW(window, WM_LBUTTONUP, 0, MAKELPARAM(right + 70, height / 2));
     check(viewer.state().anchor == saved.anchor && viewer.state().caret == saved.caret && GetCapture() != window,
         "Clicking the sticky filename must not select the hidden source row");
-    SendMessageW(window, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(right + 70, 34 + height + height / 2));
-    SendMessageW(window, WM_LBUTTONUP, 0, MAKELPARAM(right + 70, 34 + height + height / 2));
+    SendMessageW(window, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(right + 70, height + height / 2));
+    SendMessageW(window, WM_LBUTTONUP, 0, MAKELPARAM(right + 70, height + height / 2));
     const auto padded = viewer.state(); const int splitTop = info().nPos;
     check(padded.after && padded.caret == after + 5 && padded.wrapOffset > 0, "Split padding did not map to the shorter side's end");
     viewer.restore({}); viewer.restore(padded);
@@ -1489,17 +1489,26 @@ void diffWrapping() {
         viewer.setDpi(dpi); metrics.setDpi(dpi);
         MoveWindow(window, 0, 0, MulDiv(420, dpi, 96), MulDiv(360, dpi, 96), FALSE);
         for (const bool withFind : {false, true}) {
-            if (withFind) viewer.find();
+            if (withFind) {
+                viewer.find();
+                const auto input = FindWindowExW(window, nullptr, L"PoppyFindBar", nullptr);
+                RECT bounds{}; GetWindowRect(input, &bounds); MapWindowPoints(nullptr, window, reinterpret_cast<POINT*>(&bounds), 2);
+                check(bounds.top == 0, "The removed Before/After header still occupies space above diff search");
+            }
             const int header = MulDiv(34, dpi, 96), rowHeight = metrics.textHeight() + MulDiv(3, dpi, 96);
             for (const bool inlineView : {false, true}) {
+                viewer.setDiffLayout(inlineView);
                 const int rightEdge = Scrollbars::contentRect(window).right - header / 3;
-                const int x = rightEdge - header * (inlineView ? 1 : 3);
                 const auto selection = viewer.state();
-                const auto point = MAKELPARAM(x, header * (withFind ? 2 : 1) + rowHeight / 2);
-                SendMessageW(window, WM_LBUTTONDOWN, MK_LBUTTON, point);
-                SendMessageW(window, WM_LBUTTONUP, 0, point);
+                // The filename now uses the whole row; the old button area
+                // must neither toggle the layout nor start a selection.
+                for (const int x : {rightEdge - header, rightEdge - 3 * header}) {
+                    const auto point = MAKELPARAM(x, (withFind ? header : 0) + rowHeight / 2);
+                    SendMessageW(window, WM_LBUTTONDOWN, MK_LBUTTON, point);
+                    SendMessageW(window, WM_LBUTTONUP, 0, point);
+                }
                 check(viewer.diffInline() == inlineView && GetCapture() != window && viewer.state().anchor == selection.anchor && viewer.state().caret == selection.caret,
-                    "Sticky diff layout buttons lost their hit targets or changed selection after scrolling, resizing, DPI or search");
+                    "Clicking the filename retained old layout buttons or changed selection after scrolling, resizing, DPI or search");
             }
             if (withFind) SendMessageW(window, WM_KEYDOWN, VK_ESCAPE, 0);
         }
@@ -1803,7 +1812,7 @@ void selectionAutoScrolling() {
         Renderer metrics; metrics.setDpi(dpi);
         const int height = metrics.textHeight() + MulDiv(3, dpi, 96);
         const int x = MulDiv(mode == 2 ? 140 : 70, dpi, 96) + 3 * metrics.cellWidth();
-        const int y = (mode >= 2 ? MulDiv(34, dpi, 96) : 0) + 3 * height + height / 2;
+        const int y = 3 * height + height / 2;
         SendMessageW(window, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(x, y));
         check(GetCapture() == window, "Selection did not capture the pointer");
         const auto anchor = viewer.state().anchor;

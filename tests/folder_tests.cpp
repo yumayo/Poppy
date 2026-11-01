@@ -1,6 +1,7 @@
 #include <windows.h>
 #include <commctrl.h>
 #include <tlhelp32.h>
+#include <algorithm>
 #include <set>
 #include <vector>
 #include "tree_messages.h"
@@ -2023,6 +2024,22 @@ void editableGitDiffTests(const fs::path& executable) {
     waitFor([&] { return nextItem(changes, TreeRelation::Child, gitGroup(changes, false)) != 0; }, "Working Changes did not load");
     send(changes, treeSelect, nextItem(changes, TreeRelation::Child, gitGroup(changes, false)));
     waitFor([&] { return text() == L"working\r\n"; }, "Changes did not expose the editable working text");
+    const UINT dpi = GetDpiForWindow(app.window);
+    const auto switchLayout = [&](HWND pane, bool inlineView) {
+        const auto rect = bounds(app.window, pane);
+        const int toolsWidth = (std::min)(MulDiv(136, dpi, 96), static_cast<int>(rect.right - rect.left) / 2);
+        click(app.window, rect.right - toolsWidth * (inlineView ? 1 : 3) / 4, MulDiv(17, dpi, 96));
+    };
+    const auto inlineRows = scrollInfo(viewer).nMax;
+    const auto tabCount = visibleTabCount(app);
+    switchLayout(viewer, false);
+    waitFor([&] { return scrollInfo(viewer).nMax < inlineRows; }, "Split in the tab tools did not change the diff layout");
+    switchLayout(viewer, true);
+    waitFor([&] { return scrollInfo(viewer).nMax == inlineRows; }, "Inline in the tab tools did not restore the diff layout");
+    const auto pane = bounds(app.window, viewer);
+    check(tabBounds(app, 0).right <= pane.right - MulDiv(136, dpi, 96) && visibleTabCount(app) == tabCount,
+        "Diff tools overlapped a tab or opened/closed a tab");
+    check(text() == L"working\r\n", "The tab tools changed the working diff text");
     send(viewer, WM_CHAR, '!'); check(readText(path) == "working\r\n", "Typing in Changes saved without Ctrl+S");
     send(tree, treeSelect, file); waitFor([&] { return text() == L"!"; }, "The ordinary tab lost unsaved diff edits");
     key(VK_END, true); send(viewer, WM_CHAR, 'n');

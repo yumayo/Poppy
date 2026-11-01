@@ -85,7 +85,7 @@ std::wstring tabTitle(const Tab& tab) {
     return title + (tab.diff ? L" (diff)" : L"");
 }
 struct TabDrop { size_t position; RECT marker; int group = 0; };
-struct EditorGroup { RECT tabs{}, body{}; std::vector<size_t> indices, starts; size_t firstRow = 0, rows = 0; bool overflow() const { return starts.size() > rows; } };
+struct EditorGroup { RECT tabs{}, body{}, tools{}; int tabRight = 0; std::vector<size_t> indices, starts; size_t firstRow = 0, rows = 0; bool overflow() const { return starts.size() > rows; } };
 struct TabDrag {
     size_t index;
     POINT origin, point;
@@ -339,6 +339,8 @@ private:
     bool tabVisible(size_t index) const;
     bool tabOverflow() const { return editorGroups_[focusedGroup_].overflow(); }
     RECT tabBounds(size_t index) const;
+    RECT diffLayoutButton(int group, bool inlineView) const;
+    bool selectDiffLayout(POINT point);
     size_t tabAt(POINT point) const;
     std::optional<TabDrop> tabDropAt(POINT point) const;
     void updateTabDrag(POINT point);
@@ -605,7 +607,10 @@ void ProjectRuntime::Impl::create() {
             updateTabs(false); if (activeSidebar_ == Sidebar::Search) searchPane_.refresh(); if (owner_ && owner_->changed) owner_->changed();
         };
         view.save = [this, group] { saveFile(groupTab(group)); };
-        view.diffLayoutChanged = [this, group] { viewers_[1 - group].setDiffLayout(viewers_[group].diffInline()); };
+        view.diffLayoutChanged = [this, group] {
+            viewers_[1 - group].setDiffLayout(viewers_[group].diffInline());
+            updateTabs(false); if (owner_ && owner_->changed) owner_->changed();
+        };
         view.statusChanged = [this] { statusDirty_ = true; };
         view.focused = [this, group] {
             const bool changed = focusedGroup_ != group;
@@ -672,6 +677,11 @@ void ProjectRuntime::Impl::layout(bool revealTab) {
         for (size_t i = 0; i < tabs_.size(); ++i) if (tabs_[i].group == group) pane.indices.push_back(i);
         const int start = group ? middle + splitter_ : right, edge = group || !split ? width : middle;
         pane.tabs = {start, 0, edge, 0};
+        const auto selected = groupTab(group);
+        // Keep the tab tools clear of every wrapped row and its scroll buttons.
+        const int toolsWidth = selected < tabs_.size() && tabs_[selected].diff ? std::min(MulDiv(136, dpi_, 96), std::max(0, edge - start) / 2) : 0;
+        pane.tabRight = edge - toolsWidth;
+        pane.tools = {pane.tabRight, 0, edge, toolsWidth ? rowHeight : 0};
         const auto wrap = [&](int available) {
             pane.starts.clear(); int x = start, row = -1;
             for (size_t j = 0; j < pane.indices.size(); ++j) {
@@ -685,9 +695,8 @@ void ProjectRuntime::Impl::layout(bool revealTab) {
             }
             pane.rows = std::min(maxRows, pane.starts.size());
         };
-        wrap(edge - start); if (pane.overflow()) wrap(std::max(0, edge - start - MulDiv(56, dpi_, 96)));
+        wrap(pane.tabRight - start); if (pane.overflow()) wrap(std::max(0, pane.tabRight - start - MulDiv(56, dpi_, 96)));
         pane.firstRow = std::min(pane.firstRow, pane.starts.size() - pane.rows);
-        const auto selected = groupTab(group);
         const auto found = std::find(pane.indices.begin(), pane.indices.end(), selected);
         if (revealTab && found != pane.indices.end()) {
             const auto row = static_cast<size_t>(std::upper_bound(pane.starts.begin(), pane.starts.end(), static_cast<size_t>(found - pane.indices.begin())) - pane.starts.begin() - 1);
@@ -791,9 +800,16 @@ void ProjectRuntime::Impl::paint() {
             } else dc.label({rect.right - scaled(28), rect.top, rect.right - scaled(4), rect.bottom}, L"×", muted, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
             dc.fill({rect.right - 1, rect.top, rect.right, rect.bottom}, border);
         }
-        for (const auto& pane : editorGroups_) {
+        for (int group = 0; group < 2; ++group) {
+            const auto& pane = editorGroups_[group];
+            for (const bool inlineView : {false, true}) {
+                const auto button = diffLayoutButton(group, inlineView);
+                dc.fill(button, inlineView == viewers_[group].diffInline() ? rgb(50, 70, 94) : background);
+                dc.label(button, inlineView ? L"Inline" : L"Split", inlineView == viewers_[group].diffInline() ? foreground : muted,
+                    DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            }
             if (pane.overflow()) {
-                const int edge = pane.tabs.right, button = scaled(28), top = pane.tabs.bottom - scaled(34);
+                const int edge = pane.tabRight, button = scaled(28), top = pane.tabs.bottom - scaled(34);
                 dc.label({edge - 2 * button, top, edge - button, pane.tabs.bottom}, L"‹", pane.firstRow ? foreground : muted, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
                 dc.label({edge - button, top, edge, pane.tabs.bottom}, L"›", pane.firstRow + pane.rows < pane.starts.size() ? foreground : muted, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
             }
@@ -953,7 +969,7 @@ void ProjectRuntime::Impl::openWorkingFile(const ResourceId& path) {
     openFile(path);
     // A normal file tab may already have been switched to diff with F6.
     if (activeTab_ < tabs_.size() && tabs_[activeTab_].diff) {
-        saveTab(); tabs_[activeTab_].diff = false; loadTab();
+        saveTab(); tabs_[activeTab_].diff = false; layout(); loadTab();
     }
     SetFocus(viewer().window());
 }
@@ -2054,6 +2070,21 @@ void ProjectRuntime::Impl::normalizeGroups() {
     activeTab_ = groupTab(focusedGroup_);
 }
 RECT ProjectRuntime::Impl::tabBounds(size_t index) const { return tabRects_[index]; }
+RECT ProjectRuntime::Impl::diffLayoutButton(int group, bool inlineView) const {
+    auto rect = editorGroups_[group].tools;
+    const auto middle = rect.left + (rect.right - rect.left) / 2;
+    if (inlineView) rect.left = middle; else rect.right = middle;
+    return rect;
+}
+bool ProjectRuntime::Impl::selectDiffLayout(POINT point) {
+    for (int group = 0; group < 2; ++group) for (const bool inlineView : {false, true}) {
+        const auto button = diffLayoutButton(group, inlineView);
+        if (!PtInRect(&button, point)) continue;
+        viewers_[group].setDiffLayout(inlineView); SetFocus(viewers_[group].window());
+        return true;
+    }
+    return false;
+}
 bool ProjectRuntime::Impl::tabVisible(size_t i) const {
     const auto& pane = editorGroups_[tabs_[i].group]; const auto rect = tabBounds(i);
     return rect.top >= pane.tabs.top && rect.bottom <= pane.tabs.bottom && rect.right > rect.left;
@@ -2068,7 +2099,8 @@ std::optional<TabDrop> ProjectRuntime::Impl::tabDropAt(POINT point) const {
     for (int group = 0; group < 2; ++group) {
         const auto& pane = editorGroups_[group];
         if (!PtInRect(&pane.tabs, point)) continue;
-        if (pane.overflow() && point.x >= pane.tabs.right - MulDiv(56, dpi_, 96) && point.y >= pane.tabs.bottom - MulDiv(34, dpi_, 96)) return std::nullopt;
+        if (PtInRect(&pane.tools, point)) return std::nullopt;
+        if (pane.overflow() && point.x >= pane.tabRight - MulDiv(56, dpi_, 96) && point.y >= pane.tabs.bottom - MulDiv(34, dpi_, 96)) return std::nullopt;
         const int stroke = std::max(2, MulDiv(3, dpi_, 96)), inset = MulDiv(3, dpi_, 96);
         const auto target = [&](size_t position, const RECT& rect, LONG x) { const LONG left = std::clamp<LONG>(x - stroke / 2, pane.tabs.left, std::max(pane.tabs.left, pane.tabs.right - stroke)); return TabDrop{position, {left, rect.top + inset, left + stroke, rect.bottom - inset}, group}; };
         std::optional<TabDrop> result;
@@ -2106,10 +2138,10 @@ void ProjectRuntime::Impl::scrollTabDrag() {
     if (!tabDrag_ || !tabDrag_->active) return;
     for (auto& pane : editorGroups_) {
         const auto point = tabDrag_->point;
-        if (!pane.overflow() || !PtInRect(&pane.tabs, point) || point.y < pane.tabs.bottom - MulDiv(34, dpi_, 96)) continue;
+        if (!pane.overflow() || !PtInRect(&pane.tabs, point) || point.x >= pane.tabRight || point.y < pane.tabs.bottom - MulDiv(34, dpi_, 96)) continue;
         const int button = MulDiv(28, dpi_, 96);
-        if (point.x >= pane.tabs.right - button && pane.firstRow + pane.rows < pane.starts.size()) ++pane.firstRow;
-        else if (point.x >= pane.tabs.right - 2 * button && point.x < pane.tabs.right - button && pane.firstRow) --pane.firstRow;
+        if (point.x >= pane.tabRight - button && pane.firstRow + pane.rows < pane.starts.size()) ++pane.firstRow;
+        else if (point.x >= pane.tabRight - 2 * button && point.x < pane.tabRight - button && pane.firstRow) --pane.firstRow;
         else return;
         layout(false); updateTabDrag(point); return;
     }
@@ -2718,6 +2750,7 @@ LRESULT ProjectRuntime::Impl::handle(UINT m, WPARAM a, LPARAM b) {
             if (PtInRect(&button, point)) { setGitView(tree); return 0; }
         }
         if (PtInRect(&tabsRect_, point)) {
+            if (selectDiffLayout(point)) return 0;
             const auto index = tabAt(point);
             if (index < tabs_.size()) {
                 const auto rect = tabBounds(index);
@@ -2727,10 +2760,10 @@ LRESULT ProjectRuntime::Impl::handle(UINT m, WPARAM a, LPARAM b) {
                     tabDrag_ = TabDrag{index, point, point, false, std::nullopt};
                     SetCapture(window_);
                 }
-            } else for (auto& pane : editorGroups_) if (pane.overflow() && PtInRect(&pane.tabs, point) && point.y >= pane.tabs.bottom - MulDiv(34, dpi_, 96)) {
+            } else for (auto& pane : editorGroups_) if (pane.overflow() && PtInRect(&pane.tabs, point) && point.x < pane.tabRight && point.y >= pane.tabs.bottom - MulDiv(34, dpi_, 96)) {
                 const int button = MulDiv(28, dpi_, 96);
-                if (point.x >= pane.tabs.right - button && pane.firstRow + pane.rows < pane.starts.size()) ++pane.firstRow;
-                else if (point.x >= pane.tabs.right - 2 * button && point.x < pane.tabs.right - button && pane.firstRow) --pane.firstRow;
+                if (point.x >= pane.tabRight - button && pane.firstRow + pane.rows < pane.starts.size()) ++pane.firstRow;
+                else if (point.x >= pane.tabRight - 2 * button && point.x < pane.tabRight - button && pane.firstRow) --pane.firstRow;
                 layout(false);
             }
             return 0;
@@ -2743,6 +2776,7 @@ LRESULT ProjectRuntime::Impl::handle(UINT m, WPARAM a, LPARAM b) {
     }
     case WM_LBUTTONDBLCLK: {
         const POINT point{GET_X_LPARAM(b), GET_Y_LPARAM(b)};
+        if (selectDiffLayout(point)) return 0;
         const auto index = tabAt(point);
         if (index < tabs_.size()) {
             const auto rect = tabBounds(index);
@@ -2777,6 +2811,7 @@ LRESULT ProjectRuntime::Impl::handle(UINT m, WPARAM a, LPARAM b) {
         if (reinterpret_cast<HWND>(a) == window_ && LOWORD(b) == HTCLIENT) {
             if (tabDrag_) return TRUE;
             POINT p{}; GetCursorPos(&p); ScreenToClient(window_, &p);
+            for (const auto& pane : editorGroups_) if (PtInRect(&pane.tools, p)) { SetCursor(LoadCursorW(nullptr, IDC_HAND)); return TRUE; }
             if (PtInRect(&sidebarSplitter_, p) || PtInRect(&editorSplitter_, p)) { SetCursor(LoadCursorW(nullptr, IDC_SIZEWE)); return TRUE; }
             if (terminalVisible_ && PtInRect(&terminalSplitter_, p)) { SetCursor(LoadCursorW(nullptr, IDC_SIZENS)); return TRUE; }
         }
