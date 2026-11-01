@@ -20,6 +20,10 @@ namespace poppy {
 namespace {
 constexpr UINT wmStartup = WM_APP + 22;
 constexpr UINT_PTR aiAnimationTimerId = 2;
+constexpr int projectHeadingHeight = 48;
+constexpr int projectMessageLineHeight = 18;
+constexpr int projectMessageLines = 4;
+constexpr int projectRowHeight = projectHeadingHeight + projectMessageLineHeight * projectMessageLines + 8;
 fs::path stateDirectory() {
     const DWORD length = GetEnvironmentVariableW(L"APPDATA", nullptr, 0);
     if (length) { std::wstring path(length, 0); const auto count = GetEnvironmentVariableW(L"APPDATA", path.data(), length); if (!count || count >= length) throw std::runtime_error("Cannot read APPDATA"); path.resize(count); return fs::path(path) / L"yumayo" / L"Poppy"; }
@@ -326,7 +330,7 @@ void Workspace::select(size_t index,bool attention){
     const int count=std::max(1,static_cast<int>(projects_.size()));
     const auto rect=row(index);RECT client{};GetClientRect(window_,&client);
     if(rect.top<px(44))scroll_=std::min<int>(static_cast<int>(index),count-1);
-    else if(rect.bottom>client.bottom)scroll_=std::max(0,static_cast<int>(index)-(static_cast<int>(client.bottom)-px(44))/px(48)+1);
+    else if(rect.bottom>client.bottom)scroll_=std::max(0,static_cast<int>(index)-(static_cast<int>(client.bottom)-px(44))/px(projectRowHeight)+1);
     appDirty_=true;appChanged_=GetTickCount64();updateTools();InvalidateRect(window_,nullptr,FALSE);
     checkFolder(projects_[active_]);
     trimDocuments();
@@ -434,8 +438,8 @@ void Workspace::animateAiStatus() {
         RECT client{}; GetClientRect(window_, &client);
         for (size_t i = 0; i < projects_.size(); ++i) {
             const auto item = row(i);
-            if (item.top < px(44) || item.bottom > client.bottom || projects_[i].runtime->summary().state != AiState::Running) continue;
-            const RECT icon{px(4), item.top, px(30), item.bottom};
+            if (item.top < px(44) || item.top >= client.bottom || projects_[i].runtime->summary().state != AiState::Running) continue;
+            const RECT icon{px(4), item.top, px(30), item.top + px(projectHeadingHeight)};
             InvalidateRect(window_, &icon, FALSE); running = true;
         }
         if (!projects_.empty()) running = projects_[active_].runtime->animateAiStatus() || running;
@@ -446,8 +450,8 @@ void Workspace::animateAiStatus() {
     else if (!running && aiAnimationTimer_) { KillTimer(window_, aiAnimationTimer_); aiAnimationTimer_ = 0; }
 }
 RECT Workspace::addButtonBounds() const {return {px(session_.projectListWidth)-px(34),0,px(session_.projectListWidth),px(44)};}
-RECT Workspace::row(size_t index) const {const int top=px(44)+(static_cast<int>(index)-scroll_)*px(48);return {0,top,px(session_.projectListWidth),top+px(48)};}
-size_t Workspace::hit(POINT point) const {RECT r{};GetClientRect(window_,&r);if(point.x<0||point.x>=px(session_.projectListWidth)||point.y<px(44)||point.y>=r.bottom)return projects_.size();const auto index=scroll_+(point.y-px(44))/px(48);return index>=0?static_cast<size_t>(index):projects_.size();}
+RECT Workspace::row(size_t index) const {const int top=px(44)+(static_cast<int>(index)-scroll_)*px(projectRowHeight);return {0,top,px(session_.projectListWidth),top+px(projectRowHeight)};}
+size_t Workspace::hit(POINT point) const {RECT r{};GetClientRect(window_,&r);if(point.x<0||point.x>=px(session_.projectListWidth)||point.y<px(44)||point.y>=r.bottom)return projects_.size();const auto index=scroll_+(point.y-px(44))/px(projectRowHeight);return index>=0?static_cast<size_t>(index):projects_.size();}
 void Workspace::updateProjectDrag(POINT point) {
     if (!projectDrag_) return;
     auto& drag = *projectDrag_; drag.point = point;
@@ -460,7 +464,7 @@ void Workspace::updateProjectDrag(POINT point) {
     drag.position.reset();
     RECT client{}; GetClientRect(window_,&client);
     if (point.x >= 0 && point.x < px(session_.projectListWidth) && point.y >= px(44) && point.y < client.bottom) {
-        const auto position = static_cast<size_t>(scroll_+(point.y-px(44)+px(48)/2)/px(48));
+        const auto position = static_cast<size_t>(scroll_+(point.y-px(44)+px(projectRowHeight)/2)/px(projectRowHeight));
         drag.position = std::min(position,projects_.size());
     }
     InvalidateRect(window_,nullptr,FALSE);
@@ -470,7 +474,7 @@ void Workspace::scrollProjectDrag() {
     const auto point = projectDrag_->point;
     RECT client{}; GetClientRect(window_,&client);
     if (point.x < 0 || point.x >= px(session_.projectListWidth) || point.y < px(44) || point.y >= client.bottom) return;
-    const int page = std::max(1,(static_cast<int>(client.bottom)-px(44))/px(48));
+    const int page = std::max(1,(static_cast<int>(client.bottom)-px(44))/px(projectRowHeight));
     int next = scroll_;
     if (point.y < px(44+24)) --next;
     else if (point.y >= client.bottom-px(24)) ++next;
@@ -513,7 +517,7 @@ std::wstring Workspace::subtitle(size_t index) const {
 void Workspace::layout(){
     if(!window_)return;
     RECT r{};GetClientRect(window_,&r);const int left=px(session_.projectListWidth)+px(5);
-    const int page=std::max(1,(static_cast<int>(r.bottom)-px(44))/px(48));scroll_=std::clamp(scroll_,0,std::max(0,static_cast<int>(projects_.size())-page));
+    const int page=std::max(1,(static_cast<int>(r.bottom)-px(44))/px(projectRowHeight));scroll_=std::clamp(scroll_,0,std::max(0,static_cast<int>(projects_.size())-page));
     if(!projects_.empty())SetWindowPos(projects_[active_].runtime->window(),nullptr,left,0,std::max(0L,r.right-left),r.bottom,SWP_NOZORDER|SWP_NOACTIVATE);
     recent_.layout();
     updateTools();InvalidateRect(window_,nullptr,FALSE);
@@ -531,14 +535,17 @@ void Workspace::paint(){
     const auto addButton=addButtonBounds();
     renderer_.label({px(12),0,addButton.left,px(44)},L"PROJECTS",foreground);
     renderer_.fill(addButton,panel);renderer_.label(addButton,L"+",accent,DT_CENTER|DT_VCENTER|DT_SINGLELINE);
-    for(size_t i=0;i<projects_.size();++i){auto rect=row(i);if(rect.top<px(44)||rect.bottom>client.bottom)continue;
+    for(size_t i=0;i<projects_.size();++i){auto rect=row(i);if(rect.bottom<=px(44)||rect.top>=client.bottom)continue;
         const auto& project=projects_[i];const auto summary=project.runtime->summary();renderer_.fill(rect,i==active_?panel:background);if(i==active_)renderer_.fill({0,rect.top,px(3),rect.bottom},accent);
-        drawAiStatus(renderer_,{px(4),rect.top,px(30),rect.bottom},summary.state,dpi_);
+        const int headingBottom=rect.top+px(projectHeadingHeight);
+        drawAiStatus(renderer_,{px(4),rect.top,px(30),headingBottom},summary.state,dpi_);
         const auto secondary=subtitle(i);const auto title=project.path.filename().empty()?project.path.native():project.path.filename().native();
-        renderer_.label({px(32),rect.top,width-px(22),rect.top+(secondary.empty()?px(48):px(27))},title,project.missing?muted:foreground);
-        if(!secondary.empty())renderer_.label({px(32),rect.top+px(24),width-px(8),rect.bottom},secondary,muted);
+        renderer_.label({px(32),rect.top,width-px(22),rect.top+(secondary.empty()?px(projectHeadingHeight):px(27))},title,project.missing?muted:foreground);
+        if(!secondary.empty())renderer_.label({px(32),rect.top+px(24),width-px(8),headingBottom},secondary,muted);
+        renderer_.label({px(32),headingBottom,width-px(8),headingBottom+px(projectMessageLineHeight)*projectMessageLines},
+            wide(summary.activity),muted,DT_LEFT|DT_TOP|DT_WORDBREAK|DT_END_ELLIPSIS,false,px(projectMessageLineHeight));
         if(summary.unread)renderer_.fill({width-px(12),rect.top+px(10),width-px(7),rect.top+px(15)},accent);
-        const auto running=summary.counts[static_cast<size_t>(AiState::Running)];if(running&&summary.state!=AiState::Running)renderer_.label({width-px(24),rect.top+px(22),width-px(3),rect.bottom},std::to_wstring(running),accent);
+        const auto running=summary.counts[static_cast<size_t>(AiState::Running)];if(running&&summary.state!=AiState::Running)renderer_.label({width-px(24),rect.top+px(22),width-px(3),headingBottom},std::to_wstring(running),accent);
     }
     if(projectDrag_&&projectDrag_->active&&projectDrag_->position){
         const int y=std::clamp(static_cast<int>(row(*projectDrag_->position).top),px(44),static_cast<int>(client.bottom)-px(2));

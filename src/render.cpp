@@ -422,7 +422,7 @@ void InputLine::draw(Renderer& renderer, COLORREF color, COLORREF selection, boo
     if (showCaret) renderer.fill({caret_.x, caret_.y, caret_.x + caretWidth_, caret_.y + height_}, composition_.text.empty() ? color : accent);
     renderer.target_->PopAxisAlignedClip();
 }
-void Renderer::label(const RECT& rect, const std::wstring& text, COLORREF value, UINT flags, bool italic) {
+void Renderer::label(const RECT& rect, const std::wstring& text, COLORREF value, UINT flags, bool italic, int lineHeight) {
     auto* format = font_ == Font::Code ? codeFont_.get() : uiFont_.get();
     if (empty(rect) || text.empty() || !format) return;
     ComPtr<IDWriteTextLayout> layout;
@@ -433,6 +433,7 @@ void Renderer::label(const RECT& rect, const std::wstring& text, COLORREF value,
     layout->SetTextAlignment(flags & DT_RIGHT ? DWRITE_TEXT_ALIGNMENT_TRAILING : flags & DT_CENTER ? DWRITE_TEXT_ALIGNMENT_CENTER : DWRITE_TEXT_ALIGNMENT_LEADING);
     layout->SetParagraphAlignment(flags & DT_VCENTER ? DWRITE_PARAGRAPH_ALIGNMENT_CENTER : DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
     layout->SetWordWrapping(flags & DT_WORDBREAK ? DWRITE_WORD_WRAPPING_WRAP : DWRITE_WORD_WRAPPING_NO_WRAP);
+    if (lineHeight > 0) layout->SetLineSpacing(DWRITE_LINE_SPACING_METHOD_UNIFORM, static_cast<float>(lineHeight), lineHeight * 0.8f);
     if (flags & (DT_END_ELLIPSIS | DT_PATH_ELLIPSIS)) {
         ComPtr<IDWriteInlineObject> ellipsis;
         if (SUCCEEDED(factory->CreateEllipsisTrimmingSign(format, ellipsis.put()))) {

@@ -45,6 +45,21 @@ void aggregation(){
     check(summarizeAi({complete,running,paused}).state==AiState::Running,"Completed/interrupted masked a running AI");
     check(summarizeAi({complete,paused}).state==AiState::Paused,"Completion masked interruption");
 }
+void activityAggregation(){
+    AiStatus complete,running,waiting,newer,shell;
+    complete.apply(event(R"({"status":"completed","activityText":"Old result"})"),1,false);
+    running.apply(event(R"({"status":"running","activityText":"日本語の進捗\n2行目"})"),2,false);
+    waiting.apply(event(R"({"status":"waiting","activityText":"Needs a response"})"),3,false);
+    check(summarizeAi({complete,running,shell}).activity=="日本語の進捗\n2行目","Project lost the running AI message or displayed a completed result");
+    check(summarizeAi({complete,running,waiting}).activity=="Needs a response","Project message does not match its representative state");
+    newer.apply(event(R"({"status":"running","activityText":"New turn"})"),4,false);
+    check(summarizeAi({newer,running}).activity=="New turn" && summarizeAi({running,newer}).activity=="New turn","Same-state messages depend on terminal order");
+    running.apply(event(R"({"status":"running"})"),5,false);
+    check(summarizeAi({complete,running}).activity.empty(),"A new turn reused another terminal's old message");
+    running.apply(event(R"({"status":"none"})"),6,false);
+    check(summarizeAi({running,shell}).activity.empty(),"An inactive AI retained a project message");
+    check(summarizeAi({complete}).activity=="Old result","Completion lost its result message");
+}
 void delivery(){
     const std::string other="fedcba9876543210fedcba9876543210";
     std::atomic<unsigned> wakeups{0};
@@ -87,4 +102,4 @@ void validation(){
     check(parseAiEvent(id,false,"{\"status\":\"running\",\"activityText\":"+jsonString("quotes \" slash \\ newline\n")+"}").has_value(),"Escaped JSON was rejected");
 }
 }
-int main(){try{transitions();aggregation();validation();delivery();std::cout<<"AI status tests passed\n";}catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}
+int main(){try{transitions();aggregation();activityAggregation();validation();delivery();std::cout<<"AI status tests passed\n";}catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}

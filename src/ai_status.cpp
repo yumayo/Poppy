@@ -118,6 +118,14 @@ AiSummary summarizeAi(const std::vector<AiStatus>& terminals) {
         ++result.counts[static_cast<size_t>(terminal.state)]; result.unread |= terminal.unread;
         if (priority(terminal.state) > priority(result.state)) result.state = terminal.state;
     }
+    // Keep the message attached to the representative state. A completed
+    // terminal must not supply stale text for another terminal's running turn.
+    const AiStatus* latest = nullptr;
+    for (const auto& terminal : terminals) {
+        if (terminal.detected && terminal.state == result.state && !terminal.activity.empty() &&
+            (!latest || terminal.changedAt > latest->changedAt)) latest = &terminal;
+    }
+    if (latest) result.activity = latest->activity;
     return result;
 }
 const char* aiStateName(AiState state) {

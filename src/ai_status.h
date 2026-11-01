@@ -50,6 +50,7 @@ struct AiStatus {
 struct AiSummary {
     AiState state = AiState::Idle;
     bool unread = false;
+    std::string activity;
     std::array<size_t, static_cast<size_t>(AiState::Count)> counts{};
 };
 AiSummary summarizeAi(const std::vector<AiStatus>& terminals);

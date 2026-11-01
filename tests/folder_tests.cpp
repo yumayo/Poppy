@@ -17,6 +17,7 @@
 namespace fs = std::filesystem;
 using namespace poppy;
 namespace {
+constexpr int projectRowHeight = 128; // Project heading plus four message lines and padding.
 void check(bool condition, const char* message) {
     if (!condition) throw std::runtime_error(message);
 }
@@ -2623,7 +2624,7 @@ void multiProjectTests(const fs::path& executable) {
         check(send(app.host, WM_COPYDATA, 0, reinterpret_cast<LPARAM>(&data)), "Could not add a second project");
         app.tree();
     };
-    const auto select = [&](size_t index) { const UINT dpi=GetDpiForWindow(app.host);click(app.host,MulDiv(60,dpi,96),MulDiv(44+static_cast<int>(index)*48+24,dpi,96));app.tree(); };
+    const auto select = [&](size_t index) { const UINT dpi=GetDpiForWindow(app.host);click(app.host,MulDiv(60,dpi,96),MulDiv(44+static_cast<int>(index)*projectRowHeight+24,dpi,96));app.tree(); };
     open(b.root); const auto surfaceB = app.window; const auto treeB = app.tree();
     const auto viewerB = FindWindowExW(surfaceB, nullptr, L"PoppyViewer", nullptr);
     waitFor([&] { return nextItem(treeB, TreeRelation::Child, nextItem(treeB, TreeRelation::Root)) != 0; }, "Project B did not load");
@@ -2650,17 +2651,17 @@ void multiProjectTests(const fs::path& executable) {
     for (int i = 0; i < 6; ++i) { LARGE_INTEGER start{}, end{}; QueryPerformanceCounter(&start); select(i % 2); QueryPerformanceCounter(&end); maximum = std::max(maximum, (end.QuadPart-start.QuadPart)*1000.0/frequency.QuadPart); }
     std::cout << "Retained project switch maximum: " << maximum << " ms\n";
     send(app.host,WM_LBUTTONDOWN,MK_LBUTTON,MAKELPARAM(px(60),px(68)));
-    send(app.host,WM_MOUSEMOVE,MK_LBUTTON,MAKELPARAM(px(60),px(44+3*48-1)));
-    send(app.host,WM_LBUTTONUP,0,MAKELPARAM(px(60),px(44+3*48-1)));
+    send(app.host,WM_MOUSEMOVE,MK_LBUTTON,MAKELPARAM(px(60),px(44+3*projectRowHeight-1)));
+    send(app.host,WM_LBUTTONUP,0,MAKELPARAM(px(60),px(44+3*projectRowHeight-1)));
     check(app.tree()==treeA && app.window==surfaceA && scrollInfo(viewerA).nPos==top &&
           IsWindow(shell) && WaitForSingleObject(shellProcess,0)==WAIT_TIMEOUT,"Reordering a project lost its document or running terminal");
     select(0);check(app.window==surfaceB,"Dragging a project did not change the row order");
-    send(app.host,WM_LBUTTONDOWN,MK_LBUTTON,MAKELPARAM(px(60),px(44+2*48+24)));
+    send(app.host,WM_LBUTTONDOWN,MK_LBUTTON,MAKELPARAM(px(60),px(44+2*projectRowHeight+24)));
     send(app.host,WM_MOUSEMOVE,MK_LBUTTON,MAKELPARAM(px(60),px(45)));
     send(app.host,WM_LBUTTONUP,0,MAKELPARAM(px(60),px(45)));
     select(0);check(app.window==surfaceA,"Dragging a project back to the first row failed");
     open(a.root);check(app.window==surfaceA,"Reopening a registered path duplicated the project");
-    const auto oldB=surfaceB;const auto dpi=GetDpiForWindow(app.host);click(app.host,MulDiv(60,dpi,96),MulDiv(44+48+24,dpi,96),true);
+    const auto oldB=surfaceB;const auto dpi=GetDpiForWindow(app.host);click(app.host,MulDiv(60,dpi,96),MulDiv(44+projectRowHeight+24,dpi,96),true);
     check(!IsWindow(oldB)&&IsWindow(surfaceA)&&IsWindow(shell) && WaitForSingleObject(shellProcess, 0) == WAIT_TIMEOUT,"Closing an inactive project affected another session");
     CloseHandle(shellProcess);
     }
@@ -2750,14 +2751,14 @@ void recentProjectTests(const fs::path& executable) {
         // The second row opens an existing project instead of creating a copy.
         palette = show(app, FindWindowExW(surfaceB, nullptr, L"PoppyViewer", nullptr)); send(palette, WM_KEYDOWN, VK_DOWN); send(palette, WM_KEYDOWN, VK_RETURN);
         app.tree(); check(app.window == surfaceA && count(app.host) == 2, "History duplicated an already open project");
-        click(app.host, px(60), px(44+48+24), true);
+        click(app.host, px(60), px(44+projectRowHeight+24), true);
         check(!IsWindow(surfaceB) && count(app.host) == 1, "History test could not close project B");
         palette = show(app, FindWindowExW(surfaceA, nullptr, L"PoppyViewer", nullptr));
         type(palette, L"右 日本語"); click(palette, px(24), px(108));
         app.tree(); waitLines(FindWindowExW(app.window, nullptr, L"PoppyViewer", nullptr), 300);
         check(count(app.host) == 2 && !IsWindowVisible(palette), "History could not reopen a closed project by path");
         // Close both, leaving a saved workspace with no open project.
-        click(app.host, px(60), px(44+48+24), true); click(app.host, px(60), px(68), true);
+        click(app.host, px(60), px(44+projectRowHeight+24), true); click(app.host, px(60), px(68), true);
         check(count(app.host) == 0, "History test did not close all projects");
     }
     {
@@ -2788,7 +2789,7 @@ void projectDragTests(const fs::path& executable) {
         };
         const auto surfaceA=loadFile(200),surfaceB=open(b.root,300),surfaceC=open(c.root,400);
         const auto px=[dpi=GetDpiForWindow(app.host)](int value){return MulDiv(value,dpi,96);};
-        const auto point=[&](int row,int offset){return POINT{px(60),px(44+row*48+offset)};};
+        const auto point=[&](int row,int offset){return POINT{px(60),px(44+row*projectRowHeight+offset)};};
         const auto order=[&](std::initializer_list<HWND> expected){
             int index=0;for(const auto surface:expected){const auto p=point(index++,24);click(app.host,p.x,p.y);app.tree();check(app.window==surface,"Project drag produced the wrong order");}
         };
@@ -2797,23 +2798,23 @@ void projectDragTests(const fs::path& executable) {
             send(app.host,WM_MOUSEMOVE,MK_LBUTTON,MAKELPARAM(target.x,target.y));
         };
         const auto drop=[&](POINT target){send(app.host,WM_LBUTTONUP,0,MAKELPARAM(target.x,target.y));};
-        begin(0,point(2,47));drop(point(2,47));app.tree();
+        begin(0,point(2,projectRowHeight-1));drop(point(2,projectRowHeight-1));app.tree();
         check(app.window==surfaceA,"Reordering changed the selected project");order({surfaceB,surfaceC,surfaceA});
         begin(2,point(0,1));drop(point(0,1));order({surfaceA,surfaceB,surfaceC});
-        begin(0,point(0,47));drop(point(0,47));order({surfaceA,surfaceB,surfaceC});
+        begin(0,point(0,projectRowHeight-1));drop(point(0,projectRowHeight-1));order({surfaceA,surfaceB,surfaceC});
         auto tiny=point(0,24);++tiny.x;begin(0,tiny);drop(tiny);order({surfaceA,surfaceB,surfaceC});
         for(const auto cancel:{WM_CANCELMODE,WM_CAPTURECHANGED,WM_KEYDOWN}){
-            begin(0,point(2,47));send(app.host,cancel,cancel==WM_KEYDOWN?VK_ESCAPE:0);drop(point(2,47));order({surfaceA,surfaceB,surfaceC});
+            begin(0,point(2,projectRowHeight-1));send(app.host,cancel,cancel==WM_KEYDOWN?VK_ESCAPE:0);drop(point(2,projectRowHeight-1));order({surfaceA,surfaceB,surfaceC});
         }
         RECT client{};GetClientRect(app.host,&client);
         for(const POINT outside: {POINT{px(300),px(80)},POINT{px(60),px(1)},POINT{px(60),client.bottom}}){
-            begin(0,point(2,47));drop(outside);order({surfaceA,surfaceB,surfaceC});
+            begin(0,point(2,projectRowHeight-1));drop(outside);order({surfaceA,surfaceB,surfaceC});
         }
         // Escape must work while a project's editor owns keyboard focus.
-        begin(0,point(2,47));
+        begin(0,point(2,projectRowHeight-1));
         check(PostMessageW(FindWindowExW(surfaceA,nullptr,L"PoppyViewer",nullptr),WM_KEYDOWN,VK_ESCAPE,0)!=FALSE,"Could not post drag cancellation");
         waitFor([&]{GUITHREADINFO info{};info.cbSize=sizeof(info);check(GetGUIThreadInfo(app.process.dwThreadId,&info)!=FALSE,"Could not inspect project capture");return info.hwndCapture==nullptr;},"Escape did not release project drag capture");
-        drop(point(2,47));order({surfaceA,surfaceB,surfaceC});
+        drop(point(2,projectRowHeight-1));order({surfaceA,surfaceB,surfaceC});
         // Blank space after the last project accepts an append operation.
         begin(1,point(4,24));drop(point(4,24));order({surfaceA,surfaceC,surfaceB});
     }
@@ -2822,7 +2823,7 @@ void projectDragTests(const fs::path& executable) {
         waitLines(FindWindowExW(app.window,nullptr,L"PoppyViewer",nullptr),300);
         const auto px=[dpi=GetDpiForWindow(app.host)](int value){return MulDiv(value,dpi,96);};
         int index=0;for(const int lines:{200,400,300}){
-            click(app.host,px(60),px(44+index++*48+24));app.tree();
+            click(app.host,px(60),px(44+index++*projectRowHeight+24));app.tree();
             waitLines(FindWindowExW(app.window,nullptr,L"PoppyViewer",nullptr),lines);
         }
     }
@@ -2849,8 +2850,8 @@ void scrollingProjectDragTests(const fs::path& executable) {
     send(app.host,WM_MOUSEWHEEL,MAKEWPARAM(0,12000),MAKELPARAM(wheel.x,wheel.y));
     click(app.host,px(60),px(68));app.tree();check(app.window==surfaces[1],"Auto-scroll did not move the first project to the end");
     send(app.host,WM_MOUSEWHEEL,MAKEWPARAM(0,-12000),MAKELPARAM(wheel.x,wheel.y));
-    const int page=(client.bottom-px(44))/px(48);
-    const int lastY=px(44)+(page-1)*px(48)+px(24);
+    const int page=(client.bottom-px(44))/px(projectRowHeight);
+    const int lastY=px(44)+(page-1)*px(projectRowHeight)+px(24);
     send(app.host,WM_LBUTTONDOWN,MK_LBUTTON,MAKELPARAM(px(60),lastY));
     send(app.host,WM_MOUSEMOVE,MK_LBUTTON,MAKELPARAM(px(60),px(45)));
     for(int i=0;i<20;++i)send(app.host,WM_TIMER,1);
