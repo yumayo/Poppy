@@ -17,8 +17,10 @@ def install(target_dir: Path) -> None:
     config_path = target_dir / "hooks.json"
     script_path = target_dir / "hooks" / "poppy" / "poppy_status.py"
     source_script = source_dir / "poppy_status.py"
+    poll_script = source_dir / "poppy_codex_poll.py"
     # 書き込み前に、設定とコピー元の両方を確認する。
     source_script.read_bytes()
+    poll_script.read_bytes()
     template = json.loads((source_dir.parent / "examples" / "codex-hooks.json").read_text(encoding="utf-8"))
     original = config_path.read_text(encoding="utf-8-sig") if config_path.exists() else None
     config = json.loads(original) if original is not None else {}
@@ -50,6 +52,7 @@ def install(target_dir: Path) -> None:
 
     script_path.parent.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(source_script, script_path)
+    shutil.copyfile(poll_script, script_path.with_name(poll_script.name))
     if added:
         if original is not None:
             timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
@@ -71,6 +74,7 @@ def install(target_dir: Path) -> None:
             temporary_path.unlink(missing_ok=True)
     print(f"通知スクリプト: {script_path}")
     print(f"Codexフック: {config_path}（追加 {added} 件）")
+    print(f"起動中のCodexにも接続できます: python3 {shlex.quote(str(script_path.with_name(poll_script.name)))}")
     print("Codexを起動し直し、/hooks で追加したフックを確認して信頼してください。")
 
 

@@ -190,6 +190,14 @@ def main():
             print("Poppy: ツール失敗フックの入力を読み取れませんでした。", file=sys.stderr)
             return 0
         data = {}
+    # Codexは開始・終了hookを取りこぼしてもローカル履歴で表示を修復する。
+    # Claudeと、監視プロセスを起動できない環境は従来どおり直接通知する。
+    try:
+        from poppy_codex_poll import ensure_monitor
+        if ensure_monitor(action, data, relay):
+            return 0
+    except (ImportError, OSError, ValueError):
+        pass
     payload = build_payload(action, data)
     if not payload:
         return 0

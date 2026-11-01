@@ -2,7 +2,7 @@
 
 WSLにDocker Engineをインストールし、普段どおり`aicontainer`で起動する構成に対応します。PoppyのターミナルからWSLで起動すれば、**`.aicontainer`への通知用設定や、Poppy通知専用の`allow-ip`は不要です。** CLI別hookの導入は引き続き必要です。
 
-通知は`hook → マウントされたUnixソケット → WSLヘルパー → 匿名パイプ → Poppy`を通ります。Poppyは通知用のTCP/HTTPポートを開きません。通知先のセッションIDはPoppy側で保持します。対話ターミナルの標準入出力とファイル操作の接続には通知を混ぜません。wslc / WSL ContainersはPoppyのサポート対象外です。
+通知は`hook / polling → マウントされたUnixソケット → WSLヘルパー → 匿名パイプ → Poppy`を通ります。Poppyは通知用のTCP/HTTPポートを開きません。通知先のセッションIDはPoppy側で保持します。対話ターミナルの標準入出力とファイル操作の接続には通知を混ぜません。wslc / WSL ContainersはPoppyのサポート対象外です。
 
 ## 起動と更新
 
@@ -47,6 +47,24 @@ python3 /path/to/ai/scripts/uninstall-hooks.py claude
 
 解除は`hooks/poppy/poppy_status.py`の通知コマンドだけを除去し、他のhookと設定を残します。
 
+## Codexのpolling監視
+
+Codexでは、AIコンテナ内の監視プロセスが**0.5秒ごとにローカル履歴を読み取り**、実行中・完了・中断を反映します。状態が変わったときと2秒ごとに状態を再送するため、開始・終了のhookや通知を取りこぼしても表示を修復できます。モデルへの問い合わせや外部通信は行いません。Poppy.exeの通知形式は変更していないため、スクリプトの更新だけで利用できます。
+
+`install-codex-hooks.py`を再実行すると、送信スクリプトと`poppy_codex_poll.py`を更新します。監視は最初に届いたCodexのhookで一度だけ起動します。開始hookが欠けても、後続のツールhookなどから起動できます。**起動中のCodexへhookなしで接続する場合**は、そのCodexと同じAIコンテナ・ターミナルで次を実行します。
+
+```sh
+python3 "${CODEX_HOME:-$HOME/.codex}/hooks/poppy/poppy_codex_poll.py"
+# 対象のCodexプロセスを明示する場合
+python3 "${CODEX_HOME:-$HOME/.codex}/hooks/poppy/poppy_codex_poll.py" --pid 123
+```
+
+CLIが開いている会話ファイルで対象を特定し、別ターミナルや子エージェントの履歴を選びません。新しいCodexの履歴DBを読み取り専用で参照し、DBのない形式では会話JSONLの追記を読みます。入力・承認待ちはhookの情報で補助します。無出力時間、コンパクト、履歴の一時的な読取失敗を理由に`none`へ変更しません。CLIの終了時に監視も終了して`none`を送ります。CLIとコンテナが同時に終了する構成に備え、`SessionEnd`のhookからも終了通知を直接送ります。
+
+Claude Codeは引き続きhookで通知します。Codexの履歴DBとJSONLはCLI内部の保存形式なので、今後の形式変更には追従が必要です。現在導入されているCodex 0.166.0の履歴形式と、旧形式のJSONLをテスト対象にしています。
+
+監視だけを終了するには、上記スクリプトへ`--stop`を指定します。hookを残すと次のhookで再起動するため、連携を解除する場合は`uninstall-hooks.py codex`を使ってください。解除時は起動中の監視も停止します。監視情報と二重起動を防ぐロックは、コンテナの一時ディレクトリへ保存します。
+
 ## 旧通知設定の削除
 
 HTTP通知とWindows上のCLI向け通知は廃止しました。`.aicontainer`に残っている旧通知用の環境変数と、Poppy通知のためだけに追加した`allow-ip`は削除できます。
@@ -66,6 +84,7 @@ HTTP通知とWindows上のCLI向け通知は廃止しました。`.aicontainer`�
 ## 検証
 
 - `python3 tests/hook_scripts_tests.py`: Unixソケット通知、ソケット未設定時の動作、hookの導入・解除。
+- `python3 tests/codex_poll_tests.py`: 開始・完了・中断・終了hookを省略した状態の復旧、再送、入力待ち、会話切り替え、二重起動防止、コンパクトと途中のJSONL、履歴DBの読み取り。
 - `python3 tests/hook_relay_tests.py`: ビルド済みの実WSLヘルパーと導入済みhookをUnixソケット・匿名パイプで接続。PowerShell向けの単独ヘルパー配置・再利用と終了時のソケット削除も検証。別のビルドを使う場合は`POPPY_TEST_WSL_HELPER=/path/to/poppy-wsl-helper`を指定。
 - Windowsの`poppy_render_tests`: Git for Windowsがある場合、Git BashからWindowsプロセスへ通知ソケットのLinuxパスがそのまま渡り、既存のパス変換除外も保持されることを検証。
 - ai-containerの`python3 -m unittest discover -s test -p test_aicontainer_dns.py`: Dockerモックで通常起動時のソケット自動マウントとパスの引用を検証。

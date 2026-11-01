@@ -14,6 +14,12 @@ def uninstall(target_dir: Path, tool: str) -> None:
     target_dir = target_dir.expanduser().resolve()
     config_path = target_dir / ("hooks.json" if tool == "codex" else "settings.json")
     script = target_dir / "hooks" / "poppy" / "poppy_status.py"
+    if tool == "codex":
+        try:
+            from poppy_codex_poll import stop_monitors
+            stop_monitors(script.with_name("poppy_codex_poll.py"))
+        except (ImportError, OSError, ValueError):
+            pass
     if not config_path.exists():
         return
     config = json.loads(config_path.read_text(encoding="utf-8-sig"))

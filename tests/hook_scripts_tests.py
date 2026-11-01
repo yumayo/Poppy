@@ -143,6 +143,8 @@ class InstallTests(unittest.TestCase):
             installer.install(target)
             self.assertEqual(json.loads(filename.read_text(encoding="utf-8")), once)
             self.assertTrue((target / "hooks/poppy/poppy_status.py").is_file())
+            if tool == "codex":
+                self.assertTrue((target / "hooks/poppy/poppy_codex_poll.py").is_file())
             self.assertEqual(once["custom"], original["custom"])
             self.assertIn(original["hooks"]["Stop"][0], once["hooks"]["Stop"])
             self.assertTrue(list(target.glob("*.poppy-*.bak")))
