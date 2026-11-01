@@ -6,6 +6,7 @@
 #include <wincodec.h>
 
 namespace poppy {
+class InputLine;
 // Small COM owner, also supported by the MinGW build.
 template<class T> class ComPtr {
 public:
@@ -49,7 +50,7 @@ public:
     void setDpi(UINT dpi);
     int cellWidth() const { return cellWidth_; }
     int textHeight() const { return textHeight_; }
-    const LOGFONTW& compositionFont() const { return compositionFont_; }
+    const LOGFONTW& compositionFont(Font font = Font::Code) const { return font == Font::Ui ? uiCompositionFont_ : compositionFont_; }
     void font(Font value) { font_ = value; }
     bool begin(HWND window);
     // Offscreen rendering uses WIC, including the pixel regression tests.
@@ -73,6 +74,7 @@ public:
     void setImage(std::shared_ptr<const ImagePreview> image);
     bool drawImage(const RECT& bounds, int checkerSize);
 private:
+    friend class InputLine;
     bool prepare(HRESULT result);
     void color(COLORREF value, float opacity = 1.0f);
     HWND window_ = nullptr;
@@ -87,7 +89,29 @@ private:
     D2D1_PRESENT_OPTIONS presentOptions_;
     Font font_ = Font::Ui;
     int cellWidth_ = 8, textHeight_ = 18;
-    LOGFONTW compositionFont_{};
+    LOGFONTW compositionFont_{}, uiCompositionFont_{};
+};
+
+// Single-line UI input: shape committed text and preedit together. The same
+// DirectWrite layout supplies drawing, selection, hit testing and IME geometry.
+class InputLine {
+public:
+    void update(const Renderer& renderer, const std::wstring& text, size_t caret, size_t anchor,
+                const CompositionText& composition, const RECT& bounds);
+    void draw(Renderer& renderer, COLORREF color, COLORREF selection, bool showCaret) const;
+    POINT caret() const { return caret_; }
+    int height() const { return height_; }
+    size_t hit(int x) const;
+    void reset() { scroll_ = 0; }
+private:
+    void range(Renderer& renderer, size_t begin, size_t length, COLORREF color, int underline = 0) const;
+    ComPtr<IDWriteTextLayout> layout_;
+    CompositionText composition_;
+    RECT bounds_{};
+    POINT caret_{};
+    float scroll_ = 0;
+    size_t selectionBegin_ = 0, selectionEnd_ = 0, compositionBegin_ = 0;
+    int height_ = 1, caretWidth_ = 1;
 };
 
 // A child overlay keeps the drop target visible above the editor/ConPTY views.

@@ -12,7 +12,7 @@ bool separator(wchar_t ch) { return ch <= L' ' || ch == L'.' || ch == L'/' || ch
 }
 HWND TreeInput::create(HWND parent, HINSTANCE instance, const std::wstring& text, COLORREF color) {
     text_ = text; color_ = color; cue_.clear(); undo_.clear(); redo_.clear();
-    caret_ = anchor_ = first_ = 0; limit_ = 255; highSurrogate_ = 0; composing_ = false;
+    caret_ = anchor_ = 0; limit_ = 255; highSurrogate_ = 0; ime_.clear(); line_.reset();
     WNDCLASSW cls{}; cls.lpfnWndProc = procedure; cls.hInstance = instance;
     cls.lpszClassName = treeInputClassName; cls.hCursor = LoadCursorW(nullptr, IDC_IBEAM); cls.style = CS_DBLCLKS;
     RegisterClassW(&cls);
@@ -53,7 +53,7 @@ void TreeInput::replace(std::wstring text) {
     if (begin == end && text.empty()) return;
     if (undo_.size() == 32) undo_.erase(undo_.begin());
     undo_.push_back({text_, caret_, anchor_}); redo_.clear();
-    text_.replace(begin, end - begin, text); caret_ = anchor_ = begin + text.size(); first_ = std::min(first_, begin);
+    text_.replace(begin, end - begin, text); caret_ = anchor_ = begin + text.size();
     DefWindowProcW(window_, WM_SETTEXT, 0, reinterpret_cast<LPARAM>(text_.c_str()));
     caretChanged();
 }
@@ -65,33 +65,13 @@ void TreeInput::undo(bool redo) {
     text_ = std::move(state.text); caret_ = state.caret; anchor_ = state.anchor;
     DefWindowProcW(window_, WM_SETTEXT, 0, reinterpret_cast<LPARAM>(text_.c_str())); caretChanged();
 }
-size_t TreeInput::hit(int x) const {
-    size_t position = first_;
-    while (position < text_.size()) {
-        const auto after = next(position);
-        const int left = renderer_.textWidth(text_.substr(first_, position - first_));
-        const int right = renderer_.textWidth(text_.substr(first_, after - first_));
-        if (x < (left + right) / 2) break;
-        position = after;
-    }
-    return position;
-}
+size_t TreeInput::hit(int x) const { return line_.hit(x); }
 void TreeInput::caretChanged() {
     if (!window_) return;
     RECT rect{}; GetClientRect(window_, &rect);
-    first_ = std::min(first_, caret_);
-    const int available = std::max(1L, rect.right - MulDiv(2, dpi_, 96));
-    if (renderer_.textWidth(text_) <= available) first_ = 0;
-    while (first_ < caret_ && renderer_.textWidth(text_.substr(first_, caret_ - first_)) > available) first_ = next(first_);
-    const POINT point{renderer_.textWidth(text_.substr(first_, caret_ - first_)), std::max(0L, (rect.bottom - renderer_.textHeight()) / 2)};
+    line_.update(renderer_, text_, caret_, anchor_, ime_.text(), rect);
+    positionIme(window_, line_.caret(), line_.height(), renderer_.compositionFont(Renderer::Font::Ui));
     if (GetFocus() == window_) {
-        // The hidden system caret also supplies the position to accessibility/IME.
-        DestroyCaret(); CreateCaret(window_, nullptr, std::max(1, MulDiv(1, dpi_, 96)), renderer_.textHeight()); SetCaretPos(point.x, point.y);
-        const auto context = ImmGetContext(window_);
-        if (context) {
-            COMPOSITIONFORM form{}; form.dwStyle = CFS_POINT; form.ptCurrentPos = point; ImmSetCompositionWindow(context, &form);
-            positionImeCandidate(window_, context, point, rect.bottom - point.y); ImmReleaseContext(window_, context);
-        }
         KillTimer(window_, caretTimer);
         const auto blink = GetCaretBlinkTime();
         if (blink && blink != INFINITE) SetTimer(window_, caretTimer, blink, nullptr);
@@ -100,18 +80,9 @@ void TreeInput::caretChanged() {
 }
 void TreeInput::draw(Renderer& renderer, const RECT& rect) const {
     renderer.fill(rect, rowBackground);
-    const auto begin = std::max(first_, std::min(anchor_, caret_)), end = std::max(anchor_, caret_);
-    const int top = rect.top + std::max(0L, (rect.bottom - rect.top - renderer.textHeight()) / 2);
-    if (end > begin) {
-        const int left = rect.left + renderer.textWidth(text_.substr(first_, begin - first_));
-        const int right = rect.left + renderer.textWidth(text_.substr(first_, end - first_));
-        renderer.fill({left, top, std::min<LONG>(right, rect.right), std::min<LONG>(top + renderer.textHeight(), rect.bottom)}, selectionBackground);
-    }
-    renderer.label(rect, text_.empty() ? cue_ : text_.substr(first_), text_.empty() ? muted : color_, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-    if (GetFocus() == window_ && caretVisible_ && !composing_) {
-        const int x = rect.left + renderer.textWidth(text_.substr(first_, caret_ - first_));
-        if (x < rect.right) renderer.fill({x, top, std::min<LONG>(x + std::max(1, MulDiv(1, dpi_, 96)), rect.right), std::min<LONG>(top + renderer.textHeight(), rect.bottom)}, color_);
-    }
+    line_.update(renderer, text_, caret_, anchor_, ime_.text(), rect);
+    if (text_.empty() && ime_.text().text.empty()) renderer.label(rect, cue_, muted, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    line_.draw(renderer, color_, selectionBackground, GetFocus() == window_ && (caretVisible_ || !ime_.text().text.empty()));
 }
 LRESULT CALLBACK TreeInput::procedure(HWND window, UINT message, WPARAM a, LPARAM b) {
     auto* self = reinterpret_cast<TreeInput*>(GetWindowLongPtrW(window, GWLP_USERDATA));
@@ -135,7 +106,8 @@ LRESULT TreeInput::handle(UINT message, WPARAM a, LPARAM b) {
         return static_cast<LRESULT>(length);
     }
     case WM_SETTEXT:
-        text_ = b ? reinterpret_cast<const wchar_t*>(b) : L""; caret_ = anchor_ = text_.size(); first_ = 0; undo_.clear(); redo_.clear(); caretChanged();
+        ime_.cancel(window_); line_.reset();
+        text_ = b ? reinterpret_cast<const wchar_t*>(b) : L""; caret_ = anchor_ = text_.size(); undo_.clear(); redo_.clear(); caretChanged();
         return DefWindowProcW(window_, message, a, b);
     case EM_SETLIMITTEXT: limit_ = a ? static_cast<size_t>(a) : 255; return 0;
     case EM_SETCUEBANNER: cue_ = b ? reinterpret_cast<const wchar_t*>(b) : L""; InvalidateRect(window_, nullptr, FALSE); return TRUE;
@@ -149,12 +121,8 @@ LRESULT TreeInput::handle(UINT message, WPARAM a, LPARAM b) {
     case WM_SIZE: caretChanged(); return 0;
     case WM_SETFOCUS: caretChanged(); return 0;
     case WM_KILLFOCUS: {
-        if (composing_) {
-            const auto context = ImmGetContext(window_);
-            if (context) { ImmNotifyIME(context, NI_COMPOSITIONSTR, CPS_CANCEL, 0); ImmReleaseContext(window_, context); }
-            composing_ = false;
-        }
-        highSurrogate_ = 0; KillTimer(window_, caretTimer); DestroyCaret(); if (finished) finished(false); return 0;
+        ime_.cancel(window_);
+        highSurrogate_ = 0; KillTimer(window_, caretTimer); DestroyCaret(); if (finished) finished(commitOnFocusLoss); return 0;
     }
     case WM_TIMER: if (a == caretTimer) { caretVisible_ = !caretVisible_; InvalidateRect(window_, nullptr, FALSE); } return 0;
     case WM_COPY: case WM_CUT:
@@ -164,7 +132,7 @@ LRESULT TreeInput::handle(UINT message, WPARAM a, LPARAM b) {
     case WM_CLEAR: if (anchor_ != caret_) replace(L""); return 0;
     case WM_UNDO: undo(false); return TRUE;
     case WM_KEYDOWN: {
-        if (composing_) break;
+        if (ime_.active()) break;
         const bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0, shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
         if (ctrl && a == 'A') { anchor_ = 0; caret_ = text_.size(); caretChanged(); return 0; }
         if (ctrl && (a == 'C' || a == 'X' || a == 'V')) { SendMessageW(window_, a == 'C' ? WM_COPY : a == 'X' ? WM_CUT : WM_PASTE, 0, 0); return 0; }
@@ -185,7 +153,7 @@ LRESULT TreeInput::handle(UINT message, WPARAM a, LPARAM b) {
         caretChanged(); return 0;
     }
     case WM_CHAR:
-        if (!composing_ && a >= L' ' && a != 127 && !(GetKeyState(VK_CONTROL) & 0x8000)) {
+        if (!ime_.active() && a >= L' ' && a != 127 && !(GetKeyState(VK_CONTROL) & 0x8000)) {
             const auto ch = static_cast<wchar_t>(a);
             if (ch >= 0xd800 && ch <= 0xdbff) { highSurrogate_ = ch; return 0; }
             std::wstring text;
@@ -194,7 +162,7 @@ LRESULT TreeInput::handle(UINT message, WPARAM a, LPARAM b) {
         }
         return 0;
     case WM_LBUTTONDOWN: case WM_LBUTTONDBLCLK:
-        if (composing_) return 0;
+        if (ime_.active()) return 0;
         SetFocus(window_); caret_ = hit(GET_X_LPARAM(b));
         if (message == WM_LBUTTONDBLCLK) { anchor_ = word(caret_, false); caret_ = word(anchor_, true); }
         else if (!(GetKeyState(VK_SHIFT) & 0x8000)) anchor_ = caret_;
@@ -202,7 +170,7 @@ LRESULT TreeInput::handle(UINT message, WPARAM a, LPARAM b) {
     case WM_MOUSEMOVE: if (GetCapture() == window_) { caret_ = hit(GET_X_LPARAM(b)); caretChanged(); } return 0;
     case WM_LBUTTONUP: if (GetCapture() == window_) ReleaseCapture(); return 0;
     case WM_CONTEXTMENU: {
-        if (composing_) return 0;
+        if (ime_.active()) return 0;
         const bool selected = anchor_ != caret_;
         const auto menu = CreatePopupMenu(); if (!menu) return 0;
         AppendMenuW(menu, MF_STRING | (undo_.empty() ? MF_GRAYED : 0), 1, L"Undo");
@@ -221,22 +189,14 @@ LRESULT TreeInput::handle(UINT message, WPARAM a, LPARAM b) {
         else if (command == 6) { anchor_ = 0; caret_ = text_.size(); caretChanged(); }
         return 0;
     }
-    case WM_IME_STARTCOMPOSITION: composing_ = true; caretChanged(); break;
-    case WM_IME_ENDCOMPOSITION: composing_ = false; caretChanged(); break;
-    case WM_IME_COMPOSITION:
-        if (b & GCS_RESULTSTR) {
-            const auto context = ImmGetContext(window_);
-            const auto bytes = context ? ImmGetCompositionStringW(context, GCS_RESULTSTR, nullptr, 0) : 0;
-            if (bytes > 0) {
-                std::wstring text(static_cast<size_t>(bytes) / sizeof(wchar_t), L'\0');
-                ImmGetCompositionStringW(context, GCS_RESULTSTR, text.data(), bytes); replace(std::move(text));
-            }
-            if (context) ImmReleaseContext(window_, context);
-            return 0;
-        }
-        break;
+    case WM_IME_SETCONTEXT: case WM_INPUTLANGCHANGE: case WM_IME_NOTIFY:
+    case WM_IME_STARTCOMPOSITION: case WM_IME_ENDCOMPOSITION: case WM_IME_COMPOSITION:
+        return ime_.handle(window_, message, a, b, [this] { caretChanged(); },
+            [this](std::wstring text) { replace(std::move(text)); });
+    case WM_SHOWWINDOW: if (!a) { ime_.cancel(window_); highSurrogate_ = 0; } break;
     case WM_DESTROY:
         if (GetCapture() == window_) ReleaseCapture();
+        ime_.clear(); if (GetFocus() == window_) DestroyCaret();
         KillTimer(window_, caretTimer); renderer_.discard(); return 0;
     default: break;
     }

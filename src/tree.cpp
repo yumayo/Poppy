@@ -47,7 +47,7 @@ void Tree::release(const std::vector<std::pair<TreeItem, uintptr_t>>& items) {
 }
 void Tree::erase(TreeItem id) { release(model_.erase(id)); changed(); }
 void Tree::clearChildren(TreeItem id) { release(model_.eraseChildren(id)); changed(); }
-void Tree::clear() { release(model_.clear()); widths_.clear(); search_.clear(); top_ = left_ = wheel_ = 0; changed(); }
+void Tree::clear() { ime_.cancel(window_); release(model_.clear()); widths_.clear(); search_.clear(); top_ = left_ = wheel_ = 0; changed(); }
 void Tree::sort(TreeItem parent, const std::function<bool(uintptr_t, uintptr_t)>& compare) { model_.sort(parent, compare); changed(); }
 void Tree::expand(TreeItem id, bool value) {
     if (!model_.expand(id, value)) return;
@@ -109,12 +109,12 @@ void Tree::layout() {
         SCROLLINFO horizontal{sizeof(horizontal), SIF_RANGE | SIF_PAGE | SIF_POS, 0, std::max(0, extent - 1), static_cast<UINT>(width), left_, 0};
         SetScrollInfo(window_, SB_VERT, &vertical, FALSE); SetScrollInfo(window_, SB_HORZ, &horizontal, FALSE);
     }
-    layingOut_ = false; layoutRename();
+    layingOut_ = false; layoutRename(); imePosition();
     POINT point{}; GetCursorPos(&point); ScreenToClient(window_, &point); hover(point);
     InvalidateRect(window_, nullptr, FALSE);
 }
 void Tree::rename(TreeItem id, const std::wstring& name) {
-    endDrag();
+    ime_.cancel(window_); endDrag();
     finishRename(false); if (!item(id)) return;
     select(id, false);
     const int index = row(id); if (index < 0) return;
@@ -247,6 +247,34 @@ void Tree::hover(POINT point) {
         SendMessageW(actionTips_, TTM_NEWTOOLRECTW, 0, reinterpret_cast<LPARAM>(&tip));
     }
 }
+void Tree::imePosition() {
+    if (!window_ || GetFocus() != window_) return;
+    const auto content = Scrollbars::contentRect(window_);
+    const int index = row(selection());
+    const auto& rows = model_.visible();
+    const int depth = index >= 0 ? static_cast<int>(rows[static_cast<size_t>(index)].depth) : 0;
+    const int x = std::clamp((depth + 1) * indent_ - left_ + MulDiv(5, dpi_, 96), 0, std::max(0, static_cast<int>(content.right) - 1));
+    const int y = std::clamp((std::max(0, index) - top_) * rowHeight_, 0, std::max(0, static_cast<int>(content.bottom) - rowHeight_));
+    searchBounds_ = {x, y, content.right, std::min<LONG>(content.bottom, y + rowHeight_)};
+    searchInput_.update(renderer_, search_, search_.size(), search_.size(), ime_.text(), searchBounds_);
+    positionIme(window_, searchInput_.caret(), searchInput_.height(), renderer_.compositionFont(Renderer::Font::Ui));
+}
+void Tree::typeSearch(const std::wstring& value, bool composed) {
+    std::wstring input = value;
+    input.erase(std::remove_if(input.begin(), input.end(), [](wchar_t ch) { return ch <= 32 || ch == 127; }), input.end());
+    if (input.empty()) return;
+    const auto now = GetTickCount64();
+    if ((!composed && now - searchTime_ > 1000) || search_.size() >= 256 ||
+        (search_.size() == 1 && input.size() == 1 && search_ == input)) search_.clear();
+    searchTime_ = now; search_ += input;
+    const auto& rows = model_.visible(); const int current = row(selection());
+    for (size_t i = 0; i < rows.size(); ++i) {
+        const auto index = (static_cast<size_t>(std::max(0, current)) + (search_.size() == 1 ? 1 : 0) + i) % rows.size();
+        const auto& text = item(rows[index].item)->text;
+        if (text.size() >= search_.size() && CompareStringOrdinal(text.data(), static_cast<int>(search_.size()), search_.data(), static_cast<int>(search_.size()), TRUE) == CSTR_EQUAL) { select(rows[index].item); break; }
+    }
+    imePosition();
+}
 void Tree::paint() {
     Renderer::Paint paint(renderer_, window_); if (!paint) return;
     const auto r = Scrollbars::contentRect(window_);
@@ -293,6 +321,11 @@ void Tree::paint() {
             renderer_.icon(actionIconFor ? actionIconFor(row.item) : Renderer::Icon::OpenAllChanges, icon, accent);
         }
     }
+    if (GetFocus() == window_ && !ime_.text().text.empty()) {
+        renderer_.fill(searchBounds_, RGB(50, 70, 94));
+        const auto node = item(selection());
+        searchInput_.draw(renderer_, node ? node->color : foreground, RGB(75, 99, 129), true);
+    }
     scrollbars_.paint(window_, renderer_, panel);
 }
 LRESULT CALLBACK Tree::procedure(HWND w, UINT m, WPARAM a, LPARAM b) {
@@ -332,7 +365,7 @@ LRESULT Tree::handle(UINT m, WPARAM a, LPARAM b) {
         return DefWindowProcW(window_, m, a, b);
     case WM_SIZE: changed(); return 0;
     case WM_SHOWWINDOW:
-        if (!a) { endDrag(); finishRename(false); trackingMouse_ = false; hover({-1, -1}); }
+        if (!a) { ime_.cancel(window_); endDrag(); finishRename(false); trackingMouse_ = false; hover({-1, -1}); }
         return DefWindowProcW(window_, m, a, b);
     case WM_NOTIFY: {
         const auto header = reinterpret_cast<NMHDR*>(b);
@@ -345,7 +378,7 @@ LRESULT Tree::handle(UINT m, WPARAM a, LPARAM b) {
         }
         return 0;
     }
-    case WM_DESTROY: endDrag(); finishRename(false); renderer_.discard(); return 0;
+    case WM_DESTROY: ime_.clear(); if (GetFocus() == window_) DestroyCaret(); endDrag(); finishRename(false); renderer_.discard(); return 0;
     case WM_CONTEXTMENU: {
         if (!renameRequested && !deleteRequested && !copyRequested && !pasteFilesRequested && !openWithDefaultAppRequested && !revealInFileExplorerRequested && !pasteImageRequested && !createCommitted) return 0;
         SetFocus(window_);
@@ -395,11 +428,11 @@ LRESULT Tree::handle(UINT m, WPARAM a, LPARAM b) {
         return 0;
     }
     case WM_GETDLGCODE: return DLGC_WANTARROWS | DLGC_WANTCHARS;
-    case WM_SETFOCUS: if (!selection() && child()) select(child(), false); InvalidateRect(window_, nullptr, FALSE); return 0;
-    case WM_KILLFOCUS: InvalidateRect(window_, nullptr, FALSE); return 0;
+    case WM_SETFOCUS: if (!selection() && child()) select(child(), false); imePosition(); InvalidateRect(window_, nullptr, FALSE); return 0;
+    case WM_KILLFOCUS: ime_.cancel(window_); DestroyCaret(); InvalidateRect(window_, nullptr, FALSE); return 0;
     // Windows sends DBLCLK instead of the second DOWN during rapid clicks.
     case WM_LBUTTONDOWN: case WM_LBUTTONDBLCLK: {
-        SetFocus(window_);
+        ime_.cancel(window_); SetFocus(window_);
         hover({GET_X_LPARAM(b), GET_Y_LPARAM(b)});
         if (selectionChanged) selectionChanged();
         const auto id = hit(GET_Y_LPARAM(b)); if (!id) { if (multipleSelection) select(0, false); return 0; }
@@ -449,6 +482,7 @@ LRESULT Tree::handle(UINT m, WPARAM a, LPARAM b) {
         changed(); return 0;
     }
     case WM_KEYDOWN: {
+        if (ime_.active()) return DefWindowProcW(window_, m, a, b);
         if ((GetKeyState(VK_CONTROL) & 0x8000) && !(GetKeyState(VK_MENU) & 0x8000)) {
             const bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
             if (!shift && a == 'A' && multipleSelection) { if (selectionChanged) selectionChanged(); model_.selectAll(false); changed(); return 0; }
@@ -500,20 +534,14 @@ LRESULT Tree::handle(UINT m, WPARAM a, LPARAM b) {
         if (pasteFilesRequested && canPasteFiles && canPasteFiles(selection())) pasteFilesRequested(selection());
         else if (pasteImageRequested && (!canPasteImage || canPasteImage(selection()))) pasteImageRequested(selection());
         return 0;
-    case WM_CHAR: {
-        if (a <= 32 || a == 127) return 0;
-        const auto now = GetTickCount64();
-        if (now - searchTime_ > 1000 || search_.size() >= 256 || (search_.size() == 1 && search_[0] == static_cast<wchar_t>(a))) search_.clear();
-        searchTime_ = now;
-        search_ += static_cast<wchar_t>(a);
-        const auto& rows = model_.visible(); const int current = row(selection());
-        for (size_t i = 0; i < rows.size(); ++i) {
-            const auto index = (static_cast<size_t>(std::max(0, current)) + (search_.size() == 1 ? 1 : 0) + i) % rows.size();
-            const auto& text = item(rows[index].item)->text;
-            if (text.size() >= search_.size() && CompareStringOrdinal(text.data(), static_cast<int>(search_.size()), search_.data(), static_cast<int>(search_.size()), TRUE) == CSTR_EQUAL) { select(rows[index].item); break; }
-        }
+    case WM_CHAR:
+        if (!ime_.active()) typeSearch(std::wstring(1, static_cast<wchar_t>(a)));
         return 0;
-    }
+    case WM_IME_SETCONTEXT: case WM_INPUTLANGCHANGE: case WM_IME_NOTIFY:
+    case WM_IME_STARTCOMPOSITION: case WM_IME_ENDCOMPOSITION: case WM_IME_COMPOSITION:
+        if (m == WM_IME_STARTCOMPOSITION && (GetTickCount64() - searchTime_ > 1000 || search_.size() >= 256)) search_.clear();
+        return ime_.handle(window_, m, a, b, [this] { imePosition(); },
+            [this](std::wstring text) { typeSearch(text, true); });
     case treeCanUndo: return canUndo && canUndo();
     case treeCanRedo: return canRedo && canRedo();
     case treeGetNext: switch (static_cast<TreeRelation>(a)) {

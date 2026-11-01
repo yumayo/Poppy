@@ -1,5 +1,6 @@
 #pragma once
 #include "terminal.h"
+#include "tree_input.h"
 #include "ai_status_win.h"
 #include "hook_pipe.h"
 #include "session.h"
@@ -44,7 +45,7 @@ public:
     std::function<void()> changed;
 private:
     static LRESULT CALLBACK procedure(HWND, UINT, WPARAM, LPARAM);
-    static LRESULT CALLBACK renameProcedure(HWND, UINT, WPARAM, LPARAM, UINT_PTR, DWORD_PTR);
+    void finishRename(bool commit);
     LRESULT handle(UINT, WPARAM, LPARAM);
     TerminalSession& active() { return *sessions_[active_]; }
     const TerminalSession& active() const { return *sessions_[active_]; }
@@ -70,6 +71,7 @@ private:
     size_t renaming_ = 0, tools_ = 0;
     HINSTANCE instance_ = nullptr;
     Renderer renderer_;
+    TreeInput renameInput_;
     UINT dpi_ = 96;
     int header_ = 32, offset_[2]{}, ratio_ = 500;
     RECT splitter_{};

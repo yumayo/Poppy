@@ -467,26 +467,10 @@ LRESULT Terminal::handle(UINT m, WPARAM a, LPARAM b) {
         std::wstring text; if (highSurrogate_) { text += highSurrogate_; highSurrogate_ = 0; } text += c;
         send((m == WM_SYSCHAR ? "\x1b" : "") + utf8(text)); return 0;
     }
-    case WM_IME_SETCONTEXT: case WM_INPUTLANGCHANGE: {
-        if (m == WM_IME_SETCONTEXT) b &= ~ISC_SHOWUICOMPOSITIONWINDOW;
-        const auto result = DefWindowProcW(window_, m, a, b);
-        if (m == WM_INPUTLANGCHANGE || a) imePosition();
-        return result;
-    }
-    case WM_IME_NOTIFY:
-        if (a == IMN_OPENCANDIDATE || a == IMN_CHANGECANDIDATE) imePosition();
-        break;
-    case WM_IME_STARTCOMPOSITION: ime_.start(); imePosition(); InvalidateRect(window_, nullptr, FALSE); return 0;
-    case WM_IME_ENDCOMPOSITION: ime_.clear(); imePosition(); InvalidateRect(window_, nullptr, FALSE); return 0;
-    case WM_IME_COMPOSITION:
-        ime_.update(window_, b);
-        if (b & GCS_RESULTSTR) {
-            const auto context = ImmGetContext(window_);
-            const LONG bytes = context ? ImmGetCompositionStringW(context, GCS_RESULTSTR, nullptr, 0) : 0;
-            if (bytes > 0) { std::wstring text(static_cast<size_t>(bytes) / sizeof(wchar_t), L'\0'); ImmGetCompositionStringW(context, GCS_RESULTSTR, text.data(), bytes); send(utf8(text)); }
-            if (context) ImmReleaseContext(window_, context);
-        }
-        imePosition(); InvalidateRect(window_, nullptr, FALSE); return 0;
+    case WM_IME_SETCONTEXT: case WM_INPUTLANGCHANGE: case WM_IME_NOTIFY:
+    case WM_IME_STARTCOMPOSITION: case WM_IME_ENDCOMPOSITION: case WM_IME_COMPOSITION:
+        return ime_.handle(window_, m, a, b, [this] { imePosition(); },
+            [this](std::wstring text) { send(utf8(text)); });
     default: break;
     }
     return DefWindowProcW(window_, m, a, b);

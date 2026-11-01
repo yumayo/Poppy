@@ -90,6 +90,8 @@ private:
     void endDrag(bool drop = false);
     bool selectionAllowed(const std::function<bool(TreeItem)>& allowed) const;
     void layoutRename();
+    void imePosition();
+    void typeSearch(const std::wstring& text, bool composed = false);
     LRESULT handle(UINT, WPARAM, LPARAM);
     void paint();
     void layout();
@@ -115,6 +117,9 @@ private:
     TreeItem renaming_ = 0;
     bool creating_ = false, creatingDirectory_ = false;
     Renderer renderer_;
+    ImeComposition ime_;
+    InputLine searchInput_;
+    RECT searchBounds_{};
     Scrollbars scrollbars_;
     TreeModel model_;
     std::unordered_map<TreeItem, int> widths_;

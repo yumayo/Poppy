@@ -33,11 +33,12 @@ private:
     int px(int value) const { return MulDiv(value, dpi_, 96); }
     HWND window_ = nullptr;
     Renderer renderer_;
+    InputLine line_;
+    ImeComposition ime_;
     UINT dpi_ = 96;
     std::wstring query_, status_;
-    size_t caret_ = 0, anchor_ = 0, inputFirst_ = 0;
-    int caretX_ = 0;
+    size_t caret_ = 0, anchor_ = 0;
     wchar_t highSurrogate_ = 0;
-    bool visible_ = false, composing_ = false, matchCase_ = false, compact_ = false;
+    bool visible_ = false, matchCase_ = false, compact_ = false;
 };
 }

@@ -37,6 +37,40 @@ void ImeComposition::cancel(HWND window) {
     if (context) { ImmNotifyIME(context, NI_COMPOSITIONSTR, CPS_CANCEL, 0); ImmReleaseContext(window, context); }
     InvalidateRect(window, nullptr, FALSE);
 }
+LRESULT ImeComposition::handle(HWND window, UINT message, WPARAM a, LPARAM b,
+                             const std::function<void()>& position,
+                             const std::function<void(std::wstring)>& commit) {
+    switch (message) {
+    case WM_IME_SETCONTEXT: case WM_INPUTLANGCHANGE: {
+        if (message == WM_IME_SETCONTEXT) b &= ~ISC_SHOWUICOMPOSITIONWINDOW;
+        const auto result = DefWindowProcW(window, message, a, b);
+        if (message == WM_INPUTLANGCHANGE || a) position();
+        return result;
+    }
+    case WM_IME_NOTIFY:
+        if (a == IMN_OPENCANDIDATE || a == IMN_CHANGECANDIDATE) position();
+        return DefWindowProcW(window, message, a, b);
+    case WM_IME_STARTCOMPOSITION: start(); break;
+    case WM_IME_ENDCOMPOSITION: clear(); break;
+    case WM_IME_COMPOSITION: {
+        update(window, b);
+        std::wstring result;
+        if (b & GCS_RESULTSTR) {
+            const auto context = ImmGetContext(window);
+            const auto bytes = context ? ImmGetCompositionStringW(context, GCS_RESULTSTR, nullptr, 0) : 0;
+            if (bytes > 0) {
+                result.resize(static_cast<size_t>(bytes) / sizeof(wchar_t));
+                ImmGetCompositionStringW(context, GCS_RESULTSTR, result.data(), bytes);
+            }
+            if (context) ImmReleaseContext(window, context);
+        }
+        if (!result.empty()) commit(std::move(result));
+        break;
+    }
+    default: return DefWindowProcW(window, message, a, b);
+    }
+    position(); InvalidateRect(window, nullptr, FALSE); return 0;
+}
 void positionImeCandidate(HWND window, HIMC context, POINT point, int height) {
     if (!context || GetFocus() != window) return;
     RECT area{}; GetClientRect(window, &area);

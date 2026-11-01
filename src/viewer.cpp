@@ -824,26 +824,11 @@ LRESULT Viewer::handle(UINT m, WPARAM a, LPARAM b) {
             replace(utf8(text));
         }
         return 0;
-    case WM_IME_SETCONTEXT: case WM_INPUTLANGCHANGE: {
-        if (m == WM_IME_SETCONTEXT) b &= ~ISC_SHOWUICOMPOSITIONWINDOW;
-        const auto result = DefWindowProcW(window_, m, a, b);
-        if (m == WM_INPUTLANGCHANGE || a) caretPosition();
-        return result;
-    }
-    case WM_IME_NOTIFY:
-        if (a == IMN_OPENCANDIDATE || a == IMN_CHANGECANDIDATE) caretPosition();
-        break;
-    case WM_IME_STARTCOMPOSITION: if (edit_) ime_.start(); caretPosition(); return 0;
-    case WM_IME_ENDCOMPOSITION: ime_.clear(); caretPosition(); return 0;
-    case WM_IME_COMPOSITION:
-        if (!edit_) return 0;
-        ime_.update(window_, b);
-        if (edit_ && (b & GCS_RESULTSTR)) {
-            const auto context = ImmGetContext(window_); const LONG bytes = context ? ImmGetCompositionStringW(context, GCS_RESULTSTR, nullptr, 0) : 0;
-            if (bytes > 0) { std::wstring text(static_cast<size_t>(bytes) / sizeof(wchar_t), 0); ImmGetCompositionStringW(context, GCS_RESULTSTR, text.data(), bytes); replace(utf8(text)); }
-            if (context) ImmReleaseContext(window_, context);
-        }
-        caretPosition(); return 0;
+    case WM_IME_SETCONTEXT: case WM_INPUTLANGCHANGE: case WM_IME_NOTIFY:
+    case WM_IME_STARTCOMPOSITION: case WM_IME_ENDCOMPOSITION: case WM_IME_COMPOSITION:
+        if (!edit_ && (m == WM_IME_STARTCOMPOSITION || m == WM_IME_COMPOSITION)) return 0;
+        return ime_.handle(window_, m, a, b, [this] { caretPosition(); },
+            [this](std::wstring text) { if (edit_) replace(utf8(text)); });
     case WM_CONTEXTMENU: {
         if (image_) return 0;
         revealFind_ = false;

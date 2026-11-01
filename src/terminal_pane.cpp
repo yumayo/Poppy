@@ -80,7 +80,7 @@ void TerminalPane::add(SavedTerminal configuration) {
     };
     sessions_.push_back(std::move(session)); select(sessions_.size()-1);
 }
-void TerminalPane::setDpi(UINT dpi) { dpi_=dpi; renderer_.setDpi(dpi); header_=MulDiv(32,dpi,96); for(auto& s:sessions_) s->terminal->setDpi(dpi); layout(); }
+void TerminalPane::setDpi(UINT dpi) { dpi_=dpi; renderer_.setDpi(dpi); renameInput_.setDpi(dpi); header_=MulDiv(32,dpi,96); for(auto& s:sessions_) s->terminal->setDpi(dpi); layout(); }
 void TerminalPane::setDirectory(const ResourceId& directory) {
     directory_ = directory;
     for (auto& session : sessions_) {
@@ -100,7 +100,7 @@ void TerminalPane::relocate(const ResourceId& source, const ResourceId& destinat
 }
 void TerminalPane::restore(const ProjectSession& state) {
     defaultShell_ = state.defaultShell;
-    endDrag(); ratio_ = state.terminalRatio; stop(); for(auto& s:sessions_) DestroyWindow(s->terminal->window()); sessions_.clear();
+    finishRename(false); endDrag(); ratio_ = state.terminalRatio; stop(); for(auto& s:sessions_) DestroyWindow(s->terminal->window()); sessions_.clear();
     for(const auto& saved:state.terminals) add(saved);
     if(sessions_.empty()) add({"", "Shell", directory_.u8string(), 0, false, defaultShell_});
     for (size_t i = 0; i < state.terminals.size() && i < sessions_.size(); ++i) { sessions_[i]->configuration.displayed = state.terminals[i].displayed; sessions_[i]->configuration.group = state.terminals[i].group; }
@@ -145,7 +145,7 @@ void TerminalPane::select(size_t index) {
 }
 void TerminalPane::close(size_t index) {
     if(index>=sessions_.size())return;
-    endDrag(); if(rename_){DestroyWindow(rename_);rename_=nullptr;}
+    endDrag(); finishRename(false);
     sessions_[index]->terminal->stop();DestroyWindow(sessions_[index]->terminal->window());sessions_.erase(sessions_.begin()+static_cast<std::ptrdiff_t>(index));
     if(index<active_)--active_;
     if(sessions_.empty())add({"", "Shell", directory_.u8string(), 0, false, defaultShell_}); else select(std::min(active_,sessions_.size()-1));
@@ -212,6 +212,13 @@ void TerminalPane::layout(){
     for(size_t i=0;i<tools_;++i){TOOLINFOW tip{};tip.cbSize=sizeof(tip);tip.hwnd=window_;tip.uId=i+1;SendMessageW(tooltips_,TTM_DELTOOLW,0,reinterpret_cast<LPARAM>(&tip));}
     tools_=rects.size();
     for(size_t i=0;i<rects.size();++i){TOOLINFOW tip{};tip.cbSize=sizeof(tip);tip.hwnd=window_;tip.uId=i+1;tip.uFlags=TTF_SUBCLASS;tip.rect=rects[i];const auto pane = groupBounds(sessions_[i]->configuration.group);tip.rect.left=std::max(pane.left,tip.rect.left);tip.rect.right=std::min<LONG>(tabsRight(sessions_[i]->configuration.group),tip.rect.right);tip.lpszText=LPSTR_TEXTCALLBACKW;if(tip.rect.right>tip.rect.left)SendMessageW(tooltips_,TTM_ADDTOOLW,0,reinterpret_cast<LPARAM>(&tip));}
+    if (rename_ && renaming_ < rects.size()) {
+        const auto rect = rects[renaming_];
+        const int group = sessions_[renaming_]->configuration.group;
+        const auto left = std::max(groupBounds(group).left, rect.left);
+        const auto right = std::min<LONG>(tabsRight(group), rect.right);
+        SetWindowPos(rename_, HWND_TOP, left, 0, std::max(1L, right - left), header_, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    }
     InvalidateRect(window_,nullptr,FALSE);
 }
 void TerminalPane::paint(){
@@ -283,11 +290,12 @@ void TerminalPane::menu(size_t index,POINT point){
     const auto command=TrackPopupMenu(menu,TPM_RETURNCMD|TPM_RIGHTBUTTON,point.x,point.y,0,window_,nullptr);DestroyMenu(menu);
     if(command==2)close(index);
     else if(command==1){
-        if(rename_)DestroyWindow(rename_);
+        finishRename(false);
         renaming_=index;
-        rename_=CreateWindowExW(WS_EX_CLIENTEDGE,L"EDIT",sessionName(*sessions_[index]).c_str(),WS_CHILD|WS_VISIBLE|WS_TABSTOP|ES_AUTOHSCROLL,0,0,0,0,window_,reinterpret_cast<HMENU>(1001),instance_,nullptr);
-        SetWindowSubclass(rename_, renameProcedure, 1, reinterpret_cast<DWORD_PTR>(this));
-        const auto rect=bounds()[index];SetWindowPos(rename_,HWND_TOP,std::max(0L,rect.left),0,std::max(100L,rect.right-std::max(0L,rect.left)),header_,SWP_SHOWWINDOW);
+        renameInput_.commitOnFocusLoss = true;
+        renameInput_.finished = [this](bool commit) { finishRename(commit); };
+        rename_ = renameInput_.create(window_, instance_, sessionName(*sessions_[index]), foreground);
+        layout();
         SendMessageW(rename_,EM_SETLIMITTEXT,120,0);SendMessageW(rename_,EM_SETSEL,0,-1);SetFocus(rename_);
     }
 }
@@ -325,20 +333,19 @@ void TerminalPane::addMenu(int group, POINT point) {
         layout(); if (changed) changed();
     }
 }
-LRESULT CALLBACK TerminalPane::renameProcedure(HWND window, UINT message, WPARAM a, LPARAM b, UINT_PTR, DWORD_PTR data) {
-    auto& self = *reinterpret_cast<TerminalPane*>(data);
-    if (message == WM_KEYDOWN && (a == VK_RETURN || a == VK_ESCAPE)) {
-        if (a == VK_ESCAPE && self.renaming_ < self.sessions_.size()) SetWindowTextW(window, wide(self.sessions_[self.renaming_]->configuration.name).c_str());
-        SetFocus(self.window()); return 0;
-    }
-    if (message == WM_NCDESTROY) RemoveWindowSubclass(window, renameProcedure, 1);
-    return DefSubclassProc(window, message, a, b);
+void TerminalPane::finishRename(bool commit) {
+    if (!rename_) return;
+    const auto edit = std::exchange(rename_, nullptr);
+    if (commit && !renameInput_.text().empty() && renaming_ < sessions_.size())
+        sessions_[renaming_]->configuration.name = utf8(renameInput_.text());
+    const bool focus = GetFocus() == edit;
+    DestroyWindow(edit); if (focus) SetFocus(window());
+    layout(); if (commit && changed) changed();
 }
 LRESULT CALLBACK TerminalPane::procedure(HWND w,UINT m,WPARAM a,LPARAM b){auto self=reinterpret_cast<TerminalPane*>(GetWindowLongPtrW(w,GWLP_USERDATA));if(m==WM_NCCREATE){self=static_cast<TerminalPane*>(reinterpret_cast<CREATESTRUCTW*>(b)->lpCreateParams);self->window_=w;SetWindowLongPtrW(w,GWLP_USERDATA,reinterpret_cast<LONG_PTR>(self));}return self?self->handle(m,a,b):DefWindowProcW(w,m,a,b);}
 LRESULT TerminalPane::handle(UINT m,WPARAM a,LPARAM b){switch(m){
 case WM_PAINT:paint();return 0;case WM_ERASEBKGND:return 1;case WM_SIZE:layout();return 0;
 case WM_SETFOCUS:SetFocus(window());return 0;
-case WM_COMMAND:if(LOWORD(a)==1001&&HIWORD(a)==EN_KILLFOCUS&&rename_){wchar_t text[121]{};GetWindowTextW(rename_,text,121);if(*text&&renaming_<sessions_.size())sessions_[renaming_]->configuration.name=utf8(text);auto edit=std::exchange(rename_,nullptr);DestroyWindow(edit);layout();if(changed)changed();}return 0;
 case WM_LBUTTONDOWN:{
     const POINT point{GET_X_LPARAM(b),GET_Y_LPARAM(b)};
     if (PtInRect(&splitter_,point)) { resizing_=true;SetCapture(window_);return 0; }

@@ -21,7 +21,7 @@ void QuickOpen::create(HWND parent, HINSTANCE instance, bool projects) {
         indexWorker_ = std::make_unique<Worker>(window_);
     }
 }
-void QuickOpen::setDpi(UINT dpi) { dpi_ = dpi; renderer_.setDpi(dpi); layout(); }
+void QuickOpen::setDpi(UINT dpi) { dpi_ = dpi; renderer_.setDpi(dpi); layout(); caretChanged(); }
 int QuickOpen::rows() const {
     RECT rect{}; GetClientRect(GetParent(window_), &rect);
     return std::clamp((static_cast<int>(rect.bottom) - px(132)) / px(44), 1, 8);
@@ -41,7 +41,7 @@ void QuickOpen::layout() {
     const RECT desired{x, y, x + width, y + height};
     if (!EqualRect(&current, &desired))
         SetWindowPos(window_, HWND_TOP, x, y, width, height, SWP_NOACTIVATE | SWP_NOCOPYBITS);
-    InvalidateRect(window_, nullptr, FALSE);
+    caretChanged();
 }
 void QuickOpen::setRoot(const ResourceId& root) {
     close(); ++revision_; ++indexRevision_;
@@ -54,8 +54,8 @@ void QuickOpen::setProjects(std::vector<ResourceId> projects) {
     request();
 }
 void QuickOpen::show() {
-    if (visible_) { SetFocus(window_); anchor_ = 0; caret_ = query_.size(); caretChanged(); return; }
-    previousFocus_ = GetFocus(); query_.clear(); caret_ = anchor_ = inputFirst_ = 0;
+    if (visible_) { ime_.cancel(window_); SetFocus(window_); anchor_ = 0; caret_ = query_.size(); caretChanged(); return; }
+    previousFocus_ = GetFocus(); query_.clear(); caret_ = anchor_ = 0; line_.reset();
     selected_ = first_ = 0; wheel_ = 0; highSurrogate_ = 0; result_ = {}; visible_ = true;
     request();
     SetWindowPos(window_, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
@@ -66,11 +66,7 @@ void QuickOpen::close(bool restoreFocus) {
     visible_ = false; ++revision_;
     if (worker_) worker_->cancelPending();
     result_ = {}; loading_ = false;
-    if (composing_) {
-        const auto context = ImmGetContext(window_);
-        if (context) { ImmNotifyIME(context, NI_COMPOSITIONSTR, CPS_CANCEL, 0); ImmReleaseContext(window_, context); }
-        composing_ = false;
-    }
+    ime_.cancel(window_); highSurrogate_ = 0;
     ShowWindow(window_, SW_HIDE);
     if (restoreFocus && IsWindow(previousFocus_) && IsWindowVisible(previousFocus_)) SetFocus(previousFocus_);
 }
@@ -173,20 +169,17 @@ void QuickOpen::move(int delta) {
     selected_ = static_cast<size_t>(std::clamp(static_cast<int>(selected_) + delta, 0, static_cast<int>(result_.matches.size()) - 1));
     layout();
 }
-void QuickOpen::caretChanged() {
+RECT QuickOpen::inputBounds() const {
     RECT rect{}; GetClientRect(window_, &rect);
-    inputFirst_ = std::min(inputFirst_, caret_);
-    const int available = std::max(1, static_cast<int>(rect.right) - px(48));
-    while (inputFirst_ < caret_ && renderer_.textWidth(query_.substr(inputFirst_, caret_ - inputFirst_)) > available) inputFirst_ = next(inputFirst_);
-    caretX_ = px(24) + renderer_.textWidth(query_.substr(inputFirst_, caret_ - inputFirst_));
+    return {px(24), px(38), rect.right - px(24), px(76)};
+}
+void QuickOpen::caretChanged() {
+    if (!window_) return;
+    line_.update(renderer_, query_, caret_, anchor_, ime_.text(), inputBounds());
     imePosition(); InvalidateRect(window_, nullptr, FALSE);
 }
 void QuickOpen::imePosition() {
-    if (GetFocus() != window_) return;
-    const auto context = ImmGetContext(window_); if (!context) return;
-    COMPOSITIONFORM form{}; form.dwStyle = CFS_POINT; form.ptCurrentPos = {caretX_, px(44)};
-    ImmSetCompositionWindow(context, &form);
-    positionImeCandidate(window_, context, form.ptCurrentPos, px(32)); ImmReleaseContext(window_, context);
+    positionIme(window_, line_.caret(), line_.height(), renderer_.compositionFont(Renderer::Font::Ui));
 }
 void QuickOpen::paint() {
     Renderer::Paint paint(renderer_, window_); if (!paint) return;
@@ -196,16 +189,9 @@ void QuickOpen::paint() {
     renderer_.label({px(16), px(6), rect.right - px(16), px(34)}, projectMode_ ? L"Recent projects" : L"Go to file", foreground);
     const RECT input{px(16), px(38), rect.right - px(16), px(76)};
     renderer_.fill(input, background); renderer_.outline(input, accent);
-    const auto begin = std::max(inputFirst_, std::min(anchor_, caret_)), end = std::max(anchor_, caret_);
-    if (end > begin) {
-        const int left = px(24) + renderer_.textWidth(query_.substr(inputFirst_, begin - inputFirst_));
-        const int right = px(24) + renderer_.textWidth(query_.substr(inputFirst_, end - inputFirst_));
-        renderer_.fill({left, px(43), std::min<LONG>(right, input.right - px(8)), px(71)}, RGB(57, 75, 89));
-    }
-    renderer_.label({px(24), input.top, input.right - px(8), input.bottom},
-        query_.empty() ? (projectMode_ ? L"Search projects by name or path" : L"Search files by name or path") : query_.substr(inputFirst_), query_.empty() ? muted : foreground,
-        DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-    if (GetFocus() == window_ && !composing_) renderer_.fill({caretX_, px(47), caretX_ + std::max(1, px(1)), px(67)}, foreground);
+    if (query_.empty() && ime_.text().text.empty())
+        renderer_.label(inputBounds(), projectMode_ ? L"Search projects by name or path" : L"Search files by name or path", muted, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    line_.draw(renderer_, foreground, RGB(57, 75, 89), GetFocus() == window_);
     const int count = std::min(rows(), static_cast<int>(result_.matches.size() - std::min(first_, result_.matches.size())));
     for (int row = 0; row < count; ++row) {
         const auto index = first_ + row; const auto& match = result_.matches[index];
@@ -235,11 +221,11 @@ LRESULT QuickOpen::handle(UINT message, WPARAM a, LPARAM b) {
     case WM_PAINT: paint(); return 0;
     case WM_ERASEBKGND: return 1;
     case WM_SIZE: case WM_SETFOCUS: caretChanged(); return 0;
-    case WM_KILLFOCUS: close(false); return 0;
+    case WM_KILLFOCUS: ime_.cancel(window_); DestroyCaret(); close(false); return 0;
     case WM_GETDLGCODE: return DLGC_WANTALLKEYS;
     case wmWork: if (indexWorker_) indexWorker_->dispatch(); if (worker_) worker_->dispatch(); return 0;
     case WM_KEYDOWN: {
-        if (!visible_ || composing_) break;
+        if (!visible_ || ime_.active()) break;
         const bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0, shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
         if (ctrl && a == 'A') { anchor_ = 0; caret_ = query_.size(); caretChanged(); return 0; }
         if (ctrl && (a == 'C' || a == 'X')) {
@@ -267,7 +253,7 @@ LRESULT QuickOpen::handle(UINT message, WPARAM a, LPARAM b) {
         caretChanged(); return 0;
     }
     case WM_CHAR:
-        if (visible_ && !composing_ && a >= L' ' && a != 127 && !(GetKeyState(VK_CONTROL) & 0x8000)) {
+        if (visible_ && !ime_.active() && a >= L' ' && a != 127 && !(GetKeyState(VK_CONTROL) & 0x8000)) {
             const auto ch = static_cast<wchar_t>(a);
             if (ch >= 0xd800 && ch <= 0xdbff) { highSurrogate_ = ch; return 0; }
             std::wstring text;
@@ -276,18 +262,11 @@ LRESULT QuickOpen::handle(UINT message, WPARAM a, LPARAM b) {
         }
         return 0;
     case WM_LBUTTONDOWN: {
-        if (composing_) return 0;
+        if (ime_.active()) return 0;
         SetFocus(window_);
         const int y = GET_Y_LPARAM(b), x = GET_X_LPARAM(b);
         if (y >= px(38) && y < px(76)) {
-            size_t position = inputFirst_;
-            while (position < query_.size()) {
-                const auto after = next(position);
-                const int left = renderer_.textWidth(query_.substr(inputFirst_, position - inputFirst_));
-                const int right = renderer_.textWidth(query_.substr(inputFirst_, after - inputFirst_));
-                if (x - px(24) < (left + right) / 2) break;
-                position = after;
-            }
+            const auto position = line_.hit(x);
             caret_ = position; if (!(GetKeyState(VK_SHIFT) & 0x8000)) anchor_ = caret_; caretChanged();
         } else if (y >= px(86) && y < px(86 + rows() * 44)) {
             const auto index = first_ + (y - px(86)) / px(44);
@@ -302,21 +281,12 @@ LRESULT QuickOpen::handle(UINT message, WPARAM a, LPARAM b) {
         while (wheel_ <= -WHEEL_DELTA) { move(3); wheel_ += WHEEL_DELTA; }
         return 0;
     case WM_MOUSEHWHEEL: return 0;
-    case WM_IME_STARTCOMPOSITION: composing_ = true; imePosition(); InvalidateRect(window_, nullptr, FALSE); break;
-    case WM_IME_ENDCOMPOSITION: composing_ = false; caretChanged(); break;
-    case WM_IME_COMPOSITION:
-        if (b & GCS_RESULTSTR) {
-            const auto context = ImmGetContext(window_);
-            const LONG bytes = context ? ImmGetCompositionStringW(context, GCS_RESULTSTR, nullptr, 0) : 0;
-            if (bytes > 0 && visible_) {
-                std::wstring text(static_cast<size_t>(bytes) / sizeof(wchar_t), L'\0');
-                ImmGetCompositionStringW(context, GCS_RESULTSTR, text.data(), bytes); replace(std::move(text));
-            }
-            if (context) ImmReleaseContext(window_, context);
-            return 0;
-        }
-        break;
-    case WM_DESTROY: stop(); renderer_.discard(); return 0;
+    case WM_IME_SETCONTEXT: case WM_INPUTLANGCHANGE: case WM_IME_NOTIFY:
+    case WM_IME_STARTCOMPOSITION: case WM_IME_ENDCOMPOSITION: case WM_IME_COMPOSITION:
+        return ime_.handle(window_, message, a, b, [this] { caretChanged(); },
+            [this](std::wstring text) { if (visible_) replace(std::move(text)); });
+    case WM_SHOWWINDOW: if (!a) { ime_.cancel(window_); highSurrogate_ = 0; } break;
+    case WM_DESTROY: ime_.clear(); if (GetFocus() == window_) DestroyCaret(); stop(); renderer_.discard(); return 0;
     default: break;
     }
     return DefWindowProcW(window_, message, a, b);

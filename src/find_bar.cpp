@@ -15,19 +15,16 @@ void FindBar::layout(int top, int width, int height) {
     MoveWindow(window_, 0, top, width, height, TRUE); caretChanged();
 }
 void FindBar::show(const std::optional<std::wstring>& seed, bool focus) {
+    ime_.cancel(window_);
     visible_ = true;
-    if (seed) { query_.clear(); caret_ = anchor_ = inputFirst_ = 0; replace(*seed); }
+    if (seed) { query_.clear(); caret_ = anchor_ = 0; line_.reset(); replace(*seed); }
     anchor_ = 0; caret_ = query_.size();
     ShowWindow(window_, SW_SHOW); if (focus) SetFocus(window_); caretChanged();
 }
 void FindBar::close(bool restoreFocus) {
     if (!visible_) return;
     visible_ = false;
-    if (composing_) {
-        const auto context = ImmGetContext(window_);
-        if (context) { ImmNotifyIME(context, NI_COMPOSITIONSTR, CPS_CANCEL, 0); ImmReleaseContext(window_, context); }
-        composing_ = false;
-    }
+    ime_.cancel(window_);
     highSurrogate_ = 0;
     const bool hadFocus = GetFocus() == window_;
     ShowWindow(window_, SW_HIDE);
@@ -73,23 +70,12 @@ void FindBar::replace(std::wstring text) {
     caretChanged(); if (changed) changed();
 }
 void FindBar::imePosition() {
-    if (GetFocus() != window_) return;
-    const auto rect = input();
-    const POINT point{caretX_, rect.top + px(2)};
-    if (GetFocus() == window_) {
-        DestroyCaret(); CreateCaret(window_, nullptr, std::max(1, px(1)), renderer_.textHeight()); SetCaretPos(point.x, point.y);
-    }
-    const auto context = ImmGetContext(window_); if (!context) return;
-    COMPOSITIONFORM form{}; form.dwStyle = CFS_POINT; form.ptCurrentPos = point; ImmSetCompositionWindow(context, &form);
-    positionImeCandidate(window_, context, point, rect.bottom - point.y); ImmReleaseContext(window_, context);
+    positionIme(window_, line_.caret(), line_.height(), renderer_.compositionFont(Renderer::Font::Ui));
 }
 void FindBar::caretChanged() {
     if (!window_) return;
-    const auto rect = input();
-    inputFirst_ = std::min(inputFirst_, caret_);
-    const int available = std::max(1, static_cast<int>(rect.right - rect.left) - px(12));
-    while (inputFirst_ < caret_ && renderer_.textWidth(query_.substr(inputFirst_, caret_ - inputFirst_)) > available) inputFirst_ = next(inputFirst_);
-    caretX_ = rect.left + px(6) + renderer_.textWidth(query_.substr(inputFirst_, caret_ - inputFirst_));
+    auto rect = input(); rect.left += px(6); rect.right -= px(4);
+    line_.update(renderer_, query_, caret_, anchor_, ime_.text(), rect);
     imePosition(); InvalidateRect(window_, nullptr, FALSE);
 }
 void FindBar::paint() {
@@ -97,17 +83,9 @@ void FindBar::paint() {
     RECT rect{}; GetClientRect(window_, &rect);
     renderer_.fill(rect, panel);
     const auto box = input(); renderer_.fill(box, background); renderer_.outline(box, GetFocus() == window_ ? accent : border);
-    const int origin = box.left + px(6);
-    const auto begin = std::max(inputFirst_, std::min(anchor_, caret_)), end = std::max(anchor_, caret_);
-    if (end > begin) {
-        const int left = origin + renderer_.textWidth(query_.substr(inputFirst_, begin - inputFirst_));
-        const int right = origin + renderer_.textWidth(query_.substr(inputFirst_, end - inputFirst_));
-        renderer_.fill({left, box.top + 1, std::min<LONG>(right, box.right - px(4)), box.bottom - 1}, RGB(57, 75, 89));
-    }
-    renderer_.label({origin, box.top, box.right - px(4), box.bottom}, query_.empty() ? compact_ ? L"Search project" : L"Find in file" : query_.substr(inputFirst_),
-        query_.empty() ? muted : foreground, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-    if (GetFocus() == window_ && !composing_ && caretX_ < box.right)
-        renderer_.fill({caretX_, box.top + px(4), caretX_ + std::max(1, px(1)), box.bottom - px(4)}, foreground);
+    if (query_.empty() && ime_.text().text.empty())
+        renderer_.label({box.left + px(6), box.top, box.right - px(4), box.bottom}, compact_ ? L"Search project" : L"Find in file", muted, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    line_.draw(renderer_, foreground, RGB(57, 75, 89), GetFocus() == window_);
     renderer_.label({compact_ ? px(8) : box.right + px(4), compact_ ? px(32) : 0, button(0).left - px(4), rect.bottom}, status_, muted, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
     for (int i = 0; i < 4; ++i) {
         const auto area = button(i);
@@ -137,10 +115,10 @@ LRESULT FindBar::handle(UINT message, WPARAM a, LPARAM b) {
         break;
     case WM_SIZE: caretChanged(); return 0;
     case WM_SETFOCUS: caretChanged(); if (focused) focused(); return 0;
-    case WM_KILLFOCUS: highSurrogate_ = 0; DestroyCaret(); InvalidateRect(window_, nullptr, FALSE); return 0;
+    case WM_KILLFOCUS: ime_.cancel(window_); highSurrogate_ = 0; DestroyCaret(); caretChanged(); return 0;
     case WM_GETDLGCODE: return DLGC_WANTALLKEYS;
     case WM_KEYDOWN: {
-        if (composing_) break;
+        if (ime_.active()) break;
         const bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0, shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
         if (ctrl && a == 'A') { anchor_ = 0; caret_ = query_.size(); caretChanged(); return 0; }
         if (ctrl && (a == 'C' || a == 'X')) {
@@ -167,7 +145,7 @@ LRESULT FindBar::handle(UINT message, WPARAM a, LPARAM b) {
         caretChanged(); return 0;
     }
     case WM_CHAR:
-        if (!composing_ && a >= L' ' && a != 127 && !(GetKeyState(VK_CONTROL) & 0x8000)) {
+        if (!ime_.active() && a >= L' ' && a != 127 && !(GetKeyState(VK_CONTROL) & 0x8000)) {
             const auto ch = static_cast<wchar_t>(a);
             if (ch >= 0xd800 && ch <= 0xdbff) { highSurrogate_ = ch; return 0; }
             std::wstring text;
@@ -176,7 +154,7 @@ LRESULT FindBar::handle(UINT message, WPARAM a, LPARAM b) {
         }
         return 0;
     case WM_LBUTTONDOWN: {
-        if (composing_) return 0;
+        if (ime_.active()) return 0;
         SetFocus(window_);
         const POINT point{GET_X_LPARAM(b), GET_Y_LPARAM(b)};
         for (int i = 0; i < 4; ++i) {
@@ -189,33 +167,17 @@ LRESULT FindBar::handle(UINT message, WPARAM a, LPARAM b) {
         }
         const auto box = input();
         if (PtInRect(&box, point)) {
-            size_t position = inputFirst_;
-            while (position < query_.size()) {
-                const auto after = next(position);
-                const int left = renderer_.textWidth(query_.substr(inputFirst_, position - inputFirst_));
-                const int right = renderer_.textWidth(query_.substr(inputFirst_, after - inputFirst_));
-                if (point.x - box.left - px(6) < (left + right) / 2) break;
-                position = after;
-            }
+            const auto position = line_.hit(point.x);
             caret_ = position; if (!(GetKeyState(VK_SHIFT) & 0x8000)) anchor_ = caret_; caretChanged();
         }
         return 0;
     }
-    case WM_IME_STARTCOMPOSITION: composing_ = true; imePosition(); InvalidateRect(window_, nullptr, FALSE); break;
-    case WM_IME_ENDCOMPOSITION: composing_ = false; caretChanged(); break;
-    case WM_IME_COMPOSITION:
-        if (b & GCS_RESULTSTR) {
-            const auto context = ImmGetContext(window_);
-            const LONG bytes = context ? ImmGetCompositionStringW(context, GCS_RESULTSTR, nullptr, 0) : 0;
-            if (bytes > 0 && visible_) {
-                std::wstring text(static_cast<size_t>(bytes) / sizeof(wchar_t), L'\0');
-                ImmGetCompositionStringW(context, GCS_RESULTSTR, text.data(), bytes); replace(std::move(text));
-            }
-            if (context) ImmReleaseContext(window_, context);
-            return 0;
-        }
-        break;
-    case WM_DESTROY: renderer_.discard(); return 0;
+    case WM_IME_SETCONTEXT: case WM_INPUTLANGCHANGE: case WM_IME_NOTIFY:
+    case WM_IME_STARTCOMPOSITION: case WM_IME_ENDCOMPOSITION: case WM_IME_COMPOSITION:
+        return ime_.handle(window_, message, a, b, [this] { caretChanged(); },
+            [this](std::wstring text) { if (visible_) replace(std::move(text)); });
+    case WM_SHOWWINDOW: if (!a) { ime_.cancel(window_); highSurrogate_ = 0; caretChanged(); } break;
+    case WM_DESTROY: ime_.clear(); if (GetFocus() == window_) DestroyCaret(); renderer_.discard(); return 0;
     default: break;
     }
     return DefWindowProcW(window_, message, a, b);

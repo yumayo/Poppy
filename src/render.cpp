@@ -222,6 +222,12 @@ void Renderer::setDpi(UINT dpi) {
     compositionFont_.lfItalic = codeFont_->GetFontStyle() != DWRITE_FONT_STYLE_NORMAL;
     compositionFont_.lfCharSet = DEFAULT_CHARSET;
     compositionFont_.lfPitchAndFamily = FIXED_PITCH | FF_MODERN;
+    uiCompositionFont_ = {};
+    check(uiFont_->GetFontFamilyName(uiCompositionFont_.lfFaceName, LF_FACESIZE), "UI IME font name lookup failed");
+    uiCompositionFont_.lfHeight = -static_cast<LONG>(std::lround(uiFont_->GetFontSize()));
+    uiCompositionFont_.lfWeight = static_cast<LONG>(uiFont_->GetFontWeight());
+    uiCompositionFont_.lfCharSet = DEFAULT_CHARSET;
+    uiCompositionFont_.lfPitchAndFamily = VARIABLE_PITCH | FF_SWISS;
     // Geometry and fonts use the existing Win32 physical-pixel layout. Keeping
     // targets at 96 DPI avoids scaling it twice on per-monitor DPI changes.
 }
@@ -323,6 +329,78 @@ int Renderer::textWidth(const std::wstring& text) const {
     layout->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
     DWRITE_TEXT_METRICS metrics{};
     return SUCCEEDED(layout->GetMetrics(&metrics)) ? static_cast<int>(std::ceil(metrics.widthIncludingTrailingWhitespace)) : 0;
+}
+void InputLine::update(const Renderer& renderer, const std::wstring& text, size_t caret, size_t anchor,
+                       const CompositionText& composition, const RECT& bounds) {
+    bounds_ = bounds; composition_ = composition;
+    if (!renderer.uiFont_) { layout_.reset(); caret_ = {bounds.left, bounds.top}; return; }
+    caret = std::min(caret, text.size()); anchor = std::min(anchor, text.size());
+    selectionBegin_ = std::min(caret, anchor); selectionEnd_ = std::max(caret, anchor);
+    compositionBegin_ = selectionBegin_;
+    std::wstring display = text;
+    if (!composition.text.empty()) {
+        display.replace(selectionBegin_, selectionEnd_ - selectionBegin_, std::wstring(composition.text.begin(), composition.text.end()));
+        caret = compositionBegin_ + std::min(composition.cursor, composition.text.size());
+        selectionEnd_ = selectionBegin_;
+    }
+    // IMM offsets are UTF-16; never place a cursor inside a surrogate pair.
+    if (caret && caret < display.size() && display[caret] >= 0xdc00 && display[caret] <= 0xdfff &&
+        display[caret - 1] >= 0xd800 && display[caret - 1] <= 0xdbff) --caret;
+    const float width = static_cast<float>(std::max(1L, bounds.right - bounds.left));
+    check(factories().text->CreateTextLayout(display.data(), static_cast<UINT32>(display.size()), renderer.uiFont_.get(),
+        width, static_cast<float>(std::max(1L, bounds.bottom - bounds.top)), layout_.put()), "Input layout failed");
+    layout_->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+    layout_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+    FLOAT x = 0, y = 0; DWRITE_HIT_TEST_METRICS hit{};
+    layout_->HitTestTextPosition(static_cast<UINT32>(caret), FALSE, &x, &y, &hit);
+    DWRITE_TEXT_METRICS metrics{}; layout_->GetMetrics(&metrics);
+    caretWidth_ = std::max(1, static_cast<int>(std::lround(renderer.uiFont_->GetFontSize() / 13.0f)));
+    const float available = std::max(0.0f, width - caretWidth_);
+    scroll_ = std::clamp(scroll_, 0.0f, std::max(0.0f, metrics.widthIncludingTrailingWhitespace - available));
+    if (x < scroll_) scroll_ = x;
+    if (x > scroll_ + available) scroll_ = x - available;
+    caret_ = {bounds.left + static_cast<LONG>(std::lround(x - scroll_)), bounds.top + static_cast<LONG>(std::lround(y))};
+    height_ = std::max(1, static_cast<int>(std::ceil(hit.height)));
+}
+size_t InputLine::hit(int x) const {
+    if (!layout_) return 0;
+    BOOL trailing = FALSE, inside = FALSE; DWRITE_HIT_TEST_METRICS hit{};
+    layout_->HitTestPoint(static_cast<float>(x - bounds_.left) + scroll_, static_cast<float>(caret_.y - bounds_.top), &trailing, &inside, &hit);
+    return hit.textPosition + (trailing ? hit.length : 0);
+}
+void InputLine::range(Renderer& renderer, size_t begin, size_t length, COLORREF color, int underline) const {
+    if (!length) return;
+    UINT32 count = 0;
+    layout_->HitTestTextRange(static_cast<UINT32>(begin), static_cast<UINT32>(length),
+        static_cast<float>(bounds_.left) - scroll_, static_cast<float>(bounds_.top), nullptr, 0, &count);
+    std::vector<DWRITE_HIT_TEST_METRICS> ranges(count);
+    if (!count || FAILED(layout_->HitTestTextRange(static_cast<UINT32>(begin), static_cast<UINT32>(length),
+        static_cast<float>(bounds_.left) - scroll_, static_cast<float>(bounds_.top), ranges.data(), count, &count))) return;
+    for (const auto& area : ranges) {
+        const auto bottom = static_cast<LONG>(std::ceil(area.top + area.height));
+        renderer.fill({static_cast<LONG>(std::floor(area.left)), underline ? bottom - underline : static_cast<LONG>(std::floor(area.top)),
+            static_cast<LONG>(std::ceil(area.left + area.width)), bottom}, color);
+    }
+}
+void InputLine::draw(Renderer& renderer, COLORREF color, COLORREF selection, bool showCaret) const {
+    if (!layout_ || empty(bounds_)) return;
+    renderer.target_->PushAxisAlignedClip(rectangle(bounds_), D2D1_ANTIALIAS_MODE_ALIASED);
+    range(renderer, selectionBegin_, selectionEnd_ - selectionBegin_, selection);
+    const auto attributes = [&](const auto& draw) {
+        for (size_t begin = 0; begin < composition_.text.size();) {
+            const auto attribute = begin < composition_.attributes.size() ? composition_.attributes[begin] : uint8_t{ATTR_INPUT};
+            size_t end = begin + 1;
+            while (end < composition_.text.size() && (end < composition_.attributes.size() ? composition_.attributes[end] : uint8_t{ATTR_INPUT}) == attribute) ++end;
+            draw(compositionBegin_ + begin, end - begin, attribute == ATTR_TARGET_CONVERTED || attribute == ATTR_TARGET_NOTCONVERTED);
+            begin = end;
+        }
+    };
+    attributes([&](size_t begin, size_t length, bool target) { if (target) range(renderer, begin, length, RGB(50, 70, 94)); });
+    renderer.color(color);
+    renderer.target_->DrawTextLayout(D2D1::Point2F(static_cast<float>(bounds_.left) - scroll_, static_cast<float>(bounds_.top)), layout_.get(), renderer.brush_.get());
+    attributes([&](size_t begin, size_t length, bool target) { range(renderer, begin, length, target ? accent : muted, target ? 2 : 1); });
+    if (showCaret) renderer.fill({caret_.x, caret_.y, caret_.x + caretWidth_, caret_.y + height_}, composition_.text.empty() ? color : accent);
+    renderer.target_->PopAxisAlignedClip();
 }
 void Renderer::label(const RECT& rect, const std::wstring& text, COLORREF value, UINT flags) {
     auto* format = font_ == Font::Code ? codeFont_.get() : uiFont_.get();

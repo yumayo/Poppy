@@ -214,6 +214,22 @@ void inlineTreeInput() {
         check(pixels.pixels == reference.pixels, "Shortening the filename left its first characters scrolled out of view");
         DestroyWindow(window);
     }
+    TreeInput terminalName; terminalName.setDpi(96); terminalName.commitOnFocusLoss = true;
+    const auto input = terminalName.create(parent, instance, L"Shell", foreground);
+    MoveWindow(input, 0, 0, 200, 32, FALSE);
+    int completions = 0; bool commit = false;
+    terminalName.finished = [&](bool value) { ++completions; commit = value; };
+    SetFocus(input);
+    SendMessageW(input, WM_IME_STARTCOMPOSITION, 0, 0);
+    SendMessageW(input, WM_KEYDOWN, VK_RETURN, 0); SendMessageW(input, WM_KEYDOWN, VK_ESCAPE, 0);
+    check(completions == 0, "IME Enter or Escape finished a terminal name");
+    SendMessageW(input, WM_IME_ENDCOMPOSITION, 0, 0);
+    SendMessageW(input, WM_KEYDOWN, VK_ESCAPE, 0);
+    check(completions == 1 && !commit, "Escape did not cancel a terminal name");
+    SetFocus(parent);
+    check(completions == 2 && commit, "Losing focus did not finish a terminal name");
+    DestroyWindow(input);
+
 }
 void drawCells(Renderer& renderer, Bitmap& bitmap, const std::vector<Cell>& cells, int cw, int ch) {
     check(renderer.begin(bitmap.bitmap.get()), "Could not bind Direct2D to the WIC bitmap");
@@ -562,10 +578,79 @@ void imeCellRendering() {
         check(cursor.x == 8 + 2 * cw && cursor.y + ch <= clip.bottom, "Wrapped IME candidates would leave the text viewport");
     }
 }
+void imeUiRendering() {
+    Renderer renderer, reference;
+    Bitmap actual, expected;
+    for (const UINT dpi : {96u, 120u, 144u, 192u}) {
+        renderer.setDpi(dpi); reference.setDpi(dpi);
+        const RECT clip{8, 8, 500, 8 + MulDiv(32, dpi, 96)};
+        const std::wstring committed = L"prefix old.txt";
+        CompositionText composition{u"iW日本語ｱ😀Z", {}, 5};
+        const auto before = committed;
+        InputLine line;
+        line.update(renderer, committed, 10, 7, composition, clip);
+        const auto caret = line.caret(); const int bottom = caret.y + line.height();
+        check(committed == before, "Drawing preedit changed committed UI input");
+        check(renderer.begin(actual.bitmap.get()), "Cannot draw proportional preedit");
+        renderer.fill(actual.bounds(), background); line.draw(renderer, foreground, panel, false); finish(renderer); actual.read();
+        const auto display = L"prefix " + std::wstring(composition.text.begin(), composition.text.end()) + L".txt";
+        check(reference.begin(expected.bitmap.get()), "Cannot draw proportional reference");
+        reference.fill(expected.bounds(), background);
+        reference.label(clip, display, foreground, DT_LEFT | DT_VCENTER | DT_SINGLELINE); finish(reference); expected.read();
+        bool ink = false;
+        for (int y = 0; y < Bitmap::height; ++y) for (int x = 0; x < Bitmap::width; ++x) {
+            if (y >= bottom - 2 && y < bottom) continue; // The preedit underline.
+            check(actual.pixel(x, y) == expected.pixel(x, y), "UI preedit glyphs differ from the committed proportional text");
+            ink |= actual.pixel(x, y) != background;
+        }
+        check(ink, "The proportional IME text is empty");
+        // Verify the cursor against DirectWrite independently, including the
+        // preceding text, fallback glyphs and UTF-16 cursor offset.
+        ComPtr<IDWriteFactory> factory; ComPtr<IDWriteTextFormat> font; ComPtr<IDWriteTextLayout> layout;
+        check(SUCCEEDED(DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory), reinterpret_cast<IUnknown**>(factory.put()))), "Cannot create the UI IME reference factory");
+        check(SUCCEEDED(factory->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL,
+            DWRITE_FONT_STRETCH_NORMAL, 13.0f * dpi / 96, L"", font.put())), "Cannot create the UI IME reference font");
+        check(SUCCEEDED(factory->CreateTextLayout(display.data(), static_cast<UINT32>(display.size()), font.get(),
+            static_cast<FLOAT>(clip.right - clip.left), static_cast<FLOAT>(clip.bottom - clip.top), layout.put())), "Cannot create the UI IME reference layout");
+        layout->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP); layout->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+        FLOAT x = 0, y = 0; DWRITE_HIT_TEST_METRICS hit{};
+        layout->HitTestTextPosition(static_cast<UINT32>(7 + composition.cursor), FALSE, &x, &y, &hit);
+        check(caret.x == clip.left + std::lround(x) && caret.y == clip.top + std::lround(y), "UI IME caret does not follow its shaped UTF-16 text position");
+        composition = {u"iiii", {}, 4}; line.update(renderer, L"", 0, 0, composition, clip); const auto narrow = line.caret().x - clip.left;
+        composition = {u"WWWW", {}, 4}; line.update(renderer, L"", 0, 0, composition, clip);
+        check(line.caret().x - clip.left > 2 * narrow, "UI IME text was laid out in fixed cells");
+        composition = {u"iW", {ATTR_INPUT, ATTR_TARGET_CONVERTED}, 2}; line.update(renderer, L"", 0, 0, composition, clip);
+        const auto underline = line.caret().y + line.height() - 1;
+        check(renderer.begin(actual.bitmap.get()), "Cannot draw proportional clause attributes");
+        renderer.fill(actual.bounds(), background); line.draw(renderer, foreground, panel, false); finish(renderer); actual.read();
+        check(actual.pixel(clip.left + 1, underline) == muted && actual.pixel(line.caret().x - 2, underline) == accent,
+            "UI IME clause underlines do not follow proportional widths");
+        composition = {u"😀", {}, 1}; line.update(renderer, L"", 0, 0, composition, clip);
+        const auto insideSurrogate = line.caret();
+        composition.cursor = 0; line.update(renderer, L"", 0, 0, composition, clip);
+        check(insideSurrogate.x == line.caret().x, "UI IME cursor split a surrogate pair");
+        const std::wstring clusters = L"iW😀a\u0301z";
+        line.update(renderer, clusters, 0, 0, {}, clip);
+        for (int px = clip.left; px < clip.left + renderer.textWidth(clusters); ++px) {
+            const auto position = line.hit(px);
+            check(position != 3 && position != 5, "UI hit testing split a UTF-16 or combining cluster");
+        }
+        const RECT narrowClip{8, 8, 80, clip.bottom};
+        composition = {std::u16string(80, u'W') + u"日本語😀", {}, 85};
+        line.update(renderer, L"prefix.txt", 6, 6, composition, narrowClip);
+        check(line.caret().x >= narrowClip.left && line.caret().x < narrowClip.right, "Long UI preedit did not scroll its cursor into view");
+        composition.cursor = 0; line.update(renderer, L"prefix.txt", 6, 6, composition, narrowClip);
+        check(line.caret().x >= narrowClip.left && line.caret().x < narrowClip.right, "Moving the preedit cursor left escaped the input");
+        line.update(renderer, L"short", 5, 5, {}, clip);
+        check(std::abs(line.caret().x - clip.left - renderer.textWidth(L"short")) <= 1, "Cancelling preedit retained its horizontal scroll");
+    }
+}
 void imePositions() {
     Viewer viewer;
     Terminal terminal, backgroundTerminal;
     QuickOpen quickOpen;
+    FindBar projectFind; TreeInput rename; Tree navigator;
+    int treeActivations = 0;
     const auto instance = GetModuleHandleW(nullptr);
     const auto parent = CreateWindowExW(0, L"STATIC", L"IME position test", WS_POPUP | WS_CLIPCHILDREN,
         0, 0, 900, 700, nullptr, nullptr, instance, nullptr);
@@ -573,6 +658,13 @@ void imePositions() {
     struct WindowOwner { HWND value; ~WindowOwner() { DestroyWindow(value); } } owner{parent};
     viewer.create(parent, instance); terminal.create(parent, instance); backgroundTerminal.create(parent, instance);
     quickOpen.create(parent, instance, true);
+    projectFind.create(parent, instance); projectFind.projectSearch(); projectFind.setDpi(96);
+    projectFind.layout(0, 600, 64); projectFind.show(L"iW日本語", false);
+    rename.setDpi(96); const auto renameWindow = rename.create(parent, instance, L"iW日本語.txt", foreground);
+    MoveWindow(renameWindow, 0, 0, 400, 32, FALSE);
+    navigator.create(parent, instance, L"Type to select", 55);
+    navigator.activated = [&](TreeItem) { ++treeActivations; };
+    SetWindowPos(navigator.window(), nullptr, 0, 0, 400, 160, SWP_NOZORDER | SWP_SHOWWINDOW);
     const auto editor = viewer.window(), input = terminal.window(), background = backgroundTerminal.window();
     const auto find = FindWindowExW(editor, nullptr, L"PoppyFindBar", nullptr);
     check(find != nullptr, "Cannot find the editor's search input");
@@ -591,7 +683,7 @@ void imePositions() {
         }
     } context;
     check(context.value != nullptr, "Cannot create the shared IME context");
-    for (const auto window : {editor, input, background, find, quickOpen.window()})
+    for (const auto window : {editor, input, background, find, quickOpen.window(), projectFind.window(), renameWindow, navigator.window()})
         context.previous.emplace_back(window, ImmAssociateContext(window, context.value));
     const auto caret = [&](HWND window) {
         GUITHREADINFO info{}; info.cbSize = sizeof(info);
@@ -601,7 +693,7 @@ void imePositions() {
         return info.rcCaret;
     };
     Renderer metrics;
-    const auto checkPosition = [&](HWND window, UINT dpi) {
+    const auto checkPosition = [&](HWND window, UINT dpi, Renderer::Font kind = Renderer::Font::Code) {
         const auto rect = caret(window);
         COMPOSITIONFORM composition{}; CANDIDATEFORM candidate{};
         check(ImmGetCompositionWindow(context.value, &composition) && ImmGetCandidateWindow(context.value, 0, &candidate),
@@ -622,10 +714,10 @@ void imePositions() {
         LOGFONTW font{};
         check(ImmGetCompositionFontW(context.value, &font) != FALSE, "Cannot inspect the IME composition font");
         metrics.setDpi(dpi);
-        const auto& expected = metrics.compositionFont();
+        const auto& expected = metrics.compositionFont(kind);
         check(std::wstring(font.lfFaceName) == expected.lfFaceName && font.lfHeight == expected.lfHeight &&
             font.lfWidth == expected.lfWidth && font.lfWeight == expected.lfWeight && font.lfItalic == expected.lfItalic,
-            "The IME composition font does not match the code font and cell width at this DPI");
+            "The IME composition font does not match the focused input at this DPI");
     };
     const auto resetPosition = [&] {
         COMPOSITIONFORM composition{}; composition.dwStyle = CFS_POINT;
@@ -635,7 +727,7 @@ void imePositions() {
         LOGFONTW font{}; font.lfHeight = -8; lstrcpyW(font.lfFaceName, L"Arial");
         check(ImmSetCompositionFontW(context.value, &font) != FALSE, "Cannot simulate an IME font reset");
     };
-    const auto refresh = [&](HWND window, UINT dpi) {
+    const auto refresh = [&](HWND window, UINT dpi, Renderer::Font kind = Renderer::Font::Code) {
         const MSG events[] = {
             {window, WM_IME_SETCONTEXT, TRUE, 0, 0, {0, 0}},
             {window, WM_INPUTLANGCHANGE, 0, reinterpret_cast<LPARAM>(GetKeyboardLayout(0)), 0, {0, 0}},
@@ -647,7 +739,7 @@ void imePositions() {
         for (const auto& event : events) {
             resetPosition();
             SendMessageW(window, event.message, event.wParam, event.lParam);
-            checkPosition(window, dpi);
+            checkPosition(window, dpi, kind);
         }
         SendMessageW(window, WM_IME_ENDCOMPOSITION, 0, 0);
     };
@@ -683,6 +775,45 @@ void imePositions() {
             "A terminal DPI change did not resize its native IME caret");
         SetFocus(background); checkPosition(background, otherDpi);
         SetFocus(editor); checkPosition(editor, dpi);
+    }
+    for (const UINT dpi : {96u, 120u, 144u, 192u}) {
+        navigator.clear();
+        const auto treeRoot = navigator.insert(0, L"alpha", true, 0);
+        navigator.insert(treeRoot, L"xray", false, 0); navigator.insert(treeRoot, L"xeno", false, 0); navigator.expand(treeRoot, true);
+        viewer.setDpi(dpi); viewer.find();
+        projectFind.setDpi(dpi); rename.setDpi(dpi); quickOpen.setDpi(dpi); navigator.setDpi(dpi);
+        for (const auto window : {find, projectFind.window(), renameWindow, quickOpen.window(), navigator.window()}) {
+            if (window == quickOpen.window()) quickOpen.show(); else SetFocus(window);
+            checkPosition(window, dpi, Renderer::Font::Ui);
+            refresh(window, dpi, Renderer::Font::Ui);
+            // A shared HIMC must retain the UI font while other inputs resize.
+            terminal.setDpi(dpi == 96 ? 192 : 96); backgroundTerminal.setDpi(120);
+            SendMessageW(editor, WM_SIZE, 0, 0);
+            checkPosition(window, dpi, Renderer::Font::Ui);
+            const auto query = projectFind.query(), name = rename.text();
+            const auto treeSelection = navigator.selection(); const auto activations = treeActivations;
+            SendMessageW(window, WM_IME_STARTCOMPOSITION, 0, 0);
+            const auto before = caret(window);
+            for (const auto key : {VK_LEFT, VK_RETURN, VK_ESCAPE, VK_BACK, VK_DELETE}) SendMessageW(window, WM_KEYDOWN, key, 0);
+            SendMessageW(window, WM_CHAR, L'x', 0);
+            const auto during = caret(window);
+            check(IsWindow(window) && GetFocus() == window && EqualRect(&before, &during) &&
+                projectFind.query() == query && rename.text() == name && navigator.selection() == treeSelection && treeActivations == activations,
+                "Preedit keys changed or closed a proportional input before commit");
+            SendMessageW(window, WM_IME_COMPOSITION, 0, 0);
+            SendMessageW(window, WM_CHAR, L'x', 0);
+            if (window == projectFind.window()) check(projectFind.query() != query, "Cancelled search composition blocked ordinary input");
+            if (window == navigator.window()) check(navigator.selection() != treeSelection, "Cancelling type-to-select composition blocked ordinary input");
+            if (window == renameWindow) check(rename.text() != name, "Cancelled rename composition blocked ordinary input");
+            SendMessageW(window, WM_IME_ENDCOMPOSITION, 0, 0);
+            SendMessageW(window, WM_IME_STARTCOMPOSITION, 0, 0);
+            SetFocus(parent);
+            if (window == quickOpen.window()) quickOpen.show(); else SetFocus(window);
+            const auto afterFocus = projectFind.query(), afterName = rename.text();
+            SendMessageW(window, WM_CHAR, L'y', 0);
+            if (window == projectFind.window()) check(projectFind.query() != afterFocus, "Focus loss left the search composition active");
+            if (window == renameWindow) check(rename.text() != afterName, "Focus loss left the rename composition active");
+        }
     }
     // Moving between monitor corners must preserve the horizontal exclusion,
     // including monitors with negative desktop coordinates.
@@ -1703,7 +1834,7 @@ int main() {
     int result = 0;
     try {
         initializeRendering();
-        statusBarLimits(); treeMultipleSelection(); inlineTreeInput(); cellPositions(); colorsAndClipping(); imagePreviews(); smoothIcons(); windowTargets(); editableDiff(); editorCaret(); imeCellRendering(); imePositions(); editorWordSelection(); editorWordMovement(); editorLineShortcuts(); editorWrapping(); diffWrapping(); documentFind(); horizontalWheelScrolling(); continuousViewerScrolling(); selectionAutoScrolling(); terminalGitBashSocketEnvironment(); terminalSelectionAutoScrolling(); themedScrollbars(); quickOpenStability();
+        statusBarLimits(); treeMultipleSelection(); inlineTreeInput(); cellPositions(); colorsAndClipping(); imagePreviews(); smoothIcons(); windowTargets(); editableDiff(); editorCaret(); imeCellRendering(); imeUiRendering(); imePositions(); editorWordSelection(); editorWordMovement(); editorLineShortcuts(); editorWrapping(); diffWrapping(); documentFind(); horizontalWheelScrolling(); continuousViewerScrolling(); selectionAutoScrolling(); terminalGitBashSocketEnvironment(); terminalSelectionAutoScrolling(); themedScrollbars(); quickOpenStability();
         std::cout << "Direct2D rendering tests passed\n";
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; result = 1; }
     if (SUCCEEDED(com)) CoUninitialize();

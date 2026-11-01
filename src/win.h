@@ -30,6 +30,9 @@ public:
     void clear() { active_ = false; text_ = {}; }
     void update(HWND window, LPARAM flags);
     void cancel(HWND window);
+    LRESULT handle(HWND window, UINT message, WPARAM a, LPARAM b,
+                   const std::function<void()>& position,
+                   const std::function<void(std::wstring)>& commit);
 private:
     bool active_ = false;
     CompositionText text_;
