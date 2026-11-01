@@ -224,7 +224,8 @@ HWND tabTooltips(const Application& app) {
     return result;
 }
 int visibleTabCount(const Application& app) {
-    return static_cast<int>(send(tabTooltips(app), TTM_GETTOOLCOUNT)) - 2;
+    // Three activity buttons and the sidebar's Collapse All button precede tabs.
+    return static_cast<int>(send(tabTooltips(app), TTM_GETTOOLCOUNT)) - 4;
 }
 RECT tabBounds(const Application& app, int visibleIndex) {
     // Tooltip regions expose the actual clickable bounds without assuming a
@@ -1570,6 +1571,47 @@ void treeInteractionTests(const fs::path& executable) {
     click(tree, labelX, height / 2);
     check(expanded(tree, root), "A single root row click did not reopen the tree");
 }
+void collapseAllSidebarTests(const fs::path& executable) {
+    Fixture fixture;
+    fs::create_directories(fixture.root / L"nested" / L"inner");
+    writeFile(fixture.root / L"nested" / L"inner" / L"file.txt");
+    {
+        Application app(executable, fixture.root); const auto tree = app.tree();
+        const auto root = nextItem(tree, TreeRelation::Root);
+        TreeItem directory = 0, inner = 0, file = 0;
+        waitFor([&] { directory = nextItem(tree, TreeRelation::Child, root); return directory != 0; }, "Collapse fixture did not load");
+        expand(tree, directory);
+        waitFor([&] { inner = nextItem(tree, TreeRelation::Child, directory); return expanded(tree, directory) && inner; }, "Collapse fixture folder did not expand");
+        expand(tree, inner);
+        waitFor([&] { file = nextItem(tree, TreeRelation::Child, inner); return expanded(tree, inner) && file; }, "Collapse fixture inner folder did not expand");
+        const auto rect = bounds(app.window, tree);
+        const auto px = [dpi = GetDpiForWindow(app.window)](int value) { return MulDiv(value, dpi, 96); };
+        // Clicking the title must leave the tree alone. The button is on its right.
+        click(app.window, rect.left + px(20), px(17));
+        check(expanded(tree, root) && expanded(tree, inner), "The heading text activated Collapse All");
+        // Expanded descendants can already be hidden beneath a closed ancestor.
+        expand(tree, root, false);
+        check(expanded(tree, directory) && expanded(tree, inner), "Fixture lost its cached expansion");
+        click(app.window, rect.right - px(23), px(17));
+        check(!expanded(tree, root) && !expanded(tree, directory) && !expanded(tree, inner), "Collapse All skipped hidden descendants");
+        send(app.window, WM_LBUTTONDBLCLK, MK_LBUTTON, MAKELPARAM(rect.right - px(23), px(17)));
+        send(app.window, WM_LBUTTONUP);
+        check(!expanded(tree, root), "Repeating Collapse All reopened the root");
+        expand(tree, root);
+        check(!expanded(tree, directory), "Reopening the root expanded a collapsed descendant");
+        expand(tree, directory); expand(tree, inner); send(tree, treeSelect, file);
+        click(app.window, rect.right - px(23), px(17));
+        check(send(tree, treeGetSelection) == static_cast<LRESULT>(root) && scrollInfo(tree).nPos == 0 && scrollInfo(tree, SB_HORZ).nPos == 0,
+            "Collapse All left an invisible selection or stale scroll position");
+        send(app.window, WM_KEYDOWN, VK_F5);
+        check(!expanded(tree, root), "Refreshing reopened the collapsed root");
+    }
+    {
+        Application app(executable, fixture.root); const auto tree = app.tree();
+        const auto root = nextItem(tree, TreeRelation::Root);
+        check(!expanded(tree, root) && !nextItem(tree, TreeRelation::Child, root), "Restart forgot Collapse All in Explorer");
+    }
+}
 void explorerSortTests(const fs::path& executable) {
     Fixture fixture;
     for (const auto number : {11, 2}) {
@@ -1930,11 +1972,33 @@ void gitSidebarTests(const fs::path& executable) {
         view(false);
         send(changes, WM_KEYDOWN, VK_RETURN); waitLines(viewer, 300);
         view(true);
+        group = gitGroup(changes, false);
+        docs = nextItem(changes, TreeRelation::Child, group); src = nextItem(changes, TreeRelation::Next, docs);
+        const auto branch = nextItem(changes, TreeRelation::Root);
+        const auto inner = nextItem(changes, TreeRelation::Child, src);
+        const auto rect = bounds(app.window, changes);
+        click(app.window, rect.right - px(23), px(17));
+        check(!expanded(changes, branch) && !expanded(changes, group) && !expanded(changes, docs) &&
+            !expanded(changes, src) && !expanded(changes, inner), "Source Control Collapse All skipped a branch, group or nested folder");
+        check(gitChangeCount(changes) == 8 && scrollInfo(changes).nPos == 0, "Source Control Collapse All changed entries or retained a stale scroll position");
+        expand(changes, branch);
+        check(!expanded(changes, group), "Reopening the branch reopened the Changes group");
+        view(false); view(true);
+        group = gitGroup(changes, false);
+        check(!expanded(changes, group) && !expanded(changes, nextItem(changes, TreeRelation::Child, group)),
+            "Switching Git layouts forgot Collapse All");
+        const auto beforeRefresh = group;
+        send(app.window, WM_KEYDOWN, VK_F5);
+        waitFor([&] { return gitGroup(changes, false) != beforeRefresh; }, "Collapsed Git changes did not refresh");
+        check(!expanded(changes, gitGroup(changes, false)), "Refreshing reopened a collapsed Changes group");
+        click(app.window, rect.right - px(23), px(17));
     }
     {
         Application app(executable, fixture.root); app.tree();
         const auto changes = GetDlgItem(app.window, 4);
         waitFor([&] { return IsWindowVisible(changes) && gitChangeCount(changes) == 8; }, "Restart lost the Git Tree layout");
+        check(!expanded(changes, nextItem(changes, TreeRelation::Root)) && !expanded(changes, gitGroup(changes, false)),
+            "Restart forgot Collapse All in Source Control");
         const auto rect = bounds(app.window, changes);
         click(app.window, rect.left + (rect.right - rect.left) * 3 / 4, rect.top - MulDiv(14, GetDpiForWindow(app.window), 96));
     }
@@ -3049,7 +3113,7 @@ int wmain(int argc, wchar_t** argv) {
     try {
         check(argc == 2, "Pass the path to Poppy.exe");
         SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
-        for (const auto test : {folderTests, explorerSortTests, sidebarTests, treeInteractionTests, previewTabTests, explorerPreviewTabTests, previewTabSplitTests, tabTests, rapidTabMiddleClickTests, pinnedTabTests,
+        for (const auto test : {folderTests, explorerSortTests, sidebarTests, treeInteractionTests, collapseAllSidebarTests, previewTabTests, explorerPreviewTabTests, previewTabSplitTests, tabTests, rapidTabMiddleClickTests, pinnedTabTests,
                 bulkTabCloseTests, bulkTabSaveTests, bulkTabSplitTests, explorerActiveFileTests, htmlTabToolsTests,
                 tabDragTests, wrappingTabDragTests, wrappingTabTests, renameTests, explorerMoveTests, explorerDeleteTests, explorerMultipleSelectionTests, createItemTests, newFileShortcutTests, pasteImageTests, splitPaneTests, quickOpenTests, fullSearchTests, gitSidebarTests, gitIgnoredExplorerTests, gitAutoRefreshTests, editableGitDiffTests, branchSidebarTests, multiRepositoryTests, sessionTests, multiProjectTests, recentProjectTests, projectDragTests, scrollingProjectDragTests, terminalTitleTests, terminalShellTests, terminalShortcutTests, terminalBackspaceTests}) {
             Fixture appData; AppDataEnvironment environment(appData.root);

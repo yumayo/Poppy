@@ -57,6 +57,18 @@ void Tree::expand(TreeItem id, bool value) {
     if (expanded) expanded(id, value);
     changed();
 }
+void Tree::collapseAll() {
+    ime_.cancel(window_); endDrag(); finishRename(false);
+    Batch batch(*this);
+    // Include retained descendants of already collapsed folders. Collect first
+    // because expansion callbacks may change the hierarchy.
+    std::vector<TreeItem> items;
+    for (auto id = child(); id; id = next(id)) items.push_back(id);
+    for (size_t i = 0; i < items.size(); ++i)
+        for (auto id = child(items[i]); id; id = next(id)) items.push_back(id);
+    for (auto it = items.rbegin(); it != items.rend(); ++it) expand(*it, false);
+    top_ = left_ = 0; changed();
+}
 void Tree::select(TreeItem id, bool activate) {
     if (!model_.select(id)) return;
     ensureVisible(); changed();

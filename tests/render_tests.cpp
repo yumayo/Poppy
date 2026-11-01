@@ -520,7 +520,7 @@ void smoothIcons() {
         const int size = MulDiv(24, dpi, 96);
         const std::vector<Renderer::Icon> icons{Renderer::Icon::Explorer, Renderer::Icon::SourceControl, Renderer::Icon::Branch,
             Renderer::Icon::OpenAllChanges, Renderer::Icon::StageChanges, Renderer::Icon::UnstageChanges, Renderer::Icon::DiscardChanges, Renderer::Icon::StashChanges, Renderer::Icon::OpenFile,
-            Renderer::Icon::Eye, Renderer::Icon::EyeClosed};
+            Renderer::Icon::Eye, Renderer::Icon::EyeClosed, Renderer::Icon::CollapseAll};
         for (size_t i = 0; i < icons.size(); ++i) {
             const int x = 8 + static_cast<int>(i % 9) * 56, y = 8 + static_cast<int>(i / 9) * 56;
             renderer.icon(icons[i], {x, y, x + size, y + size}, RGB(255, 255, 255));

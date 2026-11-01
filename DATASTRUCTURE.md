@@ -237,4 +237,4 @@ version 10では`tabs.diff_wrap_offset`を追加します。`diff_top`に対応�
 
 version 11では`git_comparisons.repository TEXT NOT NULL DEFAULT ''`を追加します。比較元のリポジトリルートをWindowsの絶対パスまたはWSLのLinuxパスで保持し、所属プロジェクトの接続先と組み合わせて復元します。入れ子のリポジトリで同じファイルを別のリポジトリのコミットと比較する場合も対象を保持します。旧形式の空欄は、読み込み時にパスが属する最も内側のリポジトリを使用します。
 
-`session.git_sidebar`は0=EXPLORER、1=SOURCE CONTROL、2=BRANCHです。`git_collapsed.path`と`view_state.git_selected`はグループを区別する`staged:`または`changes:`を相対パスの前に付けて保存します。複数リポジトリの場合はさらに`repository:<リポジトリの正規化キー>\n`を先頭に付け、リポジトリ見出しの折りたたみも同じキーで保存します。BRANCHのコミット・変更ファイルのツリーは必要時にGitから取得し、保存しません。
+`session.git_sidebar`は0=EXPLORER、1=SOURCE CONTROL、2=BRANCHです。`git_collapsed.path`と`view_state.git_selected`はグループを区別する`staged:`または`changes:`を相対パスの前に付けて保存します。複数リポジトリの場合はさらに`repository:<リポジトリの正規化キー>\n`を先頭に付け、リポジトリ見出しの折りたたみも同じキーで保存します。ブランチの折りたたみは`branch:<リポジトリの正規化キー>\n<完全なref名>`で保存し、Collapse Allで閉じた現在のブランチも再起動時に開き直しません。BRANCHのコミット・変更ファイルのツリーは必要時にGitから取得し、保存しません。

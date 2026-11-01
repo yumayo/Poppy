@@ -29,6 +29,7 @@ public:
     void sort(TreeItem parent, const std::function<bool(uintptr_t, uintptr_t)>& compare);
     void reparent(TreeItem id, TreeItem parent) { if (model_.reparent(id, parent)) changed(); }
     void expand(TreeItem id, bool expanded);
+    void collapseAll();
     void select(TreeItem id, bool activate = true);
     void addSelection(TreeItem id) { if (!model_.selected(id) && model_.select(id, true, false)) changed(); }
     void showSelection() { ensureVisible(); changed(); }

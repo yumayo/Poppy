@@ -265,6 +265,8 @@ private:
     void layout(bool revealTab = true);
     void paint();
     void selectSidebar(Sidebar sidebar);
+    RECT collapseButton() const;
+    void collapseSidebar();
     RECT gitViewButton(bool tree) const;
     void setGitView(bool tree);
     void updateGitFiles();
@@ -377,6 +379,7 @@ private:
     int dragging_ = 0, dragOffset_ = 0;
     bool terminalVisible_ = true;
     bool updatingGitFiles_ = false;
+    bool collapsingSidebar_ = false, collapseHover_ = false;
     bool renamePending_ = false;
     bool historyStopped_ = false;
     ExplorerHistory explorerHistory_;
@@ -588,8 +591,9 @@ void ProjectRuntime::Impl::create() {
         const auto source = sourceNode(item);
         if (!source) {
             const auto n = historyNode(item);
-            if (n && n->kind == HistoryKind::Repository) {
-                const auto path = L"repository:" + pathKey(n->root) + L"\n";
+            if (n && (n->kind == HistoryKind::Repository || n->kind == HistoryKind::Branch)) {
+                const auto path = n->kind == HistoryKind::Repository ? L"repository:" + pathKey(n->root) + L"\n" :
+                    L"branch:" + pathKey(n->root) + L"\n" + wide(n->ref);
                 if (value) collapsedGitPaths_.erase(path);
                 else if (collapsedGitPaths_.size() < maxTreeNodes) collapsedGitPaths_.insert(path);
             }
@@ -621,6 +625,9 @@ void ProjectRuntime::Impl::create() {
         tip.lpszText = const_cast<wchar_t*>(button == explorerButton_ ? L"Explorer (Ctrl+Shift+E)" : button == gitButton_ ? L"Source Control (Ctrl+Shift+G)" : L"Search (Ctrl+Shift+F)");
         SendMessageW(tooltips_, TTM_ADDTOOLW, 0, reinterpret_cast<LPARAM>(&tip));
     }
+    TOOLINFOW collapseTip{}; collapseTip.cbSize = sizeof(collapseTip); collapseTip.uFlags = TTF_SUBCLASS;
+    collapseTip.hwnd = window_; collapseTip.uId = 50; collapseTip.lpszText = const_cast<wchar_t*>(L"Collapse All");
+    SendMessageW(tooltips_, TTM_ADDTOOLW, 0, reinterpret_cast<LPARAM>(&collapseTip));
     for (int group = 0; group < 2; ++group) {
         auto& view = viewers_[group]; view.create(window_, instance_);
         view.changed = [this, group] {
@@ -681,6 +688,11 @@ void ProjectRuntime::Impl::layout(bool revealTab) {
     const int terminalSize = terminalVisible_ ? std::min(MulDiv(terminalHeight_, dpi_, 96), std::max(0, content - MulDiv(100, dpi_, 96))) : 0;
     const int viewerSize = std::max(0, content - terminalSize - (terminalVisible_ ? splitter_ : 0));
     sidebarRect_ = {activityWidth_, 0, activityWidth_ + side, content};
+    TOOLINFOW collapseTip{}; collapseTip.cbSize = sizeof(collapseTip); collapseTip.hwnd = window_; collapseTip.uId = 50;
+    collapseTip.rect = collapseButton();
+    SendMessageW(tooltips_, TTM_NEWTOOLRECTW, 0, reinterpret_cast<LPARAM>(&collapseTip));
+    POINT pointer{}; GetCursorPos(&pointer); ScreenToClient(window_, &pointer);
+    collapseHover_ = PtInRect(&collapseTip.rect, pointer) != FALSE;
     sidebarSplitter_ = {sidebarRect_.right, 0, right, content};
     terminalSplitter_ = {right, viewerSize, width, viewerSize + (terminalVisible_ ? splitter_ : 0)};
     const int gitTop = sidebarHeader_ + gitHeader_;
@@ -777,7 +789,13 @@ void ProjectRuntime::Impl::paint() {
     dc.fill({activityWidth_ - 1, 0, activityWidth_, r.bottom - footer_}, border);
     dc.fill(sidebarRect_, panel);
     const int left = sidebarRect_.left + scaled(14), edge = sidebarRect_.right - scaled(12), top = sidebarHeader_;
-    dc.label({left, 0, edge, top}, activeSidebar_ == Sidebar::Explorer ? L"EXPLORER" : activeSidebar_ == Sidebar::Git ? L"SOURCE CONTROL" : L"SEARCH", foreground);
+    const auto collapse = collapseButton();
+    dc.label({left, 0, collapse.right ? collapse.left - scaled(6) : edge, top}, activeSidebar_ == Sidebar::Explorer ? L"EXPLORER" : activeSidebar_ == Sidebar::Git ? L"SOURCE CONTROL" : L"SEARCH", foreground);
+    if (collapse.right) {
+        if (collapseHover_) dc.fill(collapse, RGB(255, 255, 255), 0.10f);
+        auto icon = collapse; InflateRect(&icon, -scaled(4), -scaled(4));
+        dc.icon(Renderer::Icon::CollapseAll, icon, foreground);
+    }
     dc.fill({sidebarRect_.left, top - 1, sidebarRect_.right, top}, border);
     if (activeSidebar_ == Sidebar::Git) {
         const bool repository = git_ && !git_->repositories.empty();
@@ -852,6 +870,31 @@ void ProjectRuntime::Impl::selectSidebar(Sidebar sidebar) {
     if (sidebar == Sidebar::Explorer) explorer_.showSelection();
     SetFocus(sidebar == Sidebar::Explorer ? (IsWindowVisible(tree_) ? tree_ : explorerButton_) : (IsWindowVisible(gitTree_) ? gitTree_ : gitButton_));
 }
+RECT ProjectRuntime::Impl::collapseButton() const {
+    if (activeSidebar_ == Sidebar::Search) return {};
+    const int size = MulDiv(26, dpi_, 96), right = sidebarRect_.right - MulDiv(10, dpi_, 96);
+    const int top = (sidebarHeader_ - size) / 2;
+    return {right - size, top, right, top + size};
+}
+void ProjectRuntime::Impl::collapseSidebar() {
+    if (activeSidebar_ == Sidebar::Search) return;
+    if (activeSidebar_ == Sidebar::Explorer) {
+        pendingExplorerFile_.clear(); pendingTreeSelection_.clear(); pendingTreeSelections_.clear();
+        expandedPaths_.clear();
+        // Pending directory completions must not reopen the tree after this action.
+        for (const auto& pair : nodes_) if (const auto n = node(pair.second)) n->expandRequested = false;
+        explorer_.collapseAll(); restoredScroll_ = true;
+        if (IsWindowVisible(tree_)) SetFocus(tree_);
+    } else {
+        collapsingSidebar_ = true;
+        changes_.collapseAll();
+        collapsingSidebar_ = false;
+        pendingGitSelection_.clear(); restoreGitTop_ = restoreGitLeft_ = 0;
+        refreshAllChanges();
+        if (IsWindowVisible(gitTree_)) SetFocus(gitTree_);
+    }
+    if (owner_ && owner_->changed) owner_->changed();
+}
 RECT ProjectRuntime::Impl::gitViewButton(bool tree) const {
     const int padding = MulDiv(12, dpi_, 96), top = sidebarHeader_;
     const int middle = (sidebarRect_.left + sidebarRect_.right) / 2;
@@ -901,6 +944,7 @@ std::wstring ProjectRuntime::Impl::gitVisibilityPath(TreeItem item) const {
     return n && n->kind == HistoryKind::File ? gitVisibilityPrefix(n->root, GitDiffKind::Commit, n->revision) + n->path.lexically_relative(n->root).generic_wstring() : std::wstring{};
 }
 void ProjectRuntime::Impl::refreshAllChanges() {
+    if (collapsingSidebar_) return;
     saveTab();
     for (int group = 0; group < 2; ++group) {
         const auto index = groupTab(group);
@@ -1256,7 +1300,7 @@ void ProjectRuntime::Impl::refreshBranches() {
                             HistoryNode node{HistoryKind::Branch, ref.ref, ref.tip, {}}; node.root = listing.root; node.current = ref.current;
                             sourceChanged = sourceChanged || ref.current;
                             const auto item = insertHistory(parent, text, std::move(node), true, ref.current ? accent : foreground);
-                            if (ref.current) changes_.expand(item, true);
+                            if (ref.current) changes_.expand(item, !collapsedGitPaths_.count(L"branch:" + pathKey(listing.root) + L"\n" + wide(ref.ref)));
                         } else {
                             const auto item = found->second; auto n = historyNode(item);
                             changes_.label(item, text, ref.current ? accent : foreground);
@@ -2808,6 +2852,8 @@ LRESULT ProjectRuntime::Impl::handle(UINT m, WPARAM a, LPARAM b) {
     case WM_LBUTTONDOWN: {
         quickOpen_.close();
         const POINT point{GET_X_LPARAM(b), GET_Y_LPARAM(b)};
+        const auto collapse = collapseButton();
+        if (PtInRect(&collapse, point)) { collapseSidebar(); return 0; }
         if (activeSidebar_ == Sidebar::Git) for (const bool tree : {true, false}) {
             const auto button = gitViewButton(tree);
             if (PtInRect(&button, point)) { setGitView(tree); return 0; }
@@ -2839,6 +2885,8 @@ LRESULT ProjectRuntime::Impl::handle(UINT m, WPARAM a, LPARAM b) {
     }
     case WM_LBUTTONDBLCLK: {
         const POINT point{GET_X_LPARAM(b), GET_Y_LPARAM(b)};
+        const auto collapse = collapseButton();
+        if (PtInRect(&collapse, point)) { collapseSidebar(); return 0; }
         if (selectEditorMode(point)) return 0;
         const auto index = tabAt(point);
         if (index < tabs_.size()) {
@@ -2854,7 +2902,11 @@ LRESULT ProjectRuntime::Impl::handle(UINT m, WPARAM a, LPARAM b) {
     case WM_CONTEXTMENU:
         if (reinterpret_cast<HWND>(a) == window_) { tabMenu({GET_X_LPARAM(b), GET_Y_LPARAM(b)}); return 0; }
         break;
-    case WM_MOUSEMOVE:
+    case WM_MOUSEMOVE: {
+        const auto collapse = collapseButton();
+        const bool hot = PtInRect(&collapse, {GET_X_LPARAM(b), GET_Y_LPARAM(b)}) != FALSE;
+        if (hot != collapseHover_) { collapseHover_ = hot; InvalidateRect(window_, &collapse, FALSE); }
+        if (hot) { TRACKMOUSEEVENT track{sizeof(track), TME_LEAVE, window_, 0}; TrackMouseEvent(&track); }
         if (tabDrag_) { updateTabDrag({GET_X_LPARAM(b), GET_Y_LPARAM(b)}); return 0; }
         if (dragging_) {
             RECT r{}; GetClientRect(window_, &r);
@@ -2863,6 +2915,10 @@ LRESULT ProjectRuntime::Impl::handle(UINT m, WPARAM a, LPARAM b) {
             else terminalHeight_ = std::clamp(MulDiv(r.bottom - footer_ - GET_Y_LPARAM(b), 96, dpi_), 100, std::max(100, MulDiv(r.bottom - footer_, 96, dpi_) - 120));
             layout();
         } return 0;
+    }
+    case WM_MOUSELEAVE:
+        if (collapseHover_) { collapseHover_ = false; const auto collapse = collapseButton(); InvalidateRect(window_, &collapse, FALSE); }
+        return 0;
     case WM_LBUTTONUP:
         if (tabDrag_ && tabDrag_->active) updateTabDrag({GET_X_LPARAM(b), GET_Y_LPARAM(b)});
         endTabDrag(true);
@@ -2874,6 +2930,8 @@ LRESULT ProjectRuntime::Impl::handle(UINT m, WPARAM a, LPARAM b) {
         if (reinterpret_cast<HWND>(a) == window_ && LOWORD(b) == HTCLIENT) {
             if (tabDrag_) return TRUE;
             POINT p{}; GetCursorPos(&p); ScreenToClient(window_, &p);
+            const auto collapse = collapseButton();
+            if (PtInRect(&collapse, p)) { SetCursor(LoadCursorW(nullptr, IDC_HAND)); return TRUE; }
             for (const auto& pane : editorGroups_) if (PtInRect(&pane.tools, p)) { SetCursor(LoadCursorW(nullptr, IDC_HAND)); return TRUE; }
             if (PtInRect(&sidebarSplitter_, p) || PtInRect(&editorSplitter_, p)) { SetCursor(LoadCursorW(nullptr, IDC_SIZEWE)); return TRUE; }
             if (terminalVisible_ && PtInRect(&terminalSplitter_, p)) { SetCursor(LoadCursorW(nullptr, IDC_SIZENS)); return TRUE; }
