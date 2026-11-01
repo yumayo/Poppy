@@ -6,6 +6,7 @@
 #include "status_bar.h"
 #include "tree.h"
 #include "git_commit_pane.h"
+#include "shutdown_dialog.h"
 #include <commctrl.h>
 #include <imm.h>
 #include <algorithm>
@@ -19,6 +20,62 @@ using namespace poppy;
 namespace {
 void check(bool condition, const char* message) {
     if (!condition) throw std::runtime_error(message);
+}
+void shutdownProgress() {
+    const auto instance = GetModuleHandleW(nullptr);
+    const auto parent = CreateWindowExW(0, L"STATIC", L"Shutdown test", WS_POPUP, 100, 100, 1040, 720, nullptr, nullptr, instance, nullptr);
+    check(parent != nullptr, "Cannot create shutdown test owner");
+    struct Owner { HWND window; ~Owner() { DestroyWindow(window); } } owner{parent};
+    ShowWindow(parent, SW_SHOWNOACTIVATE);
+    {
+        ShutdownDialog dialog(parent, instance);
+        check(!IsWindowEnabled(parent) && IsWindowVisible(dialog.window()), "Shutdown did not block the workspace behind the dialog");
+        const auto shade = GetWindow(dialog.window(), GW_OWNER);
+        BYTE alpha = 0; DWORD flags = 0;
+        check(GetWindow(shade, GW_OWNER) == parent && IsWindowVisible(shade), "Shutdown shade is not owned by the workspace");
+        check(GetLayeredWindowAttributes(shade, nullptr, &alpha, &flags) && (flags & LWA_ALPHA) && alpha > 0 && alpha < 255, "Shutdown backdrop is not translucent");
+        RECT parentRect{}, shadeRect{}; GetWindowRect(parent, &parentRect); GetWindowRect(shade, &shadeRect);
+        check(EqualRect(&parentRect, &shadeRect), "Shutdown shade does not cover the whole owner");
+        struct Observation { unsigned timers = 0, paints = 0, callbacks = 0; } observed;
+        const auto observe = [](HWND window, UINT message, WPARAM a, LPARAM b, UINT_PTR, DWORD_PTR data) -> LRESULT {
+            auto& observed = *reinterpret_cast<Observation*>(data);
+            if (message == WM_TIMER) ++observed.timers;
+            if (message == WM_PAINT) ++observed.paints;
+            if (message == WM_APP+107) ++observed.callbacks;
+            return DefSubclassProc(window, message, a, b);
+        };
+        check(SetWindowSubclass(dialog.window(), observe, 1, reinterpret_cast<DWORD_PTR>(&observed)) != FALSE, "Cannot observe shutdown animation");
+        check(SetWindowSubclass(parent, observe, 1, reinterpret_cast<DWORD_PTR>(&observed)) != FALSE, "Cannot observe shutdown input blocking");
+        for (const auto dpi : {96u, 144u, 192u}) {
+            SendMessageW(dialog.window(), WM_DPICHANGED, MAKELONG(dpi, dpi), 0);
+            RECT rect{}; GetWindowRect(dialog.window(), &rect);
+            check(rect.right > rect.left && rect.bottom > rect.top, "Shutdown dialog disappeared after a DPI change");
+        }
+        dialog.stage(ShutdownDialog::Stage::Stopping, L"Project 1 / 2 · 日本語");
+        dialog.detail(L"Stopping Docker containers and WSL processes · Shell");
+        PostMessageW(parent, WM_APP+107, 0, 0);
+        PostMessageW(dialog.window(), WM_CLOSE, 0, 0);
+        Handle done(CreateEventW(nullptr, TRUE, FALSE, nullptr));
+        check(static_cast<bool>(done), "Cannot create shutdown wait fixture");
+        check(SetTimer(dialog.window(), 2, 240, [](HWND window, UINT, UINT_PTR id, DWORD) {
+            SetEvent(reinterpret_cast<HANDLE>(GetPropW(window, L"ShutdownTestDone"))); KillTimer(window, id);
+        }) != 0, "Cannot schedule shutdown wait completion");
+        SetPropW(dialog.window(), L"ShutdownTestDone", done.value);
+        const auto uiThread = GetCurrentThreadId();
+        dialog.wait([&] {
+            check(GetCurrentThreadId() != uiThread, "Blocking shutdown work ran on the UI thread");
+            check(WaitForSingleObject(done.value, 3000) == WAIT_OBJECT_0, "Shutdown dialog stopped processing timers while waiting");
+        });
+        RemovePropW(dialog.window(), L"ShutdownTestDone");
+        check(observed.timers >= 2 && observed.paints >= 1, "Shutdown progress did not animate while cleanup was blocked");
+        check(observed.callbacks == 0 && IsWindow(dialog.window()), "Shutdown reentered application work or accepted a premature close");
+        bool propagated = false;
+        try { dialog.wait([] { throw std::runtime_error("cleanup failure"); }); } catch (const std::runtime_error&) { propagated = true; }
+        check(propagated, "Shutdown wait lost the cleanup error");
+        RemoveWindowSubclass(parent, observe, 1);
+        RemoveWindowSubclass(dialog.window(), observe, 1);
+    }
+    check(IsWindowEnabled(parent), "Shutdown dialog did not restore its owner");
 }
 void statusBarLimits() {
     INITCOMMONCONTROLSEX controls{sizeof(controls), ICC_WIN95_CLASSES};
@@ -1922,7 +1979,15 @@ void terminalProcessShutdown() {
     first.stop();
     Handle lock(CreateFileW((directory / L"0").c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr));
     check(static_cast<bool>(lock), "Terminal shutdown returned while a descendant held its lock");
-    check(second.running(), "Closing a terminal stopped its sibling"); second.stop();
+    check(second.running(), "Closing a terminal stopped its sibling");
+    {
+        ShutdownDialog dialog(parent, instance);
+        dialog.stage(ShutdownDialog::Stage::Stopping, L"Terminal shutdown regression");
+        dialog.detail(L"Stopping terminal processes…");
+        second.stop(&dialog);
+    }
+    Handle secondLock(CreateFileW((directory / L"1").c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr));
+    check(static_cast<bool>(secondLock), "Modal terminal shutdown returned before its descendants exited");
 }
 void terminalGitBashSocketEnvironment() {
     const auto bash = terminalShellCommand(TerminalShell::GitBash, L"").front();
@@ -2171,6 +2236,7 @@ int main(int argc, char** argv) {
             htmlPreviewRuntime();
             std::cout << "WebView2 runtime reuse tests passed\n";
         } else {
+            shutdownProgress();
             htmlPreviewSwitching();
             terminalProcessShutdown();
             statusBarLimits(); treeMultipleSelection(); inlineTreeInput(); gitCommitInput(); cellPositions(); colorsAndClipping(); imagePreviews(); smoothIcons(); windowTargets(); editableDiff(); editorCaret(); delayedLoadingMessages(); imeCellRendering(); imeTerminalInsertion(); imeUiRendering(); imePositions(); editorWordSelection(); editorWordMovement(); editorLineShortcuts(); editorWrapping(); diffWrapping(); documentFind(); horizontalWheelScrolling(); continuousViewerScrolling(); selectionAutoScrolling(); terminalGitBashSocketEnvironment(); terminalSelectionAutoScrolling(); themedScrollbars(); quickOpenStability();

@@ -1,4 +1,5 @@
 #include "project_runtime.h"
+#include "shutdown_dialog.h"
 #include "storage.h"
 #include "terminal.h"
 #include "project_provider.h"
@@ -64,6 +65,7 @@ private:
     void save(OpenProject& project);
     void saveApp();
     void saveAll();
+    void finishClose();
     void trimDocuments();
     void checkFolder(OpenProject& project);
     void markDirty();
@@ -148,6 +150,7 @@ void Workspace::create(){
         AppSession state;std::vector<std::string> history;std::string error;
         try{storage_=std::make_unique<Storage>(stateDirectory());state=storage_->loadApp();history=storage_->projectHistory();}catch(const std::exception& failure){error=failure.what();storage_.reset();}
         storageWorker_->complete([this,state=std::move(state),history=std::move(history),error]{
+            if(closing_)return;
             session_=state;restoring_=false;
             for(const auto& path:history)history_.push_back(ResourceId::parse(path));
             if(session_.positioned){
@@ -225,6 +228,7 @@ void Workspace::chooseWsl(){
         std::vector<std::string> distributions; std::wstring error;
         try { distributions = installedWslDistributions(); } catch (const std::exception& failure) { error = wide(failure.what()); }
         storageWorker_->complete([this, distributions, error] {
+            if(closing_)return;
             listingWsl_ = false;
             if (!error.empty()) { MessageBoxW(window_, error.c_str(), L"Poppy — WSL", MB_OK | MB_ICONWARNING); return; }
             if (const auto location = chooseWslFolder(window_, distributions)) open(*location);
@@ -238,6 +242,7 @@ void Workspace::chooseWindows(){
     dialog->Release();
 }
 void Workspace::open(fs::path path,bool shouldSelect){
+    if(closing_)return;
     if (restoring_) { pendingProjects_.push_back(std::move(path)); return; }
     if (const auto location = wslUncLocation(path.u8string())) {
         storageWorker_->submit(L"normalize-wsl:" + path.native(), [this, location = *location, shouldSelect] {
@@ -248,12 +253,13 @@ void Workspace::open(fs::path path,bool shouldSelect){
                 if (found == distributions.end()) throw std::runtime_error("The WSL distribution is not registered: " + location.distro);
                 resource = ResourceId::wsl(*found, location.root);
             } catch (const std::exception& failure) { error = wide(failure.what()); }
-            storageWorker_->complete([this, resource, error, shouldSelect] { if (error.empty()) open(resource, shouldSelect); else MessageBoxW(window_, error.c_str(), L"Poppy — WSL", MB_OK | MB_ICONWARNING); });
+            storageWorker_->complete([this, resource, error, shouldSelect] { if(closing_)return; if (error.empty()) open(resource, shouldSelect); else MessageBoxW(window_, error.c_str(), L"Poppy — WSL", MB_OK | MB_ICONWARNING); });
         }); return;
     }
     open(ResourceId(path), shouldSelect);
 }
 void Workspace::open(ResourceId path,bool shouldSelect){
+    if(closing_)return;
     if (restoring_) return;
     if (!path.wsl() && wslUncLocation(path.u8string())) { open(path.local(), shouldSelect); return; }
     if (!path.wsl()) { std::error_code error; const auto local = fs::absolute(path.local(), error).lexically_normal().make_preferred(); if (error) return; path = ResourceId(local); }
@@ -295,6 +301,7 @@ void Workspace::open(ResourceId path,bool shouldSelect){
             state->tabs = std::move(tabs); state->activeTab = active;
         }
         storageWorker_->complete([this,id,path,state=std::move(state),missing,failure]{
+            if(closing_)return;
             auto project=find(id);if(!project)return;
             project->missing=missing;project->storageAvailable=failure.empty();
             project->runtime->initialize(path,state.value_or(ProjectSession{}),state.has_value());
@@ -353,6 +360,39 @@ void Workspace::saveApp(){
     const auto state=session_;storageWorker_->submit(L"save-app",[this,state]{try{if(storage_)storage_->saveApp(state);}catch(const std::exception& error){const std::string text=error.what();storageWorker_->complete([this,text]{report(text);});}});appDirty_=false;
 }
 void Workspace::saveAll(){for(auto& project:projects_)save(project);saveApp();storageWorker_->drain();storageWorker_->dispatch();}
+void Workspace::finishClose(){
+    closing_=true;
+    endProjectDrag();recent_.close(false);
+    if(GetCapture())ReleaseCapture();
+    KillTimer(window_,1);KillTimer(window_,77);
+    SendMessageW(tooltips_,TTM_ACTIVATE,FALSE,0);
+    // Snapshot focus and session state before the modal window takes focus.
+    for(auto& project:projects_)save(project);
+    saveApp();
+    std::unique_ptr<ShutdownDialog> progress;
+    // Resource exhaustion must not prevent closing the application.
+    try{progress=std::make_unique<ShutdownDialog>(window_,instance_);}catch(const std::exception&){}
+    if(progress)progress->detail(L"Saving project state and open tabs…");
+    if(progress)progress->wait([this]{storageWorker_->drain();});else storageWorker_->drain();
+    storageWorker_->dispatch();
+    for(size_t i=0;i<projects_.size();++i){
+        const auto& path=projects_[i].path;
+        const auto name=path.filename().empty()?path.native():path.filename().native();
+        if(progress)progress->stage(ShutdownDialog::Stage::Stopping,L"Project "+std::to_wstring(i+1)+L" / "+std::to_wstring(projects_.size())+L" · "+name);
+        projects_[i].runtime->shutdown(progress.get());
+    }
+    if(progress){progress->stage(ShutdownDialog::Stage::Finishing);progress->detail(L"Closing WSL connections and releasing project resources…");}
+    for(auto& project:projects_)project.runtime->disconnect(progress.get());
+    projects_.clear();
+    if(progress)progress->detail(L"Closing workspace storage…");
+    storageWorker_->submit(L"release-storage",[this]{storage_.reset();});
+    if(progress)progress->wait([this]{storageWorker_->drain();storageWorker_->stop();});
+    else{storageWorker_->drain();storageWorker_->stop();}
+    storageWorker_.reset();
+    if(!storageError_.empty())MessageBoxW(progress?progress->window():window_,(L"Some state could not be saved.\n\n"+storageError_).c_str(),L"Poppy",MB_OK|MB_ICONWARNING);
+    progress.reset();
+    DestroyWindow(window_);
+}
 void Workspace::close(size_t index){
     endProjectDrag();
     if(index>=projects_.size() || !projects_[index].runtime->canClose())return;
@@ -367,7 +407,7 @@ void Workspace::checkFolder(OpenProject& project) {
     storageWorker_->submit(L"stat:" + std::to_wstring(id), [this, path, id, request] {
         std::error_code error; const bool missing = !fs::is_directory(path.local(), error);
         storageWorker_->complete([this, id, request, missing] {
-            const auto project = find(id); if (!project || project->statRequest != request) return;
+            const auto project = find(id); if (closing_ || !project || project->statRequest != request) return;
             const bool restored = project->missing && !missing; project->missing = missing;
             if (restored) project->runtime->revalidate();
             InvalidateRect(window_, nullptr, FALSE);
@@ -492,13 +532,13 @@ LRESULT Workspace::handle(UINT m,WPARAM a,LPARAM b){switch(m){
 case WM_CREATE:create();return 0;case WM_PAINT:paint();return 0;case WM_ERASEBKGND:return 1;case WM_SIZE:endProjectDrag();layout();if(!restoring_){appDirty_=true;appChanged_=GetTickCount64();}return 0;
 case WM_GETMINMAXINFO:reinterpret_cast<MINMAXINFO*>(b)->ptMinTrackSize={px(900),px(480)};return 0;
 case WM_DPICHANGED:{endProjectDrag();dpi_=HIWORD(a);renderer_.setDpi(dpi_);recent_.setDpi(dpi_);for(auto& project:projects_)project.runtime->setDpi(dpi_);const auto rect=reinterpret_cast<RECT*>(b);SetWindowPos(window_,nullptr,rect->left,rect->top,rect->right-rect->left,rect->bottom-rect->top,SWP_NOZORDER|SWP_NOACTIVATE);layout();return 0;}
-case wmWork:storageWorker_->dispatch();return 0;
+case wmWork:if(!closing_&&storageWorker_)storageWorker_->dispatch();return 0;
 case wmStartup:applyStartupRequests();return 0;
 case WM_APP + 21:{ const auto project = find(static_cast<uint64_t>(a)); if (!project || project->runtime->hasUnsaved()) return 0; const bool active = project == &projects_[active_]; const auto index = static_cast<size_t>(project - projects_.data()); close(index); if (active) for (size_t i = 0; i < projects_.size(); ++i) if (projects_[i].id == static_cast<uint64_t>(b)) { select(i); break; } return 0; }
 case wmAiEvent:for(const auto& event:events_.drain())for(auto& project:projects_)if(project.runtime->apply(event))break;return 0;
-case WM_TIMER:if(a==77)Terminal::pump();else tick();return 0;
-case WM_ACTIVATE:if(LOWORD(a)==WA_INACTIVE)endProjectDrag();else if(!projects_.empty())PostMessageW(projects_[active_].runtime->window(),WM_APP+12,0,0);return 0;
-case WM_SETFOCUS:if(!projects_.empty())projects_[active_].runtime->activate(true);return 0;
+case WM_TIMER:if(closing_)return 0;if(a==77)Terminal::pump();else tick();return 0;
+case WM_ACTIVATE:if(closing_)return 0;if(LOWORD(a)==WA_INACTIVE)endProjectDrag();else if(!projects_.empty())PostMessageW(projects_[active_].runtime->window(),WM_APP+12,0,0);return 0;
+case WM_SETFOCUS:if(closing_)return 0;if(!projects_.empty())projects_[active_].runtime->activate(true);return 0;
 case WM_LBUTTONDOWN:{recent_.close();endProjectDrag();const POINT point{GET_X_LPARAM(b),GET_Y_LPARAM(b)};const auto addButton=addButtonBounds();const int width=px(session_.projectListWidth);if(point.x>=width&&point.x<width+px(5)){dragging_=true;SetCapture(window_);}else if(PtInRect(&addButton,point))choose();else if(const auto index=hit(point);index<projects_.size()){select(index,point.x<px(30));projectDrag_=ProjectDrag{projects_[index].id,point,point,false,std::nullopt};SetCapture(window_);}return 0;}
 case WM_MOUSEMOVE:if(projectDrag_){updateProjectDrag({GET_X_LPARAM(b),GET_Y_LPARAM(b)});return 0;}if(dragging_){session_.projectListWidth=std::clamp(MulDiv(GET_X_LPARAM(b),96,dpi_),100,600);appDirty_=true;appChanged_=GetTickCount64();layout();}return 0;
 case WM_LBUTTONUP:if(projectDrag_&&projectDrag_->active)updateProjectDrag({GET_X_LPARAM(b),GET_Y_LPARAM(b)});endProjectDrag(true);dragging_=false;if(GetCapture()==window_)ReleaseCapture();return 0;
@@ -532,8 +572,8 @@ case WM_COPYDATA:{
 }
 case WM_QUERYENDSESSION:if(!closing_){for(auto& project:projects_)if(!project.runtime->canClose())return FALSE;saveAll();}return TRUE;
 case WM_ENDSESSION:if(a&&!closing_){closing_=true;saveAll();for(auto& project:projects_)project.runtime->shutdown();DestroyWindow(window_);}return 0;
-case WM_CLOSE:if(closing_)return 0;for(auto& project:projects_)if(!project.runtime->canClose())return 0;closing_=true;saveAll();for(auto& project:projects_)project.runtime->shutdown();if(!storageError_.empty()){MessageBoxW(window_,(L"Some state could not be saved.\n\n"+storageError_).c_str(),L"Poppy",MB_OK|MB_ICONWARNING);}closing_=true;DestroyWindow(window_);return 0;
-case WM_DESTROY:singleInstance_->unpublish(window_);KillTimer(window_,1);projects_.clear();storageWorker_->submit(L"release-storage",[this]{storage_.reset();});storageWorker_->drain();storageWorker_->stop();PostQuitMessage(0);return 0;
+case WM_CLOSE:if(closing_)return 0;for(auto& project:projects_)if(!project.runtime->canClose())return 0;finishClose();return 0;
+case WM_DESTROY:singleInstance_->unpublish(window_);KillTimer(window_,1);projects_.clear();if(storageWorker_){storageWorker_->submit(L"release-storage",[this]{storage_.reset();});storageWorker_->drain();storageWorker_->stop();}PostQuitMessage(0);return 0;
 }return DefWindowProcW(window_,m,a,b);}
 }
 }

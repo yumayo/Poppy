@@ -394,6 +394,7 @@ public:
         return found == connection_->projectWatches_.end() ? ProviderChanges{} : std::exchange(found->second.changes, ProviderChanges{});
     }
     void reconnect() override { connection_->reconnect(); ++generation_; }
+    void disconnect() override { connection_->stop(); }
     void expectIdentity(std::string uid) override { expectedUid_ = std::move(uid); }
     std::string identity() const override { std::lock_guard<std::mutex> lock(connection_->mutex_); return connection_->uid_; }
     std::vector<std::wstring> terminalCommand(const ResourceId& path, const std::string& token, const std::wstring& tool) const override { if (state() != ConnectionState::Ready) throw std::runtime_error("Reconnect the WSL project before starting a terminal"); return connection_->terminal(path, token, tool); }

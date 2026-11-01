@@ -9,6 +9,7 @@
 #include <optional>
 
 namespace poppy {
+class ShutdownDialog;
 // Each session retains its ConPTY, VT model and view while other tabs are shown.
 struct TerminalSession {
     ~TerminalSession() { if (terminal) { terminal->stop(); terminal->starting = {}; terminal->ended = {}; terminal->stopping = {}; } }
@@ -37,7 +38,7 @@ public:
     void focusAttention();
     AiSummary summary() const;
     std::wstring description() const;
-    void stop();
+    void stop(ShutdownDialog* progress = nullptr);
     bool key(const MSG& message);
     bool contains(HWND window) const { return window == window_ || IsChild(window_, window); }
     HWND window() const { return active().terminal->window(); }
@@ -85,6 +86,7 @@ private:
     size_t active_ = 0;
     TerminalShell defaultShell_ = TerminalShell::PowerShell;
     AiEventQueue* events_ = nullptr;
+    ShutdownDialog* shutdownProgress_ = nullptr;
     std::wstring tooltipText_;
 };
 }

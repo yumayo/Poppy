@@ -1,4 +1,5 @@
 #include "terminal.h"
+#include "shutdown_dialog.h"
 #include "terminal_profile.h"
 #include "selection_scroll.h"
 #include <imm.h>
@@ -139,23 +140,27 @@ bool Terminal::start() {
     if (ResumeThread(thread.value) == static_cast<DWORD>(-1)) { error_ = winError(); stop(); return false; }
     started_ = true; InvalidateRect(window_, nullptr, FALSE); return true;
 }
-void Terminal::stop() {
+void Terminal::stop(ShutdownDialog* progress) {
     stopSelection();
     ime_.cancel(window_);
     if (stopping) stopping();
     if (ended) ended();
     if (window_) KillTimer(window_, 2);
-    stopping_ = true; condition_.notify_all();
-    job_.stop(0);
-    if (writer_.joinable()) {
-        // Repeat cancellation to cover a stop arriving just before WriteFile begins.
-        while (WaitForSingleObject(writer_.native_handle(), 0) == WAIT_TIMEOUT) { CancelSynchronousIo(writer_.native_handle()); WaitForSingleObject(writer_.native_handle(), 10); }
-        writer_.join();
-    }
-    // The reader keeps draining while ConPTY sends its final output.
-    if (console_) { ClosePseudoConsole(console_); console_ = nullptr; }
-    if (reader_.joinable()) { CancelSynchronousIo(reader_.native_handle()); reader_.join(); }
-    input_.reset(); output_.reset(); process_.reset(); started_ = false;
+    const auto stopProcesses = [this] {
+        stopping_ = true; condition_.notify_all();
+        job_.stop(0);
+        if (writer_.joinable()) {
+            // Repeat cancellation to cover a stop arriving just before WriteFile begins.
+            while (WaitForSingleObject(writer_.native_handle(), 0) == WAIT_TIMEOUT) { CancelSynchronousIo(writer_.native_handle()); WaitForSingleObject(writer_.native_handle(), 10); }
+            writer_.join();
+        }
+        // The reader keeps draining while ConPTY sends its final output.
+        if (console_) { ClosePseudoConsole(console_); console_ = nullptr; }
+        if (reader_.joinable()) { CancelSynchronousIo(reader_.native_handle()); reader_.join(); }
+        input_.reset(); output_.reset(); process_.reset();
+    };
+    if (progress) progress->wait(stopProcesses); else stopProcesses();
+    started_ = false;
     { std::lock_guard<std::mutex> lock(mutex_); received_.clear(); writes_.clear(); writeBytes_ = 0; notified_ = resizePending_ = false; }
     continuationPosted_ = false;
     display_.update(model_, scroll_, GetTickCount64(), true);

@@ -1,4 +1,5 @@
 #include "quick_open.h"
+#include "shutdown_dialog.h"
 #include <imm.h>
 #include <algorithm>
 
@@ -70,10 +71,10 @@ void QuickOpen::close(bool restoreFocus) {
     ShowWindow(window_, SW_HIDE);
     if (restoreFocus && IsWindow(previousFocus_) && IsWindowVisible(previousFocus_)) SetFocus(previousFocus_);
 }
-void QuickOpen::stop() {
+void QuickOpen::stop(ShutdownDialog* progress) {
     ++revision_; ++indexRevision_;
-    if (indexWorker_) indexWorker_->stop();
-    if (worker_) worker_->stop();
+    const auto stop = [this] { if (indexWorker_) indexWorker_->stop(); if (worker_) worker_->stop(); };
+    if (progress) progress->wait(stop); else stop();
 }
 void QuickOpen::refresh() {
     if (projectMode_ || root_.empty()) return;

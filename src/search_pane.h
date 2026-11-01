@@ -5,6 +5,7 @@
 #include "scrollbars.h"
 
 namespace poppy {
+class ShutdownDialog;
 struct SearchOverlay { std::string relative; std::shared_ptr<EditBuffer> buffer; };
 class SearchPane {
 public:
@@ -16,7 +17,7 @@ public:
     void focus() { input_.show(); }
     void refresh();
     void cancel();
-    void stop();
+    void stop(ShutdownDialog* progress = nullptr);
     HWND window() const { return window_; }
     std::function<std::vector<SearchOverlay>()> overlays;
     std::function<void(const ContentMatch&, const std::string&, bool)> opened;

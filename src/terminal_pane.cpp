@@ -1,4 +1,5 @@
 #include "terminal_pane.h"
+#include "shutdown_dialog.h"
 #include <commctrl.h>
 #include <algorithm>
 #include <cstdlib>
@@ -66,11 +67,25 @@ void TerminalPane::add(SavedTerminal configuration) {
     };
     session->terminal->stopping = [this, ptr] {
         // Stop Docker-owned AI processes before their WSL/Windows launchers.
-        const bool cleaned = ptr->events.stop();
+        bool cleaned = false;
+        const auto stopRelay = [&] { cleaned = ptr->events.stop(); };
+        if (shutdownProgress_) {
+            shutdownProgress_->detail(L"Stopping Docker containers and WSL processes · " + sessionName(*ptr));
+            shutdownProgress_->wait(stopRelay);
+        } else stopRelay();
         if (!ptr->wslToken.empty()) {
             const auto token = std::exchange(ptr->wslToken, {}); const bool running = ptr->terminal->running();
-            if (!cleaned && provider_ && !provider_->stopTerminal(token) && running) MessageBoxW(GetAncestor(window_, GA_ROOT), L"Could not confirm that this WSL terminal's child processes have exited. Check the processes in this distribution.", L"Poppy — WSL cleanup unconfirmed", MB_OK | MB_ICONWARNING);
+            bool stopped = true;
+            if (!cleaned && provider_) {
+                const auto stopRemote = [&] { stopped = provider_->stopTerminal(token); };
+                if (shutdownProgress_) {
+                    shutdownProgress_->detail(L"Stopping WSL child processes · " + sessionName(*ptr));
+                    shutdownProgress_->wait(stopRemote);
+                } else stopRemote();
+            }
+            if (!stopped && running) MessageBoxW(shutdownProgress_ ? shutdownProgress_->window() : GetAncestor(window_, GA_ROOT), L"Could not confirm that this WSL terminal's child processes have exited. Check the processes in this distribution.", L"Poppy — WSL cleanup unconfirmed", MB_OK | MB_ICONWARNING);
         }
+        if (shutdownProgress_) shutdownProgress_->detail(L"Stopping terminal processes · " + sessionName(*ptr));
     };
     session->terminal->ended = [this,ptr] {
         ptr->events.stop();
@@ -152,7 +167,16 @@ void TerminalPane::close(size_t index) {
     if(index<active_)--active_;
     if(sessions_.empty())add({"", "Shell", directory_.u8string(), 0, false, defaultShell_}); else select(std::min(active_,sessions_.size()-1));
 }
-void TerminalPane::stop(){for(auto& s:sessions_)s->terminal->stop();}
+void TerminalPane::stop(ShutdownDialog* progress) {
+    shutdownProgress_ = progress;
+    try {
+        for (size_t i = 0; i < sessions_.size(); ++i) {
+            if (progress) progress->detail(L"Stopping terminal " + std::to_wstring(i+1) + L" / " + std::to_wstring(sessions_.size()) + L" · " + sessionName(*sessions_[i]));
+            sessions_[i]->terminal->stop(progress);
+        }
+    } catch (...) { shutdownProgress_ = nullptr; throw; }
+    shutdownProgress_ = nullptr;
+}
 size_t TerminalPane::groupTab(int group) const {
     for (size_t i = 0; i < sessions_.size(); ++i) if (sessions_[i]->configuration.group == group && sessions_[i]->configuration.displayed) return i;
     return sessions_.size();

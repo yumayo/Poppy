@@ -5,6 +5,7 @@
 #include <memory>
 
 namespace poppy {
+class ShutdownDialog;
 // A retained project surface owns its models, controls and independent workers.
 // Hiding the surface never tears down sessions or rebuilds the tree.
 class ProjectRuntime {
@@ -14,7 +15,9 @@ public:
     void create(HWND parent, HINSTANCE instance, AiEventQueue* hooks);
     void initialize(const ResourceId& path, const ProjectSession& state, bool saved);
     void activate(bool active);
-    void shutdown();
+    void shutdown(ShutdownDialog* progress = nullptr);
+    // Call only after every project has stopped using shared WSL connections.
+    void disconnect(ShutdownDialog* progress = nullptr);
     bool canClose();
     void revalidate();
     void setDpi(UINT dpi);

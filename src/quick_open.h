@@ -5,6 +5,7 @@
 #include <memory>
 
 namespace poppy {
+class ShutdownDialog;
 class QuickOpen {
 public:
     ~QuickOpen() { stop(); }
@@ -17,7 +18,7 @@ public:
     void close(bool restoreFocus = true);
     void layout();
     void refresh();
-    void stop();
+    void stop(ShutdownDialog* progress = nullptr);
     bool visible() const { return visible_; }
     HWND window() const { return window_; }
     const FileIndex* index() const { return index_.get(); }

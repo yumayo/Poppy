@@ -1,4 +1,5 @@
 #include "search_pane.h"
+#include "shutdown_dialog.h"
 #include "content_search_protocol.h"
 #include <algorithm>
 #include <chrono>
@@ -63,7 +64,10 @@ void SearchPane::cancel() {
     if (worker_) worker_->cancelPending();
     if (!input_.query().empty()) status(L"Search stopped. Press F5 to refresh.");
 }
-void SearchPane::stop() { cancel(); if (worker_) worker_->stop(); }
+void SearchPane::stop(ShutdownDialog* progress) {
+    cancel();
+    if (worker_) { if (progress) progress->wait([this] { worker_->stop(); }); else worker_->stop(); }
+}
 void SearchPane::refresh() {
     cancel(); matches_.clear(); selected_ = 0; top_ = 0; layout();
     if (!active_ || input_.query().empty()) { status(L"Type to search this project."); return; }

@@ -3,6 +3,7 @@
 #include "terminal_display.h"
 
 namespace poppy {
+class ShutdownDialog;
 class Terminal {
 public:
     ~Terminal();
@@ -14,7 +15,7 @@ public:
     void setCommand(std::vector<std::wstring> command) { command_ = std::move(command); }
     void setDisplayDirectory(std::wstring label) { displayDirectory_ = std::move(label); }
     bool launch() { return start(); }
-    void stop();
+    void stop(ShutdownDialog* progress = nullptr);
     void setEnvironment(std::vector<std::pair<std::wstring, std::wstring>> values) { environment_ = std::move(values); }
     std::function<void()> starting, ended, focused, stopping;
     std::function<void()> titleChanged;

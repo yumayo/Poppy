@@ -1,6 +1,7 @@
 #include "viewer.h"
 #include "terminal_pane.h"
 #include "project_runtime.h"
+#include "shutdown_dialog.h"
 #include "tree.h"
 #include "git_changes.h"
 #include "git_history.h"
@@ -320,7 +321,7 @@ private:
     void recordExplorer(ExplorerEdit edit);
     void recordCreation(const ResourceId& path, const ResourceId& selection = {});
     void discardBackups(std::vector<ResourceId> paths);
-    void stopExplorerHistory();
+    void stopExplorerHistory(ShutdownDialog* progress = nullptr);
     bool canPasteImage(TreeItem item) const;
     void pasteImage(TreeItem item);
     wchar_t stateFor(const ResourceId& path) const;
@@ -359,7 +360,7 @@ private:
     void watch();
     void armWatch();
     void pollWatch();
-    void stopWatch();
+    void stopWatch(ShutdownDialog* progress = nullptr);
     void status(std::wstring message);
     void updateStatusBar();
     void toggleTerminal();
@@ -1862,12 +1863,14 @@ void ProjectRuntime::Impl::discardBackups(std::vector<ResourceId> paths) {
 void ProjectRuntime::Impl::recordExplorer(ExplorerEdit edit) {
     discardBackups(explorerHistory_.record(std::move(edit)));
 }
-void ProjectRuntime::Impl::stopExplorerHistory() {
+void ProjectRuntime::Impl::stopExplorerHistory(ShutdownDialog* progress) {
     if (historyStopped_ || !worker_) return;
     historyStopped_ = true;
-    worker_->drain(); worker_->dispatch();
+    if (progress) progress->wait([this] { worker_->drain(); }); else worker_->drain();
+    worker_->dispatch();
     discardBackups(explorerHistory_.clear());
-    worker_->drain(); worker_->dispatch();
+    if (progress) progress->wait([this] { worker_->drain(); }); else worker_->drain();
+    worker_->dispatch();
 }
 void ProjectRuntime::Impl::recordCreation(const ResourceId& path, const ResourceId& selection) {
     const auto backup = root_.parent_path() / (L".poppy-undo-" + wide(newSessionId()));
@@ -2815,9 +2818,12 @@ void ProjectRuntime::Impl::pollWatch() {
     if (dirty_ && (now - lastEvent_ >= 500 || now - dirtySince_ >= 2000)) { dirty_ = false; refresh(false); }
     if (statusDirty_) { statusDirty_ = false; updateStatusBar(); }
 }
-void ProjectRuntime::Impl::stopWatch() {
+void ProjectRuntime::Impl::stopWatch(ShutdownDialog* progress) {
     KillTimer(window_, timerId);
-    if (watchDirectory_ && watchPending_) { CancelIoEx(watchDirectory_.value, &watchOperation_); DWORD bytes = 0; GetOverlappedResult(watchDirectory_.value, &watchOperation_, &bytes, TRUE); }
+    if (watchDirectory_ && watchPending_) {
+        const auto cancel = [this] { CancelIoEx(watchDirectory_.value, &watchOperation_); DWORD bytes = 0; GetOverlappedResult(watchDirectory_.value, &watchOperation_, &bytes, TRUE); };
+        if (progress) progress->wait(cancel); else cancel();
+    }
     watchDirectory_.reset(); watchEvent_.reset(); watchPending_ = dirty_ = fileDirty_ = filesDirty_ = false;
 }
 void ProjectRuntime::Impl::toggleTerminal() {
@@ -3008,12 +3014,23 @@ void ProjectRuntime::create(HWND parent, HINSTANCE instance, AiEventQueue* hooks
     impl_->window_ = CreateWindowExW(0, cls.lpszClassName, L"Project", WS_CHILD | WS_CLIPCHILDREN | WS_CLIPSIBLINGS, 0, 0, 0, 0, parent, nullptr, instance, impl_.get());
     impl_->terminal_.connect(hooks);
 }
-void ProjectRuntime::shutdown() {
-    impl_->stopWatch(); impl_->quickOpen_.stop(); impl_->searchPane_.stop();
-    if (impl_->gitWorker_) impl_->gitWorker_->stop();
-    impl_->stopExplorerHistory();
-    if (impl_->worker_) impl_->worker_->stop();
-    impl_->terminal_.stop();
+void ProjectRuntime::shutdown(ShutdownDialog* progress) {
+    if (progress) progress->detail(L"Stopping file watchers and search tasks…");
+    impl_->stopWatch(progress); impl_->quickOpen_.stop(progress); impl_->searchPane_.stop(progress);
+    if (progress) progress->detail(L"Stopping Git tasks…");
+    if (impl_->gitWorker_) {
+        if (progress) progress->wait([this] { impl_->gitWorker_->stop(); }); else impl_->gitWorker_->stop();
+    }
+    if (progress) progress->detail(L"Cleaning up file operation history…");
+    impl_->stopExplorerHistory(progress);
+    if (impl_->worker_) {
+        if (progress) progress->wait([this] { impl_->worker_->stop(); }); else impl_->worker_->stop();
+    }
+    impl_->terminal_.stop(progress);
+}
+void ProjectRuntime::disconnect(ShutdownDialog* progress) {
+    if (!impl_->provider_) return;
+    if (progress) progress->wait([this] { impl_->provider_->disconnect(); }); else impl_->provider_->disconnect();
 }
 bool ProjectRuntime::canClose() {
     if (impl_->gitDiscardPending_ || impl_->gitStashPending_ || impl_->gitCommitPending_) { impl_->gitWorker_->drain(); impl_->gitWorker_->dispatch(); if (impl_->gitDiscardPending_ || impl_->gitStashPending_ || impl_->gitCommitPending_) return false; }

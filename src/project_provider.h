@@ -46,6 +46,7 @@ public:
     virtual ProviderChanges takeChanges() { return {}; }
     virtual std::optional<WatchUsage> watchUsage() const { return {}; }
     virtual void reconnect() {}
+    virtual void disconnect() {}
     virtual void expectIdentity(std::string) {}
     virtual std::string identity() const { return {}; }
     virtual std::vector<std::wstring> terminalCommand(const ResourceId&, const std::string&, const std::wstring& = {}) const { return {}; }
