@@ -14,6 +14,7 @@ void compositionLayout() {
     for (size_t cursor = 0; cursor < cursorColumns.size(); ++cursor) {
         text.cursor = cursor;
         const auto layout = text.layout(32, 0);
+        check(layout.endRow == 0 && layout.endColumn == 12);
         check(layout.glyphs.size() == 8 && layout.caretRow == 0 && layout.caretColumn == cursorColumns[cursor]);
         check(layout.glyphs[2].character == U'い' && layout.glyphs[2].width == 2 && layout.glyphs[2].attribute == 1);
         check(layout.glyphs[5].character == U'ｱ' && layout.glyphs[5].width == 1);

@@ -29,6 +29,10 @@ public:
     int rows() const { return rows_; }
     int cursorX() const { return active().x; }
     int cursorY() const { return active().y; }
+    bool wrapPending() const { return active().wrap; }
+    // A nonzero length joins this physical row to the next by automatic wrap.
+    // A wide glyph can wrap with one unused cell at the right edge.
+    int wrappedLength(int y) const { return active().wrapped.at(static_cast<size_t>(y)); }
     bool cursorVisible() const { return cursorVisible_; }
     bool bracketedPaste() const { return bracketedPaste_; }
     bool applicationCursor() const { return applicationCursor_; }
@@ -38,13 +42,13 @@ public:
     void endSynchronizedOutput() { synchronizedOutput_ = false; }
     std::function<void(std::string)> reply;
 private:
-    struct Screen { std::vector<std::vector<Cell>> cells; int x = 0, y = 0, savedX = 0, savedY = 0; bool wrap = false; };
+    struct Screen { std::vector<std::vector<Cell>> cells; std::vector<int> wrapped; int x = 0, y = 0, savedX = 0, savedY = 0; bool wrap = false; };
     enum class Parse { Text, Escape, Csi, CsiDiscard, Osc, OscEscape, Discard, DiscardEscape, Charset };
     Screen& active() { return alternate_ ? alternateScreen_ : normal_; }
     const Screen& active() const { return alternate_ ? alternateScreen_ : normal_; }
     void reset();
     void put(char32_t c);
-    void newline();
+    void newline(bool wrapped = false);
     void scrollUp(int count);
     void scrollDown(int count);
     void csi(char command);

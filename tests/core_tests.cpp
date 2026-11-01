@@ -356,8 +356,119 @@ void terminalSelectionScrollTests() {
     bounded.feed("\x1b" "c"); history.changed(); history.update(bounded, 0, 340);
     check(!history.hasSelection(), "terminal reset clears selection without reusing old row coordinates");
 }
+void terminalPreeditTests() {
+    const auto previewLine = [](const TerminalPreedit& preview, int y) {
+        auto cells = preview.cells[y];
+        for (const auto& glyph : preview.composition.glyphs) if (glyph.row == y) {
+            cells[glyph.column].ch = glyph.character;
+            cells[glyph.column].continuation = false;
+            if (glyph.width == 2) { cells[glyph.column + 1].ch = 0; cells[glyph.column + 1].continuation = true; }
+        }
+        std::string text;
+        for (const auto& cell : cells) if (!cell.continuation) appendUtf8(text, cell.ch);
+        while (!text.empty() && text.back() == ' ') text.pop_back();
+        return text;
+    };
+    TerminalModel model(24, 4); TerminalDisplay display;
+    model.feed("abc\x1b[38;2;1;2;3mdef\x1b[0m\r\x1b[4G");
+    display.update(model, 0, 0, true);
+    auto preview = display.preedit({u"にほんご", {}, 4});
+    check(previewLine(preview, 0) == "abcにほんごdef", "preedit inserts before existing text");
+    check(preview.cells[0][11].ch == U'd' && preview.cells[0][11].fg == rgb(1,2,3), "shifted suffix retains its colors");
+    check(line(model, 0) == "abcdef" && line(display, 0) == "abcdef" && model.cursorX() == 3,
+        "preedit never changes the terminal buffer or its real cursor");
+    preview = display.preedit({u"日本語", {}, 0});
+    check(previewLine(preview, 0) == "abc日本語def" && preview.composition.caretColumn == 3,
+        "conversion shrinks the gap using the full preedit rather than its cursor");
+    preview = display.preedit({u"日本語😀ｱ", {}, 4});
+    check(previewLine(preview, 0) == "abc日本語😀ｱdef" && preview.composition.caretColumn == 9,
+        "emoji and halfwidth text use cell widths and UTF-16 cursor positions");
+    check(display.preedit({}).cells.empty() && line(display, 0) == "abcdef", "cancel immediately restores the original frame");
+    model.feed("\x1b[6@日本語"); display.changed(); display.update(model, 0, 1);
+    check(line(display, 0) == "abc日本語def" && display.preedit({}).cells.empty(), "committed output takes over without duplicate text");
+
+    TerminalModel wrapped(8, 5); TerminalDisplay multiline;
+    wrapped.feed("abcdefghij\x1b[1;4H"); multiline.update(wrapped, 0, 0, true);
+    preview = multiline.preedit({u"日本語", {}, 3});
+    check(previewLine(preview, 0) == "abc日本" && previewLine(preview, 1) == "語defghi" && previewLine(preview, 2) == "j",
+        "preedit reflows an automatically wrapped suffix without splitting wide glyphs");
+    check(preview.composition.caretRow == 1 && preview.composition.caretColumn == 2, "wrapped candidates follow the preedit caret");
+    check(line(multiline, 0) == "abcdefgh" && line(multiline, 1) == "ij", "wrapped preview is reversible");
+    wrapped.feed("\x1b[2;3Hkl\x1b[1;4H"); multiline.changed(); multiline.update(wrapped, 0, 1);
+    preview = multiline.preedit({u"日", {}, 1});
+    check(previewLine(preview, 1) == "ghijkl", "fresh terminal output is used when rebuilding the preview");
+
+    TerminalModel padding(5, 4); TerminalDisplay padded;
+    padding.feed("abcd日本Z\x1b[1;3H"); padded.update(padding, 0, 0, true);
+    preview = padded.preedit({u"X", {}, 1});
+    check(previewLine(preview, 0) == "abXcd" && previewLine(preview, 1) == "日本Z", "wide-wrap padding is not inserted into the suffix");
+
+    TerminalModel edge(4, 3); TerminalDisplay delayed;
+    edge.feed("abcd"); delayed.update(edge, 0, 0, true);
+    preview = delayed.preedit({u"日", {}, 1});
+    check(previewLine(preview, 0) == "abcd" && previewLine(preview, 1) == "日", "pending autowrap inserts after the final column");
+    edge.feed("\x1b[1;4H"); delayed.changed(); delayed.update(edge, 0, 1);
+    preview = delayed.preedit({u"日", {}, 1});
+    check(previewLine(preview, 0) == "abc" && previewLine(preview, 1) == "日d", "wide preedit at the edge leaves padding before wrapping");
+
+    TerminalModel hard(8, 3); TerminalDisplay bounded;
+    hard.feed("abcde\r\nSTATUS\x1b[1;4H"); bounded.update(hard, 0, 0, true);
+    preview = bounded.preedit({u"日本語", {}, 3});
+    check(previewLine(preview, 1) == "STATUS" && preview.lastRow == 0 && preview.composition.caretRow == 0,
+        "long preedit pans within its input row without overwriting independent output");
+    check(previewLine(preview, 0) == "語de", "overflow shows the active preedit row and shifted suffix");
+    preview = bounded.preedit({u"日", {}, 1});
+    check(previewLine(preview, 0) == "abc日de" && previewLine(preview, 1) == "STATUS", "shortening a conversion restores the hidden prefix");
+
+    TerminalModel box(12, 3); TerminalDisplay framed;
+    box.feed("│ abcdef   │\r\n└──────────┘\x1b[1;6H"); framed.update(box, 0, 0, true);
+    preview = framed.preedit({u"日", {}, 1});
+    check(previewLine(preview, 0) == "│ abc日def │" && previewLine(preview, 1) == "└──────────┘",
+        "CLI borders stay fixed while the text inside moves");
+    check(preview.left == 1 && preview.right == 11 && preview.lastRow == 0, "framed preedit is clipped to the input interior");
+    preview = framed.preedit({u"日本語日本語", {}, 6});
+    check(preview.cells[0][0].ch == U'│' && preview.cells[0][11].ch == U'│' && preview.composition.caretRow == 0,
+        "overflow never moves or overwrites a frame");
+
+    TerminalModel wide(12, 2); TerminalDisplay inside;
+    wide.feed("A日本Z\x1b[1;3H"); inside.update(wide, 0, 0, true);
+    preview = inside.preedit({u"X", {}, 1});
+    check(previewLine(preview, 0) == "AX日本Z", "a cursor inside a wide cell does not split the existing glyph");
+
+    TerminalModel panel(12, 2); TerminalDisplay colored;
+    panel.feed("\x1b[48;2;30;40;50m\x1b[2Kabcdef\x1b[1;4H"); colored.update(panel, 0, 0, true);
+    preview = colored.preedit({u"日", {}, 1});
+    check(previewLine(preview, 0) == "abc日def" && preview.compositionBackground == rgb(30,40,50) &&
+        preview.cells[0][8].bg == rgb(30,40,50) && preview.cells[1][0].bg == background,
+        "preedit preserves the input panel background without changing adjacent blank rows");
+
+    hard.feed("\x1b[3;1Hlast\r\nnext"); bounded.changed(); bounded.update(hard, 1, 1);
+    check(bounded.preedit({u"日", {}, 1}).cells.empty(), "preedit never modifies a scrollback view");
+    bounded.update(hard, 0, 2);
+    preview = bounded.preedit({u"日本語", {}, 3});
+    check(preview.composition.caretRow == 2 && preview.composition.caretColumn < hard.columns(), "bottom-row candidates stay in the viewport");
+}
+void terminalWrapMetadataTests() {
+    TerminalModel model(5, 3);
+    model.feed("abcd日Z");
+    check(model.wrappedLength(0) == 4 && model.wrappedLength(1) == 0, "wide autowrap records the content length without padding");
+    model.feed("\x1b[1;5H\n");
+    check(!model.wrappedLength(0), "explicit line feed breaks a previous automatic continuation");
+    model.feed("\x1b[HabcdefghijklmnoP");
+    check(model.wrappedLength(0) == 5 && model.wrappedLength(1) == 5 && !model.wrappedLength(2), "scrolling preserves live automatic continuations");
+    model.feed("\x1b[?1049h");
+    check(!model.wrappedLength(0), "alternate screens start without old wrap metadata");
+    model.feed("\x1b[?1049l");
+    check(model.wrappedLength(0) == 5, "returning to the normal screen restores its wrap metadata");
+    model.feed("\x1b[1;1H\x1b[K");
+    check(!model.wrappedLength(0), "erasing to the right edge clears a continuation");
+    model.resize(6, 2);
+    check(!model.wrappedLength(0) && !model.wrappedLength(1), "resize discards stale wrap links");
+    model.feed("\x1b" "c");
+    check(!model.wrappedLength(0) && !model.wrapPending(), "reset clears wrap metadata");
+}
 }
 int main() {
-    try { textTests(); terminalTests(); terminalTitleTests(); terminalDisplayTests(); terminalInputTests(); terminalScrollTests(); terminalCopyTests(); terminalSelectionScrollTests(); std::cout << "Text and terminal core tests passed.\n"; return EXIT_SUCCESS; }
+    try { textTests(); terminalTests(); terminalTitleTests(); terminalDisplayTests(); terminalInputTests(); terminalScrollTests(); terminalCopyTests(); terminalSelectionScrollTests(); terminalPreeditTests(); terminalWrapMetadataTests(); std::cout << "Text and terminal core tests passed.\n"; return EXIT_SUCCESS; }
     catch (const std::exception& error) { std::cerr << error.what() << '\n'; return EXIT_FAILURE; }
 }

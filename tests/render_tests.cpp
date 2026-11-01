@@ -578,6 +578,41 @@ void imeCellRendering() {
         check(cursor.x == 8 + 2 * cw && cursor.y + ch <= clip.bottom, "Wrapped IME candidates would leave the text viewport");
     }
 }
+void imeTerminalInsertion() {
+    Renderer renderer;
+    Bitmap actual, expected;
+    for (const UINT dpi : {96u, 120u, 144u, 192u}) {
+        renderer.setDpi(dpi);
+        const int cw = renderer.cellWidth(), ch = renderer.textHeight() + MulDiv(2, dpi, 96);
+        for (const bool coloredPanel : {false, true}) for (const auto& text : {CompositionText{u"にほんご", {}, 4}, CompositionText{u"日本語", {}, 1}, CompositionText{u"日😀ｱ", {}, 2}}) {
+            const int columns = coloredPanel ? 28 : 18, rows = 2;
+            const RECT clip{8, 8, 8 + columns * cw, 8 + rows * ch};
+            const std::string suffix = u8"日本😀defghijk";
+            const std::string color = "\x1b[38;2;70;180;210m";
+            const std::string base = coloredPanel ? "\x1b[48;2;30;40;50m\x1b[2K" : "";
+            TerminalModel model(columns, rows), reference(columns, rows); TerminalDisplay display;
+            model.feed(base + "abc" + color + suffix + "\x1b[0m\x1b[1;4H"); display.update(model, 0, 0, true);
+            const auto preview = display.preedit(text);
+            reference.feed(base + "abc" + utf8(std::wstring(text.text.begin(), text.text.end())) + color + suffix);
+            check(renderer.begin(actual.bitmap.get()), "Cannot render terminal preedit insertion");
+            renderer.fill(actual.bounds(), panel); renderer.fill(clip, background);
+            for (int y = 0; y < rows; ++y) renderer.cells(8, 8 + y * ch, cw, ch, preview.cells[y], columns, clip);
+            renderer.composition(preview.composition, {8, 8}, cw, ch, clip, preview.compositionBackground); finish(renderer); actual.read();
+            check(renderer.begin(expected.bitmap.get()), "Cannot render terminal insertion reference");
+            renderer.fill(expected.bounds(), panel); renderer.fill(clip, background);
+            for (int y = 0; y < rows; ++y) renderer.cells(8, 8 + y * ch, cw, ch, reference.row(y), columns, clip);
+            finish(renderer); expected.read();
+            const int caretX = 8 + preview.composition.caretColumn * cw, caretY = 8 + preview.composition.caretRow * ch;
+            for (int y = 0; y < Bitmap::height; ++y) for (int x = 0; x < Bitmap::width; ++x) {
+                if (x >= clip.left && x < clip.right && y >= clip.top && y < clip.bottom) {
+                    if ((y - clip.top) % ch >= ch - 2) continue;
+                    if (x >= caretX && x < caretX + 2 && y >= caretY && y < caretY + ch) continue;
+                }
+                check(actual.pixel(x, y) == expected.pixel(x, y), "Preedit and shifted suffix differ from committed terminal insertion");
+            }
+        }
+    }
+}
 void imeUiRendering() {
     Renderer renderer, reference;
     Bitmap actual, expected;
@@ -1864,7 +1899,7 @@ int main() {
     try {
         initializeRendering();
         terminalProcessShutdown();
-        statusBarLimits(); treeMultipleSelection(); inlineTreeInput(); cellPositions(); colorsAndClipping(); imagePreviews(); smoothIcons(); windowTargets(); editableDiff(); editorCaret(); imeCellRendering(); imeUiRendering(); imePositions(); editorWordSelection(); editorWordMovement(); editorLineShortcuts(); editorWrapping(); diffWrapping(); documentFind(); horizontalWheelScrolling(); continuousViewerScrolling(); selectionAutoScrolling(); terminalGitBashSocketEnvironment(); terminalSelectionAutoScrolling(); themedScrollbars(); quickOpenStability();
+        statusBarLimits(); treeMultipleSelection(); inlineTreeInput(); cellPositions(); colorsAndClipping(); imagePreviews(); smoothIcons(); windowTargets(); editableDiff(); editorCaret(); imeCellRendering(); imeTerminalInsertion(); imeUiRendering(); imePositions(); editorWordSelection(); editorWordMovement(); editorLineShortcuts(); editorWrapping(); diffWrapping(); documentFind(); horizontalWheelScrolling(); continuousViewerScrolling(); selectionAutoScrolling(); terminalGitBashSocketEnvironment(); terminalSelectionAutoScrolling(); themedScrollbars(); quickOpenStability();
         std::cout << "Direct2D rendering tests passed\n";
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; result = 1; }
     if (SUCCEEDED(com)) CoUninitialize();

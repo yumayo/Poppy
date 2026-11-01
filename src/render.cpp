@@ -467,7 +467,11 @@ POINT Renderer::compositionCaret(const CompositionText& text, POINT origin, int 
 void Renderer::composition(const CompositionText& text, POINT origin, int cw, int ch, const RECT& clip) {
     if (text.text.empty() || cw <= 0 || ch <= 0 || empty(clip)) return;
     const auto geometry = compositionGeometry(text, origin, cw, ch, clip);
-    const auto& glyphs = geometry.layout.glyphs;
+    composition(geometry.layout, {clip.left, geometry.top}, cw, ch, clip);
+}
+void Renderer::composition(const CompositionLayout& layout, POINT origin, int cw, int ch, const RECT& clip, COLORREF preeditBackground) {
+    if (layout.glyphs.empty() || cw <= 0 || ch <= 0 || empty(clip)) return;
+    const auto& glyphs = layout.glyphs;
     for (size_t begin = 0; begin < glyphs.size();) {
         size_t end = begin + 1;
         while (end < glyphs.size() && glyphs[end].row == glyphs[begin].row) ++end;
@@ -477,23 +481,23 @@ void Renderer::composition(const CompositionText& text, POINT origin, int cw, in
         for (size_t i = begin; i < end; ++i) {
             const auto& glyph = glyphs[i];
             const bool target = glyph.attribute == ATTR_TARGET_CONVERTED || glyph.attribute == ATTR_TARGET_NOTCONVERTED;
-            Cell cell; cell.ch = glyph.character; cell.bg = target ? rgb(50, 70, 94) : background;
+            Cell cell; cell.ch = glyph.character; cell.bg = target ? rgb(50, 70, 94) : preeditBackground;
             row[glyph.column - first.column] = cell;
             if (glyph.width == 2) { cell.ch = 0; cell.continuation = true; row[glyph.column - first.column + 1] = cell; }
         }
-        const int x = clip.left + first.column * cw, y = geometry.top + first.row * ch;
+        const int x = origin.x + first.column * cw, y = origin.y + first.row * ch;
         cells(x, y, cw, ch, row, columns, clip);
         for (size_t i = begin; i < end; ++i) {
             const auto& glyph = glyphs[i];
             const bool target = glyph.attribute == ATTR_TARGET_CONVERTED || glyph.attribute == ATTR_TARGET_NOTCONVERTED;
-            const int left = clip.left + glyph.column * cw;
+            const int left = origin.x + glyph.column * cw;
             const RECT underline{left, y + ch - (target ? 2 : 1), left + glyph.width * cw, y + ch};
             RECT visible{};
             if (IntersectRect(&visible, &underline, &clip)) fill(visible, target ? accent : muted);
         }
         begin = end;
     }
-    const int x = clip.left + geometry.layout.caretColumn * cw, y = geometry.top + geometry.layout.caretRow * ch;
+    const int x = origin.x + layout.caretColumn * cw, y = origin.y + layout.caretRow * ch;
     const RECT caret{x, y, x + 2, y + ch}; RECT visible{};
     if (IntersectRect(&visible, &caret, &clip)) fill(visible, accent);
 }

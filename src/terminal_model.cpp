@@ -31,6 +31,7 @@ void TerminalModel::reset() {
     normal_ = {}; alternateScreen_ = {};
     normal_.cells.assign(rows_, std::vector<Cell>(columns_));
     alternateScreen_.cells.assign(rows_, std::vector<Cell>(columns_));
+    normal_.wrapped.assign(rows_, 0); alternateScreen_.wrapped.assign(rows_, 0);
     history_.clear(); historyCells_ = 0;
 }
 void TerminalModel::resize(int columns, int rows) {
@@ -42,6 +43,8 @@ void TerminalModel::resize(int columns, int rows) {
         const int remove = std::max(0, s->y - rows + 1);
         if (remove) { s->cells.erase(s->cells.begin(), s->cells.begin() + remove); s->y -= remove; }
         s->cells.resize(rows, std::vector<Cell>(columns));
+        // Resizing clips/pads physical rows rather than reflowing their text.
+        s->wrapped.assign(rows, 0);
         for (auto& line : s->cells) {
             line.resize(columns);
             if (!line.empty() && !line.back().continuation && cellWidth(line.back().ch) == 2) line.back() = {};
@@ -62,6 +65,7 @@ void TerminalModel::erase(int y, int begin, int end) {
     if (begin < columns_ && line[begin].continuation && begin > 0) line[begin - 1] = blank();
     if (end < columns_ && line[end].continuation) line[end] = blank();
     std::fill(line.begin() + begin, line.begin() + end, blank());
+    if (end == columns_) active().wrapped[y] = 0;
 }
 void TerminalModel::repair(int y) {
     auto& line = active().cells[y];
@@ -78,19 +82,25 @@ void TerminalModel::scrollUp(int count) {
             // At most 1,000 lines AND 131,072 cells (roughly 2 MiB).
             while (history_.size() > 1000 || historyCells_ > 131072) { historyCells_ -= history_.front().size(); history_.pop_front(); ++firstRow_; }
         }
-        for (int y = top_; y < bottom_; ++y) s.cells[y] = std::move(s.cells[y + 1]);
+        if (top_ > 0) s.wrapped[top_ - 1] = 0;
+        for (int y = top_; y < bottom_; ++y) { s.cells[y] = std::move(s.cells[y + 1]); s.wrapped[y] = s.wrapped[y + 1]; }
         s.cells[bottom_] = std::vector<Cell>(columns_, blank());
+        s.wrapped[bottom_] = 0;
     }
 }
 void TerminalModel::scrollDown(int count) {
     auto& s = active(); count = std::clamp(count, 1, bottom_ - top_ + 1);
     for (int i = 0; i < count; ++i) {
-        for (int y = bottom_; y > top_; --y) s.cells[y] = std::move(s.cells[y - 1]);
+        if (top_ > 0) s.wrapped[top_ - 1] = 0;
+        for (int y = bottom_; y > top_; --y) { s.cells[y] = std::move(s.cells[y - 1]); s.wrapped[y] = s.wrapped[y - 1]; }
         s.cells[top_] = std::vector<Cell>(columns_, blank());
+        s.wrapped[top_] = s.wrapped[bottom_] = 0;
     }
 }
-void TerminalModel::newline() {
-    auto& s = active(); s.wrap = false;
+void TerminalModel::newline(bool wrapped) {
+    auto& s = active();
+    s.wrapped[s.y] = wrapped ? (s.wrap ? columns_ : s.x) : 0;
+    s.wrap = false;
     if (s.y == bottom_) scrollUp(1); else if (s.y < rows_ - 1) ++s.y;
 }
 void TerminalModel::put(char32_t c) {
@@ -98,7 +108,7 @@ void TerminalModel::put(char32_t c) {
     // Combining marks/ZWJ composition require a shaping engine; do not consume a cell.
     if (width == 0 || c == 0x200d) return;
     if (s.wrap || (width == 2 && s.x == columns_ - 1)) {
-        if (autoWrap_) { s.x = 0; newline(); }
+        if (autoWrap_) { newline(true); s.x = 0; }
         else s.wrap = false;
     }
     if (width == 2 && s.x + 1 >= columns_) return;
@@ -170,8 +180,8 @@ void TerminalModel::csi(char command) {
         break;
     case 'K': if (args[0] <= 2) erase(s.y, args[0] == 0 ? s.x : 0, args[0] == 1 ? s.x + 1 : columns_); break;
     case 'X': erase(s.y, s.x, std::min(columns_, s.x + n)); break;
-    case 'P': { auto& line = s.cells[s.y]; const int count = std::min(n, columns_ - s.x); std::move(line.begin() + s.x + count, line.end(), line.begin() + s.x); std::fill(line.end() - count, line.end(), blank()); repair(s.y); break; }
-    case '@': { auto& line = s.cells[s.y]; const int count = std::min(n, columns_ - s.x); std::move_backward(line.begin() + s.x, line.end() - count, line.end()); std::fill(line.begin() + s.x, line.begin() + s.x + count, blank()); repair(s.y); break; }
+    case 'P': { auto& line = s.cells[s.y]; const int count = std::min(n, columns_ - s.x); std::move(line.begin() + s.x + count, line.end(), line.begin() + s.x); std::fill(line.end() - count, line.end(), blank()); s.wrapped[s.y] = 0; repair(s.y); break; }
+    case '@': { auto& line = s.cells[s.y]; const int count = std::min(n, columns_ - s.x); std::move_backward(line.begin() + s.x, line.end() - count, line.end()); std::fill(line.begin() + s.x, line.begin() + s.x + count, blank()); s.wrapped[s.y] = 0; repair(s.y); break; }
     case 'S': scrollUp(n); break;
     case 'T': scrollDown(n); break;
     case 'L': case 'M': if (s.y >= top_ && s.y <= bottom_) { const int old = top_; top_ = s.y; if (command == 'L') scrollDown(n); else scrollUp(n); top_ = old; } break;
@@ -195,7 +205,7 @@ void TerminalModel::csi(char command) {
                 if (on != alternate_) {
                     ++generation_;
                     alternate_ = on; top_ = 0; bottom_ = rows_ - 1;
-                    if (on) { alternateScreen_ = {}; alternateScreen_.cells.assign(rows_, std::vector<Cell>(columns_)); }
+                    if (on) { alternateScreen_ = {}; alternateScreen_.cells.assign(rows_, std::vector<Cell>(columns_)); alternateScreen_.wrapped.assign(rows_, 0); }
                 }
             }
         }

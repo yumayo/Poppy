@@ -11,6 +11,7 @@ struct CompositionGlyph {
 struct CompositionLayout {
     std::vector<CompositionGlyph> glyphs;
     int caretRow = 0, caretColumn = 0;
+    int endRow = 0, endColumn = 0;
 };
 // IMM cursor positions and attributes are indexed by UTF-16 code units.
 // Glyph positions use the same one/two-cell widths as the terminal and editor.

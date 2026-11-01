@@ -66,6 +66,7 @@ public:
                const std::vector<Cell>& cells, int columns, const RECT& clip);
     // Preedit uses the exact same cell renderer as committed terminal text.
     void composition(const CompositionText& text, POINT origin, int cellWidth, int cellHeight, const RECT& clip);
+    void composition(const CompositionLayout& layout, POINT origin, int cellWidth, int cellHeight, const RECT& clip, COLORREF preeditBackground = background);
     POINT compositionCaret(const CompositionText& text, POINT origin, int cellWidth, int cellHeight, const RECT& clip) const;
     void line(float x1, float y1, float x2, float y2, COLORREF color, float width);
     void ellipse(const RECT& rect, COLORREF color, float width);

@@ -22,6 +22,7 @@ CompositionLayout CompositionText::layout(int columns, int firstColumn) const {
         if (column == columns) { ++row; column = 0; }
     }
     if (caret == text.size()) { result.caretRow = row; result.caretColumn = column; }
+    result.endRow = row; result.endColumn = column;
     return result;
 }
 }
