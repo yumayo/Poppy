@@ -36,6 +36,9 @@ if mv -f "$build_output" /output/Poppy.exe; then
     build_output=/output/Poppy.exe
 fi
 rm -rf /output/ai
+for dependency in WebView2Loader.dll WebView2-LICENSE.txt WebView2-NOTICE.txt; do
+    cp "/build/windows/$dependency" /output/
+done
 cp -R "$source_dir/integration/ai" /output/
 mkdir -p /output/wsl
 cp /build/linux/poppy-wsl-helper /output/wsl/poppy-wsl-helper

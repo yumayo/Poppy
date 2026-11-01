@@ -324,6 +324,48 @@ void cellPositions() {
             check(actual.pixel(x, y) == expected.pixel(x, y), "Recreating the render target changed the drawing");
     }
 }
+void htmlPreviewSwitching() {
+    Viewer viewer;
+    const auto instance = GetModuleHandleW(nullptr);
+    const auto parent = CreateWindowExW(0, L"STATIC", L"HTML preview test", WS_POPUP | WS_CLIPCHILDREN,
+        0, 0, 800, 500, nullptr, nullptr, instance, nullptr);
+    check(parent != nullptr, "Could not create HTML preview test window");
+    struct WindowOwner { HWND value; ~WindowOwner() { DestroyWindow(value); } } owner{parent};
+    viewer.create(parent, instance); MoveWindow(viewer.window(), 0, 0, 800, 500, FALSE);
+    auto buffer = std::make_shared<EditBuffer>(); buffer->document.text = "<h1>before</h1>\r\n";
+    indexDocument(buffer->document); buffer->initialize(buffer->document.text);
+    const auto saved = buffer->document.text;
+    // Fail deterministically before starting WebView2; no Runtime is required.
+    const auto path = ResourceId::wsl("Ubuntu", "/site/bad\\name.html");
+    viewer.edit(buffer, path);
+    check(viewer.htmlAvailable() && !viewer.htmlPreview(), "HTML did not open in Source mode");
+    SendMessageW(viewer.window(), WM_CHAR, 'X', 0);
+    check(buffer->dirty(), "Could not edit HTML source before preview");
+    const auto edited = buffer->document.text;
+    const auto selection = viewer.state();
+    for (const auto dpi : {96u, 144u, 192u}) {
+        viewer.setDpi(dpi);
+        const auto click = [&](int x) { SendMessageW(viewer.window(), WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(MulDiv(x, dpi, 96), MulDiv(12, dpi, 96))); };
+        click(150); // Preview button, also when the parent is narrow at high DPI.
+        check(viewer.htmlPreview(), "Preview button did not activate the HTML preview");
+        SendMessageW(viewer.window(), WM_CHAR, 'Y', 0);
+        SendMessageW(viewer.window(), WM_MOUSEWHEEL, MAKEWPARAM(0, static_cast<WORD>(WHEEL_DELTA)), 0);
+        check(viewer.state().top == selection.top, "Scrolling an unavailable preview changed the source position");
+        check(buffer->document.text == edited && viewer.buffer() == buffer, "Preview changed or released unsaved source");
+        MoveWindow(viewer.window(), 0, 0, 760, 400, FALSE);
+        viewer.setDpi(dpi);
+        click(40); // Recover from the preview error through Source.
+        check(!viewer.htmlPreview() && viewer.state().anchor == selection.anchor && viewer.state().caret == selection.caret,
+            "Returning from a preview error lost the source selection");
+    }
+    size_t anchor = 0, caret = 0;
+    check(buffer->undo(anchor, caret) && buffer->document.text == saved, "Preview discarded the source Undo history");
+    viewer.refreshBuffer(); viewer.setHtmlPreview(true);
+    viewer.edit(buffer, L"another.txt");
+    check(!viewer.htmlAvailable() && !viewer.htmlPreview(), "Switching files retained the HTML controller");
+    viewer.edit(buffer, path); viewer.setHtmlPreview(true); viewer.message(L"Closed");
+    check(!viewer.htmlPreview() && !viewer.hasDocument(), "Closing the document retained the HTML preview");
+}
 void colorsAndClipping() {
     Renderer renderer; renderer.setDpi(96);
     Bitmap bitmap;
@@ -2022,6 +2064,7 @@ int main() {
     int result = 0;
     try {
         initializeRendering();
+        htmlPreviewSwitching();
         terminalProcessShutdown();
         statusBarLimits(); treeMultipleSelection(); inlineTreeInput(); gitCommitInput(); cellPositions(); colorsAndClipping(); imagePreviews(); smoothIcons(); windowTargets(); editableDiff(); editorCaret(); delayedLoadingMessages(); imeCellRendering(); imeTerminalInsertion(); imeUiRendering(); imePositions(); editorWordSelection(); editorWordMovement(); editorLineShortcuts(); editorWrapping(); diffWrapping(); documentFind(); horizontalWheelScrolling(); continuousViewerScrolling(); selectionAutoScrolling(); terminalGitBashSocketEnvironment(); terminalSelectionAutoScrolling(); themedScrollbars(); quickOpenStability();
         std::cout << "Direct2D rendering tests passed\n";

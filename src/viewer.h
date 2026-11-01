@@ -7,6 +7,7 @@
 #include "find_bar.h"
 #include "text_search.h"
 #include "text_layout.h"
+#include "html_preview.h"
 #include <memory>
 
 namespace poppy {
@@ -40,6 +41,9 @@ public:
     void findNext(bool backwards = false);
     bool findKey(const MSG& message);
     bool selectSearch(size_t begin, size_t end, const std::string& query, bool matchCase);
+    bool htmlAvailable() const { return document_ && !diff_ && isHtmlExtension(path_.extension().native()); }
+    void setHtmlPreview(bool enabled);
+    bool htmlPreview() const { return html_.active(); }
     HWND window() const { return window_; }
 private:
     static LRESULT CALLBACK procedure(HWND, UINT, WPARAM, LPARAM);
@@ -71,16 +75,19 @@ private:
     POINT caretPoint() const;
     RECT inputRect() const;
     RECT layoutButton(bool inlineView) const;
+    RECT htmlButton(int button) const;
+    void htmlLayout();
     int visibleRows() const;
     bool splitDiff() const { return diff_ && !inlineView_; }
     bool wrapping() const { return document_ && wordWrap_; }
     size_t diffRow(size_t visualRow) const { return wrapping() ? diffLayout_.row(visualRow).row : visualRow; }
     const DiffFile* stickyFile() const { return diff_ ? diff_->fileForRow(diffRow(static_cast<size_t>(top_)), inlineView_) : nullptr; }
     int textGutter() const { return diff_ && inlineView_ ? 2 * gutter_ : gutter_; }
-    int contentTop() const { return (diff_ ? header_ : 0) + (findBar_.visible() ? header_ : 0); }
+    int contentTop() const { return (diff_ || htmlAvailable() ? header_ : 0) + (findBar_.visible() ? header_ : 0); }
     size_t rowCount() const { return diff_ ? wrapping() ? diffLayout_.rows() : diff_->rowCount(inlineView_) : wrapping() ? textLayout_.rows() : document_->lines.size(); }
     HWND window_ = nullptr;
     Renderer renderer_;
+    HtmlPreview html_;
     ImeComposition ime_;
     FindBar findBar_;
     TextSearch search_;

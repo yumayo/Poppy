@@ -23,6 +23,8 @@ void Viewer::create(HWND parent, HINSTANCE instance) {
         KillTimer(window_, findTimer); search_.query("");
         scrollbars(); caretPosition(); InvalidateRect(window_, nullptr, FALSE);
     };
+    html_.changed = [this] { InvalidateRect(window_, nullptr, FALSE); };
+    html_.focused = [this] { if (focused) focused(); };
     setDpi(GetDpiForWindow(parent));
 }
 void Viewer::setDpi(UINT dpi) {
@@ -30,9 +32,11 @@ void Viewer::setDpi(UINT dpi) {
     cellWidth_ = renderer_.cellWidth(); cellHeight_ = renderer_.textHeight() + MulDiv(3, dpi, 96);
     header_ = MulDiv(34, dpi, 96); gutter_ = MulDiv(70, dpi, 96);
     findBar_.setDpi(dpi);
-    scrollbars(); findLayout(); caretPosition(); InvalidateRect(window_, nullptr, FALSE);
+    scrollbars(); findLayout(); htmlLayout(); caretPosition(); InvalidateRect(window_, nullptr, FALSE);
 }
 void Viewer::show(std::shared_ptr<const Document> d, const ResourceId& path, bool preserve) {
+    const bool preview = preserve && path_ == path && html_.active();
+    html_.close();
     stopLoading();
     stopSelection();
     ime_.cancel(window_);
@@ -45,6 +49,7 @@ void Viewer::show(std::shared_ptr<const Document> d, const ResourceId& path, boo
     else { anchor_ = std::min(anchor_, document_->text.size()); caret_ = std::min(caret_, document_->text.size()); }
     scrollbars(); findLayout(); requestFind(false, false, false); caretPosition(); InvalidateRect(window_, nullptr, FALSE);
     if (previous) restore(*previous);
+    if (preview) setHtmlPreview(true);
     if (statusChanged) statusChanged();
 }
 void Viewer::edit(std::shared_ptr<EditBuffer> buffer, const ResourceId& path, bool preserve) {
@@ -61,6 +66,7 @@ void Viewer::updateGitLines() {
     gitChangedLines_ = gitBefore_ && document_ && !diff_ ? changedWorkingLines(*gitBefore_, *document_) : std::vector<bool>{};
 }
 void Viewer::showDiff(std::shared_ptr<const DiffDocument> d, const ResourceId& path, bool preserve) {
+    html_.close();
     stopLoading();
     stopSelection();
     ime_.cancel(window_);
@@ -103,6 +109,7 @@ void Viewer::refreshBuffer() {
     layoutDirty_ = true; requestFind(false, false, false); scrollbars(); caretPosition(); InvalidateRect(window_, nullptr, FALSE);
 }
 void Viewer::message(const std::wstring& text, const ResourceId& path) {
+    html_.close();
     stopLoading();
     stopSelection();
     ime_.cancel(window_);
@@ -135,6 +142,24 @@ void Viewer::showImage(std::shared_ptr<const ImagePreview> image, const Resource
     image_ = std::move(image); renderer_.setImage(image_);
     InvalidateRect(window_, nullptr, FALSE);
     if (statusChanged) statusChanged();
+}
+RECT Viewer::htmlButton(int button) const {
+    const auto r = Scrollbars::contentRect(window_);
+    const int width = std::min(header_ * 3, std::max(1, static_cast<int>(r.right) / 3));
+    return {button * width, 0, (button + 1) * width, header_};
+}
+void Viewer::htmlLayout() {
+    auto bounds = Scrollbars::contentRect(window_); bounds.top = std::min<LONG>(header_, bounds.bottom);
+    html_.layout(bounds);
+}
+void Viewer::setHtmlPreview(bool enabled) {
+    if (!htmlAvailable() || enabled == html_.active()) return;
+    stopSelection(); ime_.cancel(window_); findBar_.close();
+    if (enabled) html_.show(window_, path_, {});
+    else html_.close();
+    scrollbars(); findLayout(); htmlLayout(); caretPosition();
+    InvalidateRect(window_, nullptr, FALSE);
+    if (!enabled) SetFocus(window_);
 }
 std::wstring Viewer::textStatus() const {
     if (image_) return std::to_wstring(image_->width) + L" × " + std::to_wstring(image_->height) + L" px";
@@ -216,6 +241,11 @@ RECT Viewer::layoutButton(bool inlineView) const {
 int Viewer::visibleRows() const { const auto r = Scrollbars::contentRect(window_); return std::max(1, (static_cast<int>(r.bottom) - contentTop()) / cellHeight_); }
 void Viewer::scrollbars() {
     if (!window_) return;
+    if (html_.active()) {
+        SCROLLINFO info{sizeof(info), SIF_RANGE | SIF_PAGE | SIF_POS, 0, 0, 1, 0, 0};
+        SetScrollInfo(window_, SB_VERT, &info, FALSE); SetScrollInfo(window_, SB_HORZ, &info, FALSE);
+        return;
+    }
     const int cols = document_ ? static_cast<int>(diff_ ? diff_->maxColumns : document_->maxColumns) : 1;
     std::optional<State> reflow;
     // Each bar can change the space available to the other.
@@ -345,10 +375,11 @@ void Viewer::cut() {
     anchor_ = caret_ = range.begin; edited();
 }
 void Viewer::findLayout() {
-    if (findBar_.window()) findBar_.layout(diff_ ? header_ : 0, Scrollbars::contentRect(window_).right, header_);
+    if (findBar_.window()) findBar_.layout(diff_ || htmlAvailable() ? header_ : 0, Scrollbars::contentRect(window_).right, header_);
 }
 void Viewer::find() {
     if (!document_) return;
+    if (html_.active()) setHtmlPreview(false);
     std::optional<std::wstring> seed;
     if (anchor_ != caret_) {
         const size_t begin = std::min(anchor_, caret_), length = std::max(anchor_, caret_) - begin;
@@ -364,6 +395,7 @@ void Viewer::findNext(bool backwards) {
     requestFind(true, backwards);
 }
 bool Viewer::findKey(const MSG& message) {
+    if (html_.active()) return false;
     if (ime_.active() && message.hwnd == window_) return false;
     if (message.message != WM_KEYDOWN || !document_) return false;
     const bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0, shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
@@ -412,6 +444,7 @@ bool Viewer::selectSearch(size_t begin, size_t end, const std::string& query, bo
     const auto text = std::string_view(document_->text).substr(begin, end - begin);
     const auto match = pattern.next(text, cursor, text.size());
     if (!match || match->begin != 0 || match->end != text.size()) return false;
+    if (html_.active()) setHtmlPreview(false);
     revealFind_ = false; revealRange({begin, end}); return true;
 }
 void Viewer::revealRange(TextMatch match) {
@@ -497,7 +530,7 @@ void Viewer::caretPosition(bool reveal) {
     }
 }
 bool Viewer::editSelection(size_t& anchor, size_t& caret) const {
-    if (!edit_) return false;
+    if (!edit_ || html_.active()) return false;
     if (!diff_) { anchor = anchor_; caret = caret_; return true; }
     if (!after_) return false;
     const auto first = diff_->workingOffset(anchor_), last = diff_->workingOffset(caret_);
@@ -577,7 +610,10 @@ void Viewer::paint() {
     Renderer::Paint paint(renderer_, window_); if (!paint) return;
     auto& dc = renderer_; dc.font(Renderer::Font::Ui);
     const auto r = Scrollbars::contentRect(window_);
-    if (image_) {
+    if (html_.active()) {
+        dc.fill(r, background);
+        dc.label({32, header_ + 32, std::max<LONG>(32, r.right - 32), r.bottom}, html_.status(), muted, DT_LEFT | DT_TOP | DT_WORDBREAK);
+    } else if (image_) {
         dc.fill(r, background);
         const int margin = std::max(1, header_ / 3);
         const RECT bounds{margin, margin, r.right - margin, r.bottom - margin};
@@ -710,7 +746,18 @@ void Viewer::paint() {
         }
         if (edit_ && GetFocus() == window_) dc.composition(ime_.text(), caretPoint(), cellWidth_, cellHeight_, inputRect());
     }
-    scrollbars_.paint(window_, dc, background);
+    if (htmlAvailable()) {
+        dc.font(Renderer::Font::Ui); dc.fill({0, 0, r.right, header_}, panel);
+        for (int i = 0; i < 3; ++i) {
+            const auto button = htmlButton(i);
+            const bool selected = i == (html_.active() ? 1 : 0);
+            dc.fill(button, selected ? rgb(50, 70, 94) : panel);
+            dc.label(button, i == 0 ? L"Source" : i == 1 ? L"Preview" : L"Reload", selected ? foreground : muted, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        }
+        dc.label({htmlButton(2).right + 12, 0, r.right - 12, header_}, L"Preview uses the saved file", muted);
+        dc.fill({0, header_ - 1, r.right, header_}, border);
+    }
+    if (!html_.active()) scrollbars_.paint(window_, dc, background);
 }
 LRESULT CALLBACK Viewer::procedure(HWND w, UINT m, WPARAM a, LPARAM b) {
     auto* self = reinterpret_cast<Viewer*>(GetWindowLongPtrW(w, GWLP_USERDATA));
@@ -718,14 +765,16 @@ LRESULT CALLBACK Viewer::procedure(HWND w, UINT m, WPARAM a, LPARAM b) {
     return self ? self->handle(m, a, b) : DefWindowProcW(w, m, a, b);
 }
 LRESULT Viewer::handle(UINT m, WPARAM a, LPARAM b) {
+    if (html_.active() && (m == WM_MOUSEWHEEL || m == WM_MOUSEHWHEEL || m == WM_VSCROLL || m == WM_HSCROLL)) return 0;
     LRESULT result = 0;
     if (scrollbars_.handle(window_, m, a, b, result)) return result;
     switch (m) {
     case WM_PAINT: paint(); return 0;
     case WM_ERASEBKGND: return 1;
-    case WM_SIZE: scrollbars(); findLayout(); caretPosition(); InvalidateRect(window_, nullptr, FALSE); return 0;
+    case WM_SIZE: scrollbars(); findLayout(); htmlLayout(); caretPosition(); InvalidateRect(window_, nullptr, FALSE); return 0;
+    case WM_MOVE: htmlLayout(); return 0;
     case WM_SETTINGCHANGE: caretPosition(); return 0;
-    case WM_SETFOCUS: caretPosition(); if (focused) focused(); return 0;
+    case WM_SETFOCUS: caretPosition(); if (focused) focused(); if (html_.active()) html_.focus(); return 0;
     case WM_KILLFOCUS:
         stopSelection();
         ime_.clear();
@@ -746,9 +795,13 @@ LRESULT Viewer::handle(UINT m, WPARAM a, LPARAM b) {
             caretVisible_ = !caretVisible_; InvalidateRect(window_, nullptr, FALSE);
         }
         return 0;
-    case WM_DESTROY: stopLoading(); stopSelection(); ime_.clear(); KillTimer(window_, caretTimer); KillTimer(window_, findTimer); return 0;
+    case WM_DESTROY: html_.close(); stopLoading(); stopSelection(); ime_.clear(); KillTimer(window_, caretTimer); KillTimer(window_, findTimer); return 0;
     case WM_SHOWWINDOW: if (!a) { stopSelection(); ime_.cancel(window_); } break;
     case WM_SETCURSOR:
+        if (htmlAvailable() && LOWORD(b) == HTCLIENT) {
+            POINT point{}; GetCursorPos(&point); ScreenToClient(window_, &point);
+            for (int i = 0; i < 3; ++i) { const auto button = htmlButton(i); if (PtInRect(&button, point)) { SetCursor(LoadCursorW(nullptr, IDC_HAND)); return TRUE; } }
+        }
         if (image_ && LOWORD(b) == HTCLIENT) { SetCursor(LoadCursorW(nullptr, IDC_ARROW)); return TRUE; }
         if (diff_ && LOWORD(b) == HTCLIENT) {
             POINT point{}; GetCursorPos(&point); ScreenToClient(window_, &point);
@@ -763,6 +816,15 @@ LRESULT Viewer::handle(UINT m, WPARAM a, LPARAM b) {
         SetFocus(window_);
         const POINT point{GET_X_LPARAM(b), GET_Y_LPARAM(b)};
         if (!document_) return 0;
+        if (htmlAvailable()) for (int i = 0; i < 3; ++i) {
+            const auto button = htmlButton(i);
+            if (PtInRect(&button, point)) {
+                if (i == 2) { setHtmlPreview(false); setHtmlPreview(true); }
+                else setHtmlPreview(i == 1);
+                return 0;
+            }
+        }
+        if (html_.active()) return 0;
         if (diff_) for (const bool inlineView : {false, true}) {
             const auto button = layoutButton(inlineView);
             if (PtInRect(&button, point)) { setDiffLayout(inlineView); return 0; }
@@ -804,6 +866,7 @@ LRESULT Viewer::handle(UINT m, WPARAM a, LPARAM b) {
         scroll(0, 0); return 0;
     }
     case WM_SYSKEYDOWN: case WM_KEYDOWN:
+        if (html_.active()) return DefWindowProcW(window_, m, a, b);
         if (ime_.active()) return DefWindowProcW(window_, m, a, b);
         if (edit_ && !(GetKeyState(VK_CONTROL) & 0x8000) && (GetKeyState(VK_SHIFT) & 0x8000) &&
             (GetKeyState(VK_MENU) & 0x8000) && (a == VK_UP || a == VK_DOWN)) {
@@ -843,6 +906,7 @@ LRESULT Viewer::handle(UINT m, WPARAM a, LPARAM b) {
         else if (a == VK_END && document_) { top_ = static_cast<int>(rowCount()); scroll(0, 0); }
         return 0;
     case WM_CHAR:
+        if (html_.active()) return 0;
         if (ime_.active()) return 0;
         if (edit_ && !(GetKeyState(VK_CONTROL) & 0x8000) && (a >= 32 || a == '\r')) {
             const wchar_t c = static_cast<wchar_t>(a);
@@ -857,7 +921,7 @@ LRESULT Viewer::handle(UINT m, WPARAM a, LPARAM b) {
         return ime_.handle(window_, m, a, b, [this] { caretPosition(); },
             [this](std::wstring text) { if (edit_) replace(utf8(text)); });
     case WM_CONTEXTMENU: {
-        if (image_) return 0;
+        if (image_ || html_.active()) return 0;
         revealFind_ = false;
         HMENU menu = CreatePopupMenu(); AppendMenuW(menu, MF_STRING | (anchor_ == caret_ ? MF_GRAYED : 0), 1, L"Copy\tCtrl+C"); AppendMenuW(menu, MF_STRING, 2, L"Select all\tCtrl+A");
         if (edit_) {

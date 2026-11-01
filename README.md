@@ -2,7 +2,7 @@
 
 Windows専用の、AI CLIと一緒に使う小さなコードエディターです。左端にプロジェクト一覧、その右にアイコンだけのアクティビティーバーとエクスプローラー／Gitのサイドバー、さらに右に編集可能なコード表示、右下にターミナルを配置します。AIに編集を任せながら、人間による小さな修正も行えます。
 
-C++17 / Win32 / Direct2D / DirectWrite / ConPTYで実装し、ブラウザー、WebView、Node.js、.NETランタイム、エディターエンジンを常駐させません。LSP、拡張機能は入れていません。
+C++17 / Win32 / Direct2D / DirectWrite / ConPTYで実装しています。HTMLのプレビューには必要なときにWebView2を起動し、Sourceへの切り替えやタブの切り替えでコントローラーを閉じます。Node.js、.NETランタイム、外部のエディターエンジンは使用しません。LSP、拡張機能は入れていません。
 
 コードビューアー、ターミナル、タブ、ファイルツリー、Git一覧、アクティビティーボタン、スクロールバーをDirect2Dで描画し、文字の整形とフォントのフォールバックはDirectWriteを使います。アイコンはDirect2Dのベクターパスを使い、図形のアンチエイリアスと丸い線端・結合で滑らかに描画します。ツリーとボタンも独自のウィンドウで描画し、アプリからGDIの描画・フォントAPIを呼び出したり、`gdi32`へ直接リンクしたりする処理はありません。描画テストのビットマップにはWICを使います。スクロールバーはアプリの暗いテーマに合わせ、通常・ホバー・ドラッグ中の色を切り替えます。メニュー、ツールチップはWindowsが描画する標準UIを使います。
 
@@ -15,6 +15,8 @@ C++17 / Win32 / Direct2D / DirectWrite / ConPTYで実装し、ブラウザー、
 生成するアプリはWindows 10 version 1809以降のx64環境が対象です。WindowsプロジェクトのGit表示には、別途Git for WindowsをPATHに追加してください。WSLプロジェクトは選んだディストリビューションのGitを使います。AI CLIも利用する環境へ別途インストールします。
 
 状態の保存にはSQLite3を使います。SQLite3はC++標準ライブラリには含まれません。`third_party/` はGit管理対象外のため、ビルド前に [SQLite公式サイト](https://sqlite.org/download.html) の `sqlite-amalgamation-*.zip` から、同じリリースの `sqlite3.c` と `sqlite3.h` を `third_party/sqlite/` に配置してください。SQLite 3.54.1でビルドと保存テストを確認しています。CMakeで静的リンクするため、配布先にSQLiteのDLLを追加する必要はありません。
+
+Windows向けビルドにはMicrosoft.Web.WebView2 SDK 1.0.4314.35も必要です。NuGetパッケージを`third_party/microsoft.web.webview2.1.0.4314.35/`へ展開し、`build/native/include/WebView2.h`と`build/native/x64/WebView2Loader.dll`がある状態にしてください。別の場所を使う場合はCMakeの`POPPY_WEBVIEW2_SDK`で指定します。CMakeはアーキテクチャに合う`WebView2Loader.dll`とライセンス・NOTICEを実行ファイルの隣へコピーします。配布時もこれらを同梱してください。HTMLプレビューを使うWindowsにはMicrosoft Edge WebView2 Runtimeが必要です。SDKとLoader DLLだけではブラウザー本体は含まれません。
 
 ### Dockerでビルド
 
@@ -114,6 +116,14 @@ cmake -S . -B out -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
 cmake --build out
 ctest --test-dir out --output-on-failure
 ```
+
+## HTMLプレビュー
+
+`.html` / `.htm`を開き、本文上部の`Preview`をクリックすると、Poppy内にWebView2で表示します。`Source`で編集画面へ戻り、`Reload`で保存済みファイルを再読み込みします。プレビューはディスク上のファイルを対象とするため、編集後はCtrl+Sで保存してから`Preview`または`Reload`を使ってください。ソースの未保存本文・Undo履歴・選択位置は切り替え後も保持します。
+
+`file://`で開くため、相対パスのCSS・画像・通常のスクリプトも読み込めます。開発サーバーが必要な構成や、ブラウザーがローカルファイルに制限する`fetch`・ES Modulesなどは、その制限に従います。WSLのHTMLは`\\wsl.localhost`共有経由で開き、Windows側のアクセス権を使います。名前にバックスラッシュを含むWSLパスは表示できません。Git差分・コミット時点の表示にはプレビューを付けません。プレビューの表示状態は保存せず、別のタブを開くとSourceから始まります。
+
+WebView2のユーザーデータは`%LOCALAPPDATA%\Poppy\WebView2`に保存します。Runtime・Loaderがない場合や読み込みに失敗した場合はプレビュー領域にエラーを表示し、`Source`から編集を続けられます。
 
 ## 複数プロジェクトとAI状態
 
