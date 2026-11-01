@@ -104,13 +104,9 @@ D2D1_RECT_F rectangle(const RECT& r) {
 }
 bool empty(const RECT& r) { return r.right <= r.left || r.bottom <= r.top; }
 
-// DirectWrite supplies shaping and fallback fonts. Place every glyph cluster at
-// its model cell, rather than letting fallback-font advances move later cells.
-// The object is used synchronously by IDWriteTextLayout::Draw, never retained.
-class CellTextRenderer final : public IDWriteTextRenderer {
+// These renderers are used synchronously by IDWriteTextLayout::Draw, never retained.
+class GlyphRunRenderer : public IDWriteTextRenderer {
 public:
-    CellTextRenderer(ID2D1RenderTarget* target, ID2D1Brush* brush, float x, const std::vector<float>& positions)
-        : target_(target), brush_(brush), x_(x), positions_(positions) {}
     HRESULT STDMETHODCALLTYPE QueryInterface(REFIID id, void** result) override {
         if (!result) return E_POINTER;
         *result = nullptr;
@@ -121,6 +117,40 @@ public:
     }
     ULONG STDMETHODCALLTYPE AddRef() override { return 1; }
     ULONG STDMETHODCALLTYPE Release() override { return 1; }
+    HRESULT STDMETHODCALLTYPE IsPixelSnappingDisabled(void*, BOOL* disabled) override { *disabled = TRUE; return S_OK; }
+    HRESULT STDMETHODCALLTYPE GetCurrentTransform(void*, DWRITE_MATRIX* matrix) override { *matrix = {1, 0, 0, 1, 0, 0}; return S_OK; }
+    HRESULT STDMETHODCALLTYPE GetPixelsPerDip(void*, FLOAT* pixels) override { *pixels = 1.0f; return S_OK; }
+    HRESULT STDMETHODCALLTYPE DrawUnderline(void*, FLOAT, FLOAT, const DWRITE_UNDERLINE*, IUnknown*) override { return S_OK; }
+    HRESULT STDMETHODCALLTYPE DrawStrikethrough(void*, FLOAT, FLOAT, const DWRITE_STRIKETHROUGH*, IUnknown*) override { return S_OK; }
+    HRESULT STDMETHODCALLTYPE DrawInlineObject(void*, FLOAT, FLOAT, IDWriteInlineObject*, BOOL, BOOL, IUnknown*) override { return S_OK; }
+};
+
+// Ask the same layout engine as the terminal which face and em size it uses for
+// Japanese. Passing "Consolas" to IMM alone invokes a different fallback chain.
+class CompositionFontRenderer final : public GlyphRunRenderer {
+public:
+    CompositionFontRenderer(IDWriteGdiInterop* interop, LOGFONTW& font) : interop_(interop), font_(font) {}
+    HRESULT STDMETHODCALLTYPE DrawGlyphRun(void*, FLOAT, FLOAT, DWRITE_MEASURING_MODE,
+                                         const DWRITE_GLYPH_RUN* run, const DWRITE_GLYPH_RUN_DESCRIPTION*, IUnknown*) override {
+        LOGFONTW font{};
+        const auto result = interop_->ConvertFontFaceToLOGFONT(run->fontFace, &font);
+        if (FAILED(result)) return result;
+        font.lfHeight = -static_cast<LONG>(std::lround(run->fontEmSize));
+        font.lfWidth = font_.lfWidth;
+        font_ = font;
+        return S_OK;
+    }
+private:
+    IDWriteGdiInterop* interop_;
+    LOGFONTW& font_;
+};
+
+// DirectWrite supplies shaping and fallback fonts. Place every glyph cluster at
+// its model cell, rather than letting fallback-font advances move later cells.
+class CellTextRenderer final : public GlyphRunRenderer {
+public:
+    CellTextRenderer(ID2D1RenderTarget* target, ID2D1Brush* brush, float x, const std::vector<float>& positions)
+        : target_(target), brush_(brush), x_(x), positions_(positions) {}
     HRESULT STDMETHODCALLTYPE IsPixelSnappingDisabled(void*, BOOL* disabled) override { *disabled = FALSE; return S_OK; }
     HRESULT STDMETHODCALLTYPE GetCurrentTransform(void*, DWRITE_MATRIX* matrix) override {
         D2D1_MATRIX_3X2_F transform{}; target_->GetTransform(&transform);
@@ -158,9 +188,6 @@ public:
         target_->DrawGlyphRun(D2D1::Point2F(x_, baselineY), &fixed, brush_, mode);
         return S_OK;
     }
-    HRESULT STDMETHODCALLTYPE DrawUnderline(void*, FLOAT, FLOAT, const DWRITE_UNDERLINE*, IUnknown*) override { return S_OK; }
-    HRESULT STDMETHODCALLTYPE DrawStrikethrough(void*, FLOAT, FLOAT, const DWRITE_STRIKETHROUGH*, IUnknown*) override { return S_OK; }
-    HRESULT STDMETHODCALLTYPE DrawInlineObject(void*, FLOAT, FLOAT, IDWriteInlineObject*, BOOL, BOOL, IUnknown*) override { return S_OK; }
 private:
     ID2D1RenderTarget* target_;
     ID2D1Brush* brush_;
@@ -202,6 +229,15 @@ void Renderer::setDpi(UINT dpi) {
     compositionFont_.lfItalic = codeFont_->GetFontStyle() != DWRITE_FONT_STYLE_NORMAL;
     compositionFont_.lfCharSet = DEFAULT_CHARSET;
     compositionFont_.lfPitchAndFamily = FIXED_PITCH | FF_MODERN;
+    japaneseCompositionFont_ = compositionFont_;
+    ComPtr<IDWriteGdiInterop> interop;
+    // Keep the base font if the system cannot resolve a Japanese fallback.
+    // This is metadata conversion through DirectWrite; no GDI font is created.
+    if (SUCCEEDED(text->GetGdiInterop(interop.put())) &&
+        SUCCEEDED(text->CreateTextLayout(L"\u3042", 1, codeFont_.get(), 1000.0f, 1000.0f, layout.put()))) {
+        CompositionFontRenderer renderer(interop.get(), japaneseCompositionFont_);
+        layout->Draw(nullptr, &renderer, 0, 0);
+    }
     // Geometry and fonts use the existing Win32 physical-pixel layout. Keeping
     // targets at 96 DPI avoids scaling it twice on per-monitor DPI changes.
 }
