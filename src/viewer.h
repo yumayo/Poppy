@@ -31,6 +31,7 @@ public:
     void setWordWrap(bool enabled);
     bool wordWrap() const { return wordWrap_; }
     void message(const std::wstring& text, const ResourceId& path = {});
+    void loading(const std::wstring& text, const ResourceId& path = {});
     State state() const;
     void restore(const State& state);
     size_t documentBytes() const;
@@ -49,6 +50,7 @@ private:
     void extendSelection(int x, int y);
     void scrollSelection();
     void stopSelection();
+    void stopLoading();
     void restoreTop(const State& state);
     size_t position(int x, int y, bool* trailing = nullptr, WordRange* word = nullptr) const;
     void copy();
@@ -95,6 +97,9 @@ private:
     static constexpr UINT_PTR caretTimer = 0x5056;
     static constexpr UINT_PTR findTimer = 0x5057;
     static constexpr UINT_PTR selectionTimer = 0x5058;
+    static constexpr UINT_PTR loadingTimer = 0x5059;
+    bool loading_ = false;
+    ULONGLONG loadingDue_ = 0;
     bool caretVisible_ = false;
     std::shared_ptr<const Document> document_;
     std::shared_ptr<const ImagePreview> image_;

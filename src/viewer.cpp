@@ -33,6 +33,7 @@ void Viewer::setDpi(UINT dpi) {
     scrollbars(); findLayout(); caretPosition(); InvalidateRect(window_, nullptr, FALSE);
 }
 void Viewer::show(std::shared_ptr<const Document> d, const ResourceId& path, bool preserve) {
+    stopLoading();
     stopSelection();
     ime_.cancel(window_);
     image_.reset(); renderer_.setImage({});
@@ -60,6 +61,7 @@ void Viewer::updateGitLines() {
     gitChangedLines_ = gitBefore_ && document_ && !diff_ ? changedWorkingLines(*gitBefore_, *document_) : std::vector<bool>{};
 }
 void Viewer::showDiff(std::shared_ptr<const DiffDocument> d, const ResourceId& path, bool preserve) {
+    stopLoading();
     stopSelection();
     ime_.cancel(window_);
     image_.reset(); renderer_.setImage({});
@@ -101,6 +103,7 @@ void Viewer::refreshBuffer() {
     layoutDirty_ = true; requestFind(false, false, false); scrollbars(); caretPosition(); InvalidateRect(window_, nullptr, FALSE);
 }
 void Viewer::message(const std::wstring& text, const ResourceId& path) {
+    stopLoading();
     stopSelection();
     ime_.cancel(window_);
     image_.reset(); renderer_.setImage({});
@@ -110,6 +113,22 @@ void Viewer::message(const std::wstring& text, const ResourceId& path) {
     diff_.reset(); document_.reset(); path_ = path; message_ = text; top_ = left_ = 0; anchor_ = caret_ = 0; after_ = false;
     scrollbars(); caretPosition(); InvalidateRect(window_, nullptr, FALSE);
     if (statusChanged) statusChanged();
+}
+void Viewer::loading(const std::wstring& text, const ResourceId& path) {
+    // Repository discovery and diff loading are one continuous wait for a tab.
+    if (loading_ && path_ == path) {
+        message_ = text;
+        if (!loadingDue_) InvalidateRect(window_, nullptr, FALSE);
+        return;
+    }
+    // Release the previous document immediately so it cannot still be edited.
+    message(L"", path);
+    message_ = text; loading_ = true; loadingDue_ = GetTickCount64() + 1000;
+    SetTimer(window_, loadingTimer, 1000, nullptr);
+}
+void Viewer::stopLoading() {
+    if (window_) KillTimer(window_, loadingTimer);
+    loading_ = false; loadingDue_ = 0;
 }
 void Viewer::showImage(std::shared_ptr<const ImagePreview> image, const ResourceId& path) {
     message(L"", path);
@@ -567,7 +586,7 @@ void Viewer::paint() {
     } else if (!document_) {
         dc.fill(r, background);
         RECT text{32, 48, std::max<LONG>(32, r.right - 32), r.bottom};
-        dc.label(text, message_, muted, DT_LEFT | DT_TOP | DT_WORDBREAK);
+        if (!loadingDue_) dc.label(text, message_, muted, DT_LEFT | DT_TOP | DT_WORDBREAK);
     } else {
         const int body = contentTop(), middle = static_cast<int>(r.right) / 2;
         if (diff_) {
@@ -713,13 +732,21 @@ LRESULT Viewer::handle(UINT m, WPARAM a, LPARAM b) {
         highSurrogate_ = 0; caretVisible_ = false; KillTimer(window_, caretTimer); DestroyCaret();
         InvalidateRect(window_, nullptr, FALSE); return 0;
     case WM_TIMER:
+        if (a == loadingTimer) {
+            // A queued timer from the previous tab must not shorten this wait.
+            if (loadingDue_ && GetTickCount64() >= loadingDue_) {
+                KillTimer(window_, loadingTimer); loadingDue_ = 0;
+                InvalidateRect(window_, nullptr, FALSE);
+            }
+            return 0;
+        }
         if (a == selectionTimer) { scrollSelection(); return 0; }
         if (a == findTimer) { searchSlice(); return 0; }
         if (a == caretTimer && edit_ && GetFocus() == window_ && GetCaretBlinkTime() != INFINITE) {
             caretVisible_ = !caretVisible_; InvalidateRect(window_, nullptr, FALSE);
         }
         return 0;
-    case WM_DESTROY: stopSelection(); ime_.clear(); KillTimer(window_, caretTimer); KillTimer(window_, findTimer); return 0;
+    case WM_DESTROY: stopLoading(); stopSelection(); ime_.clear(); KillTimer(window_, caretTimer); KillTimer(window_, findTimer); return 0;
     case WM_SHOWWINDOW: if (!a) { stopSelection(); ime_.cancel(window_); } break;
     case WM_SETCURSOR:
         if (image_ && LOWORD(b) == HTCLIENT) { SetCursor(LoadCursorW(nullptr, IDC_ARROW)); return TRUE; }

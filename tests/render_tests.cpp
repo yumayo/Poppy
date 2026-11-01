@@ -9,6 +9,7 @@
 #include <commctrl.h>
 #include <imm.h>
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <fstream>
 #include <iostream>
@@ -587,6 +588,75 @@ void editorCaret() {
     check(viewer.textStatus() == L"UTF-16 LE  ·  LF" && updates >= 2, "Editing the first newline did not refresh line-ending status");
     viewer.message(L"Loading");
     check(viewer.textStatus().empty(), "A loading message retained the previous file format");
+}
+void delayedLoadingMessages() {
+    Viewer pending;
+    std::array<Viewer, 6> completed;
+    const auto instance = GetModuleHandleW(nullptr);
+    const auto parent = CreateWindowExW(0, L"STATIC", L"Loading message test", WS_POPUP | WS_CLIPCHILDREN,
+        0, 0, 640, 360, nullptr, nullptr, instance, nullptr);
+    check(parent != nullptr, "Cannot create the loading message test window");
+    struct WindowOwner { HWND value; ~WindowOwner() { DestroyWindow(value); } } owner{parent};
+    constexpr UINT_PTR loadingTimer = 0x5059;
+    auto buffer = std::make_shared<EditBuffer>();
+    buffer->document.text = "original"; buffer->document.encoding = "UTF-8";
+    indexDocument(buffer->document); buffer->initialize(buffer->document.text);
+    for (auto& viewer : completed) {
+        viewer.create(parent, instance); MoveWindow(viewer.window(), 0, 0, 640, 360, FALSE);
+        viewer.edit(buffer, L"old.txt"); viewer.loading(L"Loading…", L"next.txt");
+        check(!viewer.hasDocument() && !viewer.buffer() && viewer.textStatus().empty(),
+            "Waiting to show loading text retained the previous editable document or status");
+        SendMessageW(viewer.window(), WM_CHAR, 'x', 0);
+        check(buffer->document.text == "original", "Typing while loading edited the previous tab");
+    }
+    completed[0].edit(buffer, L"next.txt");
+    completed[1].show(std::make_shared<Document>(buffer->document), L"next.txt");
+    auto diff = std::make_shared<DiffDocument>();
+    diff->patch.text = "diff --git a/next.txt b/next.txt\n--- a/next.txt\n+++ b/next.txt\n@@ -1 +1 @@\n-old\n+new\n";
+    indexDiff(*diff, true); completed[2].showDiff(diff, L"next.txt");
+    auto image = std::make_shared<ImagePreview>(); image->width = image->height = 1; image->pixels = {0, 0, 0, 255};
+    completed[3].showImage(image, L"next.png");
+    completed[4].message(L"Cannot read this file.", L"next.txt");
+    completed[5].message(L"Select a file.");
+
+    pending.create(parent, instance); MoveWindow(pending.window(), 0, 0, 640, 360, FALSE);
+    pending.loading(L"Loading…", L"first.txt");
+    ValidateRect(pending.window(), nullptr);
+    SendMessageW(pending.window(), WM_TIMER, loadingTimer, 0);
+    check(!GetUpdateRect(pending.window(), nullptr, FALSE), "Loading text appeared before one second");
+    const auto waitTimer = [&] {
+        const auto start = GetTickCount64();
+        MSG timer{};
+        while (GetTickCount64() - start < 3000) {
+            if (PeekMessageW(&timer, pending.window(), WM_TIMER, WM_TIMER, PM_REMOVE)) {
+                if (timer.wParam == loadingTimer) return timer;
+                DispatchMessageW(&timer);
+            }
+            MsgWaitForMultipleObjects(0, nullptr, FALSE, 10, QS_TIMER);
+        }
+        throw std::runtime_error("The loading message timer was not started");
+    };
+    // An expired notification can remain queued when another file is opened.
+    const auto previous = waitTimer();
+    const auto started = GetTickCount64();
+    pending.loading(L"Loading Git repository…", L"second.txt");
+    ValidateRect(pending.window(), nullptr); DispatchMessageW(&previous);
+    check(!GetUpdateRect(pending.window(), nullptr, FALSE), "The previous tab's timer shortened the next tab's delay");
+    while (!GetUpdateRect(pending.window(), nullptr, FALSE)) {
+        auto timer = waitTimer();
+        pending.loading(L"Loading Git diff…", L"second.txt");
+        DispatchMessageW(&timer);
+        check(GetTickCount64() - started < 3000, "Changing loading phases restarted the same file's delay");
+    }
+    check(GetTickCount64() - started >= 1000, "A slow read showed its message before one second");
+    ValidateRect(pending.window(), nullptr);
+    SendMessageW(pending.window(), WM_TIMER, loadingTimer, 0);
+    check(!GetUpdateRect(pending.window(), nullptr, FALSE), "A visible loading message kept repainting on stale timers");
+    for (auto& viewer : completed) {
+        ValidateRect(viewer.window(), nullptr);
+        SendMessageW(viewer.window(), WM_TIMER, loadingTimer, 0);
+        check(!GetUpdateRect(viewer.window(), nullptr, FALSE), "A completed read or closed tab retained a loading notification");
+    }
 }
 void imeCellRendering() {
     Renderer renderer;
@@ -1953,7 +2023,7 @@ int main() {
     try {
         initializeRendering();
         terminalProcessShutdown();
-        statusBarLimits(); treeMultipleSelection(); inlineTreeInput(); gitCommitInput(); cellPositions(); colorsAndClipping(); imagePreviews(); smoothIcons(); windowTargets(); editableDiff(); editorCaret(); imeCellRendering(); imeTerminalInsertion(); imeUiRendering(); imePositions(); editorWordSelection(); editorWordMovement(); editorLineShortcuts(); editorWrapping(); diffWrapping(); documentFind(); horizontalWheelScrolling(); continuousViewerScrolling(); selectionAutoScrolling(); terminalGitBashSocketEnvironment(); terminalSelectionAutoScrolling(); themedScrollbars(); quickOpenStability();
+        statusBarLimits(); treeMultipleSelection(); inlineTreeInput(); gitCommitInput(); cellPositions(); colorsAndClipping(); imagePreviews(); smoothIcons(); windowTargets(); editableDiff(); editorCaret(); delayedLoadingMessages(); imeCellRendering(); imeTerminalInsertion(); imeUiRendering(); imePositions(); editorWordSelection(); editorWordMovement(); editorLineShortcuts(); editorWrapping(); diffWrapping(); documentFind(); horizontalWheelScrolling(); continuousViewerScrolling(); selectionAutoScrolling(); terminalGitBashSocketEnvironment(); terminalSelectionAutoScrolling(); themedScrollbars(); quickOpenStability();
         std::cout << "Direct2D rendering tests passed\n";
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; result = 1; }
     if (SUCCEEDED(com)) CoUninitialize();

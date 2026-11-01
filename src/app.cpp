@@ -2033,7 +2033,7 @@ void ProjectRuntime::Impl::normalizeGroups() {
     if (std::none_of(tabs_.begin(), tabs_.end(), [](const Tab& t) { return t.group == 0; })) {
         for (auto& tab : tabs_) tab.group = 0;
         focusedGroup_ = 0; ++serial_[0]; ++serial_[1];
-        viewers_[0].message(L"Loading…"); viewers_[1].message(L"");
+        viewers_[0].loading(L"Loading…"); viewers_[1].message(L"");
         PostMessageW(window_, WM_APP + 14, 0, 0);
     }
     for (int group = 0; group < 2; ++group) {
@@ -2370,8 +2370,8 @@ void ProjectRuntime::Impl::loadTab(bool preserve, int group) {
     }
     if (root_.wsl() && !connected_) { if (!viewers_[group].hasDocument()) viewers_[group].message(connecting_ ? L"Connecting to WSL…" : L"WSL disconnected. Press F5 to reconnect.", path); return; }
     // Retain only tab metadata and view positions; reload the active document.
-    if (!preserve) viewers_[group].message(tab.diff ? L"Loading Git diff…" : L"Loading…", path);
-    status((tab.diff ? L"Git diff: " : L"Loading ") + path.filename().native());
+    if (!preserve) viewers_[group].loading(tab.diff ? L"Loading Git diff…" : L"Loading…", path);
+    status((tab.diff ? L"Git diff: " : L"") + path.filename().native());
     if (!tab.diff) {
         worker_->submit(L"file:" + std::to_wstring(group), [this, group, path, serial, generation, preserve, state] {
             auto result = readDocument(*provider_, path);
@@ -2393,7 +2393,7 @@ void ProjectRuntime::Impl::loadTab(bool preserve, int group) {
         });
         return;
     }
-    if (!git_) { waitingForGit_[group] = true; viewers_[group].message(L"Loading Git repository…", path); return; }
+    if (!git_) { waitingForGit_[group] = true; viewers_[group].loading(L"Loading Git repository…", path); return; }
     const auto repo = git_->repository(tab.gitRoot.empty() ? path : tab.gitRoot);
     if (!repo || !repo->error.empty() || (!tab.gitRoot.empty() && pathKey(repo->root) != pathKey(tab.gitRoot))) { viewers_[group].message(L"Git repository unavailable for this file. Press F5 to refresh.", path); return; }
     const auto root = tab.gitRoot.empty() ? repo->root : tab.gitRoot;
@@ -2901,7 +2901,7 @@ size_t ProjectRuntime::documentBytes() const {
 void ProjectRuntime::releaseDocument() {
     impl_->saveTab(); if (std::any_of(impl_->tabs_.begin(), impl_->tabs_.end(), [](const Tab& tab) { return tab.buffer && (tab.buffer->dirty() || tab.buffer->saving); })) return;
     for (auto& tab : impl_->tabs_) { tab.buffer.reset(); tab.diffBefore.reset(); }
-    for (int group = 0; group < 2; ++group) { ++impl_->serial_[group]; impl_->waitingForGit_[group] = false; impl_->viewers_[group].message(L"Loading…"); }
+    for (int group = 0; group < 2; ++group) { ++impl_->serial_[group]; impl_->waitingForGit_[group] = false; impl_->viewers_[group].message(L""); }
 }
 HWND ProjectRuntime::window() const { return impl_->window_; }
 bool ProjectRuntime::ready() const { return !impl_->root_.empty(); }
