@@ -71,6 +71,7 @@ private:
     void updateProjectDrag(POINT point);
     void scrollProjectDrag();
     void endProjectDrag(bool drop = false);
+    RECT addButtonBounds() const;
     size_t hit(POINT point) const;
     RECT row(size_t index) const;
     OpenProject* find(uint64_t id);
@@ -314,7 +315,7 @@ void Workspace::select(size_t index,bool attention){
     const int count=std::max(1,static_cast<int>(projects_.size()));
     const auto rect=row(index);RECT client{};GetClientRect(window_,&client);
     if(rect.top<px(44))scroll_=std::min<int>(static_cast<int>(index),count-1);
-    else if(rect.bottom>client.bottom-px(44))scroll_=std::max(0,static_cast<int>(index)-(static_cast<int>(client.bottom)-px(88))/px(48)+1);
+    else if(rect.bottom>client.bottom)scroll_=std::max(0,static_cast<int>(index)-(static_cast<int>(client.bottom)-px(44))/px(48)+1);
     appDirty_=true;appChanged_=GetTickCount64();updateTools();InvalidateRect(window_,nullptr,FALSE);
     checkFolder(projects_[active_]);
     trimDocuments();
@@ -378,14 +379,15 @@ void Workspace::tick(){
     scrollProjectDrag();
     const auto now=GetTickCount64();bool animate=false;
     for(size_t i=0;i<projects_.size();++i){auto& project=projects_[i];project.runtime->poll();if(project.dirty&&now-project.changedAt>=650)save(project);
-        RECT r{};GetClientRect(window_,&r);const auto item=row(i);if(item.bottom>px(44)&&item.top<r.bottom-px(44)&&project.runtime->summary().state==AiState::Running)animate=true;
+        RECT r{};GetClientRect(window_,&r);const auto item=row(i);if(item.bottom>px(44)&&item.top<r.bottom&&project.runtime->summary().state==AiState::Running)animate=true;
     }
     trimDocuments();
     if(appDirty_&&now-appChanged_>=650)saveApp();
     if(animate&&!IsIconic(window_)&&IsWindowVisible(window_)) {RECT r{};GetClientRect(window_,&r);r.right=px(session_.projectListWidth);InvalidateRect(window_,&r,FALSE);}
 }
+RECT Workspace::addButtonBounds() const {return {px(session_.projectListWidth)-px(34),0,px(session_.projectListWidth),px(44)};}
 RECT Workspace::row(size_t index) const {const int top=px(44)+(static_cast<int>(index)-scroll_)*px(48);return {0,top,px(session_.projectListWidth),top+px(48)};}
-size_t Workspace::hit(POINT point) const {RECT r{};GetClientRect(window_,&r);if(point.x<0||point.x>=px(session_.projectListWidth)||point.y<px(44)||point.y>=r.bottom-px(44))return projects_.size();const auto index=scroll_+(point.y-px(44))/px(48);return index>=0?static_cast<size_t>(index):projects_.size();}
+size_t Workspace::hit(POINT point) const {RECT r{};GetClientRect(window_,&r);if(point.x<0||point.x>=px(session_.projectListWidth)||point.y<px(44)||point.y>=r.bottom)return projects_.size();const auto index=scroll_+(point.y-px(44))/px(48);return index>=0?static_cast<size_t>(index):projects_.size();}
 void Workspace::updateProjectDrag(POINT point) {
     if (!projectDrag_) return;
     auto& drag = *projectDrag_; drag.point = point;
@@ -397,7 +399,7 @@ void Workspace::updateProjectDrag(POINT point) {
     }
     drag.position.reset();
     RECT client{}; GetClientRect(window_,&client);
-    if (point.x >= 0 && point.x < px(session_.projectListWidth) && point.y >= px(44) && point.y < client.bottom-px(44)) {
+    if (point.x >= 0 && point.x < px(session_.projectListWidth) && point.y >= px(44) && point.y < client.bottom) {
         const auto position = static_cast<size_t>(scroll_+(point.y-px(44)+px(48)/2)/px(48));
         drag.position = std::min(position,projects_.size());
     }
@@ -407,11 +409,11 @@ void Workspace::scrollProjectDrag() {
     if (!projectDrag_ || !projectDrag_->active) return;
     const auto point = projectDrag_->point;
     RECT client{}; GetClientRect(window_,&client);
-    if (point.x < 0 || point.x >= px(session_.projectListWidth) || point.y < px(44) || point.y >= client.bottom-px(44)) return;
-    const int page = std::max(1,(static_cast<int>(client.bottom)-px(88))/px(48));
+    if (point.x < 0 || point.x >= px(session_.projectListWidth) || point.y < px(44) || point.y >= client.bottom) return;
+    const int page = std::max(1,(static_cast<int>(client.bottom)-px(44))/px(48));
     int next = scroll_;
     if (point.y < px(44+24)) --next;
-    else if (point.y >= client.bottom-px(44+24)) ++next;
+    else if (point.y >= client.bottom-px(24)) ++next;
     next = std::clamp(next,0,std::max(0,static_cast<int>(projects_.size())-page));
     if (next == scroll_) return;
     scroll_ = next; layout(); updateProjectDrag(point);
@@ -451,22 +453,25 @@ std::wstring Workspace::subtitle(size_t index) const {
 void Workspace::layout(){
     if(!window_)return;
     RECT r{};GetClientRect(window_,&r);const int left=px(session_.projectListWidth)+px(5);
-    const int page=std::max(1,(static_cast<int>(r.bottom)-px(88))/px(48));scroll_=std::clamp(scroll_,0,std::max(0,static_cast<int>(projects_.size())-page));
+    const int page=std::max(1,(static_cast<int>(r.bottom)-px(44))/px(48));scroll_=std::clamp(scroll_,0,std::max(0,static_cast<int>(projects_.size())-page));
     if(!projects_.empty())SetWindowPos(projects_[active_].runtime->window(),nullptr,left,0,std::max(0L,r.right-left),r.bottom,SWP_NOZORDER|SWP_NOACTIVATE);
     recent_.layout();
     updateTools();InvalidateRect(window_,nullptr,FALSE);
 }
 void Workspace::updateTools(){
-    for(size_t i=0;i<tools_;++i){TOOLINFOW tip{};tip.cbSize=sizeof(tip);tip.hwnd=window_;tip.uId=i+1;SendMessageW(tooltips_,TTM_DELTOOLW,0,reinterpret_cast<LPARAM>(&tip));}
+    for(size_t i=0;i<=tools_;++i){TOOLINFOW tip{};tip.cbSize=sizeof(tip);tip.hwnd=window_;tip.uId=i;SendMessageW(tooltips_,TTM_DELTOOLW,0,reinterpret_cast<LPARAM>(&tip));}
     tools_=projects_.size();RECT client{};GetClientRect(window_,&client);
-    for(size_t i=0;i<projects_.size();++i){auto rect=row(i);rect.top=std::max<LONG>(px(44),rect.top);rect.bottom=std::min<LONG>(client.bottom-px(44),rect.bottom);if(rect.top>=rect.bottom)continue;
+    TOOLINFOW addTip{};addTip.cbSize=sizeof(addTip);addTip.hwnd=window_;addTip.uId=0;addTip.uFlags=TTF_SUBCLASS;addTip.rect=addButtonBounds();addTip.lpszText=const_cast<wchar_t*>(L"Open folder (Ctrl+O)");SendMessageW(tooltips_,TTM_ADDTOOLW,0,reinterpret_cast<LPARAM>(&addTip));
+    for(size_t i=0;i<projects_.size();++i){auto rect=row(i);rect.top=std::max<LONG>(px(44),rect.top);rect.bottom=std::min<LONG>(client.bottom,rect.bottom);if(rect.top>=rect.bottom)continue;
         TOOLINFOW tip{};tip.cbSize=sizeof(tip);tip.hwnd=window_;tip.uId=i+1;tip.uFlags=TTF_SUBCLASS;tip.rect=rect;tip.lpszText=LPSTR_TEXTCALLBACKW;SendMessageW(tooltips_,TTM_ADDTOOLW,0,reinterpret_cast<LPARAM>(&tip));}
 }
 void Workspace::paint(){
     Renderer::Paint paint(renderer_,window_);if(!paint)return;RECT client{};GetClientRect(window_,&client);renderer_.fill(client,background);
     const int width=px(session_.projectListWidth);renderer_.fill({width,0,width+px(5),client.bottom},border);
-    renderer_.label({px(12),0,width-px(8),px(44)},L"PROJECTS",foreground);
-    for(size_t i=0;i<projects_.size();++i){auto rect=row(i);if(rect.top<px(44)||rect.bottom>client.bottom-px(44))continue;
+    const auto addButton=addButtonBounds();
+    renderer_.label({px(12),0,addButton.left,px(44)},L"PROJECTS",foreground);
+    renderer_.fill(addButton,panel);renderer_.label(addButton,L"+",accent,DT_CENTER|DT_VCENTER|DT_SINGLELINE);
+    for(size_t i=0;i<projects_.size();++i){auto rect=row(i);if(rect.top<px(44)||rect.bottom>client.bottom)continue;
         const auto& project=projects_[i];const auto summary=project.runtime->summary();renderer_.fill(rect,i==active_?panel:background);if(i==active_)renderer_.fill({0,rect.top,px(3),rect.bottom},accent);
         drawAiStatus(renderer_,{px(4),rect.top,px(30),rect.bottom},summary.state,dpi_,static_cast<unsigned>(GetTickCount64()/80));
         const auto secondary=subtitle(i);const auto title=project.path.filename().empty()?project.path.native():project.path.filename().native();
@@ -476,10 +481,9 @@ void Workspace::paint(){
         const auto running=summary.counts[static_cast<size_t>(AiState::Running)];if(running&&summary.state!=AiState::Running)renderer_.label({width-px(24),rect.top+px(22),width-px(3),rect.bottom},std::to_wstring(running),accent);
     }
     if(projectDrag_&&projectDrag_->active&&projectDrag_->position){
-        const int y=std::clamp(static_cast<int>(row(*projectDrag_->position).top),px(44),static_cast<int>(client.bottom)-px(44)-px(2));
+        const int y=std::clamp(static_cast<int>(row(*projectDrag_->position).top),px(44),static_cast<int>(client.bottom)-px(2));
         renderer_.fill({px(4),y,width-px(4),y+px(2)},accent);
     }
-    renderer_.fill({0,client.bottom-px(44),width,client.bottom},panel);renderer_.label({px(12),client.bottom-px(44),width-px(8),client.bottom},L"+  Open folder",accent);
     if(projects_.empty())renderer_.label({width+px(30),px(40),client.right-px(30),client.bottom},restoring_?L"Restoring projects…":L"Open a folder with Ctrl+O.",muted,DT_LEFT|DT_TOP|DT_WORDBREAK);
 }
 void Workspace::report(std::string error){storageError_=wide(error);if(!closing_&&!initialShowPending_)MessageBoxW(window_,(L"Could not read or save state.\n\n"+storageError_).c_str(),L"Poppy",MB_OK|MB_ICONWARNING);}
@@ -495,7 +499,7 @@ case wmAiEvent:for(const auto& event:events_.drain())for(auto& project:projects_
 case WM_TIMER:if(a==77)Terminal::pump();else tick();return 0;
 case WM_ACTIVATE:if(LOWORD(a)==WA_INACTIVE)endProjectDrag();else if(!projects_.empty())PostMessageW(projects_[active_].runtime->window(),WM_APP+12,0,0);return 0;
 case WM_SETFOCUS:if(!projects_.empty())projects_[active_].runtime->activate(true);return 0;
-case WM_LBUTTONDOWN:{recent_.close();endProjectDrag();const POINT point{GET_X_LPARAM(b),GET_Y_LPARAM(b)};RECT r{};GetClientRect(window_,&r);const int width=px(session_.projectListWidth);if(point.x>=width&&point.x<width+px(5)){dragging_=true;SetCapture(window_);}else if(point.x<width&&point.y>=r.bottom-px(44))choose();else if(const auto index=hit(point);index<projects_.size()){select(index,point.x<px(30));projectDrag_=ProjectDrag{projects_[index].id,point,point,false,std::nullopt};SetCapture(window_);}return 0;}
+case WM_LBUTTONDOWN:{recent_.close();endProjectDrag();const POINT point{GET_X_LPARAM(b),GET_Y_LPARAM(b)};const auto addButton=addButtonBounds();const int width=px(session_.projectListWidth);if(point.x>=width&&point.x<width+px(5)){dragging_=true;SetCapture(window_);}else if(PtInRect(&addButton,point))choose();else if(const auto index=hit(point);index<projects_.size()){select(index,point.x<px(30));projectDrag_=ProjectDrag{projects_[index].id,point,point,false,std::nullopt};SetCapture(window_);}return 0;}
 case WM_MOUSEMOVE:if(projectDrag_){updateProjectDrag({GET_X_LPARAM(b),GET_Y_LPARAM(b)});return 0;}if(dragging_){session_.projectListWidth=std::clamp(MulDiv(GET_X_LPARAM(b),96,dpi_),100,600);appDirty_=true;appChanged_=GetTickCount64();layout();}return 0;
 case WM_LBUTTONUP:if(projectDrag_&&projectDrag_->active)updateProjectDrag({GET_X_LPARAM(b),GET_Y_LPARAM(b)});endProjectDrag(true);dragging_=false;if(GetCapture()==window_)ReleaseCapture();return 0;
 case WM_CANCELMODE:endProjectDrag();dragging_=false;if(GetCapture()==window_)ReleaseCapture();return 0;

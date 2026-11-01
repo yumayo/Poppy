@@ -2551,7 +2551,7 @@ void projectDragTests(const fs::path& executable) {
             begin(0,point(2,47));send(app.host,cancel,cancel==WM_KEYDOWN?VK_ESCAPE:0);drop(point(2,47));order({surfaceA,surfaceB,surfaceC});
         }
         RECT client{};GetClientRect(app.host,&client);
-        for(const POINT outside: {POINT{px(300),px(80)},POINT{px(60),px(1)},POINT{px(60),client.bottom-px(1)}}){
+        for(const POINT outside: {POINT{px(300),px(80)},POINT{px(60),px(1)},POINT{px(60),client.bottom}}){
             begin(0,point(2,47));drop(outside);order({surfaceA,surfaceB,surfaceC});
         }
         // Escape must work while a project's editor owns keyboard focus.
@@ -2585,7 +2585,7 @@ void scrollingProjectDragTests(const fs::path& executable) {
     check(SetWindowPos(app.host,nullptr,0,0,px(1000),px(480),SWP_NOMOVE|SWP_NOZORDER)!=FALSE,"Could not resize the project drag test");
     RECT client{};GetClientRect(app.host,&client);POINT wheel{px(60),px(68)};ClientToScreen(app.host,&wheel);
     send(app.host,WM_MOUSEWHEEL,MAKEWPARAM(0,12000),MAKELPARAM(wheel.x,wheel.y));
-    const POINT bottom{px(60),client.bottom-px(45)};
+    const POINT bottom{px(60),client.bottom-px(1)};
     send(app.host,WM_LBUTTONDOWN,MK_LBUTTON,MAKELPARAM(px(60),px(68)));
     send(app.host,WM_MOUSEMOVE,MK_LBUTTON,MAKELPARAM(bottom.x,bottom.y));
     for(int i=0;i<20;++i)send(app.host,WM_TIMER,1);
@@ -2594,7 +2594,7 @@ void scrollingProjectDragTests(const fs::path& executable) {
     send(app.host,WM_MOUSEWHEEL,MAKEWPARAM(0,12000),MAKELPARAM(wheel.x,wheel.y));
     click(app.host,px(60),px(68));app.tree();check(app.window==surfaces[1],"Auto-scroll did not move the first project to the end");
     send(app.host,WM_MOUSEWHEEL,MAKEWPARAM(0,-12000),MAKELPARAM(wheel.x,wheel.y));
-    const int page=(client.bottom-px(88))/px(48);
+    const int page=(client.bottom-px(44))/px(48);
     const int lastY=px(44)+(page-1)*px(48)+px(24);
     send(app.host,WM_LBUTTONDOWN,MK_LBUTTON,MAKELPARAM(px(60),lastY));
     send(app.host,WM_MOUSEMOVE,MK_LBUTTON,MAKELPARAM(px(60),px(45)));
