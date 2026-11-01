@@ -339,8 +339,9 @@ private:
     bool tabVisible(size_t index) const;
     bool tabOverflow() const { return editorGroups_[focusedGroup_].overflow(); }
     RECT tabBounds(size_t index) const;
-    RECT diffLayoutButton(int group, bool inlineView) const;
-    bool selectDiffLayout(POINT point);
+    bool htmlTab(int group) const;
+    RECT editorModeButton(int group, bool second) const;
+    bool selectEditorMode(POINT point);
     size_t tabAt(POINT point) const;
     std::optional<TabDrop> tabDropAt(POINT point) const;
     void updateTabDrag(POINT point);
@@ -611,7 +612,7 @@ void ProjectRuntime::Impl::create() {
             viewers_[1 - group].setDiffLayout(viewers_[group].diffInline());
             updateTabs(false); if (owner_ && owner_->changed) owner_->changed();
         };
-        view.statusChanged = [this] { statusDirty_ = true; };
+        view.statusChanged = [this] { statusDirty_ = true; InvalidateRect(window_, nullptr, FALSE); };
         view.focused = [this, group] {
             const bool changed = focusedGroup_ != group;
             focusedGroup_ = group; if (groupTab(group) < tabs_.size()) activeTab_ = groupTab(group);
@@ -679,7 +680,8 @@ void ProjectRuntime::Impl::layout(bool revealTab) {
         pane.tabs = {start, 0, edge, 0};
         const auto selected = groupTab(group);
         // Keep the tab tools clear of every wrapped row and its scroll buttons.
-        const int toolsWidth = selected < tabs_.size() && tabs_[selected].diff ? std::min(MulDiv(136, dpi_, 96), std::max(0, edge - start) / 2) : 0;
+        const int modeWidth = selected < tabs_.size() && tabs_[selected].diff ? 136 : htmlTab(group) ? 160 : 0;
+        const int toolsWidth = std::min(MulDiv(modeWidth, dpi_, 96), std::max(0, edge - start) / 2);
         pane.tabRight = edge - toolsWidth;
         pane.tools = {pane.tabRight, 0, edge, toolsWidth ? rowHeight : 0};
         const auto wrap = [&](int available) {
@@ -802,10 +804,12 @@ void ProjectRuntime::Impl::paint() {
         }
         for (int group = 0; group < 2; ++group) {
             const auto& pane = editorGroups_[group];
-            for (const bool inlineView : {false, true}) {
-                const auto button = diffLayoutButton(group, inlineView);
-                dc.fill(button, inlineView == viewers_[group].diffInline() ? rgb(50, 70, 94) : background);
-                dc.label(button, inlineView ? L"Inline" : L"Split", inlineView == viewers_[group].diffInline() ? foreground : muted,
+            const bool html = htmlTab(group);
+            const bool secondSelected = html ? viewers_[group].htmlPreview() : viewers_[group].diffInline();
+            for (const bool second : {false, true}) {
+                const auto button = editorModeButton(group, second);
+                dc.fill(button, second == secondSelected ? rgb(50, 70, 94) : background);
+                dc.label(button, html ? (second ? L"Preview" : L"Source") : (second ? L"Inline" : L"Split"), second == secondSelected ? foreground : muted,
                     DT_CENTER | DT_VCENTER | DT_SINGLELINE);
             }
             if (pane.overflow()) {
@@ -2070,17 +2074,23 @@ void ProjectRuntime::Impl::normalizeGroups() {
     activeTab_ = groupTab(focusedGroup_);
 }
 RECT ProjectRuntime::Impl::tabBounds(size_t index) const { return tabRects_[index]; }
-RECT ProjectRuntime::Impl::diffLayoutButton(int group, bool inlineView) const {
+bool ProjectRuntime::Impl::htmlTab(int group) const {
+    const auto index = groupTab(group);
+    return index < tabs_.size() && !tabs_[index].diff && isHtmlExtension(tabs_[index].path.extension().native());
+}
+RECT ProjectRuntime::Impl::editorModeButton(int group, bool second) const {
     auto rect = editorGroups_[group].tools;
     const auto middle = rect.left + (rect.right - rect.left) / 2;
-    if (inlineView) rect.left = middle; else rect.right = middle;
+    if (second) rect.left = middle; else rect.right = middle;
     return rect;
 }
-bool ProjectRuntime::Impl::selectDiffLayout(POINT point) {
-    for (int group = 0; group < 2; ++group) for (const bool inlineView : {false, true}) {
-        const auto button = diffLayoutButton(group, inlineView);
+bool ProjectRuntime::Impl::selectEditorMode(POINT point) {
+    for (int group = 0; group < 2; ++group) for (const bool second : {false, true}) {
+        const auto button = editorModeButton(group, second);
         if (!PtInRect(&button, point)) continue;
-        viewers_[group].setDiffLayout(inlineView); SetFocus(viewers_[group].window());
+        if (htmlTab(group)) viewers_[group].setHtmlPreview(second);
+        else viewers_[group].setDiffLayout(second);
+        SetFocus(viewers_[group].window());
         return true;
     }
     return false;
@@ -2750,7 +2760,7 @@ LRESULT ProjectRuntime::Impl::handle(UINT m, WPARAM a, LPARAM b) {
             if (PtInRect(&button, point)) { setGitView(tree); return 0; }
         }
         if (PtInRect(&tabsRect_, point)) {
-            if (selectDiffLayout(point)) return 0;
+            if (selectEditorMode(point)) return 0;
             const auto index = tabAt(point);
             if (index < tabs_.size()) {
                 const auto rect = tabBounds(index);
@@ -2776,7 +2786,7 @@ LRESULT ProjectRuntime::Impl::handle(UINT m, WPARAM a, LPARAM b) {
     }
     case WM_LBUTTONDBLCLK: {
         const POINT point{GET_X_LPARAM(b), GET_Y_LPARAM(b)};
-        if (selectDiffLayout(point)) return 0;
+        if (selectEditorMode(point)) return 0;
         const auto index = tabAt(point);
         if (index < tabs_.size()) {
             const auto rect = tabBounds(index);

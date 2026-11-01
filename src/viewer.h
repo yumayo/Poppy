@@ -74,7 +74,6 @@ private:
     void revealRange(TextMatch match);
     POINT caretPoint() const;
     RECT inputRect() const;
-    RECT htmlButton(int button) const;
     void htmlLayout();
     int visibleRows() const;
     bool splitDiff() const { return diff_ && !inlineView_; }
@@ -82,7 +81,7 @@ private:
     size_t diffRow(size_t visualRow) const { return wrapping() ? diffLayout_.row(visualRow).row : visualRow; }
     const DiffFile* stickyFile() const { return diff_ ? diff_->fileForRow(diffRow(static_cast<size_t>(top_)), inlineView_) : nullptr; }
     int textGutter() const { return diff_ && inlineView_ ? 2 * gutter_ : gutter_; }
-    int contentTop() const { return (htmlAvailable() ? header_ : 0) + (findBar_.visible() ? header_ : 0); }
+    int contentTop() const { return findBar_.visible() ? header_ : 0; }
     size_t rowCount() const { return diff_ ? wrapping() ? diffLayout_.rows() : diff_->rowCount(inlineView_) : wrapping() ? textLayout_.rows() : document_->lines.size(); }
     HWND window_ = nullptr;
     Renderer renderer_;

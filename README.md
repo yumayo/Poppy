@@ -119,7 +119,7 @@ ctest --test-dir out --output-on-failure
 
 ## HTMLプレビュー
 
-`.html` / `.htm`を開き、本文上部の`Preview`をクリックすると、Poppy内にWebView2で表示します。`Source`で編集画面へ戻り、`Reload`で保存済みファイルを再読み込みします。プレビューはディスク上のファイルを対象とするため、編集後はCtrl+Sで保存してから`Preview`または`Reload`を使ってください。ソースの未保存本文・Undo履歴・選択位置は切り替え後も保持します。
+`.html` / `.htm`を開き、エディターのタブ領域右端にある`Preview`をクリックすると、Poppy内にWebView2で表示します。`Source`で編集画面へ戻ります。左右分割した各エディターでもタブ領域右端に配置し、本文とプレビューはタブの直下から表示します。プレビューはディスク上のファイルを対象とするため、編集後はCtrl+Sで保存してから`Preview`を使ってください。再読み込みするときは`Source`から`Preview`へ切り替えます。ソースの未保存本文・Undo履歴・選択位置は切り替え後も保持します。
 
 `file://`で開くため、相対パスのCSS・画像・通常のスクリプトも読み込めます。開発サーバーが必要な構成や、ブラウザーがローカルファイルに制限する`fetch`・ES Modulesなどは、その制限に従います。WSLのHTMLは`\\wsl.localhost`共有経由で開き、Windows側のアクセス権を使います。名前にバックスラッシュを含むWSLパスは表示できません。Git差分・コミット時点の表示にはプレビューを付けません。プレビューの表示状態は保存せず、別のタブを開くとSourceから始まります。
 
@@ -128,6 +128,8 @@ WebView2はプロジェクトごとに初めて`Preview`を使ったときに起
 WebView2のユーザーデータは`%LOCALAPPDATA%\Poppy\WebView2`に保存します。Runtime・Loaderがない場合や読み込みに失敗した場合はプレビュー領域にエラーを表示し、`Source`から編集を続けられます。
 
 Windowsで`BUILD_TESTING=ON`のビルド後、`poppy_render_tests.exe --html-preview-runtime`でWebView2の再利用を検証できます。WebView2 Runtimeとデスクトップ環境が必要です。初期化中のSource切り替え、別HTMLへの移動、連続切り替え、エラーからの復帰で同じコントローラーのウィンドウが保持され、終了時には破棄されることを確認します。通常の描画テストはRuntimeなしでも実行できます。
+
+`tests/folder_tests.cpp`ではタブ右端のSource／Previewのクリック・ダブルクリック、タブとの重なり防止、通常ファイルへの切り替え、左右ペインごとの切り替えを検証します。`tests/render_tests.cpp`では100% / 150% / 200%のDPIで、見出し行を削除した本文と検索欄の位置、プレビュー前後の未保存本文・選択・Undo履歴の保持を確認します。これらのGUIテストの実行にはWindows環境が必要です。
 
 ## 複数プロジェクトとAI状態
 

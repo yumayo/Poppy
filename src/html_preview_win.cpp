@@ -131,7 +131,7 @@ struct HtmlPreview::State : std::enable_shared_from_this<HtmlPreview::State> {
                 args->get_WebErrorStatus(&error);
                 if (!success && error == COREWEBVIEW2_WEB_ERROR_STATUS_OPERATION_CANCELED) return;
                 state->controller->put_IsVisible(success);
-                state->status(success ? L"" : L"Cannot load this HTML file.\nCheck that it exists and is accessible from Windows.\nUse Reload to try again, or Source to return to the editor.");
+                state->status(success ? L"" : L"Cannot load this HTML file.\nCheck that it exists and is accessible from Windows.\nUse Source to return to the editor, then Preview to try again.");
                 if (success && GetFocus() == state->parent) state->controller->MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC);
             });
         error = webview->add_NavigationCompleted(navigation, &token); navigation->Release();

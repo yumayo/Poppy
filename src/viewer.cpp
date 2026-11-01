@@ -143,14 +143,8 @@ void Viewer::showImage(std::shared_ptr<const ImagePreview> image, const Resource
     InvalidateRect(window_, nullptr, FALSE);
     if (statusChanged) statusChanged();
 }
-RECT Viewer::htmlButton(int button) const {
-    const auto r = Scrollbars::contentRect(window_);
-    const int width = std::min(header_ * 3, std::max(1, static_cast<int>(r.right) / 3));
-    return {button * width, 0, (button + 1) * width, header_};
-}
 void Viewer::htmlLayout() {
-    auto bounds = Scrollbars::contentRect(window_); bounds.top = std::min<LONG>(header_, bounds.bottom);
-    html_.layout(bounds);
+    html_.layout(Scrollbars::contentRect(window_));
 }
 void Viewer::setHtmlPreview(bool enabled) {
     if (!htmlAvailable() || enabled == html_.active()) return;
@@ -160,6 +154,7 @@ void Viewer::setHtmlPreview(bool enabled) {
     scrollbars(); findLayout(); htmlLayout(); caretPosition();
     InvalidateRect(window_, nullptr, FALSE);
     if (!enabled) SetFocus(window_);
+    if (statusChanged) statusChanged();
 }
 std::wstring Viewer::textStatus() const {
     if (image_) return std::to_wstring(image_->width) + L" × " + std::to_wstring(image_->height) + L" px";
@@ -367,7 +362,7 @@ void Viewer::cut() {
     anchor_ = caret_ = range.begin; edited();
 }
 void Viewer::findLayout() {
-    if (findBar_.window()) findBar_.layout(htmlAvailable() ? header_ : 0, Scrollbars::contentRect(window_).right, header_);
+    if (findBar_.window()) findBar_.layout(0, Scrollbars::contentRect(window_).right, header_);
 }
 void Viewer::find() {
     if (!document_) return;
@@ -604,7 +599,7 @@ void Viewer::paint() {
     const auto r = Scrollbars::contentRect(window_);
     if (html_.active()) {
         dc.fill(r, background);
-        dc.label({32, header_ + 32, std::max<LONG>(32, r.right - 32), r.bottom}, html_.status(), muted, DT_LEFT | DT_TOP | DT_WORDBREAK);
+        dc.label({32, 32, std::max<LONG>(32, r.right - 32), r.bottom}, html_.status(), muted, DT_LEFT | DT_TOP | DT_WORDBREAK);
     } else if (image_) {
         dc.fill(r, background);
         const int margin = std::max(1, header_ / 3);
@@ -721,17 +716,6 @@ void Viewer::paint() {
         }
         if (edit_ && GetFocus() == window_) dc.composition(ime_.text(), caretPoint(), cellWidth_, cellHeight_, inputRect());
     }
-    if (htmlAvailable()) {
-        dc.font(Renderer::Font::Ui); dc.fill({0, 0, r.right, header_}, panel);
-        for (int i = 0; i < 3; ++i) {
-            const auto button = htmlButton(i);
-            const bool selected = i == (html_.active() ? 1 : 0);
-            dc.fill(button, selected ? rgb(50, 70, 94) : panel);
-            dc.label(button, i == 0 ? L"Source" : i == 1 ? L"Preview" : L"Reload", selected ? foreground : muted, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-        }
-        dc.label({htmlButton(2).right + 12, 0, r.right - 12, header_}, L"Preview uses the saved file", muted);
-        dc.fill({0, header_ - 1, r.right, header_}, border);
-    }
     if (!html_.active()) scrollbars_.paint(window_, dc, background);
 }
 LRESULT CALLBACK Viewer::procedure(HWND w, UINT m, WPARAM a, LPARAM b) {
@@ -773,10 +757,6 @@ LRESULT Viewer::handle(UINT m, WPARAM a, LPARAM b) {
     case WM_DESTROY: html_.close(); stopLoading(); stopSelection(); ime_.clear(); KillTimer(window_, caretTimer); KillTimer(window_, findTimer); return 0;
     case WM_SHOWWINDOW: if (!a) { stopSelection(); ime_.cancel(window_); } break;
     case WM_SETCURSOR:
-        if (htmlAvailable() && LOWORD(b) == HTCLIENT) {
-            POINT point{}; GetCursorPos(&point); ScreenToClient(window_, &point);
-            for (int i = 0; i < 3; ++i) { const auto button = htmlButton(i); if (PtInRect(&button, point)) { SetCursor(LoadCursorW(nullptr, IDC_HAND)); return TRUE; } }
-        }
         if (image_ && LOWORD(b) == HTCLIENT) { SetCursor(LoadCursorW(nullptr, IDC_ARROW)); return TRUE; }
         return DefWindowProcW(window_, m, a, b);
     case WM_GETDLGCODE: return DLGC_WANTARROWS | DLGC_WANTCHARS;
@@ -784,14 +764,6 @@ LRESULT Viewer::handle(UINT m, WPARAM a, LPARAM b) {
         SetFocus(window_);
         const POINT point{GET_X_LPARAM(b), GET_Y_LPARAM(b)};
         if (!document_) return 0;
-        if (htmlAvailable()) for (int i = 0; i < 3; ++i) {
-            const auto button = htmlButton(i);
-            if (PtInRect(&button, point)) {
-                if (i == 2) { setHtmlPreview(false); setHtmlPreview(true); }
-                else setHtmlPreview(i == 1);
-                return 0;
-            }
-        }
         if (html_.active()) return 0;
         if (point.y < contentTop() + (stickyFile() ? cellHeight_ : 0)) return 0;
         revealFind_ = false;

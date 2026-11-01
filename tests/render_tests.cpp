@@ -345,18 +345,30 @@ void htmlPreviewSwitching() {
     const auto selection = viewer.state();
     for (const auto dpi : {96u, 144u, 192u}) {
         viewer.setDpi(dpi);
-        const auto click = [&](int x) { SendMessageW(viewer.window(), WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(MulDiv(x, dpi, 96), MulDiv(12, dpi, 96))); };
-        click(150); // Preview button, also when the parent is narrow at high DPI.
-        check(viewer.htmlPreview(), "Preview button did not activate the HTML preview");
+        // The removed toolbar must now accept selection on the first line.
+        const auto point = MAKELPARAM(MulDiv(71, dpi, 96), MulDiv(1, dpi, 96));
+        SendMessageW(viewer.window(), WM_LBUTTONDOWN, MK_LBUTTON, point);
+        SendMessageW(viewer.window(), WM_LBUTTONUP, 0, point);
+        check(!viewer.htmlPreview() && viewer.state().anchor == 0 && viewer.state().caret == 0,
+            "The removed HTML toolbar still occupies space above the source");
+        viewer.restore(selection);
+        viewer.setHtmlPreview(true);
+        check(viewer.htmlPreview(), "HTML preview did not activate");
         SendMessageW(viewer.window(), WM_CHAR, 'Y', 0);
         SendMessageW(viewer.window(), WM_MOUSEWHEEL, MAKEWPARAM(0, static_cast<WORD>(WHEEL_DELTA)), 0);
         check(viewer.state().top == selection.top, "Scrolling an unavailable preview changed the source position");
         check(buffer->document.text == edited && viewer.buffer() == buffer, "Preview changed or released unsaved source");
         MoveWindow(viewer.window(), 0, 0, 760, 400, FALSE);
         viewer.setDpi(dpi);
-        click(40); // Recover from the preview error through Source.
+        viewer.setHtmlPreview(false);
         check(!viewer.htmlPreview() && viewer.state().anchor == selection.anchor && viewer.state().caret == selection.caret,
             "Returning from a preview error lost the source selection");
+        viewer.find();
+        const auto input = FindWindowExW(viewer.window(), nullptr, L"PoppyFindBar", nullptr);
+        RECT bounds{}; GetWindowRect(input, &bounds); MapWindowPoints(nullptr, viewer.window(), reinterpret_cast<POINT*>(&bounds), 2);
+        check(bounds.top == 0, "The removed HTML toolbar still occupies space above source search");
+        SendMessageW(viewer.window(), WM_KEYDOWN, VK_ESCAPE, 0);
+        viewer.restore(selection);
     }
     size_t anchor = 0, caret = 0;
     check(buffer->undo(anchor, caret) && buffer->document.text == saved, "Preview discarded the source Undo history");

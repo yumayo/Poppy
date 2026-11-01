@@ -415,6 +415,57 @@ void previewTabSplitTests(const fs::path& executable) {
     send(tree, treeSelect, b); waitLines(right, 300);
     check(visibleTabCount(app) == 2, "Dragging a preview made it permanent");
 }
+void htmlTabToolsTests(const fs::path& executable) {
+    Fixture fixture;
+    writeLines(fixture.root / L"a.html", 200); writeLines(fixture.root / L"b.HTM", 300); writeLines(fixture.root / L"c.txt", 400);
+    Application app(executable, fixture.root);
+    const auto tree = app.tree(), left = FindWindowExW(app.window, nullptr, L"PoppyViewer", nullptr);
+    const auto right = FindWindowExW(app.window, left, L"PoppyViewer", nullptr);
+    waitFor([&] { return send(tree, treeGetCount) == 4; }, "HTML tab fixture did not load");
+    auto item = nextItem(tree, TreeRelation::Child, nextItem(tree, TreeRelation::Root));
+    for (int i = 0; i < 3; ++i) {
+        send(tree, treeSelect, item); waitLines(left, 200 + i * 100); keepTab(app, i);
+        item = nextItem(tree, TreeRelation::Next, item);
+    }
+    const UINT dpi = GetDpiForWindow(app.window);
+    const auto switchMode = [&](HWND viewer, bool preview, UINT message = WM_LBUTTONDOWN) {
+        const auto rect = bounds(app.window, viewer);
+        const int toolsWidth = (std::min)(MulDiv(160, dpi, 96), static_cast<int>(rect.right - rect.left) / 2);
+        const auto point = MAKELPARAM(rect.right - toolsWidth * (preview ? 1 : 3) / 4, MulDiv(17, dpi, 96));
+        send(app.window, message, MK_LBUTTON, point); send(app.window, WM_LBUTTONUP, 0, point);
+        GUITHREADINFO input{}; input.cbSize = sizeof(input);
+        check(GetGUIThreadInfo(app.process.dwThreadId, &input) && input.hwndCapture != app.window && visibleTabCount(app) == 3,
+            "HTML mode tools started a tab drag or changed the tabs");
+        const auto after = bounds(app.window, viewer);
+        check(EqualRect(&rect, &after), "HTML mode switching moved the viewer below a toolbar");
+        for (int i = 0; i < visibleTabCount(app); ++i) {
+            const auto tab = tabBounds(app, i);
+            if (tab.left >= rect.left && tab.left < rect.right)
+                check(tab.right <= rect.right - toolsWidth, "HTML tools overlapped a wrapped tab");
+        }
+    };
+    clickTab(app, 0); waitLines(left, 200);
+    check(bounds(app.window, left).top == tabBounds(app, 0).bottom, "HTML source did not start immediately below the tabs");
+    switchMode(left, true); waitFor([&] { return scrollInfo(left).nMax == 0; }, "Tab Preview did not activate HTML preview");
+    switchMode(left, false); waitLines(left, 200);
+    switchMode(left, true, WM_LBUTTONDBLCLK); waitFor([&] { return scrollInfo(left).nMax == 0; }, "Double clicking Preview did not select preview mode");
+    switchMode(left, false); waitLines(left, 200);
+    clickTab(app, 2); waitLines(left, 400);
+    // Ordinary files do not retain the HTML buttons from the previous tab.
+    auto body = bounds(app.window, left);
+    click(app.window, body.right - MulDiv(20, dpi, 96), MulDiv(17, dpi, 96));
+    check(scrollInfo(left).nMax == 400 && visibleTabCount(app) == 3, "An ordinary file retained HTML tools");
+    clickTab(app, 0); waitLines(left, 200);
+    dragTab(app, 1, {body.left + (body.right - body.left) * 3 / 4, body.top + 60});
+    waitLines(left, 200); waitLines(right, 300);
+    SetWindowPos(app.host, nullptr, 0, 0, MulDiv(1000, dpi, 96), MulDiv(700, dpi, 96), SWP_NOMOVE | SWP_NOZORDER);
+    send(app.window, WM_NULL);
+    // Each pane owns its mode even while focus is in the other pane.
+    switchMode(right, true); check(scrollInfo(right).nMax == 0 && scrollInfo(left).nMax == 200, "Right Preview changed the left pane");
+    switchMode(left, true); check(scrollInfo(left).nMax == 0 && scrollInfo(right).nMax == 0, "Left Preview changed the right pane");
+    switchMode(right, false); waitLines(right, 300); check(scrollInfo(left).nMax == 0, "Right Source closed the left preview");
+    switchMode(left, false); waitLines(left, 200);
+}
 void bulkTabCloseTests(const fs::path& executable) {
     Fixture fixture;
     for (int i = 0; i < 4; ++i) writeLines(fixture.root / (std::wstring(1, L'a' + i) + L".txt"), 200 + i * 100);
@@ -2963,7 +3014,7 @@ int wmain(int argc, wchar_t** argv) {
         check(argc == 2, "Pass the path to Poppy.exe");
         SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         for (const auto test : {folderTests, explorerSortTests, sidebarTests, treeInteractionTests, previewTabTests, explorerPreviewTabTests, previewTabSplitTests, tabTests, rapidTabMiddleClickTests, pinnedTabTests,
-                bulkTabCloseTests, bulkTabSaveTests, bulkTabSplitTests, explorerActiveFileTests,
+                bulkTabCloseTests, bulkTabSaveTests, bulkTabSplitTests, explorerActiveFileTests, htmlTabToolsTests,
                 tabDragTests, wrappingTabDragTests, wrappingTabTests, renameTests, explorerMoveTests, explorerDeleteTests, explorerMultipleSelectionTests, createItemTests, newFileShortcutTests, pasteImageTests, splitPaneTests, quickOpenTests, fullSearchTests, gitSidebarTests, gitIgnoredExplorerTests, gitAutoRefreshTests, editableGitDiffTests, branchSidebarTests, multiRepositoryTests, sessionTests, multiProjectTests, recentProjectTests, projectDragTests, scrollingProjectDragTests, terminalTitleTests, terminalShellTests, terminalShortcutTests, terminalBackspaceTests}) {
             Fixture appData; AppDataEnvironment environment(appData.root);
             test(fs::absolute(argv[1]));
