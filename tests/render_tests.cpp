@@ -589,7 +589,7 @@ void editableDiff() {
         viewer.setDpi(dpi); viewer.setWordWrap(wrap); viewer.setDiffLayout(inlineView);
         viewer.editDiff(buffer, before, L"file.cpp"); SetFocus(viewer.window());
         const auto select = [&](size_t anchor, size_t caret) {
-            const auto diff = workingDiff(*before, buffer->document, "file.cpp");
+            const auto diff = workingDiff(*before, buffer->document);
             viewer.restore({0, 0, diff.patchOffset(anchor), diff.patchOffset(caret), true});
         };
         select(6, 16); SendMessageW(viewer.window(), WM_CHAR, 'x', 0);
@@ -606,7 +606,7 @@ void editableDiff() {
         check(buffer->document.text == "head\r\ntail\r\nx", "Moving a diff line used patch metadata"); key('Z', true);
         key('A', true); SendMessageW(viewer.window(), WM_CHAR, 'z', 0);
         check(buffer->document.text == "z", "Select All in a diff did not replace the entire working file"); key('Z', true);
-        const auto diff = workingDiff(*before, buffer->document, "file.cpp");
+        const auto diff = workingDiff(*before, buffer->document);
         for (const auto& row : diff.rows) if (row.changed && row.before.number) {
             viewer.restore({0, 0, diff.offset(row.before), diff.offset(row.before), false}); break;
         }

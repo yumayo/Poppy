@@ -37,11 +37,12 @@ struct DiffDocument {
     size_t mapRow(size_t index, bool fromInline, bool toInline, bool after) const;
     std::string selectedText(bool after, size_t start, size_t end, bool inlineView = false) const;
 };
-void indexDiff(DiffDocument& document, bool fileHeadings = false);
+// File headings include metadata; fileDetails keeps metadata without filenames.
+void indexDiff(DiffDocument& document, bool fileHeadings = false, bool fileDetails = false);
 // Reorder complete file patches in a document indexed with file headings.
 // Paths absent from the requested order remain at the end in their input order.
 void orderDiffFiles(DiffDocument& document, const std::vector<std::string>& paths);
-DiffDocument workingDiff(const Document& before, const Document& after, const std::string& path);
+DiffDocument workingDiff(const Document& before, const Document& after);
 // One flag per working line, using the same alignment as the editable diff.
 // Deleted lines have no working row; unchanged EOF caret rows stay unmarked.
 // Optional overview ranges use working line boundaries [begin, end).

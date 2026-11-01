@@ -2513,7 +2513,7 @@ void ProjectRuntime::Impl::loadTab(bool preserve, int group) {
         auto doc = std::make_shared<DiffDocument>();
         if (result.code == 0 && static_cast<size_t>(std::count(result.output.begin(), result.output.end(), '\n')) >= maxLines) { result.code = 1; result.error = L"Diff exceeds the 1,000,000-line preview limit."; }
         if (result.code == 0) {
-            doc->patch.text = std::move(result.output); indexDiff(*doc, true);
+            doc->patch.text = std::move(result.output); indexDiff(*doc, allChanges, true);
             if (allChanges) {
                 std::vector<std::string> order;
                 for (const auto& node : buildGitChanges(paths, treeView)) if (!node.directory()) order.push_back(utf8(node.path));

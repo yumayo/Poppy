@@ -160,7 +160,7 @@ std::string DiffDocument::selectedText(bool after, size_t start, size_t end, boo
     }
     return result;
 }
-void indexDiff(DiffDocument& d, bool fileHeadings) {
+void indexDiff(DiffDocument& d, bool fileHeadings, bool fileDetails) {
     d.patch.language = Language::Plain; indexDocument(d.patch);
     d.rows.clear(); d.files.clear(); d.inlineOrder.clear(); d.workingLines.clear(); d.maxColumns = 0;
     std::vector<DiffLine> removed, added;
@@ -196,10 +196,11 @@ void indexDiff(DiffDocument& d, bool fileHeadings) {
             if (!d.files.empty() && (text.substr(0, 10) == "rename to " || text.substr(0, 8) == "copy to "))
                 d.files.back().path = unquotePath(text.substr(text.front() == 'r' ? 10 : 8));
         }
-        if (fileHeadings && ((!beforeCount && !afterCount) &&
-            (text.substr(0, 11) == "diff --git " || text.substr(0, 7) == "Binary " || text.substr(0, 9) == "old mode " ||
+        if (!beforeCount && !afterCount &&
+            ((fileHeadings && text.substr(0, 11) == "diff --git ") || ((fileHeadings || fileDetails) &&
+            (text.substr(0, 7) == "Binary " || text.substr(0, 9) == "old mode " ||
              text.substr(0, 9) == "new mode " || text.substr(0, 14) == "new file mode " || text.substr(0, 18) == "deleted file mode " ||
-             text.substr(0, 11) == "Empty file " || text.substr(0, 12) == "rename from " || text.substr(0, 10) == "rename to "))) {
+             text.substr(0, 11) == "Empty file " || text.substr(0, 12) == "rename from " || text.substr(0, 10) == "rename to ")))) {
             d.inlineOrder.push_back(static_cast<uint32_t>(d.rows.size() * 2));
             d.rows.push_back({{}, {}, false, static_cast<uint32_t>(row + 1)});
             d.maxColumns = std::max(d.maxColumns, static_cast<uint32_t>(std::min(text.size(), maxLineColumns)));
@@ -355,12 +356,10 @@ std::vector<bool> changedWorkingLines(const Document& before, const Document& af
     return changed;
 }
 
-DiffDocument workingDiff(const Document& before, const Document& after, const std::string& path) {
+DiffDocument workingDiff(const Document& before, const Document& after) {
     const auto matches = matchingLines(before, after);
     DiffDocument result;
-    result.patch.text = "Working tree\n";
-    result.files.push_back({0, path}); result.rows.push_back({{}, {}, false, 1}); result.inlineOrder.push_back(0);
-    size_t patchRow = 1;
+    size_t patchRow = 0;
     auto source = [&](const Document& document, size_t row, char prefix, bool working) {
         const auto text = document.line(row);
         const size_t offset = result.patch.text.size() + 1;

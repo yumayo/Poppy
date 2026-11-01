@@ -110,10 +110,12 @@ void editorChangeMarks() {
 }
 void editableComparisons() {
     const auto verify = [](const Document& before, const Document& after) {
-        const auto diff = workingDiff(before, after, "dir/日本語\nfile.cpp");
+        const auto diff = workingDiff(before, after);
+        check(diff.files.empty(), "An editable single-file diff retained a sticky filename");
         const auto changed = changedWorkingLines(before, after);
         size_t old = 0, current = 0;
         for (const auto& row : diff.rows) {
+            check(!row.heading, "An editable single-file diff retained a filename row");
             if (row.before.number) {
                 check(row.before.number == ++old && diff.line(row.before) == before.line(old - 1), "Working diff lost or reordered original source lines");
                 check(row.before.state == before.states[old - 1], "Original multiline lexer state changed");
@@ -136,7 +138,7 @@ void editableComparisons() {
             if (!row.changed && row.before.number && row.after.number) check(before.line(old - 1) == after.line(current - 1), "Different lines were marked unchanged");
         }
         check(old == before.lines.size() && current == after.lines.size(), "Working comparisons must retain the entire source and EOF caret row");
-        check(!diff.workingOffset(0), "The filename heading became editable");
+        check(!diff.workingOffset(0), "The patch prefix became editable");
     };
     for (const auto& before : {"", "a", "a\n", "a\r\nb\r\n", "a\nb\nc", "/* old\ncomment */\n"})
         for (const auto& after : {"", "a", "a\n", "\nnew\n", "new\na\nb\nc\n", "a\r\n日本😀\r\nb", "/* new\ncomment */\n"})
@@ -160,7 +162,7 @@ void editableComparisons() {
 
     EditBuffer buffer; buffer.document = sourceDocument("keep\r\n日本😀\r\nend"); buffer.initialize(buffer.document.text);
     const auto before = sourceDocument("keep\r\nold\r\nend");
-    auto diff = workingDiff(before, buffer.document, "file.cpp");
+    auto diff = workingDiff(before, buffer.document);
     const auto begin = diff.workingOffset(diff.patchOffset(6)), end = diff.workingOffset(diff.patchOffset(16));
     check(begin == 6 && end == 16 && buffer.replace(*begin, *end, "changed"), "A working selection could not replace Japanese and emoji text");
     check(buffer.document.text == "keep\r\nchanged\r\nend" && buffer.dirty(), "Diff editing altered unrelated text or CRLF endings");
@@ -277,6 +279,23 @@ void fileHeadings() {
         {untrackedPatch("image 日本語.png", std::string_view("\0", 1)), "image 日本語.png"},
         {"diff --git \"a/back\\\\slash.txt\" \"b/back\\\\slash.txt\"\nold mode 100644\nnew mode 100755\n", "back\\slash.txt"}
     };
+    for (const auto& fixture : fixtures) {
+        DiffDocument single; single.patch.text = fixture.first;
+        indexDiff(single, true);
+        check(single.files.size() == 1 && single.files[0].path == fixture.second,
+            "All Changes must retain its filename even with only one changed file");
+        const auto splitRows = single.rowCount(false), inlineRows = single.rowCount(true);
+        const auto before = single.selectedText(false, 0, single.patch.text.size());
+        const auto after = single.selectedText(true, 0, single.patch.text.size());
+        indexDiff(single, false, true);
+        check(single.files.empty() && !single.fileForRow(0, false) && !single.fileForRow(0, true),
+            "A read-only single-file diff retained a sticky filename");
+        check(single.rowCount(false) + 1 == splitRows && single.rowCount(true) + 1 == inlineRows,
+            "Hiding a single-file heading removed source rows or binary/empty/mode/rename details");
+        check(single.selectedText(false, 0, single.patch.text.size()) == before &&
+            single.selectedText(true, 0, single.patch.text.size()) == after && single.patch.text == fixture.first,
+            "Hiding a filename changed the patch or copied source text");
+    }
     DiffDocument diff;
     for (const auto& fixture : fixtures) diff.patch.text += fixture.first;
     const auto original = diff.patch.text;

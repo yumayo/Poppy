@@ -88,7 +88,7 @@ void Viewer::showDiff(std::shared_ptr<const DiffDocument> d, const ResourceId& p
 void Viewer::editDiff(std::shared_ptr<EditBuffer> buffer, std::shared_ptr<const Document> before, const ResourceId& path, bool preserve) {
     const auto anchor = preserve && diff_ && edit_ == buffer && after_ ? diff_->workingOffset(anchor_) : std::nullopt;
     const auto caret = preserve && diff_ && edit_ == buffer && after_ ? diff_->workingOffset(caret_) : std::nullopt;
-    auto comparison = std::make_shared<DiffDocument>(workingDiff(*before, buffer->document, path.filename().u8string()));
+    auto comparison = std::make_shared<DiffDocument>(workingDiff(*before, buffer->document));
     showDiff(std::move(comparison), path, preserve);
     edit_ = std::move(buffer); diffBefore_ = std::move(before);
     if (!preserve) { anchor_ = caret_ = diff_->patchOffset(0); after_ = true; }
@@ -100,7 +100,7 @@ void Viewer::refreshBuffer() {
     if (diff_) {
         const auto previous = state();
         const auto anchor = diff_->workingOffset(anchor_), caret = diff_->workingOffset(caret_);
-        auto comparison = std::make_shared<DiffDocument>(workingDiff(*diffBefore_, edit_->document, path_.filename().u8string()));
+        auto comparison = std::make_shared<DiffDocument>(workingDiff(*diffBefore_, edit_->document));
         document_ = std::shared_ptr<const Document>(comparison, &comparison->patch); diff_ = std::move(comparison);
         anchor_ = anchor ? diff_->patchOffset(*anchor) : std::min(anchor_, document_->text.size());
         caret_ = caret ? diff_->patchOffset(*caret) : std::min(caret_, document_->text.size());
@@ -536,7 +536,7 @@ bool Viewer::editSelection(size_t& anchor, size_t& caret) const {
 }
 void Viewer::edited() {
     if (diff_) {
-        auto comparison = std::make_shared<DiffDocument>(workingDiff(*diffBefore_, edit_->document, path_.filename().u8string()));
+        auto comparison = std::make_shared<DiffDocument>(workingDiff(*diffBefore_, edit_->document));
         document_ = std::shared_ptr<const Document>(comparison, &comparison->patch); diff_ = std::move(comparison);
         anchor_ = diff_->patchOffset(anchor_); caret_ = diff_->patchOffset(caret_); after_ = true;
     }
