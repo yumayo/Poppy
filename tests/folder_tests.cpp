@@ -1142,6 +1142,10 @@ void splitPaneTests(const fs::path& executable) {
         waitLines(left, 120); waitLines(right, 240);
         const auto l = bounds(app.window,left), r = bounds(app.window,right);
         check(l.right < r.left && l.bottom == r.bottom, "Editors overlap or do not share a bottom edge");
+        click(left, 100, 40);
+        check(send(tree, treeGetSelection) == static_cast<LRESULT>(first), "Explorer did not follow focus to the left editor");
+        click(right, 100, 40);
+        check(send(tree, treeGetSelection) == static_cast<LRESULT>(nextItem(tree, TreeRelation::Next, first)), "Explorer did not follow focus to the right editor");
         send(right, WM_CHAR, '\r'); waitLines(right, 241);
         clickTab(app, 0); waitLines(left, 120); clickTab(app, 1); waitLines(right, 241);
         send(right, WM_KEYDOWN, VK_BACK); waitLines(right, 240);
@@ -1496,6 +1500,65 @@ void quickOpenTests(const fs::path& executable) {
     open();
     click(app.window, px(12), px(22));
     check(!IsWindowVisible(palette), "Clicking outside quick open did not close it");
+}
+void explorerActiveFileTests(const fs::path& executable) {
+    Fixture fixture;
+    fs::create_directories(fixture.root / L"a nested" / L"inner");
+    fs::create_directories(fixture.root / L"z nested" / L"inner");
+    writeLines(fixture.root / L"a nested" / L"inner" / L"日本語.txt", 101);
+    writeLines(fixture.root / L"z nested" / L"inner" / L"second.txt", 201);
+    for (int i = 0; i < 40; ++i) writeFile(fixture.root / (L"filler-" + std::to_wstring(i) + L".txt"));
+    Application app(executable, fixture.root); const auto tree = app.tree();
+    const auto viewer = FindWindowExW(app.window, nullptr, L"PoppyViewer", nullptr);
+    const auto palette = FindWindowExW(app.window, nullptr, L"PoppyQuickOpen", nullptr);
+    const auto gitButton = FindWindowExW(app.window, nullptr, activityButtonClassName, L"Source Control");
+    const auto explorerButton = FindWindowExW(app.window, nullptr, activityButtonClassName, L"Explorer");
+    check(viewer && palette && gitButton && explorerButton, "Explorer selection panes are missing");
+    waitFor([&] { return send(tree, treeGetCount) == 43; }, "Explorer selection fixture did not load");
+    const auto root = nextItem(tree, TreeRelation::Root), firstFolder = nextItem(tree, TreeRelation::Child, root);
+    const auto secondFolder = nextItem(tree, TreeRelation::Next, firstFolder);
+    const auto px = [dpi = GetDpiForWindow(app.window)](int value) { return MulDiv(value, dpi, 96); };
+    const auto open = [&](const wchar_t* name, int lines) {
+        click(app.window, px(520), px(22));
+        check(IsWindowVisible(palette), "Cannot open file search for Explorer selection");
+        for (const auto ch : std::wstring(name)) send(palette, WM_CHAR, ch);
+        waitFor([&] { send(palette, WM_KEYDOWN, VK_RETURN); return !IsWindowVisible(palette); }, "Cannot open selection fixture file");
+        waitLines(viewer, lines);
+    };
+    const auto selection = [&] { return static_cast<TreeItem>(send(tree, treeGetSelection)); };
+    const auto checkSelected = [&](TreeItem folder) {
+        waitFor([&] {
+            const auto inner = nextItem(tree, TreeRelation::Child, folder);
+            const auto file = nextItem(tree, TreeRelation::Child, inner);
+            return expanded(tree, root) && expanded(tree, folder) && expanded(tree, inner) && file && selection() == file;
+        }, "Explorer did not expand and select the active file");
+        check(send(tree, treeGetSelectionCount) == 1, "Active file reveal left multiple rows selected");
+        const auto row = send(tree, treeGetRow, selection());
+        const auto scroll = scrollInfo(tree);
+        check(row >= scroll.nPos && row < scroll.nPos + scroll.nPage, "Active file selection is outside the visible rows");
+    };
+    send(tree, WM_VSCROLL, SB_BOTTOM);
+    open(L"日本語", 101); checkSelected(firstFolder);
+    // Hidden Explorer follows file changes without switching the sidebar.
+    send(gitButton, BM_CLICK); check(!IsWindowVisible(tree), "Source Control did not hide Explorer");
+    open(L"second", 201); checkSelected(secondFolder);
+    check(!IsWindowVisible(tree), "Opening a file unexpectedly switched the sidebar");
+    send(explorerButton, BM_CLICK); checkSelected(secondFolder);
+    // Cached descendants must also be revealed through a collapsed root.
+    expand(tree, root, false);
+    clickTab(app, 0); waitLines(viewer, 101); checkSelected(firstFolder);
+    expand(tree, firstFolder, false);
+    clickTab(app, 0); checkSelected(firstFolder);
+    // A later tab activation supersedes any earlier asynchronous reveal.
+    expand(tree, root, false);
+    send(app.window, WM_KEYDOWN, VK_F5);
+    clickTab(app, 1); clickTab(app, 0); clickTab(app, 1);
+    waitLines(viewer, 201); checkSelected(secondFolder);
+    clickTab(app, 1, true); waitLines(viewer, 101); checkSelected(firstFolder);
+    // Navigation in Explorer remains available after automatic selection.
+    expand(tree, secondFolder, false);
+    send(viewer, WM_SETFOCUS);
+    check(selection() == secondFolder, "Refocusing the same editor overwrote manual tree navigation");
 }
 void fullSearchTests(const fs::path& executable) {
     Fixture fixture; fs::create_directory(fixture.root / L"ignored");
@@ -2704,7 +2767,7 @@ int wmain(int argc, wchar_t** argv) {
         check(argc == 2, "Pass the path to Poppy.exe");
         SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         for (const auto test : {folderTests, explorerSortTests, sidebarTests, treeInteractionTests, tabTests, pinnedTabTests,
-                bulkTabCloseTests, bulkTabSaveTests, bulkTabSplitTests,
+                bulkTabCloseTests, bulkTabSaveTests, bulkTabSplitTests, explorerActiveFileTests,
                 tabDragTests, wrappingTabDragTests, wrappingTabTests, renameTests, explorerMoveTests, explorerDeleteTests, explorerMultipleSelectionTests, createItemTests, newFileShortcutTests, pasteImageTests, splitPaneTests, quickOpenTests, fullSearchTests, gitSidebarTests, gitIgnoredExplorerTests, gitAutoRefreshTests, editableGitDiffTests, branchSidebarTests, multiRepositoryTests, sessionTests, multiProjectTests, recentProjectTests, projectDragTests, scrollingProjectDragTests, terminalTitleTests, terminalShellTests, terminalShortcutTests, terminalBackspaceTests}) {
             Fixture appData; AppDataEnvironment environment(appData.root);
             test(fs::absolute(argv[1]));

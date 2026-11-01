@@ -298,6 +298,8 @@ private:
     void forgetExpanded(const ResourceId& path);
     void requestDirectory(TreeItem item);
     void applyDirectory(TreeItem item, Node* node, const DirectoryResult& result);
+    void revealActiveFile();
+    void revealPendingFile();
     TreeItem insert(TreeItem parent, const Entry& entry);
     Node* node(TreeItem item) const;
     void updateLabel(TreeItem item);
@@ -414,6 +416,7 @@ private:
     ResourceId root_;
     std::map<std::wstring, ResourceId> expandedPaths_;
     ResourceId pendingTreeSelection_;
+    ResourceId pendingExplorerFile_;
     std::map<std::wstring, ResourceId> pendingTreeSelections_;
     bool waitingForGit_[2]{};
     std::vector<Tab> tabs_;
@@ -449,16 +452,17 @@ void ProjectRuntime::Impl::create() {
     gitCommit_.create(window_, instance_);
     gitCommit_.requested = [this](const ResourceId& root, const std::wstring& message, bool amend) { commitGitChanges(root, message, amend); };
     explorer_.multipleSelection = true;
-    explorer_.selectionChanged = [this] { pendingTreeSelection_.clear(); pendingTreeSelections_.clear(); };
+    explorer_.selectionChanged = [this] { pendingTreeSelection_.clear(); pendingTreeSelections_.clear(); pendingExplorerFile_.clear(); };
     explorer_.activated = [this](TreeItem item) {
         pendingTreeSelection_.clear();
         pendingTreeSelections_.clear();
+        pendingExplorerFile_.clear();
         if (const auto n = node(item); n && !n->directory) openFile(n->path);
     };
     explorer_.expanded = [this](TreeItem item, bool value) {
         const auto n = node(item); if (!n) return;
         if (value) { expandedPaths_[pathKey(n->path)] = n->path; n->expandRequested = true; if (!n->loaded) requestDirectory(item); }
-        else { expandedPaths_.erase(pathKey(n->path)); n->expandRequested = false; }
+        else { expandedPaths_.erase(pathKey(n->path)); n->expandRequested = false; pendingExplorerFile_.clear(); }
     };
     explorer_.removed = [this](uintptr_t data) { const auto n = reinterpret_cast<Node*>(data); if (n) { nodes_.erase(n->id); if (n->truncated) --partialFolders_; statusDirty_ = true; delete n; } };
     explorer_.canCreate = [this](TreeItem item) { return canCreateItem(item); };
@@ -603,7 +607,12 @@ void ProjectRuntime::Impl::create() {
         view.save = [this, group] { saveFile(groupTab(group)); };
         view.diffLayoutChanged = [this, group] { viewers_[1 - group].setDiffLayout(viewers_[group].diffInline()); };
         view.statusChanged = [this] { statusDirty_ = true; };
-        view.focused = [this, group] { focusedGroup_ = group; if (groupTab(group) < tabs_.size()) activeTab_ = groupTab(group); updateTabs(false); };
+        view.focused = [this, group] {
+            const bool changed = focusedGroup_ != group;
+            focusedGroup_ = group; if (groupTab(group) < tabs_.size()) activeTab_ = groupTab(group);
+            if (changed) revealActiveFile();
+            updateTabs(false);
+        };
     }
     terminal_.create(window_, instance_);
     dropPreview_.create(window_, instance_);
@@ -797,6 +806,7 @@ void ProjectRuntime::Impl::selectSidebar(Sidebar sidebar) {
     searchActivity_.select(sidebar == Sidebar::Search); searchPane_.active(sidebar == Sidebar::Search && active_);
     if (sidebar == Sidebar::Search) { searchPane_.focus(); return; }
     if (sidebar == Sidebar::Git) refreshGit();
+    if (sidebar == Sidebar::Explorer) explorer_.showSelection();
     SetFocus(sidebar == Sidebar::Explorer ? (IsWindowVisible(tree_) ? tree_ : explorerButton_) : (IsWindowVisible(gitTree_) ? gitTree_ : gitButton_));
 }
 RECT ProjectRuntime::Impl::gitViewButton(bool tree) const {
@@ -1400,6 +1410,7 @@ void ProjectRuntime::Impl::newFile() {
     } else parent = rootItem_;
     if (!canCreateItem(parent)) return;
     quickOpen_.close(); selectSidebar(Sidebar::Explorer);
+    pendingExplorerFile_.clear();
     explorer_.createItem(parent, false);
 }
 void ProjectRuntime::Impl::createItem(TreeItem parent, const std::wstring& name, bool directory) {
@@ -1702,6 +1713,7 @@ void ProjectRuntime::Impl::applyRelocation(const ResourceId& source, const Resou
     std::map<std::wstring, ResourceId> expanded;
     for (const auto& pair : expandedPaths_) { auto path = relocateResource(pair.second, source, destination); expanded[pathKey(path)] = std::move(path); }
     expandedPaths_ = std::move(expanded); pendingTreeSelection_ = destination;
+    pendingExplorerFile_ = relocateResource(pendingExplorerFile_, source, destination);
     for (auto path = destination.parent_path(); root_.contains(path); path = path.parent_path()) {
         expandedPaths_[pathKey(path)] = path;
         if (path == root_ || path == path.parent_path()) break;
@@ -1846,6 +1858,7 @@ void ProjectRuntime::Impl::connectRemote() {
                 for (const auto& item : expandedPaths_) { auto path = relocateResource(item.second, previous, root_); expanded[pathKey(path)] = std::move(path); }
                 expandedPaths_ = std::move(expanded); expandedPaths_[pathKey(root_)] = root_;
                 pendingTreeSelection_ = relocateResource(pendingTreeSelection_, previous, root_);
+                pendingExplorerFile_ = relocateResource(pendingExplorerFile_, previous, root_);
                 for (auto& tab : tabs_) { tab.path = relocateResource(tab.path, previous, root_); tab.gitRoot = relocateResource(tab.gitRoot, previous, root_); }
                 for (const auto& pair : nodes_) if (auto n = node(pair.second)) { n->path = relocateResource(n->path, previous, root_); n->loading = false; updateLabel(pair.second); }
                 terminal_.relocate(previous, root_); terminal_.setDirectory(root_); quickOpen_.setRoot(root_); searchPane_.setContext(root_, provider_);
@@ -1865,7 +1878,8 @@ ProjectSession ProjectRuntime::Impl::saveSession() {
     state.diffInline = viewer().diffInline(); state.gitTree = gitTreeView_; state.firstTabRow = editorGroups_[0].firstRow; state.rightTabRow = editorGroups_[1].firstRow; state.editorRatio = editorRatio_;
     for (const auto& tab : tabs_) state.tabs.push_back({tab.path.u8string(), tab.diff, tab.fileView, tab.diffView, tab.pinned, tab.group, tab.displayed, tab.diffKind, tab.revision, tab.allChanges, tab.gitRoot.u8string()});
     for (const auto& entry : expandedPaths_) state.expanded.push_back(entry.second.u8string());
-    if (!pendingTreeSelection_.empty()) state.selected = pendingTreeSelection_.u8string();
+    if (!pendingExplorerFile_.empty()) state.selected = pendingExplorerFile_.u8string();
+    else if (!pendingTreeSelection_.empty()) state.selected = pendingTreeSelection_.u8string();
     else if (const auto selected = node(explorer_.selection())) state.selected = selected->path.u8string();
     state.explorerTop = restoredScroll_ ? explorer_.top() : restoreExplorerTop_; state.explorerLeft = restoredScroll_ ? explorer_.left() : restoreExplorerLeft_;
     state.gitTop = git_ ? changes_.top() : restoreGitTop_; state.gitLeft = git_ ? changes_.left() : restoreGitLeft_;
@@ -1943,6 +1957,8 @@ void ProjectRuntime::Impl::requestDirectory(TreeItem item) {
             if (!restoredScroll_ && std::none_of(nodes_.begin(), nodes_.end(), [this](const auto& pair) { const auto value = node(pair.second); return value && value->loading; })) {
                 explorer_.restoreScroll(restoreExplorerTop_, restoreExplorerLeft_); restoredScroll_ = true;
             }
+            if (result->error.empty()) revealPendingFile();
+            else if (n->path.contains(pendingExplorerFile_)) pendingExplorerFile_.clear();
         });
     });
 }
@@ -1982,6 +1998,39 @@ void ProjectRuntime::Impl::applyDirectory(TreeItem item, Node* directory, const 
     if (selectionAdded) explorer_.showSelection();
     if (directory->truncated != truncated) { if (truncated) ++partialFolders_; else --partialFolders_; directory->truncated = truncated; }
     if (truncated || nodes_.size() >= maxTreeNodes) status(L"Explorer limit: 10,000 items/folder, 50,000 retained nodes.");
+}
+void ProjectRuntime::Impl::revealActiveFile() {
+    pendingExplorerFile_.clear();
+    if (activeTab_ >= tabs_.size() || tabs_[activeTab_].allChanges) return;
+    const auto& path = tabs_[activeTab_].path;
+    if (path.empty() || !root_.contains(path) || pathKey(path) == pathKey(root_)) return;
+    pendingTreeSelection_.clear(); pendingTreeSelections_.clear();
+    pendingExplorerFile_ = path;
+    revealPendingFile();
+}
+void ProjectRuntime::Impl::revealPendingFile() {
+    if (pendingExplorerFile_.empty()) return;
+    Tree::Batch batch(explorer_);
+    auto item = rootItem_;
+    while (const auto n = node(item)) {
+        if (pathKey(n->path) == pathKey(pendingExplorerFile_)) {
+            if (!n->directory && !n->unsupported) explorer_.select(item, false);
+            pendingExplorerFile_.clear(); return;
+        }
+        if (!n->directory || n->reparse || n->unsupported || !n->path.contains(pendingExplorerFile_)) break;
+        if (n->loading) return;
+        // Walk only the target's ancestors; never enumerate on the UI thread.
+        if (!n->loaded) { requestDirectory(item); return; }
+        explorer_.expand(item, true);
+        auto child = explorer_.child(item);
+        for (; child; child = explorer_.next(child)) {
+            const auto value = node(child);
+            if (value && !value->unsupported && value->path.contains(pendingExplorerFile_)) break;
+        }
+        item = child;
+    }
+    // Missing files and paths beneath links have no selectable Explorer row.
+    pendingExplorerFile_.clear();
 }
 void ProjectRuntime::Impl::normalizeGroups() {
     if (tabs_.empty()) { focusedGroup_ = 0; activeTab_ = 0; return; }
@@ -2161,7 +2210,7 @@ void ProjectRuntime::Impl::openFile(const ResourceId& path, bool diff) {
     const auto key = pathKey(path);
     const auto found = std::find_if(tabs_.begin(), tabs_.end(), [&](const Tab& tab) { return tab.diffKind == GitDiffKind::Automatic && pathKey(tab.path) == key; });
     const size_t index = static_cast<size_t>(found - tabs_.begin());
-    if (found != tabs_.end() && index == activeTab_ && (!diff || found->diff)) { updateTabs(); return; }
+    if (found != tabs_.end() && index == activeTab_ && (!diff || found->diff)) { revealActiveFile(); updateTabs(); return; }
     saveTab();
     if (found == tabs_.end()) { Tab tab; tab.path = path; tab.diff = diff; tab.group = focusedGroup_; tabs_.push_back(std::move(tab)); }
     else if (diff) found->diff = true;
@@ -2199,7 +2248,8 @@ void ProjectRuntime::Impl::openGitDiff(const ResourceId& path, GitDiffKind kind,
 }
 void ProjectRuntime::Impl::selectTab(size_t index) {
     endTabDrag();
-    if (index >= tabs_.size() || index == activeTab_) return;
+    if (index >= tabs_.size()) return;
+    if (index == activeTab_) { revealActiveFile(); return; }
     saveTab(); focusedGroup_ = tabs_[index].group; for (auto& tab : tabs_) if (tab.group == focusedGroup_) tab.displayed = false; tabs_[index].displayed = true; activeTab_ = index; updateTabs(); loadTab();
 }
 void ProjectRuntime::Impl::closeTab(size_t index) {
@@ -2227,6 +2277,7 @@ void ProjectRuntime::Impl::closeTabs(const std::vector<size_t>& indices) {
     if (activeSidebar_ == Sidebar::Search) searchPane_.refresh();
     layout();
     if (active) {
+        pendingExplorerFile_.clear();
         ++serial_[0]; ++serial_[1];
         if (!tabs_.empty()) { loadTab(false, 0); loadTab(false, 1); }
         else { viewer().message(L"Select a file on the left.\n\nEdit here and save with Ctrl+S, or use your AI CLI in the terminal."); status(L"Ready"); }
@@ -2297,6 +2348,7 @@ void ProjectRuntime::Impl::tabMenu(POINT screen) {
 }
 void ProjectRuntime::Impl::loadTab(bool preserve, int group) {
     if (group < 0) group = focusedGroup_;
+    if (!preserve && group == focusedGroup_) revealActiveFile();
     waitingForGit_[group] = false;
     const size_t index = groupTab(group); if (index >= tabs_.size()) { viewers_[group].message(L"Select a file."); return; }
     preserve = preserve && viewers_[group].hasDocument();
