@@ -1,6 +1,5 @@
 #include "ai_status_win.h"
 #include "render.h"
-#include <cmath>
 #include <stdexcept>
 
 namespace poppy {
@@ -13,12 +12,10 @@ std::string newSessionId() {
 void drawAiStatus(Renderer& dc, RECT rect, AiState state, UINT dpi, unsigned frame) {
     const int size = MulDiv(14, dpi, 96), x = (rect.left+rect.right)/2, y = (rect.top+rect.bottom)/2;
     const float unit = static_cast<float>(dpi)/96;
-    const COLORREF color = state == AiState::Running || state == AiState::Completed ? accent : state == AiState::Idle || state == AiState::Unknown ? muted : RGB(224,192,128);
+    const COLORREF color = state == AiState::Running ? RGB(255,211,64) : state == AiState::Completed ? accent : state == AiState::Idle || state == AiState::Unknown ? muted : RGB(224,192,128);
     const auto line = [&](int x1,int y1,int x2,int y2) { dc.line(x+x1*unit,y+y1*unit,x+x2*unit,y+y2*unit,color,1.6f*unit); };
     if (state == AiState::Running) {
-        dc.ellipse({x-size/2,y-size/2,x+size/2,y+size/2}, muted, unit);
-        const float angle = frame * 0.35f;
-        dc.line(static_cast<float>(x),static_cast<float>(y),x+std::cos(angle)*size/2,y+std::sin(angle)*size/2,color,2*unit);
+        dc.icon(Renderer::Icon::Spinner, {x-size/2,y-size/2,x-size/2+size,y-size/2+size}, color, (frame % 18) * 20.0f);
     } else if (state == AiState::Completed) { line(-6,0,-2,4); line(-2,4,6,-5); }
     else if (state == AiState::Paused) { line(-3,-6,-3,6); line(3,-6,3,6); }
     else if (state == AiState::Idle) dc.fill({x-1,y-1,x+2,y+2},color);

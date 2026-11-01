@@ -17,7 +17,7 @@ struct Factories {
     ComPtr<IDWriteFactory> text;
     ComPtr<IDWriteTypography> typography;
     ComPtr<ID2D1StrokeStyle> iconStroke;
-    std::array<ComPtr<ID2D1PathGeometry>, 13> icons;
+    std::array<ComPtr<ID2D1PathGeometry>, 14> icons;
     Factories() {
         check(D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, drawing.put()), "Direct2D initialization failed");
         check(DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory), reinterpret_cast<IUnknown**>(text.put())), "DirectWrite initialization failed");
@@ -107,6 +107,11 @@ struct Factories {
                 path({{8, 3}, {21, 3}, {21, 16}});
                 path({{3, 8}, {16, 8}, {16, 21}, {3, 21}}, true);
                 path({{7, 14.5f}, {12, 14.5f}});
+                break;
+            case Renderer::Icon::Spinner:
+                sink->BeginFigure({12, 2}, D2D1_FIGURE_BEGIN_HOLLOW);
+                sink->AddArc(D2D1::ArcSegment({2, 12}, {10, 10}, 0, D2D1_SWEEP_DIRECTION_CLOCKWISE, D2D1_ARC_SIZE_LARGE));
+                sink->EndFigure(D2D1_FIGURE_END_OPEN);
                 break;
             }
             check(sink->Close(), "Icon geometry completion failed");
@@ -528,16 +533,17 @@ void Renderer::outline(const RECT& rect, COLORREF value, float width) {
     if (empty(rect)) return;
     color(value); target_->DrawRectangle(rectangle(rect), brush_.get(), width);
 }
-void Renderer::icon(Icon icon, const RECT& rect, COLORREF value) {
+void Renderer::icon(Icon icon, const RECT& rect, COLORREF value, float rotation) {
     if (empty(rect)) return;
     const float size = static_cast<float>(std::min(rect.right - rect.left, rect.bottom - rect.top));
     const float scale = size / 24.0f;
     const float x = (rect.left + rect.right - size) / 2.0f, y = (rect.top + rect.bottom - size) / 2.0f;
     D2D1::Matrix3x2F previous; target_->GetTransform(&previous);
-    target_->SetTransform(D2D1::Matrix3x2F::Scale(scale, scale) * D2D1::Matrix3x2F::Translation(x, y) * previous);
+    target_->SetTransform(D2D1::Matrix3x2F::Rotation(rotation, D2D1::Point2F(12, 12)) *
+        D2D1::Matrix3x2F::Scale(scale, scale) * D2D1::Matrix3x2F::Translation(x, y) * previous);
     color(value);
     auto& resources = factories();
-    target_->DrawGeometry(resources.icons[static_cast<size_t>(icon)].get(), brush_.get(), 1.6f, resources.iconStroke.get());
+    target_->DrawGeometry(resources.icons[static_cast<size_t>(icon)].get(), brush_.get(), icon == Icon::Spinner ? 3.0f : 1.6f, resources.iconStroke.get());
     target_->SetTransform(previous);
 }
 }

@@ -30,7 +30,7 @@ class Renderer {
 public:
     explicit Renderer(D2D1_PRESENT_OPTIONS presentOptions = D2D1_PRESENT_OPTIONS_NONE) : presentOptions_(presentOptions) {}
     enum class Font { Ui, Code };
-    enum class Icon { Explorer, SourceControl, Branch, OpenAllChanges, Search, StageChanges, UnstageChanges, DiscardChanges, StashChanges, OpenFile, Eye, EyeClosed, CollapseAll };
+    enum class Icon { Explorer, SourceControl, Branch, OpenAllChanges, Search, StageChanges, UnstageChanges, DiscardChanges, StashChanges, OpenFile, Eye, EyeClosed, CollapseAll, Spinner };
     // Keeps both the Win32 paint validation and the Direct2D drawing balanced,
     // including empty windows and failed render-target creation.
     class Paint {
@@ -71,7 +71,7 @@ public:
     void line(float x1, float y1, float x2, float y2, COLORREF color, float width);
     void ellipse(const RECT& rect, COLORREF color, float width);
     void outline(const RECT& rect, COLORREF color, float width = 1.0f);
-    void icon(Icon icon, const RECT& rect, COLORREF color);
+    void icon(Icon icon, const RECT& rect, COLORREF color, float rotation = 0.0f);
     void setImage(std::shared_ptr<const ImagePreview> image);
     bool drawImage(const RECT& bounds, int checkerSize);
 private:
