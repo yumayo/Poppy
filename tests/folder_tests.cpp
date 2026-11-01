@@ -151,6 +151,21 @@ RECT bounds(HWND parent, HWND child) {
     MapWindowPoints(nullptr, parent, reinterpret_cast<POINT*>(&rect), 2);
     return rect;
 }
+template<class Predicate>
+void controlShortcut(const Application& app, HWND target, WPARAM key, Predicate completed, const char* message) {
+    struct Input {
+        DWORD thread; BYTE previous[256]{};
+        explicit Input(DWORD target) : thread(target) {
+            check(AttachThreadInput(GetCurrentThreadId(), thread, TRUE) != FALSE, "Cannot attach shortcut input");
+            GetKeyboardState(previous);
+        }
+        ~Input() { SetKeyboardState(previous); AttachThreadInput(GetCurrentThreadId(), thread, FALSE); }
+    } input(app.process.dwThreadId);
+    SetFocus(target);
+    BYTE keys[256]{}; keys[VK_CONTROL] = keys[VK_LCONTROL] = 0x80;
+    check(SetKeyboardState(keys) && PostMessageW(target, WM_KEYDOWN, key, 0), "Cannot post shortcut");
+    waitFor(completed, message);
+}
 void controlKey(const Application& app, HWND target, WPARAM key, bool shift = false) {
     const bool redo = key == 'Y' || shift;
     waitFor([&] { return send(target, redo ? treeCanRedo : treeCanUndo) != 0; }, "Explorer operation did not become available");
@@ -1286,6 +1301,7 @@ void sidebarTests(const fs::path& executable) {
     const auto activityRect = bounds(app.window, explorer), treeRect = bounds(app.window, tree), viewerRect = bounds(app.window, viewer);
     check(activityRect.left == 0 && activityRect.right <= treeRect.left && treeRect.right < viewerRect.left,
           "Activity bar, sidebar and editor are not arranged from left to right");
+    check(activityRect.top == 0 && viewerRect.top == 0, "The removed toolbar still reserves space above the workspace");
     check(treeRect.top > viewerRect.top, "Explorer is missing its sidebar heading");
     send(git, WM_KEYDOWN, VK_SPACE);
     check(IsWindowVisible(tree), "Space activated the activity button before key release");
@@ -1543,8 +1559,7 @@ void quickOpenTests(const fs::path& executable) {
     check(viewer && palette && !IsWindowVisible(palette), "Quick open should start hidden");
     const auto px = [dpi = GetDpiForWindow(app.window)](int value) { return MulDiv(value, dpi, 96); };
     const auto open = [&] {
-        click(app.window, px(520), px(22));
-        check(IsWindowVisible(palette), "Find file did not open quick open");
+        controlShortcut(app, viewer, 'P', [&] { return IsWindowVisible(palette); }, "Ctrl+P did not open quick open");
         const auto pane = bounds(app.window, palette); RECT client{}; GetClientRect(app.window, &client);
         check(pane.top == px(8) && std::abs((pane.left + pane.right) - client.right) <= 1, "Quick open is not centered at the top");
     };
@@ -1601,10 +1616,8 @@ void explorerActiveFileTests(const fs::path& executable) {
     waitFor([&] { return send(tree, treeGetCount) == 43; }, "Explorer selection fixture did not load");
     const auto root = nextItem(tree, TreeRelation::Root), firstFolder = nextItem(tree, TreeRelation::Child, root);
     const auto secondFolder = nextItem(tree, TreeRelation::Next, firstFolder);
-    const auto px = [dpi = GetDpiForWindow(app.window)](int value) { return MulDiv(value, dpi, 96); };
     const auto open = [&](const wchar_t* name, int lines) {
-        click(app.window, px(520), px(22));
-        check(IsWindowVisible(palette), "Cannot open file search for Explorer selection");
+        controlShortcut(app, viewer, 'P', [&] { return IsWindowVisible(palette); }, "Cannot open file search for Explorer selection");
         for (const auto ch : std::wstring(name)) send(palette, WM_CHAR, ch);
         waitFor([&] { send(palette, WM_KEYDOWN, VK_RETURN); return !IsWindowVisible(palette); }, "Cannot open selection fixture file");
         waitLines(viewer, lines);
@@ -2809,7 +2822,9 @@ void sessionTests(const fs::path& executable) {
         send(tree, treeSelect, third); waitLines(viewer, 100); keepTab(app, 2);
         send(tree, treeSelect, second); waitLines(viewer, 300);
         const auto px = [dpi = GetDpiForWindow(app.window)](int value) { return MulDiv(value, dpi, 96); };
-        click(app.window, px(410), px(22));
+        const auto terminal = FindWindowExW(app.window, nullptr, L"PoppyTerminalPane", nullptr);
+        check(terminal && IsWindowVisible(terminal), "Session terminal is missing");
+        controlShortcut(app, viewer, 'J', [&] { return !IsWindowVisible(terminal); }, "Ctrl+J did not hide the session terminal");
         const auto pane = bounds(app.window, viewer);
         const int splitter = pane.left - px(3), y = pane.top + px(50);
         send(app.window, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(splitter, y));

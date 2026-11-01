@@ -365,7 +365,7 @@ private:
     std::optional<WatchUsage> watchUsage_;
     ActivityButton explorerActivity_, gitActivity_, searchActivity_;
     UINT dpi_ = 96;
-    int sidebar_ = 245, terminalHeight_ = 260, toolbar_ = 44, footer_ = 26, splitter_ = 5;
+    int sidebar_ = 245, terminalHeight_ = 260, footer_ = 26, splitter_ = 5;
     int activityWidth_ = 48, sidebarHeader_ = 34, gitHeader_ = 180;
     RECT sidebarRect_{}, sidebarSplitter_{}, terminalSplitter_{}, tabsRect_{};
     int dragging_ = 0, dragOffset_ = 0;
@@ -633,7 +633,7 @@ void ProjectRuntime::Impl::dpi(UINT value) {
     dpi_ = value; renderer_.setDpi(dpi_);
     explorer_.setDpi(dpi_); changes_.setDpi(dpi_, 28);
     explorerActivity_.setDpi(dpi_); gitActivity_.setDpi(dpi_); searchActivity_.setDpi(dpi_); searchPane_.setDpi(dpi_);
-    toolbar_ = MulDiv(44, dpi_, 96); footer_ = MulDiv(26, dpi_, 96); splitter_ = MulDiv(5, dpi_, 96);
+    footer_ = MulDiv(26, dpi_, 96); splitter_ = MulDiv(5, dpi_, 96);
     activityWidth_ = MulDiv(48, dpi_, 96); sidebarHeader_ = MulDiv(34, dpi_, 96); gitHeader_ = MulDiv(180, dpi_, 96);
     gitCommit_.setDpi(dpi_);
     for (auto& view : viewers_) view.setDpi(dpi_);
@@ -644,20 +644,20 @@ void ProjectRuntime::Impl::layout(bool revealTab) {
     RECT r{}; GetClientRect(window_, &r);
     const int width = static_cast<int>(r.right), height = static_cast<int>(r.bottom);
     const int side = std::clamp(MulDiv(sidebar_, dpi_, 96), MulDiv(130, dpi_, 96), std::max(MulDiv(130, dpi_, 96), width - activityWidth_ - splitter_ - MulDiv(250, dpi_, 96)));
-    const int right = activityWidth_ + side + splitter_, content = std::max(0, height - toolbar_ - footer_);
+    const int right = activityWidth_ + side + splitter_, content = std::max(0, height - footer_);
     const int terminalSize = terminalVisible_ ? std::min(MulDiv(terminalHeight_, dpi_, 96), std::max(0, content - MulDiv(100, dpi_, 96))) : 0;
     const int viewerSize = std::max(0, content - terminalSize - (terminalVisible_ ? splitter_ : 0));
-    sidebarRect_ = {activityWidth_, toolbar_, activityWidth_ + side, toolbar_ + content};
-    sidebarSplitter_ = {sidebarRect_.right, toolbar_, right, toolbar_ + content};
-    terminalSplitter_ = {right, toolbar_ + viewerSize, width, toolbar_ + viewerSize + (terminalVisible_ ? splitter_ : 0)};
-    const int gitTop = toolbar_ + sidebarHeader_ + gitHeader_;
+    sidebarRect_ = {activityWidth_, 0, activityWidth_ + side, content};
+    sidebarSplitter_ = {sidebarRect_.right, 0, right, content};
+    terminalSplitter_ = {right, viewerSize, width, viewerSize + (terminalVisible_ ? splitter_ : 0)};
+    const int gitTop = sidebarHeader_ + gitHeader_;
     const bool showExplorer = activeSidebar_ == Sidebar::Explorer && !root_.empty();
     const bool showGitFiles = activeSidebar_ == Sidebar::Git && changes_.child();
     normalizeGroups();
-    editorRect_ = {right, toolbar_, width, toolbar_ + viewerSize};
+    editorRect_ = {right, 0, width, viewerSize};
     const bool split = std::any_of(tabs_.begin(), tabs_.end(), [](const Tab& tab) { return tab.group == 1; });
     const int middle = right + MulDiv(std::max(0, width - right - splitter_), editorRatio_, 1000);
-    editorSplitter_ = split ? RECT{middle, toolbar_, middle + splitter_, toolbar_ + viewerSize} : RECT{};
+    editorSplitter_ = split ? RECT{middle, 0, middle + splitter_, viewerSize} : RECT{};
     const int rowHeight = MulDiv(34, dpi_, 96);
     const size_t maxRows = static_cast<size_t>(std::max(1, (viewerSize - MulDiv(100, dpi_, 96)) / rowHeight));
     tabRects_.assign(tabs_.size(), RECT{});
@@ -665,7 +665,7 @@ void ProjectRuntime::Impl::layout(bool revealTab) {
         auto& pane = editorGroups_[group]; pane.indices.clear();
         for (size_t i = 0; i < tabs_.size(); ++i) if (tabs_[i].group == group) pane.indices.push_back(i);
         const int start = group ? middle + splitter_ : right, edge = group || !split ? width : middle;
-        pane.tabs = {start, toolbar_, edge, toolbar_};
+        pane.tabs = {start, 0, edge, 0};
         const auto wrap = [&](int available) {
             pane.starts.clear(); int x = start, row = -1;
             for (size_t j = 0; j < pane.indices.size(); ++j) {
@@ -675,7 +675,7 @@ void ProjectRuntime::Impl::layout(bool revealTab) {
                 // does not change their width or hide the marker in the title.
                 const int width = std::min(std::max(0, available), renderer_.textWidth(title, tab.preview) + MulDiv(52, dpi_, 96));
                 if (!j || tab.pinned != tabs_[pane.indices[j - 1]].pinned || (x > start && x + width > start + available)) { pane.starts.push_back(j); x = start; ++row; }
-                tabRects_[i] = {x, toolbar_ + row * rowHeight, x + width, toolbar_ + (row + 1) * rowHeight}; x += width;
+                tabRects_[i] = {x, row * rowHeight, x + width, (row + 1) * rowHeight}; x += width;
             }
             pane.rows = std::min(maxRows, pane.starts.size());
         };
@@ -688,27 +688,27 @@ void ProjectRuntime::Impl::layout(bool revealTab) {
             if (row < pane.firstRow) pane.firstRow = row;
             else if (row >= pane.firstRow + pane.rows) pane.firstRow = row - pane.rows + 1;
         }
-        pane.tabs.bottom = toolbar_ + static_cast<int>(pane.rows) * rowHeight;
-        pane.body = {start, pane.tabs.bottom, edge, toolbar_ + viewerSize};
+        pane.tabs.bottom = static_cast<int>(pane.rows) * rowHeight;
+        pane.body = {start, pane.tabs.bottom, edge, viewerSize};
         for (const auto i : pane.indices) OffsetRect(&tabRects_[i], 0, -static_cast<int>(pane.firstRow) * rowHeight);
     }
-    tabsRect_ = {right, toolbar_, width, std::max(editorGroups_[0].tabs.bottom, editorGroups_[1].tabs.bottom)};
+    tabsRect_ = {right, 0, width, std::max(editorGroups_[0].tabs.bottom, editorGroups_[1].tabs.bottom)};
     updateTabs(false);
     if (tabDrag_ && tabDrag_->active) tabDrag_->target = tabDropAt(tabDrag_->point);
 
     struct Placement { HWND window; int x, y, width, height, flags; };
     const std::array<Placement, 11> panes{{
         {statusBar_.window(), 0, std::max(0, height - footer_), width, footer_, SWP_SHOWWINDOW},
-        {explorerButton_, 0, toolbar_, activityWidth_ - 1, activityWidth_, SWP_SHOWWINDOW},
-        {searchButton_, 0, toolbar_ + activityWidth_, activityWidth_ - 1, activityWidth_, SWP_SHOWWINDOW},
-        {gitButton_, 0, toolbar_ + 2 * activityWidth_, activityWidth_ - 1, activityWidth_, SWP_SHOWWINDOW},
-        {tree_, activityWidth_, toolbar_ + sidebarHeader_, side, std::max(0, content - sidebarHeader_), showExplorer ? SWP_SHOWWINDOW : SWP_HIDEWINDOW},
-        {gitTree_, activityWidth_, gitTop, side, std::max(0, toolbar_ + content - gitTop), showGitFiles ? SWP_SHOWWINDOW : SWP_HIDEWINDOW},
-        {gitCommit_.window(), activityWidth_ + MulDiv(12, dpi_, 96), toolbar_ + sidebarHeader_ + MulDiv(56, dpi_, 96), side - MulDiv(24, dpi_, 96), MulDiv(90, dpi_, 96), activeSidebar_ == Sidebar::Git ? SWP_SHOWWINDOW : SWP_HIDEWINDOW},
-        {searchPane_.window(), activityWidth_, toolbar_ + sidebarHeader_, side, std::max(0, content - sidebarHeader_), activeSidebar_ == Sidebar::Search ? SWP_SHOWWINDOW : SWP_HIDEWINDOW},
+        {explorerButton_, 0, 0, activityWidth_ - 1, activityWidth_, SWP_SHOWWINDOW},
+        {searchButton_, 0, activityWidth_, activityWidth_ - 1, activityWidth_, SWP_SHOWWINDOW},
+        {gitButton_, 0, 2 * activityWidth_, activityWidth_ - 1, activityWidth_, SWP_SHOWWINDOW},
+        {tree_, activityWidth_, sidebarHeader_, side, std::max(0, content - sidebarHeader_), showExplorer ? SWP_SHOWWINDOW : SWP_HIDEWINDOW},
+        {gitTree_, activityWidth_, gitTop, side, std::max(0, content - gitTop), showGitFiles ? SWP_SHOWWINDOW : SWP_HIDEWINDOW},
+        {gitCommit_.window(), activityWidth_ + MulDiv(12, dpi_, 96), sidebarHeader_ + MulDiv(56, dpi_, 96), side - MulDiv(24, dpi_, 96), MulDiv(90, dpi_, 96), activeSidebar_ == Sidebar::Git ? SWP_SHOWWINDOW : SWP_HIDEWINDOW},
+        {searchPane_.window(), activityWidth_, sidebarHeader_, side, std::max(0, content - sidebarHeader_), activeSidebar_ == Sidebar::Search ? SWP_SHOWWINDOW : SWP_HIDEWINDOW},
         {viewers_[0].window(), editorGroups_[0].body.left, editorGroups_[0].body.top, std::max(0L, editorGroups_[0].body.right - editorGroups_[0].body.left), std::max(0L, editorGroups_[0].body.bottom - editorGroups_[0].body.top), SWP_SHOWWINDOW},
         {viewers_[1].window(), editorGroups_[1].body.left, editorGroups_[1].body.top, std::max(0L, editorGroups_[1].body.right - editorGroups_[1].body.left), std::max(0L, editorGroups_[1].body.bottom - editorGroups_[1].body.top), split ? SWP_SHOWWINDOW : SWP_HIDEWINDOW},
-        {terminal_.container(), right, toolbar_ + viewerSize + splitter_, std::max(0, width - right), terminalSize,
+        {terminal_.container(), right, viewerSize + splitter_, std::max(0, width - right), terminalSize,
             terminalVisible_ ? SWP_SHOWWINDOW : SWP_HIDEWINDOW | SWP_NOMOVE | SWP_NOSIZE}
     }};
     // Move every pane before painting. Copying old window pixels during a
@@ -733,19 +733,13 @@ void ProjectRuntime::Impl::paint() {
     Renderer::Paint paint(renderer_, window_); if (!paint) return;
     auto& dc = renderer_;
     RECT r{}; GetClientRect(window_, &r);
-    dc.fill(r, border); dc.fill({0, 0, r.right, toolbar_}, panel); dc.fill({0, r.bottom - footer_, r.right, r.bottom}, panel);
+    dc.fill(r, border); dc.fill({0, r.bottom - footer_, r.right, r.bottom}, panel);
     auto scaled = [&](int v) { return MulDiv(v, dpi_, 96); };
-    dc.label({scaled(16), 0, scaled(85), toolbar_}, L"POPPY", accent);
-    dc.label({scaled(98), 0, scaled(210), toolbar_}, L"Open folder", foreground);
-    dc.label({scaled(220), 0, scaled(292), toolbar_}, L"Refresh", foreground);
-    dc.label({scaled(305), 0, scaled(360), toolbar_}, L"Diff", foreground);
-    dc.label({scaled(374), 0, scaled(460), toolbar_}, L"Terminal", terminalVisible_ ? accent : muted);
-    dc.label({scaled(480), 0, scaled(566), toolbar_}, L"Find file", foreground);
-    dc.fill({0, toolbar_, activityWidth_, r.bottom - footer_}, background);
-    dc.fill({activityWidth_ - 1, toolbar_, activityWidth_, r.bottom - footer_}, border);
+    dc.fill({0, 0, activityWidth_, r.bottom - footer_}, background);
+    dc.fill({activityWidth_ - 1, 0, activityWidth_, r.bottom - footer_}, border);
     dc.fill(sidebarRect_, panel);
-    const int left = sidebarRect_.left + scaled(14), edge = sidebarRect_.right - scaled(12), top = toolbar_ + sidebarHeader_;
-    dc.label({left, toolbar_, edge, top}, activeSidebar_ == Sidebar::Explorer ? L"EXPLORER" : activeSidebar_ == Sidebar::Git ? L"SOURCE CONTROL" : L"SEARCH", foreground);
+    const int left = sidebarRect_.left + scaled(14), edge = sidebarRect_.right - scaled(12), top = sidebarHeader_;
+    dc.label({left, 0, edge, top}, activeSidebar_ == Sidebar::Explorer ? L"EXPLORER" : activeSidebar_ == Sidebar::Git ? L"SOURCE CONTROL" : L"SEARCH", foreground);
     dc.fill({sidebarRect_.left, top - 1, sidebarRect_.right, top}, border);
     if (activeSidebar_ == Sidebar::Git) {
         const bool repository = git_ && !git_->repositories.empty();
@@ -812,7 +806,7 @@ void ProjectRuntime::Impl::selectSidebar(Sidebar sidebar) {
     SetFocus(sidebar == Sidebar::Explorer ? (IsWindowVisible(tree_) ? tree_ : explorerButton_) : (IsWindowVisible(gitTree_) ? gitTree_ : gitButton_));
 }
 RECT ProjectRuntime::Impl::gitViewButton(bool tree) const {
-    const int padding = MulDiv(12, dpi_, 96), top = toolbar_ + sidebarHeader_;
+    const int padding = MulDiv(12, dpi_, 96), top = sidebarHeader_;
     const int middle = (sidebarRect_.left + sidebarRect_.right) / 2;
     return {tree ? sidebarRect_.left + padding : middle, top + gitHeader_ - MulDiv(25, dpi_, 96),
         tree ? middle : sidebarRect_.right - padding, top + gitHeader_ - MulDiv(3, dpi_, 96)};
@@ -2712,13 +2706,7 @@ LRESULT ProjectRuntime::Impl::handle(UINT m, WPARAM a, LPARAM b) {
         return 0;
     case WM_LBUTTONDOWN: {
         quickOpen_.close();
-        const int x = MulDiv(GET_X_LPARAM(b), 96, dpi_), y = GET_Y_LPARAM(b);
-        if (y < toolbar_) {
-            if (x >= 98 && x < 210) chooseFolder(); else if (x >= 220 && x < 292) refresh(); else if (x >= 305 && x < 360) showDiff(); else if (x >= 374 && x < 460) toggleTerminal();
-            else if (x >= 480 && x < 566) quickOpen_.show();
-            return 0;
-        }
-        const POINT point{GET_X_LPARAM(b), y};
+        const POINT point{GET_X_LPARAM(b), GET_Y_LPARAM(b)};
         if (activeSidebar_ == Sidebar::Git) for (const bool tree : {true, false}) {
             const auto button = gitViewButton(tree);
             if (PtInRect(&button, point)) { setGitView(tree); return 0; }
@@ -2768,7 +2756,7 @@ LRESULT ProjectRuntime::Impl::handle(UINT m, WPARAM a, LPARAM b) {
             RECT r{}; GetClientRect(window_, &r);
             if (dragging_ == 1) sidebar_ = std::clamp(MulDiv(GET_X_LPARAM(b) - activityWidth_ - dragOffset_, 96, dpi_), 130, std::max(130, MulDiv(r.right - activityWidth_ - splitter_, 96, dpi_) - 250));
             else if (dragging_ == 3) editorRatio_ = std::clamp(MulDiv(GET_X_LPARAM(b) - editorRect_.left, 1000, std::max(1L, editorRect_.right - editorRect_.left - splitter_)), 200, 800);
-            else terminalHeight_ = std::clamp(MulDiv(r.bottom - footer_ - GET_Y_LPARAM(b), 96, dpi_), 100, std::max(100, MulDiv(r.bottom - toolbar_ - footer_, 96, dpi_) - 120));
+            else terminalHeight_ = std::clamp(MulDiv(r.bottom - footer_ - GET_Y_LPARAM(b), 96, dpi_), 100, std::max(100, MulDiv(r.bottom - footer_, 96, dpi_) - 120));
             layout();
         } return 0;
     case WM_LBUTTONUP:
