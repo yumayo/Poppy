@@ -362,9 +362,76 @@ void htmlPreviewSwitching() {
     check(buffer->undo(anchor, caret) && buffer->document.text == saved, "Preview discarded the source Undo history");
     viewer.refreshBuffer(); viewer.setHtmlPreview(true);
     viewer.edit(buffer, L"another.txt");
-    check(!viewer.htmlAvailable() && !viewer.htmlPreview(), "Switching files retained the HTML controller");
+    check(!viewer.htmlAvailable() && !viewer.htmlPreview(), "Switching files left the HTML preview active");
     viewer.edit(buffer, path); viewer.setHtmlPreview(true); viewer.message(L"Closed");
     check(!viewer.htmlPreview() && !viewer.hasDocument(), "Closing the document retained the HTML preview");
+}
+// Run explicitly with --html-preview-runtime on a Windows desktop with WebView2.
+void htmlPreviewRuntime() {
+    const auto directory = fs::temp_directory_path() / (L"Poppy WebView2 test " + std::to_wstring(GetCurrentProcessId()) + L" " + std::to_wstring(GetTickCount64()));
+    check(fs::create_directory(directory), "Could not create WebView2 test files");
+    struct Files { fs::path path; ~Files() { std::error_code error; fs::remove_all(path, error); } } files{directory};
+    const auto first = directory / L"first.html", second = directory / L"second 日本語 #%.html";
+    for (const auto& path : {first, second}) {
+        std::ofstream file(path); file << "<!doctype html><title>Preview reuse test</title><h1>" << path.u8string() << "</h1>";
+        check(file.good(), "Could not write WebView2 test HTML");
+    }
+    const auto parent = CreateWindowExW(0, L"STATIC", L"WebView2 reuse test", WS_POPUP | WS_CLIPCHILDREN,
+        0, 0, 800, 500, nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
+    check(parent != nullptr, "Could not create WebView2 test window");
+    struct WindowOwner { HWND value; ~WindowOwner() { DestroyWindow(value); } } owner{parent};
+    ShowWindow(parent, SW_SHOWNOACTIVATE);
+    HtmlPreview preview;
+    const RECT bounds{0, 0, 800, 500};
+    const auto pump = [] {
+        MSG message{};
+        while (PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE)) { TranslateMessage(&message); DispatchMessageW(&message); }
+    };
+    const auto wait = [&](const auto& done) {
+        const auto start = GetTickCount64();
+        do {
+            pump();
+            if (done()) return;
+            check(GetTickCount64() - start < 15000, "WebView2 did not finish starting or navigating");
+            MsgWaitForMultipleObjects(0, nullptr, FALSE, 10, QS_ALLINPUT);
+        } while (true);
+    };
+    const auto loaded = [&] {
+        wait([&] { return preview.status() != L"Loading HTML preview…"; });
+        if (!preview.status().empty()) throw std::runtime_error(utf8(preview.status()));
+        check(preview.active(), "Loading the page deactivated the preview");
+    };
+    // Finish initial creation after Source has already been selected.
+    size_t changes = 0; preview.changed = [&] { ++changes; };
+    preview.show(parent, first, bounds); preview.hide();
+    const auto hiddenChanges = changes;
+    wait([&] { const auto child = GetWindow(parent, GW_CHILD); return child && !IsWindowVisible(child); });
+    const auto child = GetWindow(parent, GW_CHILD);
+    check(!preview.active() && !IsWindowVisible(child), "Late WebView2 creation displayed a hidden preview");
+    check(changes == hiddenChanges, "Late WebView2 creation notified an inactive preview");
+    // A window handle alone could be recycled after destruction; its property cannot.
+    const auto marker = reinterpret_cast<HANDLE>(1);
+    check(SetPropW(child, L"PoppyWebView2ReuseTest", marker) != FALSE, "Could not mark the WebView2 controller window");
+    const auto reused = [&] {
+        check(GetWindow(parent, GW_CHILD) == child && GetPropW(child, L"PoppyWebView2ReuseTest") == marker,
+            "Opening another HTML file recreated the WebView2 controller window");
+    };
+    preview.show(parent, second, bounds); loaded(); reused();
+    preview.show(parent, directory / L"." / first.filename(), bounds); loaded(); reused();
+    for (int i = 0; i < 3; ++i) {
+        preview.hide();
+        check(!preview.active() && !IsWindowVisible(child), "Source did not hide the retained WebView2 controller");
+        reused(); preview.show(parent, first, bounds); loaded(); reused();
+    }
+    // Queue several switches without pumping messages; old completions must be ignored.
+    preview.hide(); preview.show(parent, first, bounds); preview.hide();
+    preview.show(parent, second, bounds); loaded(); reused();
+    preview.show(parent, ResourceId::wsl("Ubuntu", "/site/bad\\name.html"), bounds);
+    check(preview.active() && !preview.status().empty() && !IsWindowVisible(child), "An invalid path showed the previous page");
+    reused(); preview.show(parent, second, bounds); loaded(); reused();
+    preview.close();
+    check(!preview.active(), "Closing WebView2 left the preview active");
+    wait([&] { return GetWindow(parent, GW_CHILD) == nullptr; });
 }
 void colorsAndClipping() {
     Renderer renderer; renderer.setDpi(96);
@@ -2059,15 +2126,20 @@ void quickOpenStability() {
     check(!observed.geometryChanges && !observed.unexpectedHides, "Typing or completing a search resized or hid quick open");
 }
 }
-int main() {
+int main(int argc, char** argv) {
     const HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     int result = 0;
     try {
         initializeRendering();
-        htmlPreviewSwitching();
-        terminalProcessShutdown();
-        statusBarLimits(); treeMultipleSelection(); inlineTreeInput(); gitCommitInput(); cellPositions(); colorsAndClipping(); imagePreviews(); smoothIcons(); windowTargets(); editableDiff(); editorCaret(); delayedLoadingMessages(); imeCellRendering(); imeTerminalInsertion(); imeUiRendering(); imePositions(); editorWordSelection(); editorWordMovement(); editorLineShortcuts(); editorWrapping(); diffWrapping(); documentFind(); horizontalWheelScrolling(); continuousViewerScrolling(); selectionAutoScrolling(); terminalGitBashSocketEnvironment(); terminalSelectionAutoScrolling(); themedScrollbars(); quickOpenStability();
-        std::cout << "Direct2D rendering tests passed\n";
+        if (argc == 2 && std::string_view(argv[1]) == "--html-preview-runtime") {
+            htmlPreviewRuntime();
+            std::cout << "WebView2 runtime reuse tests passed\n";
+        } else {
+            htmlPreviewSwitching();
+            terminalProcessShutdown();
+            statusBarLimits(); treeMultipleSelection(); inlineTreeInput(); gitCommitInput(); cellPositions(); colorsAndClipping(); imagePreviews(); smoothIcons(); windowTargets(); editableDiff(); editorCaret(); delayedLoadingMessages(); imeCellRendering(); imeTerminalInsertion(); imeUiRendering(); imePositions(); editorWordSelection(); editorWordMovement(); editorLineShortcuts(); editorWrapping(); diffWrapping(); documentFind(); horizontalWheelScrolling(); continuousViewerScrolling(); selectionAutoScrolling(); terminalGitBashSocketEnvironment(); terminalSelectionAutoScrolling(); themedScrollbars(); quickOpenStability();
+            std::cout << "Direct2D rendering tests passed\n";
+        }
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; result = 1; }
     if (SUCCEEDED(com)) CoUninitialize();
     return result;

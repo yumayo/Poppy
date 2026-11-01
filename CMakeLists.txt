@@ -92,7 +92,7 @@ if(WIN32)
     if(MINGW)
       target_include_directories(${target} PRIVATE src/webview2_mingw)
     endif()
-    target_link_libraries(${target} PRIVATE shell32)
+    target_link_libraries(${target} PRIVATE shell32 urlmon)
     add_custom_command(TARGET ${target} POST_BUILD
       COMMAND ${CMAKE_COMMAND} -E copy_if_different "${POPPY_WEBVIEW2_LOADER}" "$<TARGET_FILE_DIR:${target}>/WebView2Loader.dll"
       COMMAND ${CMAKE_COMMAND} -E copy_if_different "${POPPY_WEBVIEW2_SDK}/LICENSE.txt" "$<TARGET_FILE_DIR:${target}>/WebView2-LICENSE.txt"

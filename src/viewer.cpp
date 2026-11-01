@@ -36,7 +36,7 @@ void Viewer::setDpi(UINT dpi) {
 }
 void Viewer::show(std::shared_ptr<const Document> d, const ResourceId& path, bool preserve) {
     const bool preview = preserve && path_ == path && html_.active();
-    html_.close();
+    html_.hide();
     stopLoading();
     stopSelection();
     ime_.cancel(window_);
@@ -66,7 +66,7 @@ void Viewer::updateGitLines() {
     gitChangedLines_ = gitBefore_ && document_ && !diff_ ? changedWorkingLines(*gitBefore_, *document_) : std::vector<bool>{};
 }
 void Viewer::showDiff(std::shared_ptr<const DiffDocument> d, const ResourceId& path, bool preserve) {
-    html_.close();
+    html_.hide();
     stopLoading();
     stopSelection();
     ime_.cancel(window_);
@@ -109,7 +109,7 @@ void Viewer::refreshBuffer() {
     layoutDirty_ = true; requestFind(false, false, false); scrollbars(); caretPosition(); InvalidateRect(window_, nullptr, FALSE);
 }
 void Viewer::message(const std::wstring& text, const ResourceId& path) {
-    html_.close();
+    html_.hide();
     stopLoading();
     stopSelection();
     ime_.cancel(window_);
@@ -156,7 +156,7 @@ void Viewer::setHtmlPreview(bool enabled) {
     if (!htmlAvailable() || enabled == html_.active()) return;
     stopSelection(); ime_.cancel(window_); findBar_.close();
     if (enabled) html_.show(window_, path_, {});
-    else html_.close();
+    else html_.hide();
     scrollbars(); findLayout(); htmlLayout(); caretPosition();
     InvalidateRect(window_, nullptr, FALSE);
     if (!enabled) SetFocus(window_);
