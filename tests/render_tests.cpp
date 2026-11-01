@@ -338,7 +338,12 @@ void htmlPreviewSwitching() {
     // Fail deterministically before starting WebView2; no Runtime is required.
     const auto path = ResourceId::wsl("Ubuntu", "/site/bad\\name.html");
     viewer.edit(buffer, path);
-    check(viewer.htmlAvailable() && !viewer.htmlPreview(), "HTML did not open in Source mode");
+    check(viewer.htmlAvailable() && viewer.htmlPreview(), "HTML did not open in Preview mode");
+    viewer.edit(buffer, path, true);
+    check(viewer.htmlPreview(), "Reloading HTML lost Preview mode");
+    viewer.setHtmlPreview(false);
+    viewer.edit(buffer, path, true);
+    check(!viewer.htmlPreview(), "Reloading HTML lost the selected Source mode");
     SendMessageW(viewer.window(), WM_CHAR, 'X', 0);
     check(buffer->dirty(), "Could not edit HTML source before preview");
     const auto edited = buffer->document.text;
@@ -375,7 +380,13 @@ void htmlPreviewSwitching() {
     viewer.refreshBuffer(); viewer.setHtmlPreview(true);
     viewer.edit(buffer, L"another.txt");
     check(!viewer.htmlAvailable() && !viewer.htmlPreview(), "Switching files left the HTML preview active");
-    viewer.edit(buffer, path); viewer.setHtmlPreview(true); viewer.message(L"Closed");
+    viewer.edit(buffer, path);
+    check(viewer.htmlPreview(), "Reopening HTML did not default to Preview mode");
+    viewer.showDiff(std::make_shared<DiffDocument>(workingDiff(buffer->document, buffer->document)), path);
+    check(!viewer.htmlAvailable() && !viewer.htmlPreview(), "An HTML diff activated the preview");
+    viewer.edit(buffer, path, true);
+    check(viewer.htmlPreview(), "Returning from an HTML diff did not default to Preview mode");
+    viewer.message(L"Closed");
     check(!viewer.htmlPreview() && !viewer.hasDocument(), "Closing the document retained the HTML preview");
 }
 // Run explicitly with --html-preview-runtime on a Windows desktop with WebView2.
@@ -384,8 +395,10 @@ void htmlPreviewRuntime() {
     check(fs::create_directory(directory), "Could not create WebView2 test files");
     struct Files { fs::path path; ~Files() { std::error_code error; fs::remove_all(path, error); } } files{directory};
     const auto first = directory / L"first.html", second = directory / L"second 日本語 #%.html";
+    // If page scripts run, navigation to a missing file makes loaded() fail.
     for (const auto& path : {first, second}) {
-        std::ofstream file(path); file << "<!doctype html><title>Preview reuse test</title><h1>" << path.u8string() << "</h1>";
+        std::ofstream file(path); file << "<!doctype html><title>Preview reuse test</title><h1>" << path.u8string() << "</h1>"
+            "<script>location.replace('script-must-not-run.html');</script>";
         check(file.good(), "Could not write WebView2 test HTML");
     }
     const auto parent = CreateWindowExW(0, L"STATIC", L"WebView2 reuse test", WS_POPUP | WS_CLIPCHILDREN,
@@ -1734,6 +1747,7 @@ void continuousViewerScrolling() {
     for (int row = 0; row < 256; ++row) buffer->document.text += line;
     indexDocument(buffer->document); buffer->initialize(buffer->document.text);
     viewer.edit(buffer, L"long-lines.html");
+    viewer.setHtmlPreview(false);
     ShowWindow(parent, SW_SHOWNOACTIVATE); SetFocus(window);
     ViewerPaintWatch observed(window);
     const auto checkPaint = [&](size_t before) {

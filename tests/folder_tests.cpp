@@ -423,17 +423,30 @@ void htmlTabToolsTests(const fs::path& executable) {
     const auto tree = app.tree(), left = FindWindowExW(app.window, nullptr, L"PoppyViewer", nullptr);
     const auto right = FindWindowExW(app.window, left, L"PoppyViewer", nullptr);
     waitFor([&] { return send(tree, treeGetCount) == 4; }, "HTML tab fixture did not load");
-    auto item = nextItem(tree, TreeRelation::Child, nextItem(tree, TreeRelation::Root));
-    for (int i = 0; i < 3; ++i) {
-        send(tree, treeSelect, item); waitLines(left, 200 + i * 100); keepTab(app, i);
-        item = nextItem(tree, TreeRelation::Next, item);
-    }
     const UINT dpi = GetDpiForWindow(app.window);
-    const auto switchMode = [&](HWND viewer, bool preview, UINT message = WM_LBUTTONDOWN) {
+    const auto selectMode = [&](HWND viewer, bool preview, UINT message = WM_LBUTTONDOWN) {
         const auto rect = bounds(app.window, viewer);
         const int toolsWidth = (std::min)(MulDiv(160, dpi, 96), static_cast<int>(rect.right - rect.left) / 2);
         const auto point = MAKELPARAM(rect.right - toolsWidth * (preview ? 1 : 3) / 4, MulDiv(17, dpi, 96));
         send(app.window, message, MK_LBUTTON, point); send(app.window, WM_LBUTTONUP, 0, point);
+    };
+    const auto waitSource = [&](HWND viewer, int lines) {
+        // Opening HTML now starts in Preview; wait for the document before
+        // selecting Source, including when the asynchronous load is pending.
+        waitFor([&] { selectMode(viewer, false); return scrollInfo(viewer).nMax == lines; },
+            "The HTML tab did not switch to Source");
+    };
+    auto item = nextItem(tree, TreeRelation::Child, nextItem(tree, TreeRelation::Root));
+    for (int i = 0; i < 3; ++i) {
+        send(tree, treeSelect, item);
+        if (i < 2) waitSource(left, 200 + i * 100); else waitLines(left, 400);
+        keepTab(app, i);
+        item = nextItem(tree, TreeRelation::Next, item);
+    }
+    const auto switchMode = [&](HWND viewer, bool preview, UINT message = WM_LBUTTONDOWN) {
+        const auto rect = bounds(app.window, viewer);
+        const int toolsWidth = (std::min)(MulDiv(160, dpi, 96), static_cast<int>(rect.right - rect.left) / 2);
+        selectMode(viewer, preview, message);
         GUITHREADINFO input{}; input.cbSize = sizeof(input);
         check(GetGUIThreadInfo(app.process.dwThreadId, &input) && input.hwndCapture != app.window && visibleTabCount(app) == 3,
             "HTML mode tools started a tab drag or changed the tabs");
@@ -445,7 +458,7 @@ void htmlTabToolsTests(const fs::path& executable) {
                 check(tab.right <= rect.right - toolsWidth, "HTML tools overlapped a wrapped tab");
         }
     };
-    clickTab(app, 0); waitLines(left, 200);
+    clickTab(app, 0); waitSource(left, 200);
     check(bounds(app.window, left).top == tabBounds(app, 0).bottom, "HTML source did not start immediately below the tabs");
     switchMode(left, true); waitFor([&] { return scrollInfo(left).nMax == 0; }, "Tab Preview did not activate HTML preview");
     switchMode(left, false); waitLines(left, 200);
@@ -456,9 +469,9 @@ void htmlTabToolsTests(const fs::path& executable) {
     auto body = bounds(app.window, left);
     click(app.window, body.right - MulDiv(20, dpi, 96), MulDiv(17, dpi, 96));
     check(scrollInfo(left).nMax == 400 && visibleTabCount(app) == 3, "An ordinary file retained HTML tools");
-    clickTab(app, 0); waitLines(left, 200);
+    clickTab(app, 0); waitSource(left, 200);
     dragTab(app, 1, {body.left + (body.right - body.left) * 3 / 4, body.top + 60});
-    waitLines(left, 200); waitLines(right, 300);
+    waitSource(left, 200); waitSource(right, 300);
     SetWindowPos(app.host, nullptr, 0, 0, MulDiv(1000, dpi, 96), MulDiv(700, dpi, 96), SWP_NOMOVE | SWP_NOZORDER);
     send(app.window, WM_NULL);
     // Each pane owns its mode even while focus is in the other pane.

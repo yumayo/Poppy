@@ -102,6 +102,11 @@ struct HtmlPreview::State : std::enable_shared_from_this<HtmlPreview::State> {
         controller->put_IsVisible(FALSE);
         error = controller->get_CoreWebView2(webview.put());
         if (FAILED(error) || !webview) { fail(FAILED(error) ? error : E_FAIL); return; }
+        ComPtr<ICoreWebView2Settings> settings;
+        error = webview->get_Settings(settings.put());
+        if (FAILED(error) || !settings) { fail(FAILED(error) ? error : E_FAIL); return; }
+        error = settings->put_IsScriptEnabled(FALSE);
+        if (FAILED(error)) { fail(error); return; }
         const auto weak = weak_from_this();
         auto* focus = new Callback<ICoreWebView2FocusChangedEventHandler, ICoreWebView2Controller*, IUnknown*>(focusHandlerId,
             [weak](ICoreWebView2Controller*, IUnknown*) { if (auto state = weak.lock()) if (state->active && state->focused) state->focused(); });

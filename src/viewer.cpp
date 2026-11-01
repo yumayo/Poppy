@@ -37,7 +37,7 @@ void Viewer::setDpi(UINT dpi) {
     scrollbars(); findLayout(); htmlLayout(); caretPosition(); InvalidateRect(window_, nullptr, FALSE);
 }
 void Viewer::show(std::shared_ptr<const Document> d, const ResourceId& path, bool preserve) {
-    const bool preview = preserve && path_ == path && html_.active();
+    const bool preview = preserve && path_ == path && htmlAvailable() ? html_.active() : true;
     html_.hide();
     stopLoading();
     stopSelection();
