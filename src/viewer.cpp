@@ -608,12 +608,14 @@ void Viewer::paintGitMarks() {
     const auto r = Scrollbars::contentRect(window_);
     const int left = contentRect().right;
     renderer_.fill({left, 0, r.right, r.bottom}, background);
+    auto track = Scrollbars::trackRect(window_, SB_VERT);
+    if (!(GetWindowLongPtrW(window_, GWL_STYLE) & WS_VSCROLL)) track = {left, contentTop(), r.right, r.bottom};
     const size_t rows = std::max(rowCount(), static_cast<size_t>(visibleRows()));
     const int minimum = std::max(1, MulDiv(3, dpi_, 96));
     for (const auto& change : gitChangeRanges_) {
         const size_t begin = wrapping() ? textLayout_.lineStart(change.begin) : change.begin;
         const size_t end = wrapping() ? textLayout_.lineStart(change.end) : change.end;
-        const auto mark = changeMark(begin, end, rows, contentTop(), r.bottom, minimum);
+        const auto mark = changeMark(begin, end, rows, track.top, track.bottom, minimum);
         renderer_.fill({left, mark.top, r.right, mark.bottom}, change.begin == change.end ? rgb(231,112,118) : rgb(151,195,121));
     }
 }
