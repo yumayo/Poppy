@@ -10,19 +10,6 @@
 #include <system_error>
 
 namespace poppy {
-Handle createApplicationProcessGroup() {
-    Handle job(CreateJobObjectW(nullptr, nullptr));
-    // No UI restrictions or breakaway flags: WSL, Git, notifications and ConPTY
-    // children inherit this job and can still enter their individual jobs.
-    // Do not use KILL_ON_JOB_CLOSE here: the group includes Poppy itself, so
-    // closing it must allow the normal CRT/COM shutdown to finish.
-    if (job && AssignProcessToJobObject(job.value, GetCurrentProcess())) return job;
-    const auto error = winError();
-    OutputDebugStringW((L"Poppy: cannot group application processes: " + error + L"\n").c_str());
-    // A launcher may impose incompatible job restrictions. Grouping is optional;
-    // each child's existing job continues to manage its lifetime in that case.
-    return {};
-}
 void ImeComposition::update(HWND window, LPARAM flags) {
     if (!flags) { clear(); return; }
     active_ = true;

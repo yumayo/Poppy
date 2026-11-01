@@ -53,10 +53,6 @@ struct Handle {
     explicit operator bool() const { return value != nullptr; }
 };
 
-// Keep this handle alive around the workspace. Children inherit the common
-// application job while retaining their own nested jobs for cancellation.
-Handle createApplicationProcessGroup();
-
 // A real Windows thread HANDLE is required by CancelSynchronousIo. MinGW's
 // std::thread::native_handle() is a pthread_t when using the POSIX runtime.
 class NativeThread {

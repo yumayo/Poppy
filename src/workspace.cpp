@@ -551,10 +551,7 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,PWSTR,int show){
             if(!(attributes&FILE_ATTRIBUTE_DIRECTORY))throw std::runtime_error("The project path is not a directory: "+poppy::utf8(project));
         }
         poppy::SingleInstance singleInstance(poppy::stateDirectory());
-        if(singleInstance.acquireOrForward(options)){
-            const auto processGroup=poppy::createApplicationProcessGroup();
-            poppy::Workspace workspace;result=workspace.run(instance,show,options,singleInstance);
-        }
+        if(singleInstance.acquireOrForward(options)){poppy::Workspace workspace;result=workspace.run(instance,show,options,singleInstance);}
         else result=0;
     }catch(const std::exception& error){MessageBoxW(nullptr,poppy::wide(error.what()).c_str(),L"Poppy",MB_OK|MB_ICONERROR);}
     if(SUCCEEDED(com))CoUninitialize();
