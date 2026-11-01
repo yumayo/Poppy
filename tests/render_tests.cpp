@@ -290,6 +290,89 @@ void inlineTreeInput() {
     DestroyWindow(input);
 
 }
+void inlineTreeCreation() {
+    const auto instance = GetModuleHandleW(nullptr);
+    Tree tree;
+    const auto parent = CreateWindowExW(0, L"STATIC", L"Inline creation test", WS_POPUP | WS_CLIPCHILDREN, 0, 0, 640, 480, nullptr, nullptr, instance, nullptr);
+    check(parent != nullptr, "Cannot create the inline creation test window");
+    struct WindowOwner { HWND value; ~WindowOwner() { DestroyWindow(value); } } owner{parent};
+    tree.create(parent, instance, L"EXPLORER", 1);
+    SetWindowPos(tree.window(), nullptr, 0, 0, 640, 480, SWP_NOZORDER | SWP_SHOWWINDOW); ShowWindow(parent, SW_SHOWNOACTIVATE);
+    const auto root = tree.insert(0, L"project", true, 0);
+    const auto folder = tree.insert(root, L"folder", true, 0);
+    const auto sibling = tree.insert(root, L"sibling.txt", false, 0);
+    tree.expand(root, true);
+    tree.canCreate = [&](TreeItem id) { return id == root || id == folder; };
+    TreeItem activated = 0; tree.activated = [&](TreeItem id) { activated = id; };
+    size_t commits = 0; TreeItem destination = 0; bool directory = false; std::wstring name;
+    tree.createCommitted = [&](TreeItem id, const std::wstring& text, bool value) { ++commits; destination = id; directory = value; name = text; };
+    const auto editor = [&] { return FindWindowExW(tree.window(), nullptr, treeInputClassName, nullptr); };
+    const auto row = [&](TreeItem id) { return SendMessageW(tree.window(), treeGetRow, id, 0); };
+    const auto bounds = [&] { RECT value{}; GetWindowRect(editor(), &value); MapWindowPoints(nullptr, tree.window(), reinterpret_cast<POINT*>(&value), 2); return value; };
+    const auto checkPlacement = [&](UINT dpi, TreeItem target, int depth) {
+        check(editor() != nullptr, "Creation did not show an input");
+        const auto value = bounds();
+        const auto height = SendMessageW(tree.window(), treeGetRowHeight, 0, 0);
+        check(value.top == (row(target) + 1 - tree.top()) * height && value.bottom == value.top + height,
+              "Creation input did not occupy the row below its parent");
+        check(value.left == (depth + 1) * MulDiv(18, dpi, 96) + MulDiv(5, dpi, 96), "Creation input did not use child indentation");
+    };
+    for (const auto dpi : {96u, 144u, 192u}) {
+        tree.setDpi(dpi); tree.expand(folder, false);
+        const auto originalCount = SendMessageW(tree.window(), treeGetCount, 0, 0);
+        tree.createItem(folder, false); checkPlacement(dpi, folder, 2);
+        check(tree.item(folder)->text == L"folder" && tree.item(folder)->expanded, "Creation changed or hid the parent folder label");
+        check(row(sibling) == row(folder) + 2 && SendMessageW(tree.window(), treeGetCount, 0, 0) == originalCount,
+              "Creation input overlapped a sibling or became a resource node");
+        SetWindowTextW(editor(), L"path/新規.txt");
+        // Simulate the asynchronous directory listing arriving while typing.
+        const auto child = tree.insert(folder, L"existing.txt", false, 1);
+        tree.sort(folder, [](uintptr_t a, uintptr_t b) { return a < b; });
+        checkPlacement(dpi, folder, 2);
+        check(row(child) == row(folder) + 2 && row(sibling) == row(folder) + 3, "Listing results overlapped the creation input");
+        const auto resizedDpi = dpi == 192 ? 96u : 192u;
+        tree.setDpi(resizedDpi); checkPlacement(resizedDpi, folder, 2);
+        SetWindowPos(tree.window(), nullptr, 0, 0, 400, 480, SWP_NOZORDER);
+        check(editor() && bounds().right <= 400, "Resizing lost or clipped the creation input");
+        SendMessageW(editor(), WM_KEYDOWN, VK_RETURN, 0);
+        check(!editor() && destination == folder && !directory && name == L"path/新規.txt", "Creation committed the wrong parent, name, or kind");
+        check(row(child) == row(folder) + 1 && row(sibling) == row(folder) + 2, "Committing left an extra creation row");
+        const auto committed = commits;
+        tree.createItem(folder, true); SetWindowTextW(editor(), L"cancelled"); SendMessageW(editor(), WM_KEYDOWN, VK_ESCAPE, 0);
+        check(!editor() && commits == committed && row(child) == row(folder) + 1, "Escape committed or retained the creation row");
+        tree.createItem(folder, false);
+        activated = 0;
+        const auto clickHeight = SendMessageW(tree.window(), treeGetRowHeight, 0, 0);
+        const auto y = (row(sibling) - tree.top()) * clickHeight + clickHeight / 2;
+        SendMessageW(tree.window(), WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(100, y));
+        SendMessageW(tree.window(), WM_LBUTTONUP, 0, MAKELPARAM(100, y));
+        check(!editor() && commits == committed && activated == sibling, "Cancelling creation by clicking selected the wrong row");
+        tree.createItem(folder, false); SetFocus(parent);
+        check(!editor() && commits == committed, "Focus loss did not cancel creation");
+        tree.createItem(folder, false); tree.expand(folder, false);
+        check(!editor() && commits == committed && row(sibling) == row(folder) + 1, "Collapsing the parent retained the creation row");
+        tree.createItem(root, true); checkPlacement(resizedDpi, root, 1);
+        check(row(folder) == 2, "Root creation input overlapped an existing folder");
+        SetWindowTextW(editor(), L"新規フォルダー"); SendMessageW(editor(), WM_KEYDOWN, VK_RETURN, 0);
+        check(destination == root && directory && name == L"新規フォルダー" && row(folder) == 1, "New Folder committed the wrong destination or retained its input row");
+        tree.createItem(folder, false); tree.clearChildren(folder);
+        check(editor() != nullptr, "Refreshing children cancelled their parent's creation input");
+        SendMessageW(editor(), WM_KEYDOWN, VK_ESCAPE, 0);
+        SetWindowPos(tree.window(), nullptr, 0, 0, 640, 480, SWP_NOZORDER);
+    }
+    tree.setDpi(96); tree.restoreScroll(0, 0);
+    const auto height = SendMessageW(tree.window(), treeGetRowHeight, 0, 0);
+    SetWindowPos(tree.window(), nullptr, 0, 0, 640, 2 * static_cast<int>(height), SWP_NOZORDER);
+    tree.createItem(folder, false); checkPlacement(96, folder, 2);
+    check(tree.top() > 0 && bounds().bottom <= 2 * height, "Creation at the bottom did not scroll its input into view");
+    SCROLLINFO scroll{sizeof(scroll), SIF_RANGE, 0, 0, 0, 0, 0}; GetScrollInfo(tree.window(), SB_VERT, &scroll);
+    check(scroll.nMax == SendMessageW(tree.window(), treeGetCount, 0, 0), "Creation row was missing from the scrollbar range");
+    SendMessageW(editor(), WM_KEYDOWN, VK_ESCAPE, 0);
+    GetScrollInfo(tree.window(), SB_VERT, &scroll);
+    check(scroll.nMax + 1 == SendMessageW(tree.window(), treeGetCount, 0, 0), "Cancellation left the creation row in the scrollbar range");
+    tree.createItem(folder, false); tree.erase(folder);
+    check(!editor(), "Removing the parent left its creation input active");
+}
 void gitCommitInput() {
     const auto instance = GetModuleHandleW(nullptr);
     const auto parent = CreateWindowExW(0, L"STATIC", L"Commit input test", WS_POPUP | WS_CLIPCHILDREN, 0, 0, 700, 400, nullptr, nullptr, instance, nullptr);
@@ -2239,7 +2322,7 @@ int main(int argc, char** argv) {
             shutdownProgress();
             htmlPreviewSwitching();
             terminalProcessShutdown();
-            statusBarLimits(); treeMultipleSelection(); inlineTreeInput(); gitCommitInput(); cellPositions(); colorsAndClipping(); imagePreviews(); smoothIcons(); windowTargets(); editableDiff(); editorCaret(); delayedLoadingMessages(); imeCellRendering(); imeTerminalInsertion(); imeUiRendering(); imePositions(); editorWordSelection(); editorWordMovement(); editorLineShortcuts(); editorWrapping(); diffWrapping(); documentFind(); horizontalWheelScrolling(); continuousViewerScrolling(); selectionAutoScrolling(); terminalGitBashSocketEnvironment(); terminalSelectionAutoScrolling(); themedScrollbars(); quickOpenStability();
+            statusBarLimits(); treeMultipleSelection(); inlineTreeInput(); inlineTreeCreation(); gitCommitInput(); cellPositions(); colorsAndClipping(); imagePreviews(); smoothIcons(); windowTargets(); editableDiff(); editorCaret(); delayedLoadingMessages(); imeCellRendering(); imeTerminalInsertion(); imeUiRendering(); imePositions(); editorWordSelection(); editorWordMovement(); editorLineShortcuts(); editorWrapping(); diffWrapping(); documentFind(); horizontalWheelScrolling(); continuousViewerScrolling(); selectionAutoScrolling(); terminalGitBashSocketEnvironment(); terminalSelectionAutoScrolling(); themedScrollbars(); quickOpenStability();
             std::cout << "Direct2D rendering tests passed\n";
         }
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; result = 1; }

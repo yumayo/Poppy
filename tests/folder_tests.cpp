@@ -957,6 +957,15 @@ void createItemTests(const fs::path& executable) {
         waitFor([&] { return !menuOpen(); }, "Folder context menu did not close");
         HWND edit = nullptr;
         waitFor([&] { edit = FindWindowExW(tree, nullptr, treeInputClassName, nullptr); return edit != nullptr; }, "Creation did not show the name input");
+        const auto inputBounds = bounds(tree, edit);
+        const auto height = send(tree, treeGetRowHeight), parentRow = send(tree, treeGetRow, parent);
+        SCROLLINFO scroll{sizeof(scroll), SIF_POS, 0, 0, 0, 0, 0}; check(GetScrollInfo(tree, SB_VERT, &scroll), "Cannot inspect creation scroll position");
+        check(expanded(tree, parent) && inputBounds.top == (parentRow + 1 - scroll.nPos) * height,
+              "Creation input did not appear on the next row inside the expanded folder");
+        int depth = 0;
+        for (auto ancestor = parent; ancestor; ancestor = nextItem(tree, TreeRelation::Parent, ancestor)) ++depth;
+        const auto dpi = GetDpiForWindow(tree);
+        check(inputBounds.left == (depth + 1) * MulDiv(18, dpi, 96) + MulDiv(5, dpi, 96), "Creation input did not use the child's indentation");
         check(SetWindowTextW(edit, name), "Cannot enter new item name"); return edit;
     };
     const auto fail = [&](bool directory, const wchar_t* name) {

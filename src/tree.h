@@ -87,6 +87,7 @@ public:
     std::function<bool(TreeItem)> dimmed;
 private:
     static LRESULT CALLBACK procedure(HWND, UINT, WPARAM, LPARAM);
+    void beginInput(TreeItem item, const std::wstring& name, bool creating, bool directory = false);
     void finishRename(bool commit);
     void updateDrag(POINT point);
     void tickDrag();
@@ -100,6 +101,7 @@ private:
     void layout();
     void changed();
     void ensureVisible();
+    const std::vector<TreeModel::Row>& rows() const;
     int row(TreeItem id) const;
     TreeItem hit(int y) const;
     RECT actionBounds(TreeItem id, unsigned slot = 0) const;
@@ -126,6 +128,9 @@ private:
     RECT searchBounds_{};
     Scrollbars scrollbars_;
     TreeModel model_;
+    // The new-item input occupies a visual row without becoming a resource node.
+    mutable std::vector<TreeModel::Row> creationRows_;
+    mutable bool rowsDirty_ = true;
     std::unordered_map<TreeItem, int> widths_;
     UINT dpi_ = 96;
     int rowHeight_ = 26, indent_ = 18, top_ = 0, left_ = 0, wheel_ = 0, batch_ = 0;
