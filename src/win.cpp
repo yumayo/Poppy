@@ -8,13 +8,9 @@
 #include <process.h>
 #include <stdexcept>
 #include <system_error>
-#include <shobjidl.h>
 
 namespace poppy {
 Handle createApplicationProcessGroup() {
-    const auto identity = SetCurrentProcessExplicitAppUserModelID(applicationUserModelId);
-    if (FAILED(identity))
-        OutputDebugStringW((L"Poppy: cannot set application identity (HRESULT " + std::to_wstring(static_cast<unsigned long>(identity)) + L")\n").c_str());
     Handle job(CreateJobObjectW(nullptr, nullptr));
     // No UI restrictions or breakaway flags: WSL, Git, notifications and ConPTY
     // children inherit this job and can still enter their individual jobs.
@@ -26,12 +22,6 @@ Handle createApplicationProcessGroup() {
     // A launcher may impose incompatible job restrictions. Grouping is optional;
     // each child's existing job continues to manage its lifetime in that case.
     return {};
-}
-void groupApplicationChild(STARTUPINFOW& startup) {
-    startup.dwFlags |= STARTF_TITLEISAPPID;
-    // STARTUPINFO predates const-correct Win32 declarations. CreateProcess
-    // reads lpTitle; it does not modify the application identifier.
-    startup.lpTitle = const_cast<wchar_t*>(applicationUserModelId);
 }
 void ImeComposition::update(HWND window, LPARAM flags) {
     if (!flags) { clear(); return; }
@@ -226,7 +216,6 @@ ProcessResult runProcess(const std::vector<std::wstring>& args, const fs::path& 
     if (!UpdateProcThreadAttribute(attributes, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, inherited, sizeof(inherited), nullptr, nullptr)) { result.error = winError(); DeleteProcThreadAttributeList(attributes); return result; }
     STARTUPINFOEXW si{}; si.StartupInfo.cb = sizeof(si); si.lpAttributeList = attributes;
     si.StartupInfo.dwFlags = STARTF_USESTDHANDLES; si.StartupInfo.hStdInput = input.value; si.StartupInfo.hStdOutput = si.StartupInfo.hStdError = childOutput.value;
-    groupApplicationChild(si.StartupInfo);
     auto command = processCommandLine(args);
     PROCESS_INFORMATION pi{};
     Handle job(CreateJobObjectW(nullptr, nullptr));

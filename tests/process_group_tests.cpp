@@ -1,5 +1,4 @@
 #include "win.h"
-#include <shobjidl.h>
 #include <iostream>
 #include <stdexcept>
 
@@ -11,21 +10,6 @@ void inJob(HANDLE process, HANDLE job, const char* message) {
     BOOL member = FALSE;
     check(IsProcessInJob(process, job, &member) && member, message);
 }
-void applicationIdentity() {
-    PWSTR value = nullptr;
-    const auto result = GetCurrentProcessExplicitAppUserModelID(&value);
-    const std::wstring identity = value ? value : L"";
-    CoTaskMemFree(value);
-    check(SUCCEEDED(result) && identity == poppy::applicationUserModelId,
-          "The application has no explicit shell identity");
-}
-void childIdentity() {
-    STARTUPINFOW startup{}; startup.cb = sizeof(startup);
-    GetStartupInfoW(&startup);
-    check((startup.dwFlags & STARTF_TITLEISAPPID) && startup.lpTitle &&
-          std::wstring(startup.lpTitle) == poppy::applicationUserModelId,
-          "A child did not receive the application's shell identity");
-}
 struct Child {
     poppy::Handle job, process;
     explicit Child(const std::wstring& executable) {
@@ -36,7 +20,6 @@ struct Child {
               "Cannot create a per-child job");
         auto command = poppy::processCommandLine({executable, L"--wait"});
         STARTUPINFOW startup{}; startup.cb = sizeof(startup);
-        poppy::groupApplicationChild(startup);
         PROCESS_INFORMATION info{};
         check(CreateProcessW(executable.c_str(), command.data(), nullptr, nullptr, FALSE,
               CREATE_NO_WINDOW | CREATE_SUSPENDED, nullptr, nullptr, &startup, &info) != FALSE,
@@ -69,7 +52,6 @@ void processGroup() {
           "Cannot simulate a launcher job");
     auto group = poppy::createApplicationProcessGroup();
     check(static_cast<bool>(group), "Cannot create the application group");
-    applicationIdentity();
     inJob(GetCurrentProcess(), group.value, "The application is absent from its group");
 
     std::wstring executable(32768, L'\0');
@@ -101,9 +83,9 @@ void processGroup() {
 }
 }
 int main(int argc, char** argv) {
+    if (argc == 2 && std::string(argv[1]) == "--wait") { Sleep(INFINITE); return 0; }
+    if (argc == 2 && std::string(argv[1]) == "--echo") { std::cout << "child output"; return 0; }
     try {
-        if (argc == 2 && std::string(argv[1]) == "--wait") { childIdentity(); Sleep(INFINITE); return 0; }
-        if (argc == 2 && std::string(argv[1]) == "--echo") { childIdentity(); std::cout << "child output"; return 0; }
         processGroup();
         std::cout << "process group tests passed\n";
         return 0;
