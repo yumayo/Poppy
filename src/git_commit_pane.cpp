@@ -9,7 +9,7 @@ void GitCommitPane::create(HWND parent, HINSTANCE instance) {
     RegisterClassW(&cls);
     window_ = CreateWindowExW(0, cls.lpszClassName, L"Commit", WS_CHILD | WS_CLIPCHILDREN | WS_CLIPSIBLINGS | WS_TABSTOP,
         0, 0, 0, 0, parent, nullptr, instance, this);
-    input_ = message_.create(window_, instance, L"", foreground);
+    input_ = message_.create(window_, instance, L"", foreground, panel);
     SendMessageW(input_, EM_SETLIMITTEXT, 4096, 0);
     SendMessageW(input_, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"Commit message (Enter to commit)"));
     message_.finished = [this](bool accept) { if (accept) submit(false); };

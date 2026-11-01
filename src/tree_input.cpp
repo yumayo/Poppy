@@ -6,12 +6,12 @@
 
 namespace poppy {
 namespace {
-constexpr COLORREF rowBackground = RGB(50, 70, 94), selectionBackground = RGB(75, 99, 129);
+constexpr COLORREF selectionBackground = RGB(75, 99, 129);
 constexpr UINT_PTR caretTimer = 1;
 bool separator(wchar_t ch) { return ch <= L' ' || ch == L'.' || ch == L'/' || ch == L'\\' || ch == L'-' || ch == L'_'; }
 }
-HWND TreeInput::create(HWND parent, HINSTANCE instance, const std::wstring& text, COLORREF color) {
-    text_ = text; color_ = color; cue_.clear(); undo_.clear(); redo_.clear();
+HWND TreeInput::create(HWND parent, HINSTANCE instance, const std::wstring& text, COLORREF color, COLORREF backgroundColor) {
+    text_ = text; color_ = color; background_ = backgroundColor; cue_.clear(); undo_.clear(); redo_.clear();
     caret_ = anchor_ = 0; limit_ = 255; highSurrogate_ = 0; ime_.clear(); line_.reset();
     WNDCLASSW cls{}; cls.lpfnWndProc = procedure; cls.hInstance = instance;
     cls.lpszClassName = treeInputClassName; cls.hCursor = LoadCursorW(nullptr, IDC_IBEAM); cls.style = CS_DBLCLKS;
@@ -79,7 +79,7 @@ void TreeInput::caretChanged() {
     caretVisible_ = true; InvalidateRect(window_, nullptr, FALSE);
 }
 void TreeInput::draw(Renderer& renderer, const RECT& rect) const {
-    renderer.fill(rect, rowBackground);
+    renderer.fill(rect, background_);
     line_.update(renderer, text_, caret_, anchor_, ime_.text(), rect);
     if (text_.empty() && ime_.text().text.empty()) renderer.label(rect, cue_, muted, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
     line_.draw(renderer, color_, selectionBackground, GetFocus() == window_ && (caretVisible_ || !ime_.text().text.empty()));
