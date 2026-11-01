@@ -186,8 +186,7 @@ void QuickOpen::imePosition() {
     const auto context = ImmGetContext(window_); if (!context) return;
     COMPOSITIONFORM form{}; form.dwStyle = CFS_POINT; form.ptCurrentPos = {caretX_, px(44)};
     ImmSetCompositionWindow(context, &form);
-    CANDIDATEFORM candidate{}; candidate.dwStyle = CFS_CANDIDATEPOS; candidate.ptCurrentPos = {caretX_, px(76)};
-    ImmSetCandidateWindow(context, &candidate); ImmReleaseContext(window_, context);
+    positionImeCandidate(window_, context, form.ptCurrentPos, px(32)); ImmReleaseContext(window_, context);
 }
 void QuickOpen::paint() {
     Renderer::Paint paint(renderer_, window_); if (!paint) return;

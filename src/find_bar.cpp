@@ -81,8 +81,7 @@ void FindBar::imePosition() {
     }
     const auto context = ImmGetContext(window_); if (!context) return;
     COMPOSITIONFORM form{}; form.dwStyle = CFS_POINT; form.ptCurrentPos = point; ImmSetCompositionWindow(context, &form);
-    CANDIDATEFORM candidate{}; candidate.dwStyle = CFS_CANDIDATEPOS; candidate.ptCurrentPos = {point.x, rect.bottom};
-    ImmSetCandidateWindow(context, &candidate); ImmReleaseContext(window_, context);
+    positionImeCandidate(window_, context, point, rect.bottom - point.y); ImmReleaseContext(window_, context);
 }
 void FindBar::caretChanged() {
     if (!window_) return;

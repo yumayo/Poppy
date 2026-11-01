@@ -37,6 +37,23 @@ void ImeComposition::cancel(HWND window) {
     if (context) { ImmNotifyIME(context, NI_COMPOSITIONSTR, CPS_CANCEL, 0); ImmReleaseContext(window, context); }
     InvalidateRect(window, nullptr, FALSE);
 }
+void positionImeCandidate(HWND window, HIMC context, POINT point, int height) {
+    if (!context || GetFocus() != window) return;
+    RECT area{}; GetClientRect(window, &area);
+    POINT screenPoint = point; ClientToScreen(window, &screenPoint);
+    MONITORINFO monitor{}; monitor.cbSize = sizeof(monitor);
+    if (GetMonitorInfoW(MonitorFromPoint(screenPoint, MONITOR_DEFAULTTONEAREST), &monitor)) {
+        area = monitor.rcWork;
+        MapWindowPoints(nullptr, window, reinterpret_cast<POINT*>(&area), 2);
+    }
+    // Exclude the input row across the monitor's work area so a tall list
+    // flips above the text instead of moving alongside it. Let the IME choose
+    // the vertical position using the candidate window's actual size.
+    CANDIDATEFORM candidate{}; candidate.dwStyle = CFS_EXCLUDE;
+    candidate.ptCurrentPos = {point.x, point.y + height};
+    candidate.rcArea = {area.left, point.y, area.right, point.y + height};
+    ImmSetCandidateWindow(context, &candidate);
+}
 void positionIme(HWND window, POINT point, int height, const LOGFONTW& font) {
     // Windows share the thread's default input context. Background output must
     // never replace the composition/candidate position of the focused control.
@@ -57,9 +74,7 @@ void positionIme(HWND window, POINT point, int height, const LOGFONTW& font) {
     }
     COMPOSITIONFORM form{}; form.dwStyle = CFS_POINT; form.ptCurrentPos = point;
     ImmSetCompositionWindow(context, &form);
-    CANDIDATEFORM candidate{}; candidate.dwStyle = CFS_CANDIDATEPOS;
-    candidate.ptCurrentPos = {point.x, point.y + height};
-    ImmSetCandidateWindow(context, &candidate);
+    positionImeCandidate(window, context, point, height);
     ImmReleaseContext(window, context);
 }
 fs::path relocatePath(const fs::path& path, const fs::path& source, const fs::path& destination) {

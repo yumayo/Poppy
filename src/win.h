@@ -7,6 +7,7 @@
 #endif
 #include <windows.h>
 #include <windowsx.h>
+#include <imm.h>
 #include "terminal_model.h"
 #include "resource.h"
 #include "command_line.h"
@@ -74,6 +75,7 @@ inline std::wstring pathKey(const ResourceId& path) { return resourceWide(path.k
 fs::path relocatePath(const fs::path& path, const fs::path& source, const fs::path& destination);
 bool copyText(HWND owner, const std::wstring& text);
 std::wstring clipboardText(HWND owner);
+void positionImeCandidate(HWND window, HIMC context, POINT point, int height);
 void positionIme(HWND window, POINT point, int height, const LOGFONTW& font);
 
 struct ProcessResult { DWORD code = 1; std::string output; std::wstring error; };

@@ -608,8 +608,17 @@ void imePositions() {
             "Cannot inspect the IME window positions");
         check(composition.dwStyle == CFS_POINT && composition.ptCurrentPos.x == rect.left && composition.ptCurrentPos.y == rect.top,
             "The IME composition is detached from the insertion point");
-        check(candidate.dwStyle == CFS_CANDIDATEPOS && candidate.ptCurrentPos.x == rect.left && candidate.ptCurrentPos.y == rect.bottom,
+        check(candidate.dwStyle == CFS_EXCLUDE && candidate.ptCurrentPos.x == rect.left && candidate.ptCurrentPos.y == rect.bottom,
             "The IME candidate position is detached from the insertion point");
+        check(candidate.rcArea.top == rect.top && candidate.rcArea.bottom == rect.bottom,
+            "IME candidates can overlap the input row");
+        auto excluded = candidate.rcArea;
+        MapWindowPoints(window, nullptr, reinterpret_cast<POINT*>(&excluded), 2);
+        POINT screenPoint{rect.left, rect.top}; ClientToScreen(window, &screenPoint);
+        MONITORINFO monitor{}; monitor.cbSize = sizeof(monitor);
+        check(GetMonitorInfoW(MonitorFromPoint(screenPoint, MONITOR_DEFAULTTONEAREST), &monitor) &&
+            excluded.left <= monitor.rcWork.left && excluded.right >= monitor.rcWork.right,
+            "IME candidates can move alongside the input instead of above or below it");
         LOGFONTW font{};
         check(ImmGetCompositionFontW(context.value, &font) != FALSE, "Cannot inspect the IME composition font");
         metrics.setDpi(dpi);
@@ -675,6 +684,25 @@ void imePositions() {
         SetFocus(background); checkPosition(background, otherDpi);
         SetFocus(editor); checkPosition(editor, dpi);
     }
+    // Moving between monitor corners must preserve the horizontal exclusion,
+    // including monitors with negative desktop coordinates.
+    std::vector<RECT> workAreas;
+    EnumDisplayMonitors(nullptr, nullptr, [](HMONITOR monitor, HDC, LPRECT, LPARAM data) -> BOOL {
+        MONITORINFO info{}; info.cbSize = sizeof(info);
+        if (GetMonitorInfoW(monitor, &info)) reinterpret_cast<std::vector<RECT>*>(data)->push_back(info.rcWork);
+        return TRUE;
+    }, reinterpret_cast<LPARAM>(&workAreas));
+    SetFocus(editor); viewer.setDpi(96);
+    const auto insertion = caret(editor);
+    for (const auto& work : workAreas) {
+        const POINT positions[] = {{work.left, work.top}, {work.right - 1, work.bottom - (insertion.bottom - insertion.top)}};
+        for (const auto& point : positions) {
+            SetWindowPos(parent, nullptr, point.x - insertion.left, point.y - insertion.top, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+            SendMessageW(editor, WM_IME_NOTIFY, IMN_CHANGECANDIDATE, 1);
+            checkPosition(editor, 96);
+        }
+    }
+    SetWindowPos(parent, nullptr, 0, 0, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
     SetFocus(editor);
     const auto beforeText = buffer->document.text;
     const auto beforeState = viewer.state();
