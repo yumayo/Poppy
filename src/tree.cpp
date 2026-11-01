@@ -446,7 +446,10 @@ LRESULT Tree::handle(UINT m, WPARAM a, LPARAM b) {
                 return 0;
             }
         }
-        if (m == WM_LBUTTONDBLCLK && !item(id)->expandable) return 0;
+        if (m == WM_LBUTTONDBLCLK && !item(id)->expandable) {
+            if (!(a & (MK_CONTROL | MK_SHIFT)) && doubleClicked) doubleClicked(id);
+            return 0;
+        }
         if (multipleSelection && (a & (MK_CONTROL | MK_SHIFT))) {
             model_.select(id, (a & MK_CONTROL) != 0, (a & MK_SHIFT) != 0);
             ensureVisible(); changed(); return 0;

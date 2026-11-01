@@ -348,6 +348,48 @@ void previewTabTests(const fs::path& executable) {
         check(visibleTabCount(app) == 3, "Pinning did not keep the preview");
     }
 }
+void explorerPreviewTabTests(const fs::path& executable) {
+    Fixture fixture;
+    for (int i = 0; i < 3; ++i) writeLines(fixture.root / (std::wstring(1, L'a' + i) + L".txt"), 200 + i * 100);
+    {
+        Application app(executable, fixture.root);
+        const auto tree = app.tree(), viewer = FindWindowExW(app.window, nullptr, L"PoppyViewer", nullptr);
+        waitFor([&] { return send(tree, treeGetCount) == 4; }, "Explorer preview fixture did not load");
+        const auto a = nextItem(tree, TreeRelation::Child, nextItem(tree, TreeRelation::Root));
+        const auto b = nextItem(tree, TreeRelation::Next, a), c = nextItem(tree, TreeRelation::Next, b);
+        const auto clickFile = [&](TreeItem item, bool keep = false) {
+            const int height = static_cast<int>(send(tree, treeGetRowHeight));
+            const int y = (static_cast<int>(send(tree, treeGetRow, item)) - scrollInfo(tree).nPos) * height + height / 2;
+            const int x = MulDiv(60, GetDpiForWindow(app.window), 96);
+            click(tree, x, y);
+            if (keep) {
+                send(tree, WM_LBUTTONDBLCLK, MK_LBUTTON, MAKELPARAM(x, y));
+                send(tree, WM_LBUTTONUP, 0, MAKELPARAM(x, y));
+            }
+        };
+        clickFile(a); waitLines(viewer, 200);
+        send(viewer, WM_VSCROLL, SB_PAGEDOWN); const auto top = scrollInfo(viewer).nPos;
+        clickFile(a, true);
+        check(visibleTabCount(app) == 1 && scrollInfo(viewer).nPos == top,
+              "Double-clicking an Explorer preview duplicated it or lost its scroll position");
+        clickFile(b); waitLines(viewer, 300);
+        check(visibleTabCount(app) == 2, "Double-clicking in Explorer did not keep the preview");
+        clickFile(a, true); waitLines(viewer, 200);
+        check(visibleTabCount(app) == 2 && scrollInfo(viewer).nPos == top,
+              "Double-clicking a permanent Explorer file duplicated it or lost its view");
+        clickFile(c); waitLines(viewer, 400);
+        check(visibleTabCount(app) == 2, "Single-clicking in Explorer did not reuse the inactive preview");
+        clickFile(b); clickFile(c, true); clickFile(b); waitLines(viewer, 300);
+        check(visibleTabCount(app) == 3, "Double-clicking in Explorer failed to keep a pending preview");
+    }
+    {
+        Application app(executable, fixture.root); app.tree();
+        const auto viewer = FindWindowExW(app.window, nullptr, L"PoppyViewer", nullptr);
+        waitLines(viewer, 200);
+        check(visibleTabCount(app) == 2, "Restart lost an Explorer-kept tab or restored a preview");
+        clickTab(app, 1); waitLines(viewer, 400);
+    }
+}
 void previewTabSplitTests(const fs::path& executable) {
     Fixture fixture;
     for (int i = 0; i < 3; ++i) writeLines(fixture.root / (std::wstring(1, L'a' + i) + L".txt"), 200 + i * 100);
@@ -2871,7 +2913,7 @@ int wmain(int argc, wchar_t** argv) {
     try {
         check(argc == 2, "Pass the path to Poppy.exe");
         SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
-        for (const auto test : {folderTests, explorerSortTests, sidebarTests, treeInteractionTests, previewTabTests, previewTabSplitTests, tabTests, pinnedTabTests,
+        for (const auto test : {folderTests, explorerSortTests, sidebarTests, treeInteractionTests, previewTabTests, explorerPreviewTabTests, previewTabSplitTests, tabTests, pinnedTabTests,
                 bulkTabCloseTests, bulkTabSaveTests, bulkTabSplitTests, explorerActiveFileTests,
                 tabDragTests, wrappingTabDragTests, wrappingTabTests, renameTests, explorerMoveTests, explorerDeleteTests, explorerMultipleSelectionTests, createItemTests, newFileShortcutTests, pasteImageTests, splitPaneTests, quickOpenTests, fullSearchTests, gitSidebarTests, gitIgnoredExplorerTests, gitAutoRefreshTests, editableGitDiffTests, branchSidebarTests, multiRepositoryTests, sessionTests, multiProjectTests, recentProjectTests, projectDragTests, scrollingProjectDragTests, terminalTitleTests, terminalShellTests, terminalShortcutTests, terminalBackspaceTests}) {
             Fixture appData; AppDataEnvironment environment(appData.root);

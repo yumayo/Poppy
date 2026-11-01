@@ -67,6 +67,7 @@ public:
     std::function<bool()> canUndo, canRedo;
     std::function<void()> undoRequested, redoRequested;
     std::function<void(TreeItem)> activated;
+    std::function<void(TreeItem)> doubleClicked;
     std::function<void(TreeItem, bool)> expanded;
     std::function<void(uintptr_t)> removed;
     std::function<std::wstring(TreeItem)> actionLabel;

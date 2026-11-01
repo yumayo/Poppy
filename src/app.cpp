@@ -453,6 +453,12 @@ void ProjectRuntime::Impl::create() {
         pendingExplorerFile_.clear();
         if (const auto n = node(item); n && !n->directory) openFile(n->path);
     };
+    explorer_.doubleClicked = [this](TreeItem item) {
+        const auto n = node(item); if (!n || n->directory || n->path.empty()) return;
+        explorer_.activated(item);
+        tabs_[activeTab_].preview = false; updateTabs();
+        if (owner_ && owner_->changed) owner_->changed();
+    };
     explorer_.expanded = [this](TreeItem item, bool value) {
         const auto n = node(item); if (!n) return;
         if (value) { expandedPaths_[pathKey(n->path)] = n->path; n->expandRequested = true; if (!n->loaded) requestDirectory(item); }
