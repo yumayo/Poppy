@@ -582,6 +582,34 @@ void tabTests(const fs::path& executable) {
     click(app.window, pane.left + px(30), tabY, true);
     check(bounds(app.window, viewer).top == empty.top && scrollInfo(viewer).nMax == 0, "A stale load restored a closed tab");
 }
+void rapidTabMiddleClickTests(const fs::path& executable) {
+    Fixture fixture;
+    for (int i = 0; i < 4; ++i) writeLines(fixture.root / (std::wstring(1, L'a' + i) + L".txt"), 200 + i * 100);
+    Application app(executable, fixture.root);
+    const auto tree = app.tree(), viewer = FindWindowExW(app.window, nullptr, L"PoppyViewer", nullptr);
+    waitFor([&] { return send(tree, treeGetCount) == 5; }, "Rapid middle-click fixture did not load");
+    auto item = nextItem(tree, TreeRelation::Child, nextItem(tree, TreeRelation::Root));
+    for (int i = 0; i < 4; ++i) {
+        send(tree, treeSelect, item); waitLines(viewer, 200 + i * 100);
+        if (i < 3) keepTab(app, i);
+        item = nextItem(tree, TreeRelation::Next, item);
+    }
+    send(viewer, WM_VSCROLL, SB_PAGEDOWN); const auto top = scrollInfo(viewer).nPos;
+    const auto rect = tabBounds(app, 0);
+    const auto point = MAKELPARAM(rect.left + MulDiv(16, GetDpiForWindow(app.window), 96), (rect.top + rect.bottom) / 2);
+    int remaining = 4;
+    // Keep clicking the same point as the next tab moves under the pointer.
+    // Windows sends DOWN/UP/DBLCLK/UP for each pair of rapid middle-clicks.
+    for (const auto message : {WM_MBUTTONDOWN, WM_MBUTTONDBLCLK, WM_MBUTTONDOWN, WM_MBUTTONDBLCLK}) {
+        send(app.window, message, MK_MBUTTON, point);
+        check(visibleTabCount(app) == --remaining, "A rapid middle-click did not close exactly one tab");
+        send(app.window, WM_MBUTTONUP, 0, point);
+        check(visibleTabCount(app) == remaining, "Releasing a middle-click closed another tab");
+        if (remaining) check(scrollInfo(viewer).nMax == 500 && scrollInfo(viewer).nPos == top,
+                             "Closing inactive tabs rapidly changed the active preview or its scroll position");
+    }
+    check(scrollInfo(viewer).nMax == 0, "Rapid middle-clicks left the last preview open");
+}
 void pinnedTabTests(const fs::path& executable) {
     Fixture fixture;
     writeLines(fixture.root / L"a.txt", 200); writeLines(fixture.root / L"b.txt", 300); writeLines(fixture.root / L"c.txt", 400);
@@ -605,6 +633,10 @@ void pinnedTabTests(const fs::path& executable) {
         clickTab(app, 0); waitLines(viewer, 300);
         clickTab(app, 0, true);
         check(visibleTabCount(app) == 3 && scrollInfo(viewer).nMax == 300, "Middle-click closed a pinned tab");
+        const auto middlePoint = MAKELPARAM(pinned.left + MulDiv(16, GetDpiForWindow(app.window), 96), (pinned.top + pinned.bottom) / 2);
+        send(app.window, WM_MBUTTONDBLCLK, MK_MBUTTON, middlePoint);
+        send(app.window, WM_MBUTTONUP, 0, middlePoint);
+        check(visibleTabCount(app) == 3 && scrollInfo(viewer).nMax == 300, "Rapid middle-clicking closed a pinned tab");
         clickTab(app, 0, false, true);
         check(visibleTabCount(app) == 3 && scrollInfo(viewer).nMax == 300, "A pinned tab retained a close button");
         toggleTabPin(app, 0);
@@ -2913,7 +2945,7 @@ int wmain(int argc, wchar_t** argv) {
     try {
         check(argc == 2, "Pass the path to Poppy.exe");
         SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
-        for (const auto test : {folderTests, explorerSortTests, sidebarTests, treeInteractionTests, previewTabTests, explorerPreviewTabTests, previewTabSplitTests, tabTests, pinnedTabTests,
+        for (const auto test : {folderTests, explorerSortTests, sidebarTests, treeInteractionTests, previewTabTests, explorerPreviewTabTests, previewTabSplitTests, tabTests, rapidTabMiddleClickTests, pinnedTabTests,
                 bulkTabCloseTests, bulkTabSaveTests, bulkTabSplitTests, explorerActiveFileTests,
                 tabDragTests, wrappingTabDragTests, wrappingTabTests, renameTests, explorerMoveTests, explorerDeleteTests, explorerMultipleSelectionTests, createItemTests, newFileShortcutTests, pasteImageTests, splitPaneTests, quickOpenTests, fullSearchTests, gitSidebarTests, gitIgnoredExplorerTests, gitAutoRefreshTests, editableGitDiffTests, branchSidebarTests, multiRepositoryTests, sessionTests, multiProjectTests, recentProjectTests, projectDragTests, scrollingProjectDragTests, terminalTitleTests, terminalShellTests, terminalShortcutTests, terminalBackspaceTests}) {
             Fixture appData; AppDataEnvironment environment(appData.root);

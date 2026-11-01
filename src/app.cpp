@@ -2752,7 +2752,8 @@ LRESULT ProjectRuntime::Impl::handle(UINT m, WPARAM a, LPARAM b) {
         }
         return 0;
     }
-    case WM_MBUTTONDOWN: { closeTab(tabAt({GET_X_LPARAM(b), GET_Y_LPARAM(b)})); return 0; }
+    // With CS_DBLCLKS, a rapid second press arrives as DBLCLK instead of DOWN.
+    case WM_MBUTTONDOWN: case WM_MBUTTONDBLCLK: { closeTab(tabAt({GET_X_LPARAM(b), GET_Y_LPARAM(b)})); return 0; }
     case WM_CONTEXTMENU:
         if (reinterpret_cast<HWND>(a) == window_) { tabMenu({GET_X_LPARAM(b), GET_Y_LPARAM(b)}); return 0; }
         break;
