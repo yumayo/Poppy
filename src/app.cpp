@@ -723,9 +723,11 @@ void ProjectRuntime::Impl::layout(bool revealTab) {
             for (size_t j = 0; j < pane.indices.size(); ++j) {
                 const size_t i = pane.indices[j]; const auto& tab = tabs_[i];
                 const auto title = tabTitle(tab);
-                // Reserve the modified marker even for clean tabs, so editing
-                // does not change their width or hide the marker in the title.
-                const int width = std::min(std::max(0, available), renderer_.textWidth(title, tab.preview) + MulDiv(52, dpi_, 96));
+                // Editing a preview switches its title from italic to normal
+                // without laying out the tabs again. Reserve both font styles
+                // and the modified marker from the start, even for clean tabs.
+                const int titleWidth = std::max(renderer_.textWidth(title), renderer_.textWidth(title, true));
+                const int width = std::min(std::max(0, available), titleWidth + MulDiv(12, dpi_, 96) + MulDiv(40, dpi_, 96));
                 if (!j || tab.pinned != tabs_[pane.indices[j - 1]].pinned || (x > start && x + width > start + available)) { pane.starts.push_back(j); x = start; ++row; }
                 tabRects_[i] = {x, row * rowHeight, x + width, (row + 1) * rowHeight}; x += width;
             }
