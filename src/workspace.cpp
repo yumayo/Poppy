@@ -518,9 +518,13 @@ void Workspace::layout(){
     if(!window_)return;
     RECT r{};GetClientRect(window_,&r);const int left=px(session_.projectListWidth)+px(5);
     const int page=std::max(1,(static_cast<int>(r.bottom)-px(44))/px(projectRowHeight));scroll_=std::clamp(scroll_,0,std::max(0,static_cast<int>(projects_.size())-page));
-    if(!projects_.empty())SetWindowPos(projects_[active_].runtime->window(),nullptr,left,0,std::max(0L,r.right-left),r.bottom,SWP_NOZORDER|SWP_NOACTIVATE);
+    // Do not copy old Direct2D pixels while moving the project and its panes.
+    // Repaint the complete layout after the new positions have been applied.
+    if(!projects_.empty())SetWindowPos(projects_[active_].runtime->window(),nullptr,left,0,std::max(0L,r.right-left),r.bottom,SWP_NOZORDER|SWP_NOACTIVATE|SWP_NOREDRAW|SWP_NOCOPYBITS);
     recent_.layout();
-    updateTools();InvalidateRect(window_,nullptr,FALSE);
+    updateTools();
+    // A continuous stream of mouse moves can delay queued WM_PAINT messages.
+    RedrawWindow(window_,nullptr,nullptr,RDW_INVALIDATE|RDW_ALLCHILDREN|RDW_UPDATENOW);
 }
 void Workspace::updateTools(){
     for(size_t i=0;i<=tools_;++i){TOOLINFOW tip{};tip.cbSize=sizeof(tip);tip.hwnd=window_;tip.uId=i;SendMessageW(tooltips_,TTM_DELTOOLW,0,reinterpret_cast<LPARAM>(&tip));}
