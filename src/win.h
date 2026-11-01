@@ -10,6 +10,7 @@
 #include "terminal_model.h"
 #include "resource.h"
 #include "command_line.h"
+#include "composition.h"
 #include <atomic>
 #include <condition_variable>
 #include <deque>
@@ -20,6 +21,18 @@
 
 namespace poppy {
 namespace fs = std::filesystem;
+class ImeComposition {
+public:
+    bool active() const { return active_; }
+    const CompositionText& text() const { return text_; }
+    void start() { active_ = true; text_ = {}; }
+    void clear() { active_ = false; text_ = {}; }
+    void update(HWND window, LPARAM flags);
+    void cancel(HWND window);
+private:
+    bool active_ = false;
+    CompositionText text_;
+};
 constexpr UINT wmWork = WM_APP + 1, wmTerminal = WM_APP + 2;
 constexpr COLORREF panel = RGB(28, 32, 39), border = RGB(46, 53, 64), muted = RGB(132, 145, 164), accent = RGB(151, 195, 121);
 constexpr COLORREF scrollbarThumb = RGB(63, 73, 88), scrollbarHover = RGB(83, 97, 116);

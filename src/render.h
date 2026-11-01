@@ -49,9 +49,7 @@ public:
     void setDpi(UINT dpi);
     int cellWidth() const { return cellWidth_; }
     int textHeight() const { return textHeight_; }
-    const LOGFONTW& compositionFont(LANGID language = LOWORD(GetKeyboardLayout(0))) const {
-        return PRIMARYLANGID(language) == LANG_JAPANESE ? japaneseCompositionFont_ : compositionFont_;
-    }
+    const LOGFONTW& compositionFont() const { return compositionFont_; }
     void font(Font value) { font_ = value; }
     bool begin(HWND window);
     // Offscreen rendering uses WIC, including the pixel regression tests.
@@ -65,6 +63,9 @@ public:
                UINT flags = DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
     void cells(int x, int y, int cellWidth, int cellHeight,
                const std::vector<Cell>& cells, int columns, const RECT& clip);
+    // Preedit uses the exact same cell renderer as committed terminal text.
+    void composition(const CompositionText& text, POINT origin, int cellWidth, int cellHeight, const RECT& clip);
+    POINT compositionCaret(const CompositionText& text, POINT origin, int cellWidth, int cellHeight, const RECT& clip) const;
     void line(float x1, float y1, float x2, float y2, COLORREF color, float width);
     void ellipse(const RECT& rect, COLORREF color, float width);
     void outline(const RECT& rect, COLORREF color, float width = 1.0f);
@@ -86,7 +87,7 @@ private:
     D2D1_PRESENT_OPTIONS presentOptions_;
     Font font_ = Font::Ui;
     int cellWidth_ = 8, textHeight_ = 18;
-    LOGFONTW compositionFont_{}, japaneseCompositionFont_{};
+    LOGFONTW compositionFont_{};
 };
 
 // A child overlay keeps the drop target visible above the editor/ConPTY views.

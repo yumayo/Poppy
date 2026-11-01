@@ -34,6 +34,7 @@ void Viewer::setDpi(UINT dpi) {
 }
 void Viewer::show(std::shared_ptr<const Document> d, const ResourceId& path, bool preserve) {
     stopSelection();
+    ime_.cancel(window_);
     image_.reset(); renderer_.setImage({});
     const auto previous = preserve && document_ ? std::optional<State>(state()) : std::nullopt;
     edit_.reset(); diffBefore_.reset(); gitBefore_.reset(); gitChangedLines_ = {}; highSurrogate_ = 0;
@@ -60,6 +61,7 @@ void Viewer::updateGitLines() {
 }
 void Viewer::showDiff(std::shared_ptr<const DiffDocument> d, const ResourceId& path, bool preserve) {
     stopSelection();
+    ime_.cancel(window_);
     image_.reset(); renderer_.setImage({});
     const auto previous = preserve && document_ ? std::optional<State>(state()) : std::nullopt;
     edit_.reset(); diffBefore_.reset(); gitBefore_.reset(); gitChangedLines_ = {}; highSurrogate_ = 0;
@@ -100,6 +102,7 @@ void Viewer::refreshBuffer() {
 }
 void Viewer::message(const std::wstring& text, const ResourceId& path) {
     stopSelection();
+    ime_.cancel(window_);
     image_.reset(); renderer_.setImage({});
     findBar_.close(); KillTimer(window_, findTimer); search_.query("");
     edit_.reset(); diffBefore_.reset(); gitBefore_.reset(); gitChangedLines_ = {}; highSurrogate_ = 0;
@@ -342,6 +345,7 @@ void Viewer::findNext(bool backwards) {
     requestFind(true, backwards);
 }
 bool Viewer::findKey(const MSG& message) {
+    if (ime_.active() && message.hwnd == window_) return false;
     if (message.message != WM_KEYDOWN || !document_) return false;
     const bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0, shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
     if (ctrl && !shift && !(GetKeyState(VK_MENU) & 0x8000) && message.wParam == 'F') { find(); return true; }
@@ -441,6 +445,10 @@ POINT Viewer::caretPoint() const {
     if (wrapping()) col -= wrapped.column;
     return {gutter_ + (col - left_) * cellWidth_, contentTop() + (static_cast<int>(row) - top_) * cellHeight_};
 }
+RECT Viewer::inputRect() const {
+    const auto rect = Scrollbars::contentRect(window_);
+    return {textGutter() + (splitDiff() ? rect.right / 2 + 1 : 0), contentTop() + (stickyFile() ? cellHeight_ : 0), rect.right, rect.bottom};
+}
 void Viewer::caretPosition(bool reveal) {
     size_t anchor = 0, caret = 0;
     if (!editSelection(anchor, caret)) {
@@ -462,7 +470,7 @@ void Viewer::caretPosition(bool reveal) {
         scrollbars(); point = caretPoint();
     }
     if (GetFocus() == window_) {
-        positionIme(window_, point, cellHeight_, renderer_.compositionFont());
+        positionIme(window_, renderer_.compositionCaret(ime_.text(), point, cellWidth_, cellHeight_, inputRect()), cellHeight_, renderer_.compositionFont());
         caretVisible_ = true; KillTimer(window_, caretTimer);
         const UINT blink = GetCaretBlinkTime();
         if (blink != INFINITE) SetTimer(window_, caretTimer, blink ? blink : 500, nullptr);
@@ -674,13 +682,14 @@ void Viewer::paint() {
                 dc.fill({0, bottom - 1, r.right, bottom}, border);
             }
         }
-        if (edit_ && caretVisible_ && GetFocus() == window_) {
+        if (edit_ && caretVisible_ && GetFocus() == window_ && ime_.text().text.empty()) {
             const auto point = caretPoint();
             const RECT caret{point.x, point.y, point.x + 2, point.y + cellHeight_};
             const RECT bodyRect{textGutter() + (splitDiff() ? middle + 1 : 0), body + (stickyFile() ? cellHeight_ : 0), r.right, r.bottom};
             RECT clipped{};
             if (IntersectRect(&clipped, &caret, &bodyRect)) dc.fill(clipped, foreground);
         }
+        if (edit_ && GetFocus() == window_) dc.composition(ime_.text(), caretPoint(), cellWidth_, cellHeight_, inputRect());
     }
     scrollbars_.paint(window_, dc, background);
 }
@@ -700,6 +709,7 @@ LRESULT Viewer::handle(UINT m, WPARAM a, LPARAM b) {
     case WM_SETFOCUS: caretPosition(); if (focused) focused(); return 0;
     case WM_KILLFOCUS:
         stopSelection();
+        ime_.clear();
         highSurrogate_ = 0; caretVisible_ = false; KillTimer(window_, caretTimer); DestroyCaret();
         InvalidateRect(window_, nullptr, FALSE); return 0;
     case WM_TIMER:
@@ -709,8 +719,8 @@ LRESULT Viewer::handle(UINT m, WPARAM a, LPARAM b) {
             caretVisible_ = !caretVisible_; InvalidateRect(window_, nullptr, FALSE);
         }
         return 0;
-    case WM_DESTROY: stopSelection(); KillTimer(window_, caretTimer); KillTimer(window_, findTimer); return 0;
-    case WM_SHOWWINDOW: if (!a) stopSelection(); break;
+    case WM_DESTROY: stopSelection(); ime_.clear(); KillTimer(window_, caretTimer); KillTimer(window_, findTimer); return 0;
+    case WM_SHOWWINDOW: if (!a) { stopSelection(); ime_.cancel(window_); } break;
     case WM_SETCURSOR:
         if (image_ && LOWORD(b) == HTCLIENT) { SetCursor(LoadCursorW(nullptr, IDC_ARROW)); return TRUE; }
         if (diff_ && LOWORD(b) == HTCLIENT) {
@@ -767,6 +777,7 @@ LRESULT Viewer::handle(UINT m, WPARAM a, LPARAM b) {
         scroll(0, 0); return 0;
     }
     case WM_SYSKEYDOWN: case WM_KEYDOWN:
+        if (ime_.active()) return DefWindowProcW(window_, m, a, b);
         if (edit_ && !(GetKeyState(VK_CONTROL) & 0x8000) && (GetKeyState(VK_SHIFT) & 0x8000) &&
             (GetKeyState(VK_MENU) & 0x8000) && (a == VK_UP || a == VK_DOWN)) {
             revealFind_ = false;
@@ -805,6 +816,7 @@ LRESULT Viewer::handle(UINT m, WPARAM a, LPARAM b) {
         else if (a == VK_END && document_) { top_ = static_cast<int>(rowCount()); scroll(0, 0); }
         return 0;
     case WM_CHAR:
+        if (ime_.active()) return 0;
         if (edit_ && !(GetKeyState(VK_CONTROL) & 0x8000) && (a >= 32 || a == '\r')) {
             const wchar_t c = static_cast<wchar_t>(a);
             if (c >= 0xd800 && c <= 0xdbff) { highSurrogate_ = c; return 0; }
@@ -813,6 +825,7 @@ LRESULT Viewer::handle(UINT m, WPARAM a, LPARAM b) {
         }
         return 0;
     case WM_IME_SETCONTEXT: case WM_INPUTLANGCHANGE: {
+        if (m == WM_IME_SETCONTEXT) b &= ~ISC_SHOWUICOMPOSITIONWINDOW;
         const auto result = DefWindowProcW(window_, m, a, b);
         if (m == WM_INPUTLANGCHANGE || a) caretPosition();
         return result;
@@ -820,16 +833,17 @@ LRESULT Viewer::handle(UINT m, WPARAM a, LPARAM b) {
     case WM_IME_NOTIFY:
         if (a == IMN_OPENCANDIDATE || a == IMN_CHANGECANDIDATE) caretPosition();
         break;
-    case WM_IME_STARTCOMPOSITION: caretPosition(); break;
+    case WM_IME_STARTCOMPOSITION: if (edit_) ime_.start(); caretPosition(); return 0;
+    case WM_IME_ENDCOMPOSITION: ime_.clear(); caretPosition(); return 0;
     case WM_IME_COMPOSITION:
-        caretPosition();
+        if (!edit_) return 0;
+        ime_.update(window_, b);
         if (edit_ && (b & GCS_RESULTSTR)) {
             const auto context = ImmGetContext(window_); const LONG bytes = context ? ImmGetCompositionStringW(context, GCS_RESULTSTR, nullptr, 0) : 0;
             if (bytes > 0) { std::wstring text(static_cast<size_t>(bytes) / sizeof(wchar_t), 0); ImmGetCompositionStringW(context, GCS_RESULTSTR, text.data(), bytes); replace(utf8(text)); }
             if (context) ImmReleaseContext(window_, context);
-            return 0;
         }
-        break;
+        caretPosition(); return 0;
     case WM_CONTEXTMENU: {
         if (image_) return 0;
         revealFind_ = false;

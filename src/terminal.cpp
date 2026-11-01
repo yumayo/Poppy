@@ -141,6 +141,7 @@ bool Terminal::start() {
 }
 void Terminal::stop() {
     stopSelection();
+    ime_.cancel(window_);
     if (stopping) stopping();
     if (ended) ended();
     if (window_) KillTimer(window_, 2);
@@ -305,7 +306,10 @@ void Terminal::stopSelection() {
     if (GetCapture() == window_) ReleaseCapture();
 }
 void Terminal::imePosition() {
-    positionIme(window_, {6 + display_.cursorX() * cellWidth_, 4 + display_.cursorY() * cellHeight_}, cellHeight_, renderer_.compositionFont());
+    const auto rect = Scrollbars::contentRect(window_);
+    const RECT clip{6, 4, rect.right - 6, rect.bottom};
+    const POINT origin{6 + display_.cursorX() * cellWidth_, 4 + display_.cursorY() * cellHeight_};
+    positionIme(window_, renderer_.compositionCaret(ime_.text(), origin, cellWidth_, cellHeight_, clip), cellHeight_, renderer_.compositionFont());
 }
 void Terminal::paste() {
     auto text = utf8(clipboardText(window_)); if (text.empty()) return;
@@ -352,11 +356,15 @@ void Terminal::paint() {
             const int sy = 4 + y * cellHeight_;
             dc.cells(6, sy, cellWidth_, cellHeight_, visible, display_.columns(), clip);
         }
-        if (running() && display_.cursorVisible() && GetFocus() == window_) {
+        if (running() && display_.cursorVisible() && GetFocus() == window_ && ime_.text().text.empty()) {
             const int x = 6 + display_.cursorX() * cellWidth_, y = 4 + display_.cursorY() * cellHeight_;
             if (x + cellWidth_ <= clip.right && y + cellHeight_ <= clip.bottom)
                 dc.fill({x, y + cellHeight_ - 2, x + cellWidth_, y + cellHeight_}, accent);
         }
+    }
+    if (GetFocus() == window_) {
+        const POINT origin{6 + display_.cursorX() * cellWidth_, 4 + display_.cursorY() * cellHeight_};
+        dc.composition(ime_.text(), origin, cellWidth_, cellHeight_, {6, 4, rect.right - 6, rect.bottom});
     }
     scrollbars_.paint(window_, dc, background);
 }
@@ -378,12 +386,12 @@ LRESULT Terminal::handle(UINT m, WPARAM a, LPARAM b) {
         if (a == selectionTimer) scrollSelection();
         else if (a == 2) pump();
         return 0;
-    case WM_DESTROY: stopSelection(); if (GetFocus() == window_) DestroyCaret(); return 0;
-    case WM_SHOWWINDOW: if (!a) stopSelection(); break;
+    case WM_DESTROY: stopSelection(); ime_.clear(); if (GetFocus() == window_) DestroyCaret(); return 0;
+    case WM_SHOWWINDOW: if (!a) { stopSelection(); ime_.cancel(window_); } break;
     case WM_GETDLGCODE: return DLGC_WANTALLKEYS;
     case WM_COPY: copy(); return 0;
     case WM_SETFOCUS: imePosition(); if (focused) focused(); InvalidateRect(window_, nullptr, FALSE); return 0;
-    case WM_KILLFOCUS: stopSelection(); highSurrogate_ = 0; DestroyCaret(); InvalidateRect(window_, nullptr, FALSE); return 0;
+    case WM_KILLFOCUS: stopSelection(); ime_.clear(); highSurrogate_ = 0; DestroyCaret(); InvalidateRect(window_, nullptr, FALSE); return 0;
     case WM_LBUTTONDOWN:
         SetFocus(window_);
         if (!started_) { start(); InvalidateRect(window_, nullptr, FALSE); return 0; }
@@ -418,6 +426,7 @@ LRESULT Terminal::handle(UINT m, WPARAM a, LPARAM b) {
         return 0;
     }
     case WM_KEYDOWN: case WM_SYSKEYDOWN: {
+        if (ime_.active()) return DefWindowProcW(window_, m, a, b);
         const bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0, shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0, alt = (GetKeyState(VK_MENU) & 0x8000) != 0;
         if (started_ && !running() && a == VK_RETURN && !ctrl && !shift && !alt) { start(); InvalidateRect(window_, nullptr, FALSE); return 0; }
         if (ctrl && shift && !alt && a == 'C') { copy(); return 0; }
@@ -443,6 +452,7 @@ LRESULT Terminal::handle(UINT m, WPARAM a, LPARAM b) {
         return 0;
     }
     case WM_CHAR: case WM_SYSCHAR: {
+        if (ime_.active()) return 0;
         if (a == VK_ESCAPE || (a == '\t' && (GetKeyState(VK_SHIFT) & 0x8000))) return 0;
         if ((GetKeyState(VK_CONTROL) & 0x8000) && (GetKeyState(VK_SHIFT) & 0x8000) && (a == 3 || a == 22)) return 0;
         // Handle Ctrl+C's character here so copying cannot also send ETX after
@@ -458,6 +468,7 @@ LRESULT Terminal::handle(UINT m, WPARAM a, LPARAM b) {
         send((m == WM_SYSCHAR ? "\x1b" : "") + utf8(text)); return 0;
     }
     case WM_IME_SETCONTEXT: case WM_INPUTLANGCHANGE: {
+        if (m == WM_IME_SETCONTEXT) b &= ~ISC_SHOWUICOMPOSITIONWINDOW;
         const auto result = DefWindowProcW(window_, m, a, b);
         if (m == WM_INPUTLANGCHANGE || a) imePosition();
         return result;
@@ -465,16 +476,17 @@ LRESULT Terminal::handle(UINT m, WPARAM a, LPARAM b) {
     case WM_IME_NOTIFY:
         if (a == IMN_OPENCANDIDATE || a == IMN_CHANGECANDIDATE) imePosition();
         break;
-    case WM_IME_STARTCOMPOSITION: imePosition(); break;
+    case WM_IME_STARTCOMPOSITION: ime_.start(); imePosition(); InvalidateRect(window_, nullptr, FALSE); return 0;
+    case WM_IME_ENDCOMPOSITION: ime_.clear(); imePosition(); InvalidateRect(window_, nullptr, FALSE); return 0;
     case WM_IME_COMPOSITION:
-        imePosition();
+        ime_.update(window_, b);
         if (b & GCS_RESULTSTR) {
             const auto context = ImmGetContext(window_);
             const LONG bytes = context ? ImmGetCompositionStringW(context, GCS_RESULTSTR, nullptr, 0) : 0;
             if (bytes > 0) { std::wstring text(static_cast<size_t>(bytes) / sizeof(wchar_t), L'\0'); ImmGetCompositionStringW(context, GCS_RESULTSTR, text.data(), bytes); send(utf8(text)); }
             if (context) ImmReleaseContext(window_, context);
-            return 0;
-        } break;
+        }
+        imePosition(); InvalidateRect(window_, nullptr, FALSE); return 0;
     default: break;
     }
     return DefWindowProcW(window_, m, a, b);

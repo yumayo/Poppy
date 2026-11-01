@@ -1,10 +1,52 @@
 #include "edit_buffer.h"
 #include "text_layout.h"
 #include "selection_scroll.h"
+#include "composition.h"
+#include "terminal_model.h"
+#include <algorithm>
 #include <cstdlib>
 #include <iostream>
 using namespace poppy;
 void check(bool value) { if (!value) { std::cerr << "Editor check failed\n"; std::exit(1); } }
+void compositionLayout() {
+    CompositionText text{u"iWいあ日ｱ😀Z", {0, 0, 1, 1, 2, 0, 3, 3, 0}, 0};
+    const std::vector<int> cursorColumns{0, 1, 2, 4, 6, 8, 9, 9, 11, 12};
+    for (size_t cursor = 0; cursor < cursorColumns.size(); ++cursor) {
+        text.cursor = cursor;
+        const auto layout = text.layout(32, 0);
+        check(layout.glyphs.size() == 8 && layout.caretRow == 0 && layout.caretColumn == cursorColumns[cursor]);
+        check(layout.glyphs[2].character == U'い' && layout.glyphs[2].width == 2 && layout.glyphs[2].attribute == 1);
+        check(layout.glyphs[5].character == U'ｱ' && layout.glyphs[5].width == 1);
+        check(layout.glyphs[6].character == U'😀' && layout.glyphs[6].column == 9 && layout.glyphs[6].attribute == 3);
+        // Natural advances of i/W or Japanese kana must never affect placement.
+        TerminalModel terminal(32, 2); terminal.feed(u8"iWいあ日ｱ😀Z");
+        for (const auto& glyph : layout.glyphs) {
+            check(terminal.row(glyph.row)[glyph.column].ch == glyph.character);
+            if (glyph.width == 2) check(terminal.row(glyph.row)[glyph.column + 1].continuation);
+        }
+    }
+    text = {u"日AあB", {1, 2, 3, 4}, 4};
+    auto layout = text.layout(6, 5);
+    check(layout.glyphs[0].row == 1 && layout.glyphs[0].column == 0 && layout.glyphs[0].width == 2);
+    check(layout.glyphs[1].row == 1 && layout.glyphs[1].column == 2);
+    check(layout.glyphs[2].row == 1 && layout.glyphs[2].column == 3 && layout.glyphs[2].attribute == 3);
+    check(layout.caretRow == 2 && layout.caretColumn == 0);
+    text.cursor = 0; layout = text.layout(6, 5);
+    check(layout.caretRow == 1 && layout.caretColumn == 0);
+    text = {std::u16string{0xd800, u'A', 0xdc00}, {}, 999};
+    layout = text.layout(8, 0);
+    check(layout.glyphs.size() == 3 && layout.glyphs[0].character == 0xfffd && layout.glyphs[2].character == 0xfffd);
+    check(layout.caretRow == 0 && layout.caretColumn == 3 && layout.glyphs[2].attribute == 0);
+    for (const int columns : {0, 1, 2, 3, 5, 80}) {
+        text = {u"あいう😀日A", {}, 7};
+        layout = text.layout(columns, columns - 1);
+        for (const auto& glyph : layout.glyphs) check(glyph.column >= 0 && glyph.column + glyph.width <= std::max(2, columns));
+    }
+    text = {}; layout = text.layout(8, 5);
+    check(layout.glyphs.empty() && layout.caretRow == 0 && layout.caretColumn == 5);
+    text = {u"A", {}, 0}; layout = text.layout(8, 8);
+    check(layout.glyphs[0].row == 1 && layout.glyphs[0].column == 0 && layout.caretRow == 1 && layout.caretColumn == 0);
+}
 EditBuffer load(std::string bytes) {
     EditBuffer buffer; std::string error;
     check(decodeText(bytes, buffer.document.text, buffer.document.encoding, error));
@@ -244,6 +286,7 @@ void selectionScrolling() {
     check(selectionScrollRows(100, 0, 80, 0) == 0);
 }
 int main() {
+    compositionLayout();
     lineCutting();
     lineMovement();
     selectionScrolling();

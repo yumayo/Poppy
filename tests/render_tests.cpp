@@ -518,84 +518,48 @@ void editorCaret() {
     viewer.message(L"Loading");
     check(viewer.textStatus().empty(), "A loading message retained the previous file format");
 }
-std::wstring fontFamily(IDWriteFont* font) {
-    ComPtr<IDWriteFontFamily> family;
-    ComPtr<IDWriteLocalizedStrings> names;
-    check(SUCCEEDED(font->GetFontFamily(family.put())) && SUCCEEDED(family->GetFamilyNames(names.put())),
-        "Cannot inspect the rendered font family");
-    UINT32 index = 0, length = 0; BOOL exists = FALSE;
-    names->FindLocaleName(L"en-us", &index, &exists);
-    if (!exists) index = 0;
-    check(SUCCEEDED(names->GetStringLength(index, &length)), "Cannot inspect the rendered font name length");
-    std::wstring name(length + 1, L'\0');
-    check(SUCCEEDED(names->GetString(index, name.data(), length + 1)), "Cannot inspect the rendered font name");
-    name.resize(length); return name;
-}
-// Inspect the actual glyph runs, since a text layout's family-name property
-// still reports Consolas even when DirectWrite draws Japanese with another face.
-class FontRunInspector final : public IDWriteTextRenderer {
-public:
-    IDWriteFontCollection* fonts = nullptr;
-    std::wstring family;
-    FLOAT size = 0;
-    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID id, void** result) override {
-        if (!result) return E_POINTER;
-        *result = nullptr;
-        if (IsEqualIID(id, __uuidof(IUnknown)) || IsEqualIID(id, __uuidof(IDWritePixelSnapping)) || IsEqualIID(id, __uuidof(IDWriteTextRenderer))) {
-            *result = static_cast<IDWriteTextRenderer*>(this); AddRef(); return S_OK;
-        }
-        return E_NOINTERFACE;
-    }
-    ULONG STDMETHODCALLTYPE AddRef() override { return 1; }
-    ULONG STDMETHODCALLTYPE Release() override { return 1; }
-    HRESULT STDMETHODCALLTYPE IsPixelSnappingDisabled(void*, BOOL* disabled) override { *disabled = TRUE; return S_OK; }
-    HRESULT STDMETHODCALLTYPE GetCurrentTransform(void*, DWRITE_MATRIX* matrix) override { *matrix = {1, 0, 0, 1, 0, 0}; return S_OK; }
-    HRESULT STDMETHODCALLTYPE GetPixelsPerDip(void*, FLOAT* pixels) override { *pixels = 1; return S_OK; }
-    HRESULT STDMETHODCALLTYPE DrawGlyphRun(void*, FLOAT, FLOAT, DWRITE_MEASURING_MODE,
-                                         const DWRITE_GLYPH_RUN* run, const DWRITE_GLYPH_RUN_DESCRIPTION*, IUnknown*) override {
-        ComPtr<IDWriteFont> font;
-        const auto result = fonts->GetFontFromFontFace(run->fontFace, font.put());
-        if (FAILED(result)) return result;
-        family = fontFamily(font.get()); size = run->fontEmSize;
-        return S_OK;
-    }
-    HRESULT STDMETHODCALLTYPE DrawUnderline(void*, FLOAT, FLOAT, const DWRITE_UNDERLINE*, IUnknown*) override { return S_OK; }
-    HRESULT STDMETHODCALLTYPE DrawStrikethrough(void*, FLOAT, FLOAT, const DWRITE_STRIKETHROUGH*, IUnknown*) override { return S_OK; }
-    HRESULT STDMETHODCALLTYPE DrawInlineObject(void*, FLOAT, FLOAT, IDWriteInlineObject*, BOOL, BOOL, IUnknown*) override { return S_OK; }
-};
-void imeFallbackFonts() {
-    ComPtr<IDWriteFactory> factory;
-    ComPtr<IDWriteFontCollection> fonts;
-    ComPtr<IDWriteGdiInterop> interop;
-    check(SUCCEEDED(DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory), reinterpret_cast<IUnknown**>(factory.put()))) &&
-        SUCCEEDED(factory->GetSystemFontCollection(fonts.put())) && SUCCEEDED(factory->GetGdiInterop(interop.put())),
-        "Cannot create the IME fallback test factory");
+void imeCellRendering() {
     Renderer renderer;
+    Bitmap actual, expected;
     for (const UINT dpi : {96u, 120u, 144u, 192u}) {
         renderer.setDpi(dpi);
-        ComPtr<IDWriteTextFormat> format;
-        check(SUCCEEDED(factory->CreateTextFormat(L"Consolas", nullptr, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL,
-            DWRITE_FONT_STRETCH_NORMAL, 15.0f * dpi / 96.0f, L"", format.put())), "Cannot create the terminal reference font");
-        for (const LANGID language : {MAKELANGID(LANG_ENGLISH, SUBLANG_ENGLISH_US), MAKELANGID(LANG_JAPANESE, SUBLANG_DEFAULT)}) {
-            const auto& composition = renderer.compositionFont(language);
-            // Resolve the LOGFONT back to a DirectWrite face so localized family
-            // names and GDI aliases do not affect the comparison.
-            ComPtr<IDWriteFont> font;
-            check(SUCCEEDED(interop->CreateFontFromLOGFONT(&composition, font.put())), "Cannot resolve the IME font");
-            const auto family = fontFamily(font.get());
-            const std::wstring samples = PRIMARYLANGID(language) == LANG_JAPANESE ? L"あいうえおアイウエオ日本語" : L"AMfi";
-            for (const auto character : samples) {
-                ComPtr<IDWriteTextLayout> layout;
-                check(SUCCEEDED(factory->CreateTextLayout(&character, 1, format.get(), 1000, 1000, layout.put())),
-                    "Cannot create the fallback font reference layout");
-                FontRunInspector inspector; inspector.fonts = fonts.get();
-                check(SUCCEEDED(layout->Draw(nullptr, &inspector, 0, 0)) && !inspector.family.empty(), "Cannot inspect the fallback glyph run");
-                check(family == inspector.family && composition.lfHeight == -static_cast<LONG>(std::lround(inspector.size)),
-                    "The IME font face or em size differs from the terminal's actual glyph run");
+        const int cw = renderer.cellWidth(), ch = renderer.textHeight() + MulDiv(2, dpi, 96);
+        const int columns = (Bitmap::width - 16) / cw;
+        const RECT clip{8, 8, 8 + columns * cw, std::min(Bitmap::height - 8, 8 + 3 * ch)};
+        for (const int first : {2, columns - 1}) {
+            CompositionText text{u"iWいい、り漢字ｱ😀Z", {}, 0}; text.cursor = text.text.size();
+            const POINT origin{8 + first * cw, 8};
+            const auto cursor = renderer.compositionCaret(text, origin, cw, ch, clip);
+            check(renderer.begin(actual.bitmap.get()), "Cannot render fixed-cell IME text");
+            renderer.fill(actual.bounds(), panel); renderer.fill(clip, background);
+            renderer.composition(text, origin, cw, ch, clip); finish(renderer); actual.read();
+            // Feed the same text through the terminal, including wrapping at the
+            // right edge. Glyph pixels must agree without relying on font names
+            // or the LOGFONT average width.
+            TerminalModel terminal(columns, 3);
+            terminal.feed("\x1b[1;" + std::to_string(first + 1) + "H" + u8"iWいい、り漢字ｱ😀Z");
+            check(renderer.begin(expected.bitmap.get()), "Cannot render the terminal IME reference");
+            renderer.fill(expected.bounds(), panel); renderer.fill(clip, background);
+            for (int row = 0; row < 3; ++row) renderer.cells(8, 8 + row * ch, cw, ch, terminal.row(row), columns, clip);
+            finish(renderer); expected.read();
+            bool ink = false;
+            for (int y = 0; y < Bitmap::height; ++y) for (int x = 0; x < Bitmap::width; ++x) {
+                if (x >= clip.left && x < clip.right && y >= clip.top && y < clip.bottom) {
+                    if ((y - clip.top) % ch >= ch - 2) continue; // Composition underline.
+                    if (x >= cursor.x && x < cursor.x + 2 && y >= cursor.y && y < cursor.y + ch) continue;
+                    ink |= expected.pixel(x, y) != background;
+                }
+                check(actual.pixel(x, y) == expected.pixel(x, y), "IME preedit glyphs differ from committed fixed-cell terminal text");
             }
-            check(composition.lfWidth == renderer.cellWidth() && composition.lfWeight == FW_NORMAL && !composition.lfItalic,
-                "Resolving the IME fallback font changed the fixed cell width or font style");
+            check(ink, "No IME reference glyphs were drawn");
         }
+        CompositionText target{u"日あ", {ATTR_TARGET_CONVERTED, ATTR_INPUT}, 2};
+        check(renderer.begin(actual.bitmap.get()), "Cannot render IME clause attributes");
+        renderer.fill(actual.bounds(), background); renderer.composition(target, {8, 8}, cw, ch, clip); finish(renderer); actual.read();
+        for (int x = 8; x < 8 + 4 * cw; ++x)
+            check(actual.pixel(x, 8 + ch - 1) == (x < 8 + 2 * cw ? accent : muted), "IME conversion target underline does not follow its fixed cells");
+        const auto cursor = renderer.compositionCaret(target, {8, clip.bottom - ch}, cw, ch, {8, 8, 8 + 3 * cw, clip.bottom});
+        check(cursor.x == 8 + 2 * cw && cursor.y + ch <= clip.bottom, "Wrapped IME candidates would leave the text viewport");
     }
 }
 void imePositions() {
@@ -711,21 +675,21 @@ void imePositions() {
         SetFocus(background); checkPosition(background, otherDpi);
         SetFocus(editor); checkPosition(editor, dpi);
     }
-    // Exercise switching both font families in the shared IMM context even on
-    // machines without a Japanese keyboard layout installed.
-    SetFocus(input);
-    for (const UINT dpi : {96u, 120u, 144u, 192u}) {
-        terminal.setDpi(dpi); metrics.setDpi(dpi);
-        const auto rect = caret(input);
-        for (const LANGID language : {MAKELANGID(LANG_JAPANESE, SUBLANG_DEFAULT), MAKELANGID(LANG_ENGLISH, SUBLANG_ENGLISH_US)}) {
-            const auto& expected = metrics.compositionFont(language);
-            positionIme(input, {rect.left, rect.top}, rect.bottom - rect.top, expected);
-            LOGFONTW font{};
-            check(ImmGetCompositionFontW(context.value, &font) && std::wstring(font.lfFaceName) == expected.lfFaceName &&
-                font.lfHeight == expected.lfHeight && font.lfWidth == expected.lfWidth,
-                "Switching input languages did not update the IME fallback font and size");
-        }
-    }
+    SetFocus(editor);
+    const auto beforeText = buffer->document.text;
+    const auto beforeState = viewer.state();
+    SendMessageW(editor, WM_IME_STARTCOMPOSITION, 0, 0);
+    SendMessageW(editor, WM_KEYDOWN, VK_LEFT, 0); SendMessageW(editor, WM_CHAR, L'x', 0);
+    check(buffer->document.text == beforeText && viewer.state().caret == beforeState.caret,
+        "Preedit keys changed the document or its insertion point before IME commit");
+    SendMessageW(editor, WM_IME_ENDCOMPOSITION, 0, 0);
+    SendMessageW(editor, WM_CHAR, L'x', 0);
+    check(buffer->document.text.size() == beforeText.size() + 1, "Ending IME composition did not restore ordinary input");
+    SendMessageW(editor, WM_IME_STARTCOMPOSITION, 0, 0);
+    SendMessageW(editor, WM_IME_COMPOSITION, 0, 0);
+    SendMessageW(editor, WM_CHAR, L'x', 0);
+    check(buffer->document.text.size() == beforeText.size() + 2, "Cancelling IME composition left ordinary input blocked");
+    SendMessageW(editor, WM_IME_ENDCOMPOSITION, 0, 0);
     SetFocus(parent);
     GUITHREADINFO info{}; info.cbSize = sizeof(info);
     check(GetGUIThreadInfo(GetCurrentThreadId(), &info) && info.hwndCaret == nullptr,
@@ -1711,7 +1675,7 @@ int main() {
     int result = 0;
     try {
         initializeRendering();
-        statusBarLimits(); treeMultipleSelection(); inlineTreeInput(); cellPositions(); colorsAndClipping(); imagePreviews(); smoothIcons(); windowTargets(); editableDiff(); editorCaret(); imeFallbackFonts(); imePositions(); editorWordSelection(); editorWordMovement(); editorLineShortcuts(); editorWrapping(); diffWrapping(); documentFind(); horizontalWheelScrolling(); continuousViewerScrolling(); selectionAutoScrolling(); terminalGitBashSocketEnvironment(); terminalSelectionAutoScrolling(); themedScrollbars(); quickOpenStability();
+        statusBarLimits(); treeMultipleSelection(); inlineTreeInput(); cellPositions(); colorsAndClipping(); imagePreviews(); smoothIcons(); windowTargets(); editableDiff(); editorCaret(); imeCellRendering(); imePositions(); editorWordSelection(); editorWordMovement(); editorLineShortcuts(); editorWrapping(); diffWrapping(); documentFind(); horizontalWheelScrolling(); continuousViewerScrolling(); selectionAutoScrolling(); terminalGitBashSocketEnvironment(); terminalSelectionAutoScrolling(); themedScrollbars(); quickOpenStability();
         std::cout << "Direct2D rendering tests passed\n";
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; result = 1; }
     if (SUCCEEDED(com)) CoUninitialize();

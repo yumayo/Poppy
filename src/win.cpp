@@ -10,6 +10,33 @@
 #include <system_error>
 
 namespace poppy {
+void ImeComposition::update(HWND window, LPARAM flags) {
+    if (!flags) { clear(); return; }
+    active_ = true;
+    if (flags & GCS_RESULTSTR) text_ = {};
+    if (!(flags & (GCS_COMPSTR | GCS_COMPATTR | GCS_CURSORPOS))) return;
+    const auto context = ImmGetContext(window); if (!context) return;
+    if (flags & GCS_COMPSTR) {
+        const auto bytes = ImmGetCompositionStringW(context, GCS_COMPSTR, nullptr, 0);
+        std::wstring text(bytes > 0 ? static_cast<size_t>(bytes) / sizeof(wchar_t) : 0, L'\0');
+        if (bytes > 0) ImmGetCompositionStringW(context, GCS_COMPSTR, text.data(), bytes);
+        text_.text.assign(text.begin(), text.end());
+    }
+    const auto bytes = ImmGetCompositionStringW(context, GCS_COMPATTR, nullptr, 0);
+    text_.attributes.assign(bytes > 0 ? static_cast<size_t>(bytes) : 0, 0);
+    if (bytes > 0) ImmGetCompositionStringW(context, GCS_COMPATTR, text_.attributes.data(), bytes);
+    const auto cursor = ImmGetCompositionStringW(context, GCS_CURSORPOS, nullptr, 0);
+    text_.cursor = cursor >= 0 ? std::min(static_cast<size_t>(cursor), text_.text.size()) : text_.text.size();
+    ImmReleaseContext(window, context);
+}
+void ImeComposition::cancel(HWND window) {
+    const bool composing = active_;
+    clear();
+    if (!composing || !window) return;
+    const auto context = ImmGetContext(window);
+    if (context) { ImmNotifyIME(context, NI_COMPOSITIONSTR, CPS_CANCEL, 0); ImmReleaseContext(window, context); }
+    InvalidateRect(window, nullptr, FALSE);
+}
 void positionIme(HWND window, POINT point, int height, const LOGFONTW& font) {
     // Windows share the thread's default input context. Background output must
     // never replace the composition/candidate position of the focused control.

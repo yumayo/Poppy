@@ -67,6 +67,7 @@ private:
     void revealMatch();
     void revealRange(TextMatch match);
     POINT caretPoint() const;
+    RECT inputRect() const;
     RECT layoutButton(bool inlineView) const;
     int visibleRows() const;
     bool splitDiff() const { return diff_ && !inlineView_; }
@@ -78,6 +79,7 @@ private:
     size_t rowCount() const { return diff_ ? wrapping() ? diffLayout_.rows() : diff_->rowCount(inlineView_) : wrapping() ? textLayout_.rows() : document_->lines.size(); }
     HWND window_ = nullptr;
     Renderer renderer_;
+    ImeComposition ime_;
     FindBar findBar_;
     TextSearch search_;
     bool revealFind_ = false;

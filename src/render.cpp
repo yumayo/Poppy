@@ -5,6 +5,7 @@
 #include <initializer_list>
 #include <limits>
 #include <stdexcept>
+#include <imm.h>
 
 namespace poppy {
 namespace {
@@ -104,6 +105,18 @@ D2D1_RECT_F rectangle(const RECT& r) {
 }
 bool empty(const RECT& r) { return r.right <= r.left || r.bottom <= r.top; }
 
+struct CompositionGeometry {
+    CompositionLayout layout;
+    int top;
+};
+CompositionGeometry compositionGeometry(const CompositionText& text, POINT origin, int cw, int ch, const RECT& clip) {
+    auto layout = text.layout(static_cast<int>(clip.right - clip.left) / cw, static_cast<int>(origin.x - clip.left) / cw);
+    // Keep the preedit cursor and candidate anchor visible when wrapping on the
+    // last line. Earlier composition rows are clipped to the text viewport.
+    const int top = std::min(static_cast<int>(origin.y), static_cast<int>(clip.bottom) - (layout.caretRow + 1) * ch);
+    return {std::move(layout), top};
+}
+
 // These renderers are used synchronously by IDWriteTextLayout::Draw, never retained.
 class GlyphRunRenderer : public IDWriteTextRenderer {
 public:
@@ -123,26 +136,6 @@ public:
     HRESULT STDMETHODCALLTYPE DrawUnderline(void*, FLOAT, FLOAT, const DWRITE_UNDERLINE*, IUnknown*) override { return S_OK; }
     HRESULT STDMETHODCALLTYPE DrawStrikethrough(void*, FLOAT, FLOAT, const DWRITE_STRIKETHROUGH*, IUnknown*) override { return S_OK; }
     HRESULT STDMETHODCALLTYPE DrawInlineObject(void*, FLOAT, FLOAT, IDWriteInlineObject*, BOOL, BOOL, IUnknown*) override { return S_OK; }
-};
-
-// Ask the same layout engine as the terminal which face and em size it uses for
-// Japanese. Passing "Consolas" to IMM alone invokes a different fallback chain.
-class CompositionFontRenderer final : public GlyphRunRenderer {
-public:
-    CompositionFontRenderer(IDWriteGdiInterop* interop, LOGFONTW& font) : interop_(interop), font_(font) {}
-    HRESULT STDMETHODCALLTYPE DrawGlyphRun(void*, FLOAT, FLOAT, DWRITE_MEASURING_MODE,
-                                         const DWRITE_GLYPH_RUN* run, const DWRITE_GLYPH_RUN_DESCRIPTION*, IUnknown*) override {
-        LOGFONTW font{};
-        const auto result = interop_->ConvertFontFaceToLOGFONT(run->fontFace, &font);
-        if (FAILED(result)) return result;
-        font.lfHeight = -static_cast<LONG>(std::lround(run->fontEmSize));
-        font.lfWidth = font_.lfWidth;
-        font_ = font;
-        return S_OK;
-    }
-private:
-    IDWriteGdiInterop* interop_;
-    LOGFONTW& font_;
 };
 
 // DirectWrite supplies shaping and fallback fonts. Place every glyph cluster at
@@ -219,8 +212,8 @@ void Renderer::setDpi(UINT dpi) {
     cellWidth_ = std::max(1, static_cast<int>(std::ceil(metrics.widthIncludingTrailingWhitespace)));
     textHeight_ = std::max(1, static_cast<int>(std::ceil(metrics.height)));
     check(codeFont_->SetLineSpacing(DWRITE_LINE_SPACING_METHOD_UNIFORM, static_cast<float>(textHeight_), std::ceil(line.baseline)), "Code line spacing setup failed");
-    // IMM uses physical-pixel LOGFONT metrics. Use the em size rather than
-    // the padded editor/terminal row height, and match our rounded cell width.
+    // IMM font metadata uses physical pixels and an average-width hint. Actual
+    // preedit glyph placement is controlled by composition(), just like cells().
     compositionFont_ = {};
     check(codeFont_->GetFontFamilyName(compositionFont_.lfFaceName, LF_FACESIZE), "IME font name lookup failed");
     compositionFont_.lfHeight = -static_cast<LONG>(std::lround(codeFont_->GetFontSize()));
@@ -229,15 +222,6 @@ void Renderer::setDpi(UINT dpi) {
     compositionFont_.lfItalic = codeFont_->GetFontStyle() != DWRITE_FONT_STYLE_NORMAL;
     compositionFont_.lfCharSet = DEFAULT_CHARSET;
     compositionFont_.lfPitchAndFamily = FIXED_PITCH | FF_MODERN;
-    japaneseCompositionFont_ = compositionFont_;
-    ComPtr<IDWriteGdiInterop> interop;
-    // Keep the base font if the system cannot resolve a Japanese fallback.
-    // This is metadata conversion through DirectWrite; no GDI font is created.
-    if (SUCCEEDED(text->GetGdiInterop(interop.put())) &&
-        SUCCEEDED(text->CreateTextLayout(L"\u3042", 1, codeFont_.get(), 1000.0f, 1000.0f, layout.put()))) {
-        CompositionFontRenderer renderer(interop.get(), japaneseCompositionFont_);
-        layout->Draw(nullptr, &renderer, 0, 0);
-    }
     // Geometry and fonts use the existing Win32 physical-pixel layout. Keeping
     // targets at 96 DPI avoids scaling it twice on per-monitor DPI changes.
 }
@@ -396,6 +380,44 @@ void Renderer::cells(int x, int y, int cw, int ch, const std::vector<Cell>& cell
         layout->Draw(nullptr, &renderer, static_cast<float>(x + begin * cw), static_cast<float>(y));
     }
     target_->PopAxisAlignedClip();
+}
+POINT Renderer::compositionCaret(const CompositionText& text, POINT origin, int cw, int ch, const RECT& clip) const {
+    if (text.text.empty() || cw <= 0 || ch <= 0 || empty(clip)) return origin;
+    const auto geometry = compositionGeometry(text, origin, cw, ch, clip);
+    return {clip.left + geometry.layout.caretColumn * cw, geometry.top + geometry.layout.caretRow * ch};
+}
+void Renderer::composition(const CompositionText& text, POINT origin, int cw, int ch, const RECT& clip) {
+    if (text.text.empty() || cw <= 0 || ch <= 0 || empty(clip)) return;
+    const auto geometry = compositionGeometry(text, origin, cw, ch, clip);
+    const auto& glyphs = geometry.layout.glyphs;
+    for (size_t begin = 0; begin < glyphs.size();) {
+        size_t end = begin + 1;
+        while (end < glyphs.size() && glyphs[end].row == glyphs[begin].row) ++end;
+        const auto& first = glyphs[begin]; const auto& last = glyphs[end - 1];
+        const int columns = last.column + last.width - first.column;
+        std::vector<Cell> row(static_cast<size_t>(columns));
+        for (size_t i = begin; i < end; ++i) {
+            const auto& glyph = glyphs[i];
+            const bool target = glyph.attribute == ATTR_TARGET_CONVERTED || glyph.attribute == ATTR_TARGET_NOTCONVERTED;
+            Cell cell; cell.ch = glyph.character; cell.bg = target ? rgb(50, 70, 94) : background;
+            row[glyph.column - first.column] = cell;
+            if (glyph.width == 2) { cell.ch = 0; cell.continuation = true; row[glyph.column - first.column + 1] = cell; }
+        }
+        const int x = clip.left + first.column * cw, y = geometry.top + first.row * ch;
+        cells(x, y, cw, ch, row, columns, clip);
+        for (size_t i = begin; i < end; ++i) {
+            const auto& glyph = glyphs[i];
+            const bool target = glyph.attribute == ATTR_TARGET_CONVERTED || glyph.attribute == ATTR_TARGET_NOTCONVERTED;
+            const int left = clip.left + glyph.column * cw;
+            const RECT underline{left, y + ch - (target ? 2 : 1), left + glyph.width * cw, y + ch};
+            RECT visible{};
+            if (IntersectRect(&visible, &underline, &clip)) fill(visible, target ? accent : muted);
+        }
+        begin = end;
+    }
+    const int x = clip.left + geometry.layout.caretColumn * cw, y = geometry.top + geometry.layout.caretRow * ch;
+    const RECT caret{x, y, x + 2, y + ch}; RECT visible{};
+    if (IntersectRect(&visible, &caret, &clip)) fill(visible, accent);
 }
 void Renderer::line(float x1, float y1, float x2, float y2, COLORREF value, float width) {
     color(value); target_->DrawLine(D2D1::Point2F(x1, y1), D2D1::Point2F(x2, y2), brush_.get(), width);
