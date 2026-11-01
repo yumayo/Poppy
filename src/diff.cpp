@@ -96,6 +96,17 @@ DiffRow DiffDocument::displayRow(size_t index, bool inlineView) const {
     }
     return row;
 }
+std::vector<DiffChange> changedDiffRows(const DiffDocument& document, bool inlineView) {
+    std::vector<DiffChange> ranges;
+    for (size_t i = 0; i < document.rowCount(inlineView); ++i) {
+        const auto row = document.displayRow(i, inlineView);
+        if (!row.changed || row.heading || (!row.before.number && !row.after.number)) continue;
+        const bool removed = !row.after.number;
+        if (!ranges.empty() && ranges.back().end == i && ranges.back().removed == removed) ranges.back().end = i + 1;
+        else ranges.push_back({i, i + 1, removed});
+    }
+    return ranges;
+}
 const DiffFile* DiffDocument::fileForRow(size_t index, bool inlineView) const {
     if (index >= rowCount(inlineView)) return nullptr;
     const size_t splitRow = inlineView ? inlineOrder[index] / 2 : index;

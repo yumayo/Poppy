@@ -176,6 +176,67 @@ void editableComparisons() {
 DiffDocument parse(std::string patch) {
     DiffDocument result; result.patch.text = std::move(patch); indexDiff(result); return result;
 }
+void diffChangeMarks() {
+    const auto verify = [](const DiffDocument& diff, bool inlineView, const std::vector<DiffChange>& expected) {
+        const auto ranges = changedDiffRows(diff, inlineView);
+        check(ranges.size() == expected.size(), "Diff overview missed changes or marked context/metadata");
+        for (size_t i = 0; i < ranges.size(); ++i)
+            check(ranges[i].begin == expected[i].begin && ranges[i].end == expected[i].end && ranges[i].removed == expected[i].removed,
+                "Diff overview lost display order, a change boundary or its addition/deletion color");
+    };
+    const auto mixed = parse("@@ -1,6 +1,5 @@\n head\n-old1\n-old2\n+new\n middle\n-gone\n+added\n tail\n");
+    verify(mixed, false, {{1, 2, false}, {2, 3, true}, {4, 5, false}});
+    verify(mixed, true, {{1, 3, true}, {3, 4, false}, {5, 6, true}, {6, 7, false}});
+    for (const bool inlineView : {false, true}) {
+        verify(parse("@@ -1,3 +1 @@\n-first\n same\n-last\n"), inlineView, {{0, 1, true}, {2, 3, true}});
+        verify(parse("@@ -0,0 +1,2 @@\n+\n+日本😀\n"), inlineView, {{0, 2, false}});
+        verify(parse("@@ -1 +0,0 @@\n-\n\\ No newline at end of file\n"), inlineView, {{0, 1, true}});
+        verify(parse(""), inlineView, {});
+        verify(parse("@@ -1 +1 @@\n same\n"), inlineView, {});
+    }
+    auto all = parse("diff --git a/a.txt b/a.txt\n@@ -1,2 +1,2 @@\n-abcdefghijkl\n+x\n tail\n"
+        "diff --git a/b.txt b/b.txt\nnew file mode 100644\n--- /dev/null\n+++ b/b.txt\n@@ -0,0 +1 @@\n+日本😀\n");
+    indexDiff(all, true);
+    verify(all, false, {{1, 2, false}, {5, 6, false}});
+    verify(all, true, {{1, 2, true}, {2, 3, false}, {6, 7, false}});
+    DiffLayout layout;
+    for (const bool inlineView : {false, true}) for (const int columns : {1, 4, 80}) {
+        layout.build(all, inlineView, columns);
+        check(layout.rowStart(all.rowCount(inlineView)) == layout.rows(), "Diff overview lost the final wrapped boundary");
+        for (const auto& range : changedDiffRows(all, inlineView)) {
+            const auto begin = layout.rowStart(range.begin), end = layout.rowStart(range.end);
+            check(end > begin && layout.row(begin).row == range.begin && layout.row(end - 1).row == range.end - 1,
+                "Diff overview did not cover the changed rows' wrapped continuations");
+        }
+        check(layout.rowStart(2) - layout.rowStart(1) == wrappedLineRows("abcdefghijkl", columns),
+            "Diff overview ignored the longer side of a split replacement or retained its old wrapping");
+    }
+    orderDiffFiles(all, {"b.txt", "a.txt"});
+    verify(all, false, {{2, 3, false}, {4, 5, false}});
+    hideDiffFiles(all, {"b.txt"});
+    verify(all, false, {{1, 2, false}});
+    verify(all, true, {{1, 2, true}, {2, 3, false}});
+    hideDiffFiles(all, {"a.txt"});
+    verify(all, true, {});
+    layout.build(all, true, 4);
+    check(layout.rowStart(0) == 0 && layout.rowStart(100) == 0, "An empty diff retained overview boundaries");
+    // Editable Changes rebuild from the current buffer; Staged Changes remain
+    // based on their own patch snapshot. Undo and base refresh remove old marks.
+    EditBuffer buffer; buffer.document = sourceDocument("head\ntail"); buffer.initialize(buffer.document.text);
+    const auto before = buffer.document;
+    check(buffer.replace(5, 5, "new\n"), "Cannot edit the diff overview fixture");
+    const auto staged = workingDiff(before, buffer.document);
+    for (const bool inlineView : {false, true}) {
+        verify(staged, inlineView, {{1, 2, false}});
+        size_t anchor = 0, caret = 0;
+        check(buffer.undo(anchor, caret), "Cannot undo the diff overview fixture");
+        verify(workingDiff(before, buffer.document), inlineView, {});
+        verify(staged, inlineView, {{1, 2, false}});
+        check(buffer.redo(anchor, caret), "Cannot redo the diff overview fixture");
+        verify(workingDiff(before, buffer.document), inlineView, {{1, 2, false}});
+        verify(workingDiff(buffer.document, buffer.document), inlineView, {});
+    }
+}
 Style styleAt(const DiffDocument& diff, DiffLine source, size_t byte) {
     auto state = source.state;
     std::vector<Token> tokens;
@@ -564,6 +625,6 @@ void wrapping() {
 }
 }
 int main() {
-    try { editorLineChanges(); editorChangeMarks(); editableComparisons(); syntaxHighlighting(); multilineSyntax(); syntaxLanguages(); fileHeadings(); alignment(); additionsAndDeletions(); inlineLayout(); edgeCases(); viewPositions(); wrapping(); std::cout << "Diff tests passed.\n"; return EXIT_SUCCESS; }
+    try { editorLineChanges(); editorChangeMarks(); diffChangeMarks(); editableComparisons(); syntaxHighlighting(); multilineSyntax(); syntaxLanguages(); fileHeadings(); alignment(); additionsAndDeletions(); inlineLayout(); edgeCases(); viewPositions(); wrapping(); std::cout << "Diff tests passed.\n"; return EXIT_SUCCESS; }
     catch (const std::exception& error) { std::cerr << error.what() << '\n'; return EXIT_FAILURE; }
 }

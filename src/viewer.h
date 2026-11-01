@@ -118,6 +118,7 @@ private:
     std::shared_ptr<const Document> gitBefore_;
     std::vector<bool> gitChangedLines_;
     std::vector<LineChange> gitChangeRanges_;
+    std::vector<DiffChange> diffChangeRanges_;
     ResourceId path_;
     std::wstring message_ = L"Open a folder to start\n\nSelect a file on the left. Run your AI CLI in the terminal below.";
 };

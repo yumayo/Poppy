@@ -9,6 +9,8 @@ public:
     void build(const DiffDocument& document, bool inlineView, int columns);
     int columns() const { return columns_; }
     size_t rows() const { return starts_.empty() ? 0 : starts_.back(); }
+    // Include the final boundary so overview ranges cover all continuations.
+    size_t rowStart(size_t row) const { return starts_.empty() ? 0 : starts_[std::min(row, starts_.size() - 1)]; }
     size_t bytes() const { return starts_.capacity() * sizeof(uint32_t); }
     WrappedDiffRow row(size_t visualRow) const;
     WrappedRow textRow(const DiffDocument& document, size_t visualRow, bool after) const;

@@ -51,4 +51,8 @@ DiffDocument workingDiff(const Document& before, const Document& after);
 // An empty range marks a deletion at that boundary, including EOF.
 struct LineChange { size_t begin = 0, end = 0; };
 std::vector<bool> changedWorkingLines(const Document& before, const Document& after, std::vector<LineChange>* ranges = nullptr);
+// Contiguous changed display rows [begin, end), excluding file/metadata headings.
+// Split replacements use the added/modified color; removal-only rows use red.
+struct DiffChange { size_t begin = 0, end = 0; bool removed = false; };
+std::vector<DiffChange> changedDiffRows(const DiffDocument& document, bool inlineView);
 }

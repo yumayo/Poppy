@@ -46,7 +46,7 @@ void Viewer::show(std::shared_ptr<const Document> d, const ResourceId& path, boo
     const auto previous = preserve && document_ ? std::optional<State>(state()) : std::nullopt;
     edit_.reset(); diffBefore_.reset(); gitBefore_.reset(); gitChangedLines_ = {}; gitChangeRanges_ = {}; highSurrogate_ = 0;
     diffLayout_ = {}; layoutDirty_ = true; caretTrailing_ = false;
-    diff_.reset(); document_ = std::move(d); path_ = path; message_.clear();
+    diff_.reset(); diffChangeRanges_ = {}; document_ = std::move(d); path_ = path; message_.clear();
     if (!preserve) { top_ = left_ = 0; anchor_ = caret_ = 0; after_ = false; }
     else { anchor_ = std::min(anchor_, document_->text.size()); caret_ = std::min(caret_, document_->text.size()); }
     scrollbars(); findLayout(); requestFind(false, false, false); caretPosition(); InvalidateRect(window_, nullptr, FALSE);
@@ -79,6 +79,7 @@ void Viewer::showDiff(std::shared_ptr<const DiffDocument> d, const ResourceId& p
     textLayout_ = {}; layoutDirty_ = true; caretTrailing_ = false;
     // Share the patch snapshot; both panes only keep references to its lines.
     document_ = std::shared_ptr<const Document>(d, &d->patch); diff_ = std::move(d); path_ = path; message_.clear();
+    diffChangeRanges_ = changedDiffRows(*diff_, inlineView_);
     if (!preserve) { top_ = left_ = 0; anchor_ = caret_ = 0; after_ = false; }
     else { anchor_ = std::min(anchor_, document_->text.size()); caret_ = std::min(caret_, document_->text.size()); }
     scrollbars(); findLayout(); requestFind(false, false, false); caretPosition(); InvalidateRect(window_, nullptr, FALSE);
@@ -102,6 +103,7 @@ void Viewer::refreshBuffer() {
         const auto anchor = diff_->workingOffset(anchor_), caret = diff_->workingOffset(caret_);
         auto comparison = std::make_shared<DiffDocument>(workingDiff(*diffBefore_, edit_->document));
         document_ = std::shared_ptr<const Document>(comparison, &comparison->patch); diff_ = std::move(comparison);
+        diffChangeRanges_ = changedDiffRows(*diff_, inlineView_);
         anchor_ = anchor ? diff_->patchOffset(*anchor) : std::min(anchor_, document_->text.size());
         caret_ = caret ? diff_->patchOffset(*caret) : std::min(caret_, document_->text.size());
         layoutDirty_ = true; scrollbars(); restoreTop(previous);
@@ -120,7 +122,7 @@ void Viewer::message(const std::wstring& text, const ResourceId& path) {
     findBar_.close(); KillTimer(window_, findTimer); search_.query("");
     edit_.reset(); diffBefore_.reset(); gitBefore_.reset(); gitChangedLines_ = {}; gitChangeRanges_ = {}; highSurrogate_ = 0;
     textLayout_ = {}; diffLayout_ = {}; layoutDirty_ = true; caretTrailing_ = false;
-    diff_.reset(); document_.reset(); path_ = path; message_ = text; top_ = left_ = 0; anchor_ = caret_ = 0; after_ = false;
+    diff_.reset(); diffChangeRanges_ = {}; document_.reset(); path_ = path; message_ = text; top_ = left_ = 0; anchor_ = caret_ = 0; after_ = false;
     scrollbars(); caretPosition(); InvalidateRect(window_, nullptr, FALSE);
     if (statusChanged) statusChanged();
 }
@@ -222,6 +224,7 @@ void Viewer::setDiffLayout(bool inlineView) {
     if (inlineView_ == inlineView) return;
     const auto previous = state();
     inlineView_ = inlineView; layoutDirty_ = true;
+    if (diff_) diffChangeRanges_ = changedDiffRows(*diff_, inlineView_);
     stopSelection();
     scrollbars();
     if (diff_) { restoreTop(previous); scrollbars(); }
@@ -230,9 +233,9 @@ void Viewer::setDiffLayout(bool inlineView) {
 }
 RECT Viewer::contentRect() const {
     auto rect = Scrollbars::contentRect(window_);
-    // Reserve the strip before the asynchronous Git base arrives, so loading
-    // it never reflows the source. Other viewer modes use the full content area.
-    if (document_ && !diff_ && !html_.active()) rect.right = std::max(0L, rect.right - MulDiv(4, dpi_, 96));
+    // Reserve the same strip in source and diff views, including before an
+    // asynchronous Git base arrives, so loading it never reflows the source.
+    if (document_ && !html_.active()) rect.right = std::max(0L, rect.right - MulDiv(4, dpi_, 96));
     return rect;
 }
 int Viewer::visibleRows() const { const auto r = contentRect(); return std::max(1, (static_cast<int>(r.bottom) - contentTop()) / cellHeight_); }
@@ -538,6 +541,7 @@ void Viewer::edited() {
     if (diff_) {
         auto comparison = std::make_shared<DiffDocument>(workingDiff(*diffBefore_, edit_->document));
         document_ = std::shared_ptr<const Document>(comparison, &comparison->patch); diff_ = std::move(comparison);
+        diffChangeRanges_ = changedDiffRows(*diff_, inlineView_);
         anchor_ = diff_->patchOffset(anchor_); caret_ = diff_->patchOffset(caret_); after_ = true;
     }
     updateGitLines();
@@ -604,7 +608,7 @@ void Viewer::moveCaret(WPARAM key, bool shift, bool ctrl) {
     caret_ = diff_ ? diff_->patchOffset(next) : next; if (!shift) anchor_ = caret_; caretPosition(true); InvalidateRect(window_, nullptr, FALSE);
 }
 void Viewer::paintGitMarks() {
-    if (!document_ || diff_ || html_.active()) return;
+    if (!document_ || html_.active()) return;
     const auto r = Scrollbars::contentRect(window_);
     const int left = contentRect().right;
     renderer_.fill({left, 0, r.right, r.bottom}, background);
@@ -612,11 +616,22 @@ void Viewer::paintGitMarks() {
     if (!(GetWindowLongPtrW(window_, GWL_STYLE) & WS_VSCROLL)) track = {left, contentTop(), r.right, r.bottom};
     const size_t rows = std::max(rowCount(), static_cast<size_t>(visibleRows()));
     const int minimum = std::max(1, MulDiv(3, dpi_, 96));
+    const auto paintMark = [&](size_t begin, size_t end, bool removed) {
+        const auto mark = changeMark(begin, end, rows, track.top, track.bottom, minimum);
+        renderer_.fill({left, mark.top, r.right, mark.bottom}, removed ? rgb(231,112,118) : rgb(151,195,121));
+    };
+    if (diff_) {
+        for (const auto& change : diffChangeRanges_) {
+            const size_t begin = wrapping() ? diffLayout_.rowStart(change.begin) : change.begin;
+            const size_t end = wrapping() ? diffLayout_.rowStart(change.end) : change.end;
+            paintMark(begin, end, change.removed);
+        }
+        return;
+    }
     for (const auto& change : gitChangeRanges_) {
         const size_t begin = wrapping() ? textLayout_.lineStart(change.begin) : change.begin;
         const size_t end = wrapping() ? textLayout_.lineStart(change.end) : change.end;
-        const auto mark = changeMark(begin, end, rows, track.top, track.bottom, minimum);
-        renderer_.fill({left, mark.top, r.right, mark.bottom}, change.begin == change.end ? rgb(231,112,118) : rgb(151,195,121));
+        paintMark(begin, end, change.begin == change.end);
     }
 }
 void Viewer::paint() {
@@ -908,6 +923,7 @@ size_t poppy::Viewer::documentBytes() const {
     size_t bytes = textLayout_.bytes() + diffLayout_.bytes() + (document_ ? document_->text.capacity() + document_->lines.capacity() * sizeof(uint32_t) + document_->states.capacity() * sizeof(LexState) : 0);
     bytes += gitChangedLines_.capacity() / 8;
     bytes += gitChangeRanges_.capacity() * sizeof(LineChange);
+    bytes += diffChangeRanges_.capacity() * sizeof(DiffChange);
     if (gitBefore_) bytes += gitBefore_->text.capacity() + gitBefore_->lines.capacity() * sizeof(uint32_t) + gitBefore_->states.capacity() * sizeof(LexState);
     if (diff_) {
         bytes += diff_->rows.capacity() * sizeof(DiffRow) + diff_->inlineOrder.capacity() * sizeof(uint32_t) + diff_->files.capacity() * sizeof(DiffFile);

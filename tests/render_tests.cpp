@@ -1370,7 +1370,7 @@ void editorWordSelection() {
     diff->patch.text = "@@ -1 +1 @@\n-old_name.\n+new_name.\n"; indexDiff(*diff);
     for (const bool inlineView : {false, true}) for (const bool after : {false, true}) {
         viewer.setDiffLayout(inlineView); viewer.showDiff(diff, L"words.diff");
-        const int origin = inlineView ? 140 : 70 + (after ? Scrollbars::contentRect(window).right / 2 + 1 : 0);
+        const int origin = inlineView ? 140 : 70 + (after ? (Scrollbars::contentRect(window).right - 4) / 2 + 1 : 0);
         const int y = (inlineView && after ? height : 0) + height / 2;
         doubleClick(MAKELPARAM(origin + 7 * width + width * 3 / 4, y));
         const std::string word = after ? "new_name" : "old_name";
@@ -1604,7 +1604,7 @@ void diffWrapping() {
     const auto original = diff->patch.text;
     const size_t before = diff->offset(diff->rows[1].before), after = diff->offset(diff->rows[1].after);
     const auto info = [&] { SCROLLINFO value{sizeof(value), SIF_ALL, 0, 0, 0, 0, 0}; GetScrollInfo(window, SB_VERT, &value); return value; };
-    const int columns = (Scrollbars::contentRect(window).right - 140 - 2) / cell;
+    const int columns = (Scrollbars::contentRect(window).right - 4 - 140 - 2) / cell;
     check(viewer.wordWrap() && !(GetWindowLongPtrW(window, GWL_STYLE) & WS_HSCROLL), "Inline diffs did not inherit word wrapping");
     const auto point = [&](int column, int row) { return MAKELPARAM(140 + column * cell, row * height + height / 2); };
     SendMessageW(window, WM_LBUTTONDOWN, MK_LBUTTON, point(3, 2));
@@ -1621,13 +1621,13 @@ void diffWrapping() {
     check(viewer.state().wrapOffset == saved.wrapOffset && info().nPos == top, "Refreshing a diff lost its wrapped position");
     viewer.setDiffLayout(false);
     DiffLayout layout;
-    layout.build(*diff, false, ((Scrollbars::contentRect(window).right - 1) / 2 - 70 - 2) / cell);
+    layout.build(*diff, false, ((Scrollbars::contentRect(window).right - 4 - 1) / 2 - 70 - 2) / cell);
     const auto expected = layout.textRow(*diff, layout.rowForOffset(*diff, 1, saved.wrapOffset, false), false);
     check(viewer.state().wrapOffset == expected.begin && viewer.state().anchor == saved.anchor && viewer.state().caret == saved.caret,
         "Changing diff layouts lost the top source position or selection");
     // The top source row extends beyond the right side. Clicking that padding
     // maps to the right line's end while the viewport retains the longer side.
-    const int right = Scrollbars::contentRect(window).right / 2 + 1;
+    const int right = (Scrollbars::contentRect(window).right - 4) / 2 + 1;
     SendMessageW(window, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(right + 70, height / 2));
     SendMessageW(window, WM_LBUTTONUP, 0, MAKELPARAM(right + 70, height / 2));
     check(viewer.state().anchor == saved.anchor && viewer.state().caret == saved.caret && GetCapture() != window,
@@ -1640,7 +1640,7 @@ void diffWrapping() {
     check(info().nPos == splitTop && viewer.state().wrapOffset == padded.wrapOffset && viewer.state().after,
         "Restoring split padding used the selected shorter side's row count");
     MoveWindow(window, 0, 0, 420, 360, FALSE);
-    layout.build(*diff, false, ((Scrollbars::contentRect(window).right - 1) / 2 - 70 - 2) / cell);
+    layout.build(*diff, false, ((Scrollbars::contentRect(window).right - 4 - 1) / 2 - 70 - 2) / cell);
     const auto resized = layout.textRow(*diff, layout.rowForOffset(*diff, 1, padded.wrapOffset, false), false);
     check(viewer.state().wrapOffset == resized.begin && viewer.state().caret == padded.caret, "Resizing a split diff lost its source position");
     viewer.setDiffLayout(true); SendMessageW(window, WM_PAINT, 0, 0);
@@ -1757,7 +1757,8 @@ void documentFind() {
         query(L"needle");
         check(status() == L"Find in file: 1 / 2" && !viewer.state().after, "Wrapped diff search selected the wrong removal");
         Renderer metrics; metrics.setDpi(96); DiffLayout layout;
-        const int width = inlineView ? Scrollbars::contentRect(window).right : (Scrollbars::contentRect(window).right - 1) / 2;
+        const int contentWidth = Scrollbars::contentRect(window).right - 4;
+        const int width = inlineView ? contentWidth : (contentWidth - 1) / 2;
         layout.build(*longDiff, inlineView, (width - (inlineView ? 140 : 70) - 2) / metrics.cellWidth());
         const auto visible = [&] {
             const auto match = longDiff->inlineRowForText(viewer.state().anchor, viewer.state().caret);
