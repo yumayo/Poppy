@@ -274,6 +274,7 @@ private:
     void setGitView(bool tree);
     void updateGitFiles();
     void openGitFile(TreeItem item, bool diff = true);
+    void openWorkingFile(const ResourceId& path);
     SourceNode* sourceNode(TreeItem item) const;
     void updateCommitFiles(TreeItem item);
     void clearHistoryChildren(TreeItem item);
@@ -483,19 +484,28 @@ void ProjectRuntime::Impl::create() {
     changes_.hoverActionsOnly = true;
     changes_.actionLabel = [this](TreeItem item) {
         const auto source = sourceNode(item);
-        if (!source) { const auto n = historyNode(item); return n && n->kind == HistoryKind::Commit ? L"Open All Changes" : L""; }
+        if (!source) {
+            const auto n = historyNode(item);
+            return !n ? L"" : n->kind == HistoryKind::Commit ? L"Open All Changes" : n->kind == HistoryKind::File ? L"Open File" : L"";
+        }
         const auto& node = *source;
         if (node.group) return changes_.child(item) ? L"Open All Changes" : L"";
         return node.directory ? L"" : node.staged ? L"Unstage Changes" : L"Stage Changes";
     };
     changes_.actionIcon = [this](TreeItem item) {
         const auto source = sourceNode(item);
-        if (!source || source->group) return Renderer::Icon::OpenAllChanges;
+        if (!source) { const auto n = historyNode(item); return n && n->kind == HistoryKind::File ? Renderer::Icon::OpenFile : Renderer::Icon::OpenAllChanges; }
+        if (source->group) return Renderer::Icon::OpenAllChanges;
         return source->staged ? Renderer::Icon::UnstageChanges : Renderer::Icon::StageChanges;
     };
     changes_.actionClicked = [this](TreeItem item) {
         const auto source = sourceNode(item);
-        if (!source) { const auto n = historyNode(item); if (n && n->kind == HistoryKind::Commit) openGitDiff(n->root, GitDiffKind::Commit, n->revision, true, n->root); return; }
+        if (!source) {
+            const auto n = historyNode(item);
+            if (n && n->kind == HistoryKind::Commit) openGitDiff(n->root, GitDiffKind::Commit, n->revision, true, n->root);
+            else if (n && n->kind == HistoryKind::File) openWorkingFile(n->path);
+            return;
+        }
         if (!git_) return;
         if (source->group) { const auto root = git_->repositories[source->repository]->root; openGitDiff(root, source->staged ? GitDiffKind::Staged : GitDiffKind::Changes, {}, true, root); }
         else stageGitChanges(item);
@@ -913,16 +923,19 @@ void ProjectRuntime::Impl::openGitFile(TreeItem item, bool diff) {
     if (node.group || node.directory || node.entry >= repo.entries.size()) return;
     const auto entry = repo.entries[node.entry];
     if (!diff) {
-        openFile(entry.path);
-        // A normal file tab may already have been switched to diff with F6.
-        if (activeTab_ < tabs_.size() && tabs_[activeTab_].diff) {
-            saveTab(); tabs_[activeTab_].diff = false; loadTab();
-        }
-        SetFocus(viewer().window());
+        openWorkingFile(entry.path);
         return;
     }
     if (entry.state == L'?') { openFile(entry.path); return; }
     openGitDiff(entry.path, node.staged ? GitDiffKind::Staged : GitDiffKind::Changes, {}, false, repo.root);
+}
+void ProjectRuntime::Impl::openWorkingFile(const ResourceId& path) {
+    openFile(path);
+    // A normal file tab may already have been switched to diff with F6.
+    if (activeTab_ < tabs_.size() && tabs_[activeTab_].diff) {
+        saveTab(); tabs_[activeTab_].diff = false; loadTab();
+    }
+    SetFocus(viewer().window());
 }
 void ProjectRuntime::Impl::stageGitChanges(TreeItem item, bool all) {
     if (updatingGitFiles_ || gitStagePending_ || gitDiscardPending_ || gitStashPending_ || renamePending_ || !git_ || git_->repositories.empty()) return;

@@ -1863,6 +1863,19 @@ void branchSidebarTests(const fs::path& executable) {
             }, "Open File did not open an editable working file");
             send(viewer, WM_KEYDOWN, VK_BACK); waitLines(viewer, 1);
         };
+        const auto viewerKey = [&](WPARAM value, bool ctrl = false) {
+            check(AttachThreadInput(GetCurrentThreadId(), app.process.dwThreadId, TRUE) != FALSE, "Cannot attach history file input");
+            BYTE previous[256]{}, keys[256]{}; GetKeyboardState(previous);
+            if (ctrl) keys[VK_CONTROL] = keys[VK_LCONTROL] = 0x80;
+            SetFocus(viewer); SetKeyboardState(keys); send(viewer, WM_KEYDOWN, value); SetKeyboardState(previous);
+            AttachThreadInput(GetCurrentThreadId(), app.process.dwThreadId, FALSE);
+        };
+        const auto viewerText = [&] {
+            viewerKey('A', true); viewerKey('C', true);
+            if (!OpenClipboard(app.host)) return std::wstring{};
+            const auto value = GetClipboardData(CF_UNICODETEXT); const auto data = value ? static_cast<const wchar_t*>(GlobalLock(value)) : nullptr;
+            const std::wstring result = data ? data : L""; if (data) GlobalUnlock(value); CloseClipboard(); return result;
+        };
         // File actions read left to right: Open File, Discard Changes, Stage.
         const auto workingFile = nextItem(changes, TreeRelation::Child, working);
         clickFileAction(workingFile, 74); waitLines(viewer, 1);
@@ -2007,12 +2020,27 @@ void branchSidebarTests(const fs::path& executable) {
         const auto directory = nextItem(branches, TreeRelation::Child, latest), file = nextItem(branches, TreeRelation::Child, directory);
         check(file != 0, "Commit files are missing their folder hierarchy");
         send(branches, treeSelect, file); waitLines(viewer, 1);
+        clickFileAction(file, 18); checkEditable();
         click(app.window, pane.left + (pane.right - pane.left) * 3 / 4, pane.top - MulDiv(14, GetDpiForWindow(app.window), 96));
         check(children(branches, latest) == 2 && !nextItem(branches, TreeRelation::Child, nextItem(branches, TreeRelation::Child, latest)), "List did not flatten loaded commit files");
         send(branches, WM_KEYDOWN, VK_RETURN); waitLines(viewer, 1);
+        send(branches, WM_KEYDOWN, VK_F4); checkEditable();
         click(app.window, pane.left + (pane.right - pane.left) / 4, pane.top - MulDiv(14, GetDpiForWindow(app.window), 96));
         check(children(branches, nextItem(branches, TreeRelation::Child, latest)) == 1, "Tree did not restore loaded commit folders");
         send(branches, treeSelect, latest); send(branches, WM_KEYDOWN, VK_F4); waitLines(viewer, 4);
+        send(branches, treeSelect, rootCommit); send(branches, WM_KEYDOWN, VK_F4); waitLines(viewer, 5);
+        waitFor([&] { return children(branches, rootCommit) == 2; }, "The oldest commit did not load its files");
+        const auto oldFile = nextItem(branches, TreeRelation::Child, nextItem(branches, TreeRelation::Child, rootCommit));
+        check(oldFile != 0, "The oldest commit is missing its nested file");
+        clickFileAction(oldFile, 18);
+        waitFor([&] { return viewerText() == L"committed\n"; }, "History Open File opened the old revision instead of the current working file");
+        viewerKey(VK_END, true); send(viewer, WM_CHAR, '!');
+        send(branches, treeSelect, oldFile); waitLines(viewer, 1);
+        send(branches, WM_KEYDOWN, VK_F4);
+        waitFor([&] { return viewerText() == L"committed\n!"; }, "History Open File lost unsaved edits in the existing file tab");
+        check(readText(fixture.root / L"src/file.txt") == "committed\n", "History Open File saved edits without Ctrl+S");
+        viewerKey('Z', true);
+        waitFor([&] { return viewerText() == L"committed\n"; }, "History Open File lost the working file's Undo history");
         send(branches, treeSelect, rootCommit); send(branches, WM_KEYDOWN, VK_F4); waitLines(viewer, 5);
         const auto oldWorking = gitGroup(branches, false);
         PostMessageW(app.window, WM_KEYDOWN, VK_F5, 0);
