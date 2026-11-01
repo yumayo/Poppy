@@ -49,7 +49,8 @@ private:
     TerminalModel model_;
     TerminalDisplay display_;
     HPCON console_ = nullptr;
-    Handle input_, output_, process_, job_;
+    Handle input_, output_, process_;
+    ProcessJob job_;
     std::vector<std::wstring> command_;
     std::atomic<bool> stopping_{false};
     NativeThread reader_, writer_;

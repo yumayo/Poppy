@@ -1,4 +1,5 @@
 #include "wsl_events.h"
+#include "wsl_lifecycle.h"
 #include "wsl_protocol.h"
 #include "ai_status.h"
 #include <cerrno>
@@ -48,6 +49,7 @@ int serveTerminalEvents() {
     if (fcntl(STDOUT_FILENO, F_SETFL, O_NONBLOCK) < 0) throw std::runtime_error("Cannot configure notification pipe");
     std::deque<std::string> output{encodeFrame({1, encodeMessage({{"socket", paths.socket}})})};
     size_t outputBytes = output.front().size(), offset = 0;
+    struct Cleanup { const std::string& socket; ~Cleanup() { cleanupTerminalSocket(socket); } } cleanup{paths.socket};
     while (!stopped) {
         std::vector<pollfd> polls{{STDIN_FILENO, POLLIN, 0}, {STDOUT_FILENO, static_cast<short>(output.empty() ? 0 : POLLOUT), 0}, {sockets.listener, POLLIN, 0}};
         for (const auto& client : sockets.clients) polls.push_back({client.fd, static_cast<short>(client.reply.empty() ? POLLIN : POLLOUT), 0});

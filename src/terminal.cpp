@@ -76,8 +76,7 @@ bool Terminal::start() {
     const auto args = command_.empty() ? terminalShellCommand(TerminalShell::PowerShell, system) : command_;
     const auto& shell = args.front();
     std::wstring command = processCommandLine(args);
-    job_.reset(CreateJobObjectW(nullptr, nullptr)); JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{}; limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-    if (!job_ || !SetInformationJobObject(job_.value, JobObjectExtendedLimitInformation, &limits, sizeof(limits))) { error_ = winError(); DeleteProcThreadAttributeList(attributes); stop(); return false; }
+    if (!job_.create()) { error_ = winError(); DeleteProcThreadAttributeList(attributes); stop(); return false; }
     PROCESS_INFORMATION pi{};
     struct Less { bool operator()(const std::wstring& a, const std::wstring& b) const { return CompareStringOrdinal(a.c_str(), -1, b.c_str(), -1, TRUE) == CSTR_LESS_THAN; } };
     std::map<std::wstring, std::wstring, Less> inherited;
@@ -121,7 +120,7 @@ bool Terminal::start() {
     const DWORD error = ok ? 0 : GetLastError(); DeleteProcThreadAttributeList(attributes);
     if (!ok) { error_ = L"Could not start " + shell + L": " + winError(error); stop(); return false; }
     process_.reset(pi.hProcess); Handle thread(pi.hThread);
-    if (!AssignProcessToJobObject(job_.value, process_.value)) { error_ = winError(); TerminateProcess(process_.value, 1); stop(); return false; }
+    if (!AssignProcessToJobObject(job_.handle(), process_.value)) { error_ = winError(); TerminateProcess(process_.value, 1); WaitForSingleObject(process_.value, INFINITE); stop(); return false; }
     writer_.start([this] {
         for (;;) {
             std::string text; bool changeSize = false; COORD size{};
@@ -137,7 +136,8 @@ bool Terminal::start() {
             }
         }
     });
-    ResumeThread(thread.value); started_ = true; InvalidateRect(window_, nullptr, FALSE); return true;
+    if (ResumeThread(thread.value) == static_cast<DWORD>(-1)) { error_ = winError(); stop(); return false; }
+    started_ = true; InvalidateRect(window_, nullptr, FALSE); return true;
 }
 void Terminal::stop() {
     stopSelection();
@@ -146,7 +146,7 @@ void Terminal::stop() {
     if (ended) ended();
     if (window_) KillTimer(window_, 2);
     stopping_ = true; condition_.notify_all();
-    if (job_) TerminateJobObject(job_.value, 0);
+    job_.stop(0);
     if (writer_.joinable()) {
         // Repeat cancellation to cover a stop arriving just before WriteFile begins.
         while (WaitForSingleObject(writer_.native_handle(), 0) == WAIT_TIMEOUT) { CancelSynchronousIo(writer_.native_handle()); WaitForSingleObject(writer_.native_handle(), 10); }
@@ -155,7 +155,7 @@ void Terminal::stop() {
     // The reader keeps draining while ConPTY sends its final output.
     if (console_) { ClosePseudoConsole(console_); console_ = nullptr; }
     if (reader_.joinable()) { CancelSynchronousIo(reader_.native_handle()); reader_.join(); }
-    input_.reset(); output_.reset(); process_.reset(); job_.reset(); started_ = false;
+    input_.reset(); output_.reset(); process_.reset(); started_ = false;
     { std::lock_guard<std::mutex> lock(mutex_); received_.clear(); writes_.clear(); writeBytes_ = 0; notified_ = resizePending_ = false; }
     continuationPosted_ = false;
     display_.update(model_, scroll_, GetTickCount64(), true);

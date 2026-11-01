@@ -62,30 +62,35 @@ bool stopTerminal(const std::string& token) {
     socklen_t length; const auto address = terminalAddress(token, length); Fd socketFd(socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0));
     if (socketFd.value < 0 || connect(socketFd.value, reinterpret_cast<const sockaddr*>(&address), length)) return false;
     const char command = 'S'; if (send(socketFd.value, &command, 1, MSG_NOSIGNAL) != 1) return false;
-    pollfd fd{socketFd.value, POLLIN, 0}; if (poll(&fd, 1, 3000) <= 0) return false;
+    pollfd fd{socketFd.value, POLLIN, 0};
+    int ready; do { ready = poll(&fd, 1, -1); } while (ready < 0 && errno == EINTR);
+    if (ready <= 0) return false;
     char result = 0; return recv(socketFd.value, &result, 1, 0) == 1 && result == 'K';
 }
 std::vector<pid_t> descendants(pid_t parent) {
-    std::vector<pid_t> result; std::deque<pid_t> pending{parent};
+    std::vector<pid_t> result; std::deque<pid_t> pending{parent}; std::set<pid_t> seen{parent};
     while (!pending.empty() && result.size() < 16384) {
         const auto pid = pending.front(); pending.pop_front();
-        std::ifstream children("/proc/" + std::to_string(pid) + "/task/" + std::to_string(pid) + "/children"); pid_t child;
-        while (children >> child) if (child > 1) { result.push_back(child); pending.push_back(child); }
+        const auto path = "/proc/" + std::to_string(pid) + "/task";
+        auto tasks = opendir(path.c_str()); if (!tasks) continue;
+        while (auto task = readdir(tasks)) {
+            if (task->d_name[0] == '.') continue;
+            std::ifstream children(path + '/' + task->d_name + "/children"); pid_t child;
+            while (children >> child) if (child > 1 && seen.insert(child).second) { result.push_back(child); pending.push_back(child); }
+        }
+        closedir(tasks);
     }
     return result;
 }
 bool cleanupTerminal() {
-    for (const auto signal : {SIGTERM, SIGKILL}) {
-        const auto deadline = Clock::now() + std::chrono::milliseconds(signal == SIGTERM ? 700 : 1000);
-        do {
-            const auto children = descendants(getpid());
-            for (auto it = children.rbegin(); it != children.rend(); ++it) kill(*it, signal);
-            int status = 0; while (waitpid(-1, &status, WNOHANG) > 0) {}
-            if (descendants(getpid()).empty()) return true;
-            poll(nullptr, 0, 20);
-        } while (Clock::now() < deadline);
+    const auto deadline = Clock::now() + std::chrono::milliseconds(700);
+    for (;;) {
+        const auto children = descendants(getpid());
+        for (auto it = children.rbegin(); it != children.rend(); ++it) kill(*it, Clock::now() < deadline ? SIGTERM : SIGKILL);
+        int status = 0; while (waitpid(-1, &status, WNOHANG) > 0) {}
+        if (descendants(getpid()).empty()) return true;
+        poll(nullptr, 0, 20);
     }
-    return false;
 }
 int terminal(int argc, char** argv) {
     if (argc < 5) throw std::runtime_error("Invalid terminal invocation");
@@ -231,6 +236,7 @@ Server::~Server() {
     for (auto& worker : workers_) if (worker.joinable()) worker.join();
     if (searchWorker_.joinable()) searchWorker_.join();
     if (watcher_.joinable()) watcher_.join();
+    cleanupTerminal();
 }
 void Server::writeOutput(std::string_view bytes) {
     std::lock_guard<std::mutex> lock(outputMutex_); size_t offset = 0;

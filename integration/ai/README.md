@@ -79,13 +79,17 @@ HTTP通知とWindows上のCLI向け通知は廃止しました。`.aicontainer`�
 
 接続は最大32件、受信期限は2秒、1通知は16 KiB、本文は8 KiBです。匿名パイプへ送る待ち行列は最大1,024件・1 MiBで、上限時は`BUSY`を返します。`OK`はリレーへの受け付けを表し、Poppyでの最終反映の確認ではありません。Poppy側の配送待ちも最大1,024件です。
 
-ターミナルの終了やPoppyとのパイプ切断でリレーを終了し、ソケットと専用ディレクトリを削除します。ターミナルごとに経路が独立するため、別のターミナルの通知は継続します。同じターミナル内で独立したAIを並列実行すると通知先を共有するため、AIごとにターミナルを分けてください。Dockerデーモン上のコンテナの停止・後始末は通常の`aicontainer`の管理範囲です。
+ターミナルの終了やPoppyとのパイプ切断で、リレーは新しい起動用のソケットを削除し、同じソケットをマウントしたAIコンテナを停止・削除します。Dockerのコンテナ名やCLIの名前では判定せず、マウント元がそのターミナル専用ソケットのパスと一致するものだけが対象です。Docker操作はWSLホスト側で行い、AIコンテナへのDocker権限の追加は不要です。
+
+次に`AICONTAINER_EVENT_SOCKET`を引き継いだWSLプロセスとその子孫を終了し、ロックを解放するまで待ちます。PowerShell／Git Bashから手入力した`wsl`も対象です。WSLでは子からSIGTERMを送り、700 msで終了しないプロセスにはSIGKILLを送り、終了確認を続けます。最後にWindows側のジョブ内の全プロセスの終了を待ちます。通常の終了では、この後始末が終わるまでPoppy.exeは終了しません。Dockerがインストールされていない通常のシェルではコンテナ操作を省略します。Dockerがある環境で照会・停止を確認できない場合は再試行し、終了待ちを続けます。
+
+ターミナルごとに経路が独立するため、別のターミナルは終了しません。同じターミナル内で起動したAIは同じ終了対象になります。以前のPoppyから残ったコンテナや、通知ソケットを引き継がず起動した別の環境は識別できません。更新時はPoppy.exeと同梱の`wsl/`フォルダーを一緒に置き換え、ターミナルを開き直してください。
 
 ## 検証
 
 - `python3 tests/hook_scripts_tests.py`: Unixソケット通知、ソケット未設定時の動作、hookの導入・解除。
 - `python3 tests/codex_poll_tests.py`: 開始・完了・中断・終了hookを省略した状態の復旧、再送、入力待ち、会話切り替え、二重起動防止、コンパクトと途中のJSONL、履歴DBの読み取り。
-- `python3 tests/hook_relay_tests.py`: ビルド済みの実WSLヘルパーと導入済みhookをUnixソケット・匿名パイプで接続。PowerShell向けの単独ヘルパー配置・再利用と終了時のソケット削除も検証。別のビルドを使う場合は`POPPY_TEST_WSL_HELPER=/path/to/poppy-wsl-helper`を指定。
+- `python3 tests/hook_relay_tests.py`: ビルド済みの実WSLヘルパーと導入済みhookをUnixソケット・匿名パイプで接続。PowerShell向けの単独ヘルパー配置・再利用、子孫プロセスのロック解放、別ターミナルの保持、Dockerモックによる所有判定・停止完了待ち・照会失敗時の再試行も検証。別のビルドを使う場合は`POPPY_TEST_WSL_HELPER=/path/to/poppy-wsl-helper`を指定。
 - Windowsの`poppy_render_tests`: Git for Windowsがある場合、Git BashからWindowsプロセスへ通知ソケットのLinuxパスがそのまま渡り、既存のパス変換除外も保持されることを検証。
 - ai-containerの`python3 -m unittest discover -s test -p test_aicontainer_dns.py`: Dockerモックで通常起動時のソケット自動マウントとパスの引用を検証。
 

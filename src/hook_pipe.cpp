@@ -23,14 +23,14 @@ std::string HookPipe::start(const std::vector<std::wstring>& command, std::funct
         if (!UpdateProcThreadAttribute(list, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, inherited, sizeof(inherited), nullptr, nullptr)) throw std::runtime_error("Cannot inherit notification pipes");
         STARTUPINFOEXW startup{}; startup.StartupInfo.cb = sizeof(startup); startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
         startup.StartupInfo.hStdInput = childInput.value; startup.StartupInfo.hStdOutput = childOutput.value; startup.StartupInfo.hStdError = diagnostics.value; startup.lpAttributeList = list;
-        job_.reset(CreateJobObjectW(nullptr, nullptr)); JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{}; limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-        if (!job_ || !SetInformationJobObject(job_.value, JobObjectExtendedLimitInformation, &limits, sizeof(limits))) throw std::runtime_error("Cannot track notification process");
+        if (!job_.create()) throw std::runtime_error("Cannot track notification process");
         auto arguments = processCommandLine(command); PROCESS_INFORMATION pi{};
         const auto directory = windowsProcessDirectory();
         if (!CreateProcessW(command.front().c_str(), arguments.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW | CREATE_SUSPENDED | EXTENDED_STARTUPINFO_PRESENT, nullptr, directory.c_str(), &startup.StartupInfo, &pi)) throw std::runtime_error("Cannot start WSL notifications");
         process_.reset(pi.hProcess); Handle thread(pi.hThread);
-        if (!AssignProcessToJobObject(job_.value, process_.value)) { TerminateProcess(process_.value, 1); throw std::runtime_error("Cannot track WSL notifications"); }
-        ResumeThread(thread.value); childInput.reset(); childOutput.reset();
+        if (!AssignProcessToJobObject(job_.handle(), process_.value)) { TerminateProcess(process_.value, 1); WaitForSingleObject(process_.value, INFINITE); process_.reset(); throw std::runtime_error("Cannot track WSL notifications"); }
+        if (ResumeThread(thread.value) == static_cast<DWORD>(-1)) { job_.stop(); throw std::runtime_error("Cannot resume WSL notifications"); }
+        childInput.reset(); childOutput.reset();
         stopping_ = false;
         if (!input.empty()) uploader_.start([this, bytes = std::move(input)] {
             size_t offset = 0;
@@ -56,7 +56,7 @@ std::string HookPipe::start(const std::vector<std::wstring>& command, std::funct
                 if (GetTickCount64() >= deadline || WaitForSingleObject(process_.value, 15) == WAIT_OBJECT_0) throw std::runtime_error("WSL notification relay did not start");
             }
         }
-        stopping_ = false; running_ = true;
+        stopping_ = false; running_ = true; ready_ = true;
         reader_.start([this, receive = std::move(receive)] {
             try {
                 wsl::FrameReader stream;
@@ -77,7 +77,7 @@ std::string HookPipe::start(const std::vector<std::wstring>& command, std::funct
         return socket;
     } catch (...) { stop(); throw; }
 }
-void HookPipe::stop() {
+bool HookPipe::stop() {
     stopping_ = true;
     if (uploader_.joinable()) {
         while (WaitForSingleObject(uploader_.native_handle(), 0) == WAIT_TIMEOUT) {
@@ -87,7 +87,15 @@ void HookPipe::stop() {
     }
     input_.reset();
     reader_.join();
-    if (process_ && WaitForSingleObject(process_.value, 2000) != WAIT_OBJECT_0 && job_) TerminateJobObject(job_.value, 1);
-    process_.reset(); output_.reset(); job_.reset(); running_ = false;
+    // EOF asks the Linux relay to stop its containers and Linux processes.
+    // Killing wsl.exe after a fixed timeout would abandon that cleanup.
+    bool cleaned = false;
+    if (process_) {
+        WaitForSingleObject(process_.value, INFINITE);
+        DWORD code = 1; cleaned = ready_ && GetExitCodeProcess(process_.value, &code) && code == 0;
+    }
+    job_.stop();
+    process_.reset(); output_.reset(); running_ = false; ready_ = false;
+    return cleaned;
 }
 }

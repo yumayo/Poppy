@@ -3,12 +3,14 @@ import sys
 sys.dont_write_bytecode = True
 import json
 import hashlib
+import fcntl
 import os
 from pathlib import Path
 import select
 import re
 import shlex
 import socket
+import signal
 import struct
 import subprocess
 import tempfile
@@ -29,7 +31,7 @@ class RelayTests(unittest.TestCase):
         self.server, self.socket = self.start_server()
         self.environment = dict(os.environ, AICONTAINER_EVENT_SOCKET=str(self.socket))
 
-    def start_server(self, bootstrap_home=None):
+    def start_server(self, bootstrap_home=None, extra_environment=None):
         command = [str(HELPER), "--events"]
         environment = None
         binary = b""
@@ -40,6 +42,8 @@ class RelayTests(unittest.TestCase):
             command = ["/bin/sh", "-c", script, "poppy-bootstrap", version,
                        hashlib.sha256(binary).hexdigest(), str(len(binary)), "--events"]
             environment = dict(os.environ, HOME=str(bootstrap_home))
+        if extra_environment:
+            environment = dict(environment or os.environ, **extra_environment)
         process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                    stderr=subprocess.PIPE, bufsize=0, env=environment)
         self.addCleanup(self.stop, process)
@@ -132,6 +136,128 @@ class RelayTests(unittest.TestCase):
         self.stop(self.server)
         self.assertFalse(self.socket.exists())
         self.assertFalse(self.socket.parent.exists())
+
+    def test_cleanup_waits_for_only_the_containers_with_this_socket(self):
+        docker = self.root / "docker"
+        docker.write_text(f"#!{sys.executable}\n" + '''
+import json
+import os
+from pathlib import Path
+import sys
+import time
+
+root = Path(os.environ["POPPY_DOCKER_FIXTURE"])
+args = sys.argv[1:]
+with (root / "calls.jsonl").open("a") as output:
+    output.write(json.dumps(args) + "\\n")
+owned, sibling = "a" * 64, "b" * 64
+if args == ["ps", "--all", "--quiet", "--no-trunc"]:
+    if not (root / "query-release").exists():
+        (root / "querying").touch()
+        sys.exit(1)
+    if not (root / "removed").exists():
+        print(owned)
+    print(sibling)
+elif args[:2] == ["inspect", "--format"]:
+    assert str((root / "socket").read_text()) in args[2]
+    if owned in args[3:]:
+        print(owned)
+elif args == ["stop", "--time", "1", owned]:
+    (root / "stopping").touch()
+    while not (root / "release").exists():
+        time.sleep(0.01)
+    (root / "stopped").touch()
+elif args == ["rm", "--force", owned]:
+    assert (root / "stopped").exists()
+    (root / "removed").touch()
+else:
+    raise AssertionError(args)
+''')
+        docker.chmod(0o755)
+        process, filename = self.start_server(extra_environment={
+            "PATH": str(self.root) + os.pathsep + os.environ.get("PATH", ""),
+            "POPPY_DOCKER_FIXTURE": str(self.root),
+        })
+        self.addCleanup(lambda: ((self.root / "release").touch(), (self.root / "query-release").touch()))
+        (self.root / "socket").write_text(str(filename))
+        process.stdin.close(); process.stdin = None
+        deadline = time.monotonic() + 3
+        while not (self.root / "querying").exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertTrue((self.root / "querying").exists())
+        self.assertIsNone(process.poll(), "Docker query failure was treated as successful cleanup")
+        (self.root / "query-release").touch()
+        deadline = time.monotonic() + 3
+        while not (self.root / "stopping").exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertTrue((self.root / "stopping").exists(), "The relay did not request container shutdown")
+        self.assertIsNone(process.poll(), "The relay exited before the container stopped")
+        (self.root / "release").touch()
+        self.stop(process)
+        self.assertTrue((self.root / "stopped").exists())
+        self.assertTrue((self.root / "removed").exists())
+        calls = [json.loads(line) for line in (self.root / "calls.jsonl").read_text().splitlines()]
+        self.assertEqual([call for call in calls if call[0] == "stop"], [["stop", "--time", "1", "a" * 64]])
+
+    def test_cleanup_stops_wsl_descendants_and_releases_locks(self):
+        other, other_socket = self.start_server()
+        script = self.root / "process.py"
+        script.write_text('''
+import fcntl
+import os
+from pathlib import Path
+import signal
+import subprocess
+import sys
+import time
+
+root = Path(sys.argv[1])
+if len(sys.argv) == 3:
+    os.setsid()
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    lock = (root / "lock").open("w")
+    fcntl.flock(lock, fcntl.LOCK_EX)
+    (root / "pid").write_text(str(os.getpid()))
+else:
+    environment = dict(os.environ)
+    environment.pop("AICONTAINER_EVENT_SOCKET", None)
+    child = subprocess.Popen([sys.executable, __file__, str(root), "child"], env=environment)
+while True:
+    time.sleep(1)
+''')
+        parent = subprocess.Popen([sys.executable, str(script), str(self.root)],
+                                  env=self.environment, stdin=subprocess.DEVNULL)
+        sibling = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"],
+                                   env=dict(os.environ, AICONTAINER_EVENT_SOCKET=str(other_socket)))
+        self.addCleanup(sibling.wait)
+        self.addCleanup(lambda: sibling.poll() is None and sibling.kill())
+        self.addCleanup(lambda: parent.poll() is None and parent.kill())
+        deadline = time.monotonic() + 3
+        while not (self.root / "pid").exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertTrue((self.root / "pid").exists(), "WSL descendant did not acquire the lock")
+        child = int((self.root / "pid").read_text())
+        self.addCleanup(lambda: self.kill_if_alive(child))
+        self.stop(self.server)
+        parent.wait(timeout=3)
+        self.assertIsNone(sibling.poll(), "Closing one terminal stopped a sibling")
+        with (self.root / "lock").open("w") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        self.assertFalse(self.alive(child), "A detached WSL descendant survived shutdown")
+        self.stop(other)
+        sibling.wait(timeout=3)
+
+    @staticmethod
+    def alive(pid):
+        try:
+            return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0] not in ("Z", "X")
+        except FileNotFoundError:
+            return False
+
+    @classmethod
+    def kill_if_alive(cls, pid):
+        if cls.alive(pid):
+            os.kill(pid, signal.SIGKILL)
 
     def test_bootstrap_installs_and_reuses_standalone_notification_helper(self):
         home = self.root / "home 日本語 ' $"

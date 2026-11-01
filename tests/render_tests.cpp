@@ -1591,6 +1591,35 @@ void selectionAutoScrolling() {
     }
     check(!buffer->dirty(), "Selection scrolling edited the buffer");
 }
+void terminalProcessShutdown() {
+    std::wstring module(32768, L'\0'); const auto count = GetModuleFileNameW(nullptr, module.data(), static_cast<DWORD>(module.size()));
+    check(count && count < module.size(), "Cannot locate terminal lifetime fixture"); module.resize(count);
+    const auto executable = fs::path(module).parent_path() / L"poppy_process_lifetime_tests.exe";
+    const auto directory = fs::temp_directory_path() / (L"Poppy ConPTY lifetime " + std::to_wstring(GetCurrentProcessId()));
+    fs::create_directories(directory);
+    struct Cleanup { fs::path path; ~Cleanup() { std::error_code error; fs::remove_all(path, error); } } cleanup{directory};
+    const auto instance = GetModuleHandleW(nullptr);
+    const auto parent = CreateWindowExW(0, L"STATIC", L"Lifetime test", WS_POPUP, 0, 0, 640, 360, nullptr, nullptr, instance, nullptr);
+    check(parent != nullptr, "Cannot create terminal lifetime window");
+    struct Window { HWND value; ~Window() { DestroyWindow(value); } } owner{parent};
+    Terminal first, second;
+    int index = 0;
+    for (auto terminal : {&first, &second}) {
+        terminal->create(parent, instance); terminal->setDirectory(directory);
+        terminal->setCommand({executable.native(), L"--tree", (directory / std::to_wstring(index++)).native(), L"Poppy-ConPTY-lifetime"});
+        check(terminal->launch(), "Cannot launch terminal lifetime fixture");
+    }
+    const auto start = GetTickCount64();
+    while (first.title() != "Poppy lifetime ready" || second.title() != "Poppy lifetime ready") {
+        MSG message{}; while (PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE)) { TranslateMessage(&message); DispatchMessageW(&message); }
+        Terminal::pump(); check(GetTickCount64() - start < 10000, "Terminal lifetime fixture did not become ready");
+        Sleep(10);
+    }
+    first.stop();
+    Handle lock(CreateFileW((directory / L"0").c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr));
+    check(static_cast<bool>(lock), "Terminal shutdown returned while a descendant held its lock");
+    check(second.running(), "Closing a terminal stopped its sibling"); second.stop();
+}
 void terminalGitBashSocketEnvironment() {
     const auto bash = terminalShellCommand(TerminalShell::GitBash, L"").front();
     if (!fs::is_regular_file(bash)) {
@@ -1834,6 +1863,7 @@ int main() {
     int result = 0;
     try {
         initializeRendering();
+        terminalProcessShutdown();
         statusBarLimits(); treeMultipleSelection(); inlineTreeInput(); cellPositions(); colorsAndClipping(); imagePreviews(); smoothIcons(); windowTargets(); editableDiff(); editorCaret(); imeCellRendering(); imeUiRendering(); imePositions(); editorWordSelection(); editorWordMovement(); editorLineShortcuts(); editorWrapping(); diffWrapping(); documentFind(); horizontalWheelScrolling(); continuousViewerScrolling(); selectionAutoScrolling(); terminalGitBashSocketEnvironment(); terminalSelectionAutoScrolling(); themedScrollbars(); quickOpenStability();
         std::cout << "Direct2D rendering tests passed\n";
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; result = 1; }

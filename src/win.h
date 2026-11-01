@@ -53,6 +53,19 @@ struct Handle {
     explicit operator bool() const { return value != nullptr; }
 };
 
+// Own only the launched processes, never Poppy itself. Closing a job requests
+// termination asynchronously; keep it open until every descendant has exited.
+class ProcessJob {
+public:
+    ~ProcessJob() { stop(); }
+    bool create();
+    void stop(DWORD exitCode = 1);
+    HANDLE handle() const { return job_.value; }
+    explicit operator bool() const { return static_cast<bool>(job_); }
+private:
+    Handle job_;
+};
+
 // A real Windows thread HANDLE is required by CancelSynchronousIo. MinGW's
 // std::thread::native_handle() is a pthread_t when using the POSIX runtime.
 class NativeThread {

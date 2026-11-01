@@ -10,6 +10,24 @@
 #include <system_error>
 
 namespace poppy {
+bool ProcessJob::create() {
+    stop();
+    job_.reset(CreateJobObjectW(nullptr, nullptr));
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
+    limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    if (job_ && SetInformationJobObject(job_.value, JobObjectExtendedLimitInformation, &limits, sizeof(limits))) return true;
+    const auto error = GetLastError(); job_.reset(); SetLastError(error); return false;
+}
+void ProcessJob::stop(DWORD exitCode) {
+    if (!job_) return;
+    TerminateJobObject(job_.value, exitCode);
+    JOBOBJECT_BASIC_ACCOUNTING_INFORMATION accounting{};
+    for (;;) {
+        if (QueryInformationJobObject(job_.value, JobObjectBasicAccountingInformation, &accounting, sizeof(accounting), nullptr) && !accounting.ActiveProcesses) break;
+        TerminateJobObject(job_.value, exitCode); Sleep(10);
+    }
+    job_.reset();
+}
 void ImeComposition::update(HWND window, LPARAM flags) {
     if (!flags) { clear(); return; }
     active_ = true;
@@ -205,42 +223,42 @@ ProcessResult runProcess(const std::vector<std::wstring>& args, const fs::path& 
     si.StartupInfo.dwFlags = STARTF_USESTDHANDLES; si.StartupInfo.hStdInput = input.value; si.StartupInfo.hStdOutput = si.StartupInfo.hStdError = childOutput.value;
     auto command = processCommandLine(args);
     PROCESS_INFORMATION pi{};
-    Handle job(CreateJobObjectW(nullptr, nullptr));
-    JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{}; limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-    if (!job || !SetInformationJobObject(job.value, JobObjectExtendedLimitInformation, &limits, sizeof(limits))) { result.error = winError(); DeleteProcThreadAttributeList(attributes); return result; }
+    ProcessJob job;
+    if (!job.create()) { result.error = winError(); DeleteProcThreadAttributeList(attributes); return result; }
     const BOOL ok = CreateProcessW(nullptr, command.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW | CREATE_SUSPENDED | EXTENDED_STARTUPINFO_PRESENT, nullptr, directory.c_str(), &si.StartupInfo, &pi);
     const DWORD error = ok ? 0 : GetLastError();
     DeleteProcThreadAttributeList(attributes);
     if (!ok) { result.error = winError(error); return result; }
     Handle process(pi.hProcess), thread(pi.hThread);
-    if (!AssignProcessToJobObject(job.value, process.value)) { result.error = winError(); TerminateProcess(process.value, 1); return result; }
-    ResumeThread(thread.value); childOutput.reset(); input.reset();
+    if (!AssignProcessToJobObject(job.handle(), process.value)) { result.error = winError(); TerminateProcess(process.value, 1); WaitForSingleObject(process.value, INFINITE); return result; }
+    if (ResumeThread(thread.value) == static_cast<DWORD>(-1)) { result.error = winError(); return result; }
+    childOutput.reset(); input.reset();
     const ULONGLONG start = GetTickCount64();
     char buffer[8192];
     for (;;) {
-        if (cancelled && *cancelled) { result.error = L"Git operation cancelled."; TerminateJobObject(job.value, 1); break; }
+        if (cancelled && *cancelled) { result.error = L"Git operation cancelled."; break; }
         DWORD available = 0;
         if (!PeekNamedPipe(output.value, nullptr, 0, nullptr, &available, nullptr)) break;
         if (available) {
             DWORD count = 0;
             if (!ReadFile(output.value, buffer, std::min<DWORD>(available, sizeof(buffer)), &count, nullptr) || !count) break;
             result.output.append(buffer, count);
-            if (result.output.size() > 4 * 1024 * 1024) { result.error = L"Git output exceeds the 4 MiB limit."; TerminateJobObject(job.value, 1); break; }
+            if (result.output.size() > 4 * 1024 * 1024) { result.error = L"Git output exceeds the 4 MiB limit."; break; }
         } else if (WaitForSingleObject(process.value, 15) == WAIT_OBJECT_0) {
             // The process may have written its final bytes during the wait.
             DWORD remaining = 0;
             if (!PeekNamedPipe(output.value, nullptr, 0, nullptr, &remaining, nullptr) || !remaining) break;
         }
-        if (GetTickCount64() - start > timeoutMs) { result.error = L"Git operation timed out."; TerminateJobObject(job.value, 1); break; }
+        if (timeoutMs != INFINITE && GetTickCount64() - start > timeoutMs) { result.error = L"Git operation timed out."; break; }
     }
     if (result.error.empty()) {
         while (WaitForSingleObject(process.value, 15) != WAIT_OBJECT_0) {
             if (cancelled && *cancelled) { result.error = L"Git operation cancelled."; break; }
-            if (GetTickCount64() - start >= timeoutMs) { result.error = L"Git operation timed out."; break; }
+            if (timeoutMs != INFINITE && GetTickCount64() - start >= timeoutMs) { result.error = L"Git operation timed out."; break; }
         }
-        if (!result.error.empty()) TerminateJobObject(job.value, 1);
-        else GetExitCodeProcess(process.value, &result.code);
+        if (result.error.empty()) GetExitCodeProcess(process.value, &result.code);
     }
+    job.stop();
     if (result.code != 0 && result.error.empty()) result.error = wide(result.output);
     return result;
 }

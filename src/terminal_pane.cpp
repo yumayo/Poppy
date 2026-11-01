@@ -65,9 +65,11 @@ void TerminalPane::add(SavedTerminal configuration) {
         if (changed) changed();
     };
     session->terminal->stopping = [this, ptr] {
+        // Stop Docker-owned AI processes before their WSL/Windows launchers.
+        const bool cleaned = ptr->events.stop();
         if (!ptr->wslToken.empty()) {
             const auto token = std::exchange(ptr->wslToken, {}); const bool running = ptr->terminal->running();
-            if (provider_ && !provider_->stopTerminal(token) && running) MessageBoxW(GetAncestor(window_, GA_ROOT), L"Could not confirm that this WSL terminal's child processes have exited. Check the processes in this distribution.", L"Poppy — WSL cleanup unconfirmed", MB_OK | MB_ICONWARNING);
+            if (!cleaned && provider_ && !provider_->stopTerminal(token) && running) MessageBoxW(GetAncestor(window_, GA_ROOT), L"Could not confirm that this WSL terminal's child processes have exited. Check the processes in this distribution.", L"Poppy — WSL cleanup unconfirmed", MB_OK | MB_ICONWARNING);
         }
     };
     session->terminal->ended = [this,ptr] {

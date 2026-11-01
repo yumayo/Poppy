@@ -63,7 +63,8 @@ private:
     std::deque<std::string> writes_;
     size_t writeBytes_ = 0;
     size_t responseBytes_ = 0;
-    Handle input_, output_, diagnostics_, process_, job_;
+    Handle input_, output_, diagnostics_, process_;
+    ProcessJob job_;
     NativeThread reader_, writer_;
     std::atomic<bool> stopping_{false};
     std::atomic<ConnectionState> state_{ConnectionState::Disconnected};
@@ -80,17 +81,19 @@ std::vector<std::wstring> Connection::command() const {
 void Connection::fail(const std::wstring& error) {
     { std::lock_guard<std::mutex> lock(mutex_); error_ = error; if (!diagnostic_.empty() && validUtf8(diagnostic_)) error_ += L"\n" + wide(diagnostic_); state_ = ConnectionState::Unavailable; stopping_ = true; for (auto& item : pending_) { item.second->response.metadata["error"] = utf8(error_); item.second->done = true; } }
     ++revision_; condition_.notify_all();
-    if (job_) TerminateJobObject(job_.value, 1);
 }
 void Connection::stop() {
     if (state_ == ConnectionState::Ready && !stopping_) {
         try { send({1, encodeMessage({{"op", "shutdown"}})}, 500); if (process_) WaitForSingleObject(process_.value, 500); } catch (const std::exception&) {}
     }
     stopping_ = true; condition_.notify_all();
-    if (process_) TerminateJobObject(job_.value, 1);
     if (writer_.joinable()) while (WaitForSingleObject(writer_.native_handle(), 0) == WAIT_TIMEOUT) { CancelSynchronousIo(writer_.native_handle()); WaitForSingleObject(writer_.native_handle(), 10); }
     writer_.join(); reader_.join();
-    input_.reset(); output_.reset(); diagnostics_.reset(); process_.reset(); job_.reset();
+    input_.reset();
+    // Let EOF reach the Linux helper and wait for its Git workers to clean up.
+    if (process_) WaitForSingleObject(process_.value, INFINITE);
+    job_.stop();
+    output_.reset(); diagnostics_.reset(); process_.reset();
     { std::lock_guard<std::mutex> lock(mutex_); writes_.clear(); writeBytes_ = 0; }
 }
 void Connection::reconnect() { std::lock_guard<std::mutex> lock(startMutex_); if (state_ == ConnectionState::Unavailable || state_ == ConnectionState::Disconnected) { stop(); state_ = ConnectionState::Disconnected; } }
@@ -112,16 +115,16 @@ void Connection::start() {
     struct Delete { LPPROC_THREAD_ATTRIBUTE_LIST list; ~Delete() { DeleteProcThreadAttributeList(list); } } cleanup{list};
     HANDLE inherited[]{childInput.value, childOutput.value, childError.value}; if (!UpdateProcThreadAttribute(list, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, inherited, sizeof(inherited), nullptr, nullptr)) throw std::runtime_error(utf8(winError()));
     STARTUPINFOEXW startup{}; startup.StartupInfo.cb = sizeof(startup); startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES; startup.StartupInfo.hStdInput = childInput.value; startup.StartupInfo.hStdOutput = childOutput.value; startup.StartupInfo.hStdError = childError.value; startup.lpAttributeList = list;
-    job_.reset(CreateJobObjectW(nullptr, nullptr)); JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{}; limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-    if (!job_ || !SetInformationJobObject(job_.value, JobObjectExtendedLimitInformation, &limits, sizeof(limits))) throw std::runtime_error(utf8(winError()));
+    if (!job_.create()) throw std::runtime_error(utf8(winError()));
     auto line = processCommandLine(args);
     PROCESS_INFORMATION pi{}; const auto cwd = windowsProcessDirectory();
     if (!CreateProcessW(args[0].c_str(), line.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW | CREATE_SUSPENDED | EXTENDED_STARTUPINFO_PRESENT, nullptr, cwd.c_str(), &startup.StartupInfo, &pi)) throw std::runtime_error(utf8(winError()));
     process_.reset(pi.hProcess); Handle thread(pi.hThread);
-    if (!AssignProcessToJobObject(job_.value, process_.value)) { TerminateProcess(process_.value, 1); throw std::runtime_error(utf8(winError())); }
+    if (!AssignProcessToJobObject(job_.handle(), process_.value)) { const auto error = winError(); TerminateProcess(process_.value, 1); WaitForSingleObject(process_.value, INFINITE); process_.reset(); throw std::runtime_error(utf8(error)); }
     stopping_ = false; diagnostic_.clear();
     { std::lock_guard<std::mutex> lock(mutex_); watchLimited_ = false; watchUsage_.reset(); }
-    ResumeThread(thread.value); childInput.reset(); childOutput.reset(); childError.reset();
+    if (ResumeThread(thread.value) == static_cast<DWORD>(-1)) { const auto error = winError(); job_.stop(); throw std::runtime_error(utf8(error)); }
+    childInput.reset(); childOutput.reset(); childError.reset();
     reader_.start([this] {
         FrameReader frames;
         try {
@@ -259,7 +262,7 @@ std::vector<std::wstring> Connection::terminalEvents() const {
 bool Connection::stopTerminal(const std::string& token) const {
     std::vector<std::wstring> args;
     { std::lock_guard<std::mutex> lock(mutex_); if (helperPath_.empty() || helperPath_[0] != '/') return false; args = command(); args.insert(args.end(), {wide(helperPath_), L"--stop-terminal", wide(token)}); }
-    return runProcess(args, windowsProcessDirectory(), 4000).code == 0;
+    return runProcess(args, windowsProcessDirectory(), INFINITE).code == 0;
 }
 class WslProvider final : public ProjectProvider {
 public:
