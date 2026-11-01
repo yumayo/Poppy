@@ -82,7 +82,7 @@ std::wstring tabTitle(const Tab& tab) {
     if (tab.diffKind == GitDiffKind::Commit) title += L" · " + wide(tab.revision.substr(0, 8));
     else if (tab.diffKind == GitDiffKind::Staged) title += L" · Staged";
     else if (tab.diffKind != GitDiffKind::Automatic) title += L" · Changes";
-    return title + (tab.buffer && tab.buffer->dirty() ? L" *" : L"") + (tab.diff ? L" (diff)" : L"");
+    return title + (tab.diff ? L" (diff)" : L"");
 }
 struct TabDrop { size_t position; RECT marker; int group = 0; };
 struct EditorGroup { RECT tabs{}, body{}; std::vector<size_t> indices, starts; size_t firstRow = 0, rows = 0; bool overflow() const { return starts.size() > rows; } };
@@ -671,7 +671,9 @@ void ProjectRuntime::Impl::layout(bool revealTab) {
             for (size_t j = 0; j < pane.indices.size(); ++j) {
                 const size_t i = pane.indices[j]; const auto& tab = tabs_[i];
                 const auto title = tabTitle(tab);
-                const int width = std::min(std::max(0, available), renderer_.textWidth(title, tab.preview) + MulDiv(40, dpi_, 96));
+                // Reserve the modified marker even for clean tabs, so editing
+                // does not change their width or hide the marker in the title.
+                const int width = std::min(std::max(0, available), renderer_.textWidth(title, tab.preview) + MulDiv(52, dpi_, 96));
                 if (!j || tab.pinned != tabs_[pane.indices[j - 1]].pinned || (x > start && x + width > start + available)) { pane.starts.push_back(j); x = start; ++row; }
                 tabRects_[i] = {x, toolbar_ + row * rowHeight, x + width, toolbar_ + (row + 1) * rowHeight}; x += width;
             }
@@ -771,8 +773,13 @@ void ProjectRuntime::Impl::paint() {
             dc.fill(rect, active ? panel : background);
             if (active) dc.fill({rect.left, rect.top, rect.right, rect.top + scaled(2)}, accent);
             const auto title = tabTitle(tabs_[i]);
-            dc.label({rect.left + scaled(12), rect.top, rect.right - scaled(28), rect.bottom}, title, active ? foreground : muted,
+            dc.label({rect.left + scaled(12), rect.top, rect.right - scaled(40), rect.bottom}, title, active ? foreground : muted,
                 DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS, tabs_[i].preview);
+            // Draw unsaved state outside the ellipsized filename, before the
+            // close/pin control. This also applies to editable diff tabs.
+            if (tabs_[i].buffer && tabs_[i].buffer->dirty())
+                dc.label({rect.right - scaled(40), rect.top, rect.right - scaled(28), rect.bottom}, L"*", active ? foreground : muted,
+                    DT_CENTER | DT_VCENTER | DT_SINGLELINE);
             if (tabs_[i].pinned) {
                 const float x = static_cast<float>(rect.right - scaled(16)), y = static_cast<float>((rect.top + rect.bottom) / 2);
                 const float unit = static_cast<float>(dpi_) / 96.0f;
