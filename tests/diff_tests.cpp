@@ -2,6 +2,7 @@
 #include "diff_layout.h"
 #include "git_history.h"
 #include "edit_buffer.h"
+#include "change_marks.h"
 #include <cstdlib>
 #include <iostream>
 #include <stdexcept>
@@ -40,6 +41,72 @@ void editorLineChanges() {
     check(buffer.undo(anchor, caret) && changedWorkingLines(before, buffer.document) == std::vector<bool>({false, false, false}), "Undo left stale changed rows");
     check(buffer.redo(anchor, caret) && changedWorkingLines(before, buffer.document) == changed, "Redo did not restore changed rows");
     check(changedWorkingLines(buffer.document, buffer.document) == std::vector<bool>({false, false, false, false}), "Refreshing HEAD after a commit retained changed rows");
+}
+void editorChangeMarks() {
+    struct Case { std::string before, after; std::vector<LineChange> ranges; };
+    const std::vector<Case> cases{
+        {"head\nold\ntail", "head\nnew\ntail", {{1, 2}}},
+        {"head\ntail\n", "head\nadded\ntail\n", {{1, 2}}},
+        {"head\nremoved\ntail\n", "head\ntail\n", {{1, 1}}},
+        {"removed\nhead", "head", {{0, 0}}},
+        {"head\nremoved", "head", {{1, 1}}},
+        {"head\nremoved\n", "head\n", {{1, 1}}},
+        {"head\nold\nremoved\ntail", "head\nnew\ntail", {{1, 2}, {2, 2}}},
+        {"", "new\nfile\n", {{0, 2}}},
+        {"", "new", {{0, 1}}},
+        {"", "\n", {{0, 1}}},
+        {"head\ntail", "", {{0, 0}}},
+        {"head\ntail\n", "", {{0, 0}}},
+        {"", "", {}},
+        {"same\nold\nsame\nold\nend", "same\nnew\nsame\nnew\nend", {{1, 2}, {3, 4}}},
+        {"日本😀\r\nold\r\n", "日本😀\r\n新規\r\n", {{1, 2}}}
+    };
+    for (const auto& test : cases) {
+        std::vector<LineChange> ranges{{999, 999}};
+        changedWorkingLines(sourceDocument(test.before), sourceDocument(test.after), &ranges);
+        check(ranges.size() == test.ranges.size(), "Git overview missed a change or retained stale ranges");
+        for (size_t i = 0; i < ranges.size(); ++i)
+            check(ranges[i].begin == test.ranges[i].begin && ranges[i].end == test.ranges[i].end,
+                "Git overview used the wrong working line boundary for an addition/deletion");
+    }
+    const auto verify = [](ChangeMark mark, int top, int bottom) {
+        check(mark.top == top && mark.bottom == bottom, "Git overview projection lost its position, extent or minimum height");
+    };
+    verify(changeMark(50, 60, 100, 34, 234, 3), 134, 154);
+    verify(changeMark(0, 1, 1000000, 0, 200, 3), 0, 3);
+    verify(changeMark(1000000, 1000000, 1000000, 34, 234, 3), 231, 234);
+    verify(changeMark(2, 3, 10, 0, 200, 3), 40, 60); // short document / full viewport
+    verify(changeMark(999, 999, 3, 0, 2, 6), 0, 2);
+    verify(changeMark(0, 1, 0, 34, 234, 3), 34, 34);
+    verify(changeMark(0, 1, 10, 34, 34, 3), 34, 34);
+    // The same logical change grows and moves with wrapping, including an EOF
+    // deletion after the last source line. No source rescanning is needed.
+    const auto document = sourceDocument("head\nabcdefghijkl\ntail");
+    TextLayout layout;
+    for (int columns : {4, 8, 80}) {
+        layout.build(document, columns);
+        const auto begin = layout.lineStart(1), end = layout.lineStart(2);
+        check(end - begin == wrappedLineRows(document.line(1), columns) && layout.lineStart(3) == layout.rows(),
+            "Git overview did not include all wrapped continuations or the EOF boundary");
+        const auto mark = changeMark(begin, end, layout.rows(), 0, 400, 3);
+        check(mark.top == static_cast<int>(begin * 400 / layout.rows()) && mark.bottom > mark.top,
+            "Resizing or changing wrapping left a Git overview at its old position");
+    }
+    EditBuffer buffer; buffer.document = sourceDocument("head\nremoved\ntail"); buffer.initialize(buffer.document.text);
+    const auto before = buffer.document;
+    std::vector<LineChange> ranges;
+    check(buffer.replace(5, 13, ""), "Cannot delete the overview fixture line");
+    changedWorkingLines(before, buffer.document, &ranges);
+    check(ranges.size() == 1 && ranges[0].begin == 1 && ranges[0].end == 1, "Unsaved deletion is absent from the overview");
+    size_t anchor = 0, caret = 0;
+    check(buffer.undo(anchor, caret), "Cannot undo the overview fixture deletion");
+    changedWorkingLines(before, buffer.document, &ranges);
+    check(ranges.empty(), "Undo left a stale deletion mark");
+    check(buffer.redo(anchor, caret), "Cannot redo the overview fixture deletion");
+    changedWorkingLines(before, buffer.document, &ranges);
+    check(ranges.size() == 1, "Redo lost its deletion mark");
+    changedWorkingLines(buffer.document, buffer.document, &ranges);
+    check(ranges.empty(), "Updating HEAD retained old overview marks");
 }
 void editableComparisons() {
     const auto verify = [](const Document& before, const Document& after) {
@@ -441,6 +508,6 @@ void wrapping() {
 }
 }
 int main() {
-    try { editorLineChanges(); editableComparisons(); syntaxHighlighting(); multilineSyntax(); syntaxLanguages(); fileHeadings(); alignment(); additionsAndDeletions(); inlineLayout(); edgeCases(); viewPositions(); wrapping(); std::cout << "Diff tests passed.\n"; return EXIT_SUCCESS; }
+    try { editorLineChanges(); editorChangeMarks(); editableComparisons(); syntaxHighlighting(); multilineSyntax(); syntaxLanguages(); fileHeadings(); alignment(); additionsAndDeletions(); inlineLayout(); edgeCases(); viewPositions(); wrapping(); std::cout << "Diff tests passed.\n"; return EXIT_SUCCESS; }
     catch (const std::exception& error) { std::cerr << error.what() << '\n'; return EXIT_FAILURE; }
 }

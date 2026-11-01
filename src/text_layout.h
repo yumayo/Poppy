@@ -1,5 +1,6 @@
 #pragma once
 #include "text.h"
+#include <algorithm>
 
 namespace poppy {
 // Byte boundaries stay in the logical line. Tabs retain their logical columns.
@@ -16,6 +17,8 @@ public:
     void build(const Document& document, int columns);
     int columns() const { return columns_; }
     size_t rows() const { return starts_.empty() ? 0 : starts_.back(); }
+    // Accept the end boundary as well as source lines (for overview ranges).
+    size_t lineStart(size_t line) const { return starts_.empty() ? 0 : starts_[std::min(line, starts_.size() - 1)]; }
     size_t bytes() const { return starts_.capacity() * sizeof(uint32_t); }
     WrappedRow row(const Document& document, size_t visualRow) const;
     size_t rowForOffset(const Document& document, size_t offset, bool trailing = false) const;

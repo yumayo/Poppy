@@ -49,6 +49,8 @@ private:
     static LRESULT CALLBACK procedure(HWND, UINT, WPARAM, LPARAM);
     LRESULT handle(UINT, WPARAM, LPARAM);
     void paint();
+    void paintGitMarks();
+    RECT contentRect() const;
     void scrollbars();
     void scroll(int vertical, int horizontal);
     void extendSelection(int x, int y);
@@ -91,6 +93,7 @@ private:
     TextSearch search_;
     bool revealFind_ = false;
     Scrollbars scrollbars_;
+    UINT dpi_ = 96;
     int cellWidth_ = 8, cellHeight_ = 20, header_ = 34, gutter_ = 66;
     int top_ = 0, left_ = 0;
     size_t anchor_ = 0, caret_ = 0;
@@ -114,6 +117,7 @@ private:
     std::shared_ptr<const Document> diffBefore_;
     std::shared_ptr<const Document> gitBefore_;
     std::vector<bool> gitChangedLines_;
+    std::vector<LineChange> gitChangeRanges_;
     ResourceId path_;
     std::wstring message_ = L"Open a folder to start\n\nSelect a file on the left. Run your AI CLI in the terminal below.";
 };

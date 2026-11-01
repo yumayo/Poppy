@@ -334,10 +334,24 @@ std::vector<std::pair<size_t, size_t>> matchingLines(const Document& before, con
 }
 }
 
-std::vector<bool> changedWorkingLines(const Document& before, const Document& after) {
+std::vector<bool> changedWorkingLines(const Document& before, const Document& after, std::vector<LineChange>* ranges) {
     std::vector<bool> changed(after.lines.size(), true);
-    for (const auto& match : matchingLines(before, after))
+    if (ranges) ranges->clear();
+    size_t old = 0, current = 0;
+    for (const auto& match : matchingLines(before, after)) {
         if (match.second < changed.size()) changed[match.second] = false;
+        if (ranges) {
+            // Virtual caret rows are not source additions or deletions.
+            size_t oldEnd = match.first, newEnd = match.second;
+            if (oldEnd && before.lines[oldEnd - 1] == before.text.size()) --oldEnd;
+            if (newEnd && after.lines[newEnd - 1] == after.text.size()) --newEnd;
+            const size_t removed = oldEnd > old ? oldEnd - old : 0;
+            const size_t added = newEnd > current ? newEnd - current : 0;
+            if (added) ranges->push_back({current, newEnd});
+            if (removed > added) ranges->push_back({newEnd, newEnd});
+        }
+        old = match.first + 1; current = match.second + 1;
+    }
     return changed;
 }
 

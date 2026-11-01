@@ -1197,7 +1197,7 @@ void editorWordSelection() {
     indexDocument(longWord->document); longWord->initialize(longWord->document.text);
     viewer.edit(longWord, L"wrapped-word.txt");
     doubleClick(point(3, 1)); selection(0, std::string(2000, 'x'));
-    const int columns = (Scrollbars::contentRect(window).right - gutter - 2) / width;
+    const int columns = (Scrollbars::contentRect(window).right - 4 - gutter - 2) / width;
     doubleClick(MAKELPARAM(gutter + columns * width, height / 2)); selection(static_cast<size_t>(columns), "");
     doubleClick(point(3, 1));
     SendMessageW(window, WM_CHAR, 'z', 0);
@@ -1391,7 +1391,7 @@ void editorWrapping() {
         check(GetGUIThreadInfo(GetCurrentThreadId(), &info) && info.hwndCaret == window, "Wrapped text lost the IME caret");
         return info.rcCaret;
     };
-    const int columns = (Scrollbars::contentRect(window).right - 70 - 2) / cell;
+    const int columns = (Scrollbars::contentRect(window).right - 4 - 70 - 2) / cell;
     const auto original = buffer->document.text;
     check(viewer.wordWrap() && !(GetWindowLongPtrW(window, GWL_STYLE) & WS_HSCROLL), "Wrapping is not enabled by default or left a horizontal scrollbar");
     SendMessageW(window, WM_KEYDOWN, VK_END, 0);
@@ -1418,7 +1418,7 @@ void editorWrapping() {
     check(viewer.state().wrapOffset > 0 && caret().top >= 0 && caret().bottom <= Scrollbars::contentRect(window).bottom, "A match in a continuation was not revealed");
     const auto saved = viewer.state();
     MoveWindow(window, 0, 0, 360, 360, FALSE);
-    TextLayout layout; layout.build(buffer->document, (Scrollbars::contentRect(window).right - 70 - 2) / cell);
+    TextLayout layout; layout.build(buffer->document, (Scrollbars::contentRect(window).right - 4 - 70 - 2) / cell);
     const auto topRow = layout.row(buffer->document, layout.rowForOffset(buffer->document, saved.wrapOffset));
     check(viewer.state().wrapOffset == topRow.begin && viewer.state().caret == saved.caret, "Resizing lost the top source position or selection");
     viewer.restore(saved);

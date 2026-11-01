@@ -44,5 +44,8 @@ void orderDiffFiles(DiffDocument& document, const std::vector<std::string>& path
 DiffDocument workingDiff(const Document& before, const Document& after, const std::string& path);
 // One flag per working line, using the same alignment as the editable diff.
 // Deleted lines have no working row; unchanged EOF caret rows stay unmarked.
-std::vector<bool> changedWorkingLines(const Document& before, const Document& after);
+// Optional overview ranges use working line boundaries [begin, end).
+// An empty range marks a deletion at that boundary, including EOF.
+struct LineChange { size_t begin = 0, end = 0; };
+std::vector<bool> changedWorkingLines(const Document& before, const Document& after, std::vector<LineChange>* ranges = nullptr);
 }
