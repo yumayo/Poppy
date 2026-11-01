@@ -3,6 +3,7 @@
 #include <charconv>
 #include <iterator>
 #include <limits>
+#include <unordered_map>
 
 namespace poppy {
 namespace {
@@ -238,6 +239,29 @@ void indexDiff(DiffDocument& d, bool fileHeadings) {
         }
         d.maxColumns = std::max(d.maxColumns, columns);
     }
+}
+
+void orderDiffFiles(DiffDocument& document, const std::vector<std::string>& paths) {
+    if (document.files.size() < 2 || paths.empty()) return;
+    std::unordered_map<std::string_view, size_t> positions;
+    for (size_t i = 0; i < paths.size(); ++i) positions.emplace(paths[i], i);
+    struct FileRange { size_t begin, end, position; };
+    std::vector<FileRange> files;
+    for (size_t i = 0; i < document.files.size(); ++i) {
+        const auto& file = document.files[i];
+        const auto position = positions.find(file.path);
+        const size_t begin = document.patch.lines[document.rows[file.row].heading - 1];
+        if (!files.empty()) files.back().end = begin;
+        files.push_back({begin, document.patch.text.size(), position == positions.end() ? paths.size() : position->second});
+    }
+    const auto less = [](const FileRange& a, const FileRange& b) { return a.position < b.position; };
+    if (std::is_sorted(files.begin(), files.end(), less)) return;
+    std::string patch = document.patch.text.substr(0, files.front().begin);
+    patch.reserve(document.patch.text.size());
+    std::stable_sort(files.begin(), files.end(), less);
+    for (const auto& file : files) patch.append(document.patch.text, file.begin, file.end - file.begin);
+    document.patch.text = std::move(patch);
+    indexDiff(document, true);
 }
 
 std::optional<size_t> DiffDocument::workingOffset(size_t offset) const {

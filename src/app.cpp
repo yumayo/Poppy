@@ -805,6 +805,11 @@ void ProjectRuntime::Impl::setGitView(bool tree) {
         updateGitFiles();
     }
     changes_.restoreScroll(top, left);
+    saveTab();
+    for (int group = 0; group < 2; ++group) {
+        const auto index = groupTab(group);
+        if (index < tabs_.size() && tabs_[index].diff && tabs_[index].allChanges) loadTab(true, group);
+    }
     if (IsWindowVisible(gitTree_)) SetFocus(gitTree_);
 }
 std::wstring ProjectRuntime::Impl::repositoryLabel(const ResourceId& root) const {
@@ -2285,8 +2290,8 @@ void ProjectRuntime::Impl::loadTab(bool preserve, int group) {
     const auto root = tab.gitRoot.empty() ? repo->root : tab.gitRoot;
     const auto kind = tab.diffKind; const auto revision = tab.revision; const auto allChanges = tab.allChanges;
     const bool unsaved = tab.buffer && (tab.buffer->dirty() || tab.buffer->saving);
-    const auto roots = git_->roots;
-    gitWorker_->submit(L"diff:" + std::to_wstring(group), [this, group, serial, generation, path, root, preserve, state, kind, revision, allChanges, roots, unsaved] {
+    const auto roots = git_->roots; const bool treeView = gitTreeView_;
+    gitWorker_->submit(L"diff:" + std::to_wstring(group), [this, group, serial, generation, path, root, preserve, state, kind, revision, allChanges, roots, unsaved, treeView] {
         constexpr size_t maxPatchBytes = 4 * 1024 * 1024;
         const auto relative = allChanges ? std::string{} : path.lexically_relative(root).generic_u8string();
         auto readDiff = [&](GitDiffKind scope) {
@@ -2314,14 +2319,26 @@ void ProjectRuntime::Impl::loadTab(bool preserve, int group) {
             if (working->document) before = readWorkingBase(*provider_, root, relative, working->document->language, gitWorker_->cancellation());
         }
         std::vector<ResourceId> untracked;
-        if (!result.code && allChanges && kind == GitDiffKind::Changes) {
-            auto status = provider_->git(gitArguments(gitStatusArguments()), root, gitWorker_->cancellation());
-            if (status.code) { result.code = status.code; result.error = status.error; }
-            else for (const auto& entry : parseGitStatus(status.output)) if (entry.index == '?' && (!root.wsl() || validUtf8(entry.path))) {
+        std::vector<std::wstring> paths;
+        if (!result.code && allChanges) {
+            // Use the sidebar's input order, including rename destinations and
+            // untracked files, before applying its Tree/List layout.
+            auto files = provider_->git(gitArguments(scope == GitDiffKind::Commit ? gitCommitFilesArguments(revision) : gitStatusArguments()), root, gitWorker_->cancellation());
+            if (files.code) { result.code = files.code; result.error = files.error; }
+            else if (scope == GitDiffKind::Commit) {
+                for (const auto& file : parseGitCommitFiles(files.output)) {
+                    if (root.wsl() && (!validUtf8(file.path) || !validUtf8(file.previousPath))) continue;
+                    paths.push_back(wide(file.path));
+                    if (paths.size() >= maxTreeNodes) break;
+                }
+            } else for (const auto& entry : parseGitStatus(files.output)) {
+                if (scope == GitDiffKind::Staged ? !entry.staged() : !entry.changed()) continue;
+                if (root.wsl() && (!validUtf8(entry.path) || !validUtf8(entry.previousPath))) continue;
                 const auto file = (root / std::string_view(entry.path)).lexically_normal();
-                if (pathKey(gitRepositoryFor(roots, file)) != pathKey(root)) continue;
-                untracked.push_back(file);
-                if (untracked.size() >= maxTreeNodes) break;
+                if (entry.index == '?' && pathKey(gitRepositoryFor(roots, file)) != pathKey(root)) continue;
+                paths.push_back(file.lexically_relative(root).generic_wstring());
+                if (entry.index == '?') untracked.push_back(file);
+                if (paths.size() >= maxTreeNodes) break;
             }
         }
         for (const auto& file : untracked) {
@@ -2338,7 +2355,14 @@ void ProjectRuntime::Impl::loadTab(bool preserve, int group) {
         }
         auto doc = std::make_shared<DiffDocument>();
         if (result.code == 0 && static_cast<size_t>(std::count(result.output.begin(), result.output.end(), '\n')) >= maxLines) { result.code = 1; result.error = L"Diff exceeds the 1,000,000-line preview limit."; }
-        if (result.code == 0) { doc->patch.text = std::move(result.output); indexDiff(*doc, true); }
+        if (result.code == 0) {
+            doc->patch.text = std::move(result.output); indexDiff(*doc, true);
+            if (allChanges) {
+                std::vector<std::string> order;
+                for (const auto& node : buildGitChanges(paths, treeView)) if (!node.directory()) order.push_back(utf8(node.path));
+                orderDiffFiles(*doc, order);
+            }
+        }
         const auto error = result.error; const auto code = result.code;
         gitWorker_->complete([this, group, serial, generation, path, doc, code, error, scope, preserve, state, allChanges, working, before] {
             if (generation != generation_ || serial != serial_[group]) return;

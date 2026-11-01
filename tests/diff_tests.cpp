@@ -229,6 +229,38 @@ void fileHeadings() {
         check(diff.fileForRow(diff.rowCount(inlineView), inlineView) == nullptr, "A row past the diff must not retain a sticky filename");
     }
     check(diff.patch.text == original, "Filename display must not rewrite the patch snapshot");
+    std::vector<std::string> order;
+    std::string reordered;
+    for (auto file = fixtures.rbegin(); file != fixtures.rend(); ++file) {
+        order.push_back(file->second); reordered += file->first;
+    }
+    orderDiffFiles(diff, order);
+    check(diff.patch.text == reordered && diff.files.size() == fixtures.size(),
+        "Ordering files must move whole patches without losing empty, binary, deleted or renamed files");
+    for (size_t i = 0; i < order.size(); ++i) check(diff.files[i].path == order[i], "Ordered file headings lost their decoded paths");
+    for (const bool inlineView : {false, true}) {
+        size_t file = 0;
+        for (size_t row = 0; row < diff.rowCount(inlineView); ++row) {
+            const auto change = diff.displayRow(row, inlineView);
+            if (file + 1 < diff.files.size() && change.heading == diff.rows[diff.files[file + 1].row].heading) ++file;
+            check(diff.fileForRow(row, inlineView) == &diff.files[file], "Ordering files broke sticky headings in Inline or Split");
+            for (const auto source : {change.before, change.after}) if (source.number && !diff.line(source).empty()) {
+                const size_t begin = diff.offset(source), end = begin + diff.line(source).size();
+                const auto inlineRow = diff.inlineRowForText(begin, end);
+                check(inlineRow && diff.fileForRow(*inlineRow, true)->path == order[file], "Ordering files broke text search row mapping");
+                check(diff.selectedText(source.row == change.after.row, begin, end, inlineView) == diff.line(source),
+                    "Ordering files broke copying source text");
+            }
+        }
+    }
+    orderDiffFiles(diff, order);
+    check(diff.patch.text == reordered, "Applying the same file order changed the patch");
+    orderDiffFiles(diff, {fixtures[0].second, fixtures[0].second, "missing.txt"});
+    std::string partial = fixtures[0].first;
+    for (size_t i = fixtures.size(); --i > 0;) partial += fixtures[i].first;
+    check(diff.patch.text == partial, "Missing or duplicate order paths lost unmatched files or changed their relative order");
+    orderDiffFiles(diff, {});
+    check(diff.patch.text == partial, "An empty file order changed the patch");
     indexDiff(diff);
     check(diff.files.empty() && !diff.fileForRow(0, true), "Reindexing without headings must clear sticky filenames");
     diff.patch.text.clear(); indexDiff(diff, true);

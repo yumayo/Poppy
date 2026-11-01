@@ -1,4 +1,5 @@
 #include "git_history.h"
+#include "git_changes.h"
 #include "git_repositories.h"
 #include "git_ignore.h"
 #include "diff.h"
@@ -804,6 +805,48 @@ void repositoryRenames() {
     repo.git({"rm", "--", destination}); repo.git({"commit", "-qm", "remove renamed file"});
     verify(GitDiffKind::Commit, revision);
 }
+void repositoryDiffOrdering() {
+    Repository repo;
+    repo.git({"init", "--quiet", "--template=", "--initial-branch=main"});
+    repo.git({"config", "user.name", "Poppy Test"}); repo.git({"config", "user.email", "poppy@example.invalid"});
+    repo.git({"config", "core.autocrlf", "false"}); repo.git({"config", "commit.gpgsign", "false"});
+    for (const auto& name : {"old.txt", "A.txt", "src/Z.cpp", "z.txt"}) repo.write(name, "before\n");
+    repo.git({"add", "."}); repo.git({"commit", "-qm", "baseline"});
+    for (const auto& name : {"A.txt", "src/Z.cpp", "z.txt"}) repo.write(name, "after\n");
+    repo.write("docs/new.py", "return 42\n"); repo.write("src/nested/file.cpp", "new nested\n"); repo.write("src/a.cpp", "new source\n");
+    const auto verify = [&](GitDiffKind kind, const std::string& revision) {
+        std::vector<std::string> paths;
+        DiffDocument diff; diff.patch.text = repo.git(gitDiffArguments(kind, revision, {}));
+        if (kind == GitDiffKind::Commit) {
+            for (const auto& file : parseGitCommitFiles(repo.git(gitCommitFilesArguments(revision)))) paths.push_back(file.path);
+        } else for (const auto& entry : parseGitStatus(repo.git(gitStatusArguments()))) {
+            if (kind == GitDiffKind::Staged ? !entry.staged() : !entry.changed()) continue;
+            paths.push_back(entry.path);
+            if (entry.index == '?') diff.patch.text += untrackedPatch(entry.path, repo.readFile(entry.path));
+        }
+        indexDiff(diff, true);
+        const std::vector<std::string> expectedTree = kind == GitDiffKind::Changes ?
+            std::vector<std::string>{"docs/new.py", "src/nested/file.cpp", "src/a.cpp", "src/Z.cpp", "A.txt", "z.txt"} :
+            std::vector<std::string>{"docs/new.py", "src/nested/file.cpp", "src/a.cpp", "src/Z.cpp", "A.txt", "renamed.txt", "z.txt"};
+        std::vector<std::wstring> widePaths;
+        for (const auto& path : paths) widePaths.emplace_back(path.begin(), path.end());
+        // Apply both layouts repeatedly, as when switching an open All Changes tab.
+        for (const bool tree : {true, false, true}) {
+            std::vector<std::string> order;
+            for (const auto& node : buildGitChanges(widePaths, tree)) if (!node.directory()) order.push_back(paths[node.entry]);
+            orderDiffFiles(diff, order);
+            const auto& expected = tree ? expectedTree : paths;
+            check(diff.files.size() == expected.size(), "All Changes ordering lost a tracked, untracked or renamed file");
+            for (size_t i = 0; i < expected.size(); ++i)
+                check(diff.files[i].path == expected[i], "All Changes file order differs from Source Control Tree/List order");
+        }
+    };
+    verify(GitDiffKind::Changes, {});
+    repo.git({"mv", "old.txt", "renamed.txt"}); repo.git({"add", "."});
+    verify(GitDiffKind::Staged, {});
+    repo.git({"commit", "-qm", "ordered changes"});
+    verify(GitDiffKind::Commit, repo.hash());
+}
 void repositoryHistory() {
     Repository repo;
     repo.git({"init", "--quiet", "--template=", "--initial-branch=main"});
@@ -861,7 +904,7 @@ int main() {
     try {
         statusGroups(); records(); patchLists(); repositoryOwnership(); ignoredNameBatches(); editorBaseFailures();
 #ifndef _WIN32
-        repositoryEditorBase(); repositoryIgnores(); repositoryStaging(); repositoryStageAll(); repositoryUnstageAll(); repositoryDiscardAll(); repositoryDiscardFile(); repositoryStashUnstaged(); repositoryStashStaged(); repositorySyntax(); repositoryRenames(); repositoryHistory(); multipleRepositories();
+        repositoryEditorBase(); repositoryIgnores(); repositoryStaging(); repositoryStageAll(); repositoryUnstageAll(); repositoryDiscardAll(); repositoryDiscardFile(); repositoryStashUnstaged(); repositoryStashStaged(); repositorySyntax(); repositoryRenames(); repositoryDiffOrdering(); repositoryHistory(); multipleRepositories();
 #endif
         std::cout << "Git history tests passed.\n"; return 0;
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
