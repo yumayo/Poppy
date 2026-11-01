@@ -519,18 +519,19 @@ void smoothIcons() {
         renderer.fill(bitmap.bounds(), RGB(0, 0, 0));
         const int size = MulDiv(24, dpi, 96);
         const std::vector<Renderer::Icon> icons{Renderer::Icon::Explorer, Renderer::Icon::SourceControl, Renderer::Icon::Branch,
-            Renderer::Icon::OpenAllChanges, Renderer::Icon::StageChanges, Renderer::Icon::UnstageChanges, Renderer::Icon::DiscardChanges, Renderer::Icon::StashChanges, Renderer::Icon::OpenFile};
+            Renderer::Icon::OpenAllChanges, Renderer::Icon::StageChanges, Renderer::Icon::UnstageChanges, Renderer::Icon::DiscardChanges, Renderer::Icon::StashChanges, Renderer::Icon::OpenFile,
+            Renderer::Icon::Eye, Renderer::Icon::EyeClosed};
         for (size_t i = 0; i < icons.size(); ++i) {
-            const int x = 8 + static_cast<int>(i) * 56;
-            renderer.icon(icons[i], {x, 8, x + size, 8 + size}, RGB(255, 255, 255));
+            const int x = 8 + static_cast<int>(i % 9) * 56, y = 8 + static_cast<int>(i / 9) * 56;
+            renderer.icon(icons[i], {x, y, x + size, y + size}, RGB(255, 255, 255));
         }
         // Icon transforms must not leak into subsequent panel/cell fills.
         renderer.fill({440, 80, 460, 100}, accent);
         finish(renderer); bitmap.read();
         for (size_t i = 0; i < icons.size(); ++i) {
-            const int first = 8 + static_cast<int>(i) * 56;
+            const int first = 8 + static_cast<int>(i % 9) * 56, top = 8 + static_cast<int>(i / 9) * 56;
             bool ink = false, blendedEdge = false;
-            for (int y = 7; y <= 8 + size; ++y) for (int x = first - 1; x <= first + size; ++x) {
+            for (int y = top - 1; y <= top + size; ++y) for (int x = first - 1; x <= first + size; ++x) {
                 const auto pixel = bitmap.pixel(x, y);
                 ink = ink || pixel != RGB(0, 0, 0);
                 blendedEdge = blendedEdge || (pixel != RGB(0, 0, 0) && pixel != RGB(255, 255, 255));

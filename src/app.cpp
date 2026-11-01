@@ -268,6 +268,9 @@ private:
     RECT gitViewButton(bool tree) const;
     void setGitView(bool tree);
     void updateGitFiles();
+    std::wstring gitVisibilityPrefix(const ResourceId& root, GitDiffKind kind, const std::string& revision = {}) const;
+    std::wstring gitVisibilityPath(TreeItem item) const;
+    void refreshAllChanges();
     void openGitFile(TreeItem item, bool diff = true);
     void openWorkingFile(const ResourceId& path);
     SourceNode* sourceNode(TreeItem item) const;
@@ -389,6 +392,7 @@ private:
     bool branchesLoading_ = false, branchesLoaded_ = false, branchRepositories_ = false;
     std::wstring branchError_;
     std::set<std::wstring> collapsedGitPaths_;
+    std::set<std::wstring> hiddenGitFiles_;
     Sidebar activeSidebar_ = Sidebar::Explorer;
     Viewer viewers_[2];
     Viewer& viewer() { return viewers_[focusedGroup_]; }
@@ -562,13 +566,24 @@ void ProjectRuntime::Impl::create() {
         else discardGitChanges(item, true);
     };
     changes_.quaternaryActionLabel = [this](TreeItem item) {
+        const auto path = gitVisibilityPath(item);
+        if (!path.empty()) return hiddenGitFiles_.count(path) ? L"Show in All Changes" : L"Hide from All Changes";
         const auto source = sourceNode(item);
         if (!source) return L"";
         const auto& node = *source;
         return node.group && !node.staged && changes_.child(item) ? L"Stash Unstaged Changes" : L"";
     };
-    changes_.quaternaryActionIcon = [](TreeItem) { return Renderer::Icon::StashChanges; };
-    changes_.quaternaryActionClicked = [this](TreeItem item) { stashGitChanges(item); };
+    changes_.quaternaryActionIcon = [this](TreeItem item) {
+        const auto path = gitVisibilityPath(item);
+        return path.empty() ? Renderer::Icon::StashChanges : hiddenGitFiles_.count(path) ? Renderer::Icon::EyeClosed : Renderer::Icon::Eye;
+    };
+    changes_.quaternaryActionClicked = [this](TreeItem item) {
+        const auto path = gitVisibilityPath(item);
+        if (path.empty()) { stashGitChanges(item); return; }
+        if (!hiddenGitFiles_.erase(path)) hiddenGitFiles_.insert(path);
+        refreshAllChanges();
+    };
+    changes_.persistentAction = [this](TreeItem item, unsigned slot) { return slot == 3 && !gitVisibilityPath(item).empty(); };
     changes_.expanded = [this](TreeItem item, bool value) {
         const auto source = sourceNode(item);
         if (!source) {
@@ -578,6 +593,11 @@ void ProjectRuntime::Impl::create() {
                 if (value) collapsedGitPaths_.erase(path);
                 else if (collapsedGitPaths_.size() < maxTreeNodes) collapsedGitPaths_.insert(path);
             }
+            if (n && n->kind == HistoryKind::Directory) {
+                const auto path = gitVisibilityPrefix(n->root, GitDiffKind::Commit, n->revision) + n->path.lexically_relative(n->root).generic_wstring();
+                const bool changed = value ? collapsedGitPaths_.erase(path) != 0 : collapsedGitPaths_.insert(path).second;
+                if (changed) refreshAllChanges();
+            }
             if (value) requestHistory(item);
             return;
         }
@@ -585,6 +605,7 @@ void ProjectRuntime::Impl::create() {
         const auto& path = source->path;
         if (value) collapsedGitPaths_.erase(path);
         else if (collapsedGitPaths_.size() < maxTreeNodes) collapsedGitPaths_.insert(path);
+        if (source->directory && !source->group) refreshAllChanges();
     };
     explorerActivity_.create(window_, instance_, L"Explorer", explorerCommand, false); explorerButton_ = explorerActivity_.window();
     gitActivity_.create(window_, instance_, L"Source Control", gitCommand, true); gitButton_ = gitActivity_.window();
@@ -868,6 +889,24 @@ std::wstring ProjectRuntime::Impl::repositoryLabel(const ResourceId& root) const
 }
 SourceNode* ProjectRuntime::Impl::sourceNode(TreeItem item) const {
     const auto n = historyNode(item); return n && n->kind == HistoryKind::Source ? &n->source : nullptr;
+}
+std::wstring ProjectRuntime::Impl::gitVisibilityPrefix(const ResourceId& root, GitDiffKind kind, const std::string& revision) const {
+    if (kind == GitDiffKind::Commit) return L"commit:" + pathKey(root) + L"\n" + wide(revision) + L"\n";
+    return (git_ && git_->repositories.size() > 1 ? L"repository:" + pathKey(root) + L"\n" : std::wstring{}) +
+        (kind == GitDiffKind::Staged ? L"staged:" : L"changes:");
+}
+std::wstring ProjectRuntime::Impl::gitVisibilityPath(TreeItem item) const {
+    if (const auto source = sourceNode(item)) return source->directory || source->group ? std::wstring{} : source->path;
+    const auto n = historyNode(item);
+    return n && n->kind == HistoryKind::File ? gitVisibilityPrefix(n->root, GitDiffKind::Commit, n->revision) + n->path.lexically_relative(n->root).generic_wstring() : std::wstring{};
+}
+void ProjectRuntime::Impl::refreshAllChanges() {
+    saveTab();
+    for (int group = 0; group < 2; ++group) {
+        const auto index = groupTab(group);
+        if (index < tabs_.size() && tabs_[index].diff && tabs_[index].allChanges) loadTab(true, group);
+    }
+    InvalidateRect(gitTree_, nullptr, FALSE);
 }
 void ProjectRuntime::Impl::clearHistoryChildren(TreeItem item) {
     // Working changes belong to the branch, independently of history loading.
@@ -1328,7 +1367,8 @@ void ProjectRuntime::Impl::updateCommitFiles(TreeItem item) {
         const auto child = insertHistory(parent, value.path.substr(offset),
             {value.directory() ? HistoryKind::Directory : HistoryKind::File, {}, n->revision, path}, value.directory(),
             value.directory() ? foreground : stateColor(static_cast<wchar_t>(n->files[value.entry].state)));
-        items.push_back(child); if (value.directory()) changes_.expand(child, true);
+        items.push_back(child);
+        if (value.directory()) changes_.expand(child, !collapsedGitPaths_.count(gitVisibilityPrefix(n->root, GitDiffKind::Commit, n->revision) + value.path));
         if (!selectedPath.empty() && path == selectedPath) changes_.select(child, false);
     }
     if (paths.empty()) insertHistory(item, L"No changed files.", {HistoryKind::Message, {}, {}, {}}, false, muted);
@@ -2448,7 +2488,15 @@ void ProjectRuntime::Impl::loadTab(bool preserve, int group) {
     const auto kind = tab.diffKind; const auto revision = tab.revision; const auto allChanges = tab.allChanges;
     const bool unsaved = tab.buffer && (tab.buffer->dirty() || tab.buffer->saving);
     const auto roots = git_->roots; const bool treeView = gitTreeView_;
-    gitWorker_->submit(L"diff:" + std::to_wstring(group), [this, group, serial, generation, path, root, preserve, state, kind, revision, allChanges, roots, unsaved, treeView] {
+    GitChangeVisibility visibility;
+    if (allChanges) {
+        const auto prefix = gitVisibilityPrefix(root, kind, revision);
+        for (const auto& path : collapsedGitPaths_) if (path.compare(0, prefix.size(), prefix) == 0 && path.size() > prefix.size())
+            visibility.collapsedDirectories.insert(path.substr(prefix.size()));
+        for (const auto& path : hiddenGitFiles_) if (path.compare(0, prefix.size(), prefix) == 0)
+            visibility.hiddenFiles.insert(path.substr(prefix.size()));
+    }
+    gitWorker_->submit(L"diff:" + std::to_wstring(group), [this, group, serial, generation, path, root, preserve, state, kind, revision, allChanges, roots, unsaved, treeView, visibility] {
         constexpr size_t maxPatchBytes = 4 * 1024 * 1024;
         const auto relative = allChanges ? std::string{} : path.lexically_relative(root).generic_u8string();
         auto readDiff = [&](GitDiffKind scope) {
@@ -2500,6 +2548,7 @@ void ProjectRuntime::Impl::loadTab(bool preserve, int group) {
         }
         for (const auto& file : untracked) {
             if (result.code || *gitWorker_->cancellation()) break;
+            if (!visibility.visible(file.lexically_relative(root).generic_wstring(), treeView)) continue;
             auto read = provider_->readFile(file);
             if (!read.error.empty()) { result.code = 1; result.error = read.error; break; }
             std::string text, encoding, error;
@@ -2515,9 +2564,13 @@ void ProjectRuntime::Impl::loadTab(bool preserve, int group) {
         if (result.code == 0) {
             doc->patch.text = std::move(result.output); indexDiff(*doc, allChanges, true);
             if (allChanges) {
-                std::vector<std::string> order;
-                for (const auto& node : buildGitChanges(paths, treeView)) if (!node.directory()) order.push_back(utf8(node.path));
+                std::vector<std::string> order, hidden;
+                for (const auto& node : buildGitChanges(paths, treeView)) if (!node.directory()) {
+                    order.push_back(utf8(node.path));
+                    if (!visibility.visible(node.path, treeView)) hidden.push_back(utf8(node.path));
+                }
                 orderDiffFiles(*doc, order);
+                hideDiffFiles(*doc, hidden);
             }
         }
         const auto error = result.error; const auto code = result.code;

@@ -142,6 +142,25 @@ void multipleSelection() {
     tree.clear();
     check(tree.selections().empty() && !tree.selection(), "Clear retained multiple selections");
 }
+void gitChangeVisibility() {
+    GitChangeVisibility visibility;
+    const std::vector<std::wstring> paths{L"src/a.cpp", L"src/nested 日本語/b.cpp", L"src2/c.cpp", L"root.txt"};
+    for (bool tree : {false, true}) for (const auto& path : paths)
+        check(visibility.visible(path, tree), "Changes must start visible in both layouts");
+    visibility.collapsedDirectories.insert(L"src/nested 日本語");
+    check(!visibility.visible(paths[1], true) && visibility.visible(paths[0], true), "Collapsing a nested directory hid its siblings or kept its descendants");
+    visibility.collapsedDirectories.insert(L"src");
+    check(!visibility.visible(paths[0], true) && !visibility.visible(paths[1], true) && visibility.visible(paths[2], true), "Directory visibility must follow path boundaries");
+    visibility.hiddenFiles.insert(paths[0]);
+    visibility.hiddenFiles.insert(paths[3]);
+    check(!visibility.visible(paths[0], false) && visibility.visible(paths[1], false) && !visibility.visible(paths[3], false), "List must ignore folder folding while retaining individual hidden files");
+    visibility.collapsedDirectories.erase(L"src");
+    check(!visibility.visible(paths[0], true) && !visibility.visible(paths[1], true), "Reopening a parent forgot hidden files or nested folding");
+    visibility.hiddenFiles.erase(paths[0]); visibility.collapsedDirectories.clear();
+    check(visibility.visible(paths[0], true) && visibility.visible(paths[1], true) && !visibility.visible(paths[3], true), "Showing one file changed another file's visibility");
+    const auto otherScope = GitChangeVisibility{};
+    check(otherScope.visible(paths[3], true), "An independent comparison inherited hidden paths");
+}
 void gitChangeLayouts() {
     const std::vector<std::wstring> paths{L"z.txt", L"src/z.cpp", L"src/nested/same.cpp", L"src/A.cpp",
         L"docs/same.cpp", L"docs/日本語 file.txt", L"a.txt"};
@@ -185,6 +204,6 @@ void gitChangeLayouts() {
 }
 }
 int main() {
-    try { hierarchy(); orderingAndRemoval(); largeAndDeepTrees(); movingSubtrees(); multipleSelection(); gitChangeLayouts(); std::cout << "Tree model tests passed.\n"; return 0; }
+    try { hierarchy(); orderingAndRemoval(); largeAndDeepTrees(); movingSubtrees(); multipleSelection(); gitChangeVisibility(); gitChangeLayouts(); std::cout << "Tree model tests passed.\n"; return 0; }
     catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
 }

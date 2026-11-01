@@ -221,12 +221,17 @@ RECT Tree::actionBounds(TreeItem id, unsigned slot) const {
     const auto r = Scrollbars::contentRect(window_);
     const int y = (row(id) - top_) * rowHeight_, padding = MulDiv(6, dpi_, 96);
     const int width = MulDiv(24, dpi_, 96);
-    const int offset = MulDiv(28 * static_cast<int>(slot), dpi_, 96);
+    int preceding = 0;
+    for (unsigned i = 0; i < slot; ++i) {
+        const auto& previous = actionLabelFor(i);
+        if (previous && !previous(id).empty()) ++preceding;
+    }
+    const int offset = MulDiv(28 * preceding, dpi_, 96);
     return {std::max(0L, r.right - width - padding - offset), y + MulDiv(2, dpi_, 96), r.right - padding - offset, y + rowHeight_ - MulDiv(2, dpi_, 96)};
 }
 bool Tree::actionVisible(TreeItem id, unsigned slot) const {
     const auto& label = actionLabelFor(slot);
-    return id && (!hoverActionsOnly || hotItem_ == id) && label && !label(id).empty();
+    return id && (!hoverActionsOnly || hotItem_ == id || (persistentAction && persistentAction(id, slot))) && label && !label(id).empty();
 }
 void Tree::hover(POINT point) {
     const auto content = Scrollbars::contentRect(window_);

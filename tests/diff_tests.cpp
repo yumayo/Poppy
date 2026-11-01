@@ -3,6 +3,7 @@
 #include "git_history.h"
 #include "edit_buffer.h"
 #include "change_marks.h"
+#include <algorithm>
 #include <cstdlib>
 #include <iostream>
 #include <stdexcept>
@@ -347,6 +348,42 @@ void fileHeadings() {
     check(diff.patch.text == partial, "Missing or duplicate order paths lost unmatched files or changed their relative order");
     orderDiffFiles(diff, {});
     check(diff.patch.text == partial, "An empty file order changed the patch");
+    hideDiffFiles(diff, {"missing.txt"});
+    check(diff.patch.text == partial, "Hiding an absent file changed the patch");
+    // Remove alternating files to cover leading, interior and trailing blocks,
+    // including metadata-only, renamed, deleted, binary and quoted paths.
+    std::vector<std::string> hidden;
+    std::string visible;
+    for (size_t i = 0; i < fixtures.size(); ++i) {
+        if (i % 2 == 0) hidden.push_back(fixtures[i].second);
+    }
+    for (size_t i = fixtures.size(); i-- > 0;) if (i % 2) visible += fixtures[i].first;
+    hideDiffFiles(diff, hidden);
+    check(diff.patch.text == visible && diff.files.size() == fixtures.size() / 2,
+        "Hiding files left part of a patch or removed a visible file");
+    for (bool inlineView : {false, true}) {
+        DiffLayout layout; layout.build(diff, inlineView, 3);
+        for (size_t row = 0; row < diff.rowCount(inlineView); ++row) {
+            const auto file = diff.fileForRow(row, inlineView);
+            check(file && std::find(hidden.begin(), hidden.end(), file->path) == hidden.end(), "A hidden file retained a sticky heading");
+            const auto change = diff.displayRow(row, inlineView);
+            for (const auto source : {change.before, change.after}) if (source.number && !diff.line(source).empty()) {
+                const auto begin = diff.offset(source), end = begin + diff.line(source).size();
+                check(diff.inlineRowForText(begin, end).has_value(), "Filtering broke search row mapping");
+                check(diff.selectedText(source.row == change.after.row, begin, end, inlineView) == diff.line(source), "Filtering broke copying visible text");
+            }
+        }
+        check(layout.rows() >= diff.rowCount(inlineView), "Filtering lost wrapped rows");
+    }
+    std::vector<std::string> remaining;
+    for (const auto& file : diff.files) remaining.push_back(file.path);
+    hideDiffFiles(diff, remaining);
+    check(diff.patch.text.empty() && diff.rows.empty() && diff.files.empty() && diff.inlineOrder.empty(), "Hiding every file retained stale display/search rows");
+    diff.patch.text = fixtures.front().first; indexDiff(diff, true);
+    hideDiffFiles(diff, {fixtures.front().second});
+    check(diff.patch.text.empty() && diff.files.empty(), "A single-file All Changes could not be hidden");
+    diff.patch.text = original; indexDiff(diff, true);
+    check(diff.files.size() == fixtures.size() && diff.patch.text == original, "Reloading visible files did not restore complete patches");
     indexDiff(diff);
     check(diff.files.empty() && !diff.fileForRow(0, true), "Reindexing without headings must clear sticky filenames");
     diff.patch.text.clear(); indexDiff(diff, true);

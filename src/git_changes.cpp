@@ -5,6 +5,12 @@
 #include <string_view>
 
 namespace poppy {
+bool GitChangeVisibility::visible(std::wstring_view path, bool tree) const {
+    if (hiddenFiles.count(std::wstring(path))) return false;
+    if (tree) for (size_t slash = path.find(L'/'); slash != path.npos; slash = path.find(L'/', slash + 1))
+        if (collapsedDirectories.count(std::wstring(path.substr(0, slash)))) return false;
+    return true;
+}
 std::vector<GitChangeNode> buildGitChanges(const std::vector<std::wstring>& paths, bool tree, size_t maxDirectories) {
     std::vector<GitChangeNode> nodes;
     nodes.reserve(paths.size());

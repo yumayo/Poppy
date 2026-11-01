@@ -1858,6 +1858,42 @@ void gitSidebarTests(const fs::path& executable) {
         auto group = gitGroup(changes, false);
         auto docs = nextItem(changes, TreeRelation::Child, group), src = nextItem(changes, TreeRelation::Next, docs);
         check(expanded(changes, docs) && expanded(changes, src), "Git folders did not start expanded");
+        send(changes, treeSelect, group); send(changes, WM_KEYDOWN, VK_F4); waitLines(viewer, 905);
+        expand(changes, src, false); waitLines(viewer, 603);
+        expand(changes, src); waitLines(viewer, 905);
+        const auto visibilityNested = nextItem(changes, TreeRelation::Child, src);
+        expand(changes, visibilityNested, false); waitLines(viewer, 603);
+        expand(changes, visibilityNested); waitLines(viewer, 905);
+        const auto rootFile = nextItem(changes, TreeRelation::Next, src);
+        const auto toggleEye = [&] {
+            RECT rect{}; GetClientRect(changes, &rect);
+            const int height = static_cast<int>(send(changes, treeGetRowHeight));
+            const int y = (static_cast<int>(send(changes, treeGetRow, rootFile)) - scrollInfo(changes).nPos) * height + height / 2;
+            // The eye remains visible without hovering; it follows Stage,
+            // Discard and Open File without changing their hit regions.
+            send(changes, WM_MOUSELEAVE);
+            click(changes, rect.right - px(102), y);
+        };
+        toggleEye(); waitLines(viewer, 503);
+        check(visibleTabCount(app) == 1, "Toggling visibility opened a file tab");
+        expand(changes, src, false); waitLines(viewer, 201);
+        view(false); waitLines(viewer, 503);
+        view(true); waitLines(viewer, 201);
+        // Layout changes rebuild item IDs but keep each file's visibility.
+        group = gitGroup(changes, false);
+        docs = nextItem(changes, TreeRelation::Child, group); src = nextItem(changes, TreeRelation::Next, docs);
+        const auto restoredRootFile = nextItem(changes, TreeRelation::Next, src);
+        send(changes, treeSelect, restoredRootFile); waitLines(viewer, 400);
+        send(changes, treeSelect, group); send(changes, WM_KEYDOWN, VK_F4); waitLines(viewer, 201);
+        expand(changes, docs, false); waitLines(viewer, 0);
+        expand(changes, docs); waitLines(viewer, 201);
+        // Show the root file again using its newly allocated row.
+        RECT visibilityRect{}; GetClientRect(changes, &visibilityRect);
+        const int visibilityHeight = static_cast<int>(send(changes, treeGetRowHeight));
+        const int visibilityY = (static_cast<int>(send(changes, treeGetRow, restoredRootFile)) - scrollInfo(changes).nPos) * visibilityHeight + visibilityHeight / 2;
+        click(changes, visibilityRect.right - px(102), visibilityY); waitLines(viewer, 603);
+        expand(changes, src); waitLines(viewer, 905);
+        clickTab(app, 0, false, true);
         send(changes, treeSelect, docs);
         check(scrollInfo(viewer).nMax == 0, "Selecting a Git folder opened a file");
         send(changes, treeSelect, nextItem(changes, TreeRelation::Child, docs)); waitLines(viewer, 200);

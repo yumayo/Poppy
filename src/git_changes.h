@@ -1,6 +1,8 @@
 #pragma once
 #include <cstddef>
+#include <set>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace poppy {
@@ -14,4 +16,8 @@ struct GitChangeNode {
 // file entries retain their input indices in both layouts. No disk I/O is used.
 // Beyond the directory limit, remaining path components stay in file labels.
 std::vector<GitChangeNode> buildGitChanges(const std::vector<std::wstring>& paths, bool tree, size_t maxDirectories = 50000);
+struct GitChangeVisibility {
+    std::set<std::wstring> collapsedDirectories, hiddenFiles;
+    bool visible(std::wstring_view path, bool tree) const;
+};
 }

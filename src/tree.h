@@ -83,6 +83,7 @@ public:
     std::function<Renderer::Icon(TreeItem)> quaternaryActionIcon;
     std::function<void(TreeItem)> quaternaryActionClicked;
     bool hoverActionsOnly = false;
+    std::function<bool(TreeItem, unsigned)> persistentAction;
 private:
     static LRESULT CALLBACK procedure(HWND, UINT, WPARAM, LPARAM);
     void finishRename(bool commit);

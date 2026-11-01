@@ -4,6 +4,7 @@
 #include <iterator>
 #include <limits>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace poppy {
 namespace {
@@ -261,6 +262,27 @@ void orderDiffFiles(DiffDocument& document, const std::vector<std::string>& path
     patch.reserve(document.patch.text.size());
     std::stable_sort(files.begin(), files.end(), less);
     for (const auto& file : files) patch.append(document.patch.text, file.begin, file.end - file.begin);
+    document.patch.text = std::move(patch);
+    indexDiff(document, true);
+}
+
+void hideDiffFiles(DiffDocument& document, const std::vector<std::string>& paths) {
+    if (document.files.empty() || paths.empty()) return;
+    const std::unordered_set<std::string_view> hidden(paths.begin(), paths.end());
+    std::string patch;
+    size_t begin = 0;
+    bool changed = false;
+    for (size_t i = 0; i < document.files.size(); ++i) {
+        const auto& file = document.files[i];
+        const auto start = document.patch.lines[document.rows[file.row].heading - 1];
+        if (!hidden.count(file.path)) continue;
+        patch.append(document.patch.text, begin, start - begin);
+        begin = i + 1 == document.files.size() ? document.patch.text.size() :
+            document.patch.lines[document.rows[document.files[i + 1].row].heading - 1];
+        changed = true;
+    }
+    if (!changed) return;
+    patch.append(document.patch.text, begin, document.patch.text.size() - begin);
     document.patch.text = std::move(patch);
     indexDiff(document, true);
 }

@@ -42,6 +42,8 @@ void indexDiff(DiffDocument& document, bool fileHeadings = false, bool fileDetai
 // Reorder complete file patches in a document indexed with file headings.
 // Paths absent from the requested order remain at the end in their input order.
 void orderDiffFiles(DiffDocument& document, const std::vector<std::string>& paths);
+// Remove complete file patches, including headings and metadata, then reindex.
+void hideDiffFiles(DiffDocument& document, const std::vector<std::string>& paths);
 DiffDocument workingDiff(const Document& before, const Document& after);
 // One flag per working line, using the same alignment as the editable diff.
 // Deleted lines have no working row; unchanged EOF caret rows stay unmarked.
