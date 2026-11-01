@@ -112,6 +112,7 @@ void Connection::start() {
     struct Delete { LPPROC_THREAD_ATTRIBUTE_LIST list; ~Delete() { DeleteProcThreadAttributeList(list); } } cleanup{list};
     HANDLE inherited[]{childInput.value, childOutput.value, childError.value}; if (!UpdateProcThreadAttribute(list, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, inherited, sizeof(inherited), nullptr, nullptr)) throw std::runtime_error(utf8(winError()));
     STARTUPINFOEXW startup{}; startup.StartupInfo.cb = sizeof(startup); startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES; startup.StartupInfo.hStdInput = childInput.value; startup.StartupInfo.hStdOutput = childOutput.value; startup.StartupInfo.hStdError = childError.value; startup.lpAttributeList = list;
+    groupApplicationChild(startup.StartupInfo);
     job_.reset(CreateJobObjectW(nullptr, nullptr)); JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{}; limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
     if (!job_ || !SetInformationJobObject(job_.value, JobObjectExtendedLimitInformation, &limits, sizeof(limits))) throw std::runtime_error(utf8(winError()));
     auto line = processCommandLine(args);

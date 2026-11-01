@@ -72,6 +72,7 @@ bool Terminal::start() {
     if (!InitializeProcThreadAttributeList(attributes, 1, 0, &size)) { error_ = winError(); stop(); return false; }
     if (!UpdateProcThreadAttribute(attributes, 0, PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, console_, sizeof(console_), nullptr, nullptr)) { error_ = winError(); DeleteProcThreadAttributeList(attributes); stop(); return false; }
     STARTUPINFOEXW si{}; si.StartupInfo.cb = sizeof(si); si.lpAttributeList = attributes;
+    groupApplicationChild(si.StartupInfo);
     wchar_t system[MAX_PATH]{}; GetSystemDirectoryW(system, MAX_PATH);
     const auto args = command_.empty() ? terminalShellCommand(TerminalShell::PowerShell, system) : command_;
     const auto& shell = args.front();

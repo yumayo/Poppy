@@ -1591,6 +1591,37 @@ void selectionAutoScrolling() {
     }
     check(!buffer->dirty(), "Selection scrolling edited the buffer");
 }
+void terminalApplicationIdentity() {
+    const auto group = createApplicationProcessGroup();
+    check(static_cast<bool>(group), "Cannot create the terminal application group");
+    const auto instance = GetModuleHandleW(nullptr);
+    Terminal first, second;
+    const auto parent = CreateWindowExW(0, L"STATIC", L"Terminal identity test", WS_POPUP, 0, 0, 640, 360, nullptr, nullptr, instance, nullptr);
+    check(parent != nullptr, "Cannot create the terminal identity test window");
+    struct WindowOwner { HWND value; ~WindowOwner() { DestroyWindow(value); } } owner{parent};
+    std::wstring executable(32768, L'\0');
+    const auto count = GetModuleFileNameW(nullptr, executable.data(), static_cast<DWORD>(executable.size()));
+    check(count && count < executable.size(), "Cannot locate the terminal identity fixture");
+    executable.resize(count);
+    for (auto terminal : {&first, &second}) {
+        terminal->create(parent, instance);
+        terminal->setDirectory(fs::temp_directory_path());
+        terminal->setCommand({executable, L"--terminal-identity"});
+        check(terminal->launch(), "Cannot start the terminal identity fixture");
+    }
+    const auto start = GetTickCount64();
+    while (first.title() != "Poppy terminal identity ready" || second.title() != "Poppy terminal identity ready") {
+        MSG message{};
+        while (PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE)) { TranslateMessage(&message); DispatchMessageW(&message); }
+        Terminal::pump();
+        check(first.running() && second.running(), "A ConPTY child did not receive the application's shell identity");
+        check(GetTickCount64() - start < 5000, "The terminal identity fixture did not produce its title");
+        MsgWaitForMultipleObjects(0, nullptr, FALSE, 10, QS_ALLINPUT);
+    }
+    first.stop();
+    check(second.running(), "Closing a terminal also stopped a sibling in the application group");
+    second.stop();
+}
 void terminalGitBashSocketEnvironment() {
     const auto bash = terminalShellCommand(TerminalShell::GitBash, L"").front();
     if (!fs::is_regular_file(bash)) {
@@ -1829,11 +1860,19 @@ void quickOpenStability() {
     check(!observed.geometryChanges && !observed.unexpectedHides, "Typing or completing a search resized or hid quick open");
 }
 }
-int main() {
+int main(int argc, char** argv) {
+    if (argc == 2 && std::string(argv[1]) == "--terminal-identity") {
+        STARTUPINFOW startup{}; startup.cb = sizeof(startup); GetStartupInfoW(&startup);
+        if (!(startup.dwFlags & STARTF_TITLEISAPPID) || !startup.lpTitle || std::wstring(startup.lpTitle) != applicationUserModelId) return 1;
+        std::cout << "\x1b]2;Poppy terminal identity ready\x07" << std::flush;
+        Sleep(INFINITE);
+        return 0;
+    }
     const HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     int result = 0;
     try {
         initializeRendering();
+        terminalApplicationIdentity();
         statusBarLimits(); treeMultipleSelection(); inlineTreeInput(); cellPositions(); colorsAndClipping(); imagePreviews(); smoothIcons(); windowTargets(); editableDiff(); editorCaret(); imeCellRendering(); imeUiRendering(); imePositions(); editorWordSelection(); editorWordMovement(); editorLineShortcuts(); editorWrapping(); diffWrapping(); documentFind(); horizontalWheelScrolling(); continuousViewerScrolling(); selectionAutoScrolling(); terminalGitBashSocketEnvironment(); terminalSelectionAutoScrolling(); themedScrollbars(); quickOpenStability();
         std::cout << "Direct2D rendering tests passed\n";
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; result = 1; }

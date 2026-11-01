@@ -53,9 +53,12 @@ struct Handle {
     explicit operator bool() const { return value != nullptr; }
 };
 
-// Keep this handle alive around the workspace. Children inherit the common
-// application job while retaining their own nested jobs for cancellation.
+inline constexpr wchar_t applicationUserModelId[] = L"yumayo.Poppy";
+// Keep this handle alive around the workspace. Set the shell's application
+// identity as well as the common job; job membership alone is not a UI identity.
 Handle createApplicationProcessGroup();
+// Preserve pipe/ConPTY settings while giving children the same shell identity.
+void groupApplicationChild(STARTUPINFOW& startup);
 
 // A real Windows thread HANDLE is required by CancelSynchronousIo. MinGW's
 // std::thread::native_handle() is a pthread_t when using the POSIX runtime.
