@@ -6,7 +6,7 @@ WSLにDocker Engineをインストールし、普段どおり`aicontainer`で起
 
 ## 起動と更新
 
-1. Poppyの「＋」からターミナルを開きます。PowerShellが起動した場合は`wsl`を実行します。WSLプロジェクトでは直接WSLシェルが起動します。
+1. Poppyの「＋」からターミナルを開きます。PowerShellまたはGit Bashが起動した場合は`wsl`を実行します。WSLプロジェクトでは直接WSLシェルが起動します。
 2. WSLホストの`.bash_ai_container`を更新し、利用しているコピーを`source`で読み込みます。
 3. 下記のhookをAIコンテナ内へ導入します。HTTP版のhookを導入済みの場合も送信スクリプトを一度更新してください。
 4. PoppyのWSLターミナルで、普段どおり起動します。
@@ -17,7 +17,7 @@ aicontainer codex
 aicontainer claude
 ```
 
-PoppyはターミナルごとのUnixソケットをシェル起動前に開き、そのパスを`AICONTAINER_EVENT_SOCKET`へ自動設定します。WindowsプロジェクトのPowerShellでも、既定のWSL内にソケットを用意し、手入力の`wsl`へ`WSLENV`で引き継ぎます。更新した`aicontainer`はこのソケットだけをコンテナの`/tmp/aicontainer-events.sock`へマウントし、hookへ引き継ぎます。`.aicontainer`への追加、起動プロファイル、ai-containerリポジトリのパス指定は不要です。この変更だけならDockerイメージの再ビルドも不要です。
+PoppyはターミナルごとのUnixソケットをシェル起動前に開き、そのパスを`AICONTAINER_EVENT_SOCKET`へ自動設定します。WindowsプロジェクトのPowerShell・Git Bashでも、既定のWSL内にソケットを用意し、手入力の`wsl`へ`WSLENV`で引き継ぎます。Git Bashのパス変換でLinux側の`/tmp/poppy-events-…/events.sock`がWindowsの一時フォルダーへ書き換わらないよう、`MSYS2_ENV_CONV_EXCL`へこの変数だけを追加します。既存の除外設定は保持します。更新した`aicontainer`はこのソケットだけをコンテナの`/tmp/aicontainer-events.sock`へマウントし、hookへ引き継ぎます。`.aicontainer`への追加、起動プロファイル、ai-containerリポジトリのパス指定は不要です。この変更だけならDockerイメージの再ビルドも不要です。
 
 PowerShell経由でも、Poppy本体と同じ場所にリリースの`wsl/`フォルダーを配置してください。Poppy更新後はWSLターミナルも開き直します。ai-container側をコピーして利用している場合は、そのコピーも更新してください。Dockerデーモンは、起動元のWSLと同じソケットの実体を参照できる必要があります。リモートDockerへの転送は対象外です。
 
@@ -67,6 +67,7 @@ HTTP通知とWindows上のCLI向け通知は廃止しました。`.aicontainer`�
 
 - `python3 tests/hook_scripts_tests.py`: Unixソケット通知、ソケット未設定時の動作、hookの導入・解除。
 - `python3 tests/hook_relay_tests.py`: ビルド済みの実WSLヘルパーと導入済みhookをUnixソケット・匿名パイプで接続。PowerShell向けの単独ヘルパー配置・再利用と終了時のソケット削除も検証。別のビルドを使う場合は`POPPY_TEST_WSL_HELPER=/path/to/poppy-wsl-helper`を指定。
+- Windowsの`poppy_render_tests`: Git for Windowsがある場合、Git BashからWindowsプロセスへ通知ソケットのLinuxパスがそのまま渡り、既存のパス変換除外も保持されることを検証。
 - ai-containerの`python3 -m unittest discover -s test -p test_aicontainer_dns.py`: Dockerモックで通常起動時のソケット自動マウントとパスの引用を検証。
 
 Windows上の`wsl.exe`、WSLENVによる引き継ぎ、実際のDockerマウントとCLIのhook発火は実機確認が必要です。

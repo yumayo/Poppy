@@ -2,6 +2,7 @@
 #include "quick_open.h"
 #include "viewer.h"
 #include "terminal.h"
+#include "terminal_profile.h"
 #include "status_bar.h"
 #include "tree.h"
 #include <commctrl.h>
@@ -1467,6 +1468,42 @@ void selectionAutoScrolling() {
     }
     check(!buffer->dirty(), "Selection scrolling edited the buffer");
 }
+void terminalGitBashSocketEnvironment() {
+    const auto bash = terminalShellCommand(TerminalShell::GitBash, L"").front();
+    if (!fs::is_regular_file(bash)) {
+        std::cout << "Git Bash socket environment test skipped: Git for Windows is not installed\n";
+        return;
+    }
+    const auto instance = GetModuleHandleW(nullptr);
+    const auto parent = CreateWindowExW(0, L"STATIC", L"Terminal socket environment test", WS_POPUP | WS_CLIPCHILDREN,
+        0, 0, 640, 360, nullptr, nullptr, instance, nullptr);
+    check(parent != nullptr, "Cannot create the terminal socket test window");
+    struct WindowOwner { HWND value; ~WindowOwner() { DestroyWindow(value); } } owner{parent};
+    wchar_t system[MAX_PATH]{}; GetSystemDirectoryW(system, MAX_PATH);
+    std::wstring powershell = std::wstring(system) + L"/WindowsPowerShell/v1.0/powershell.exe";
+    std::replace(powershell.begin(), powershell.end(), L'\\', L'/');
+    const std::wstring socket = L"/tmp/poppy-events-regression/events.sock";
+    // Read the environment in a native child so MSYS actually applies its
+    // conversion rules. No WSL installation or live notification relay is needed.
+    for (const std::wstring excluded : {L"", L"POPPY_KEEP_PATH", L"POPPY_KEEP_PATH;", L"*"}) {
+        Terminal terminal; terminal.create(parent, instance);
+        MoveWindow(terminal.window(), 0, 0, 640, 360, FALSE);
+        terminal.setDirectory(fs::temp_directory_path());
+        const std::wstring kept = excluded.empty() ? L"kept" : L"/tmp/poppy-keep-path";
+        terminal.setEnvironment({{L"AICONTAINER_EVENT_SOCKET", socket}, {L"MSYS2_ENV_CONV_EXCL", excluded}, {L"POPPY_KEEP_PATH", kept}});
+        terminal.setCommand({bash, L"--noprofile", L"--norc", L"-c",
+            L"\"" + powershell + L"\" -NoLogo -NoProfile -NonInteractive -Command '[Console]::Title = $env:AICONTAINER_EVENT_SOCKET + \"|\" + $env:POPPY_KEEP_PATH'"});
+        check(terminal.launch(), "Cannot start the Git Bash socket environment fixture");
+        const auto expected = utf8(socket + L"|" + kept);
+        const auto start = GetTickCount64();
+        while (terminal.running() || terminal.title() != expected) {
+            Terminal::pump();
+            check(GetTickCount64() - start < 5000, "Git Bash converted the Linux notification socket or lost an existing conversion exclusion");
+            MsgWaitForMultipleObjects(0, nullptr, FALSE, 10, QS_ALLINPUT);
+        }
+        terminal.stop(); DestroyWindow(terminal.window());
+    }
+}
 void terminalSelectionAutoScrolling() {
     Terminal terminal;
     const auto instance = GetModuleHandleW(nullptr);
@@ -1674,7 +1711,7 @@ int main() {
     int result = 0;
     try {
         initializeRendering();
-        statusBarLimits(); treeMultipleSelection(); inlineTreeInput(); cellPositions(); colorsAndClipping(); imagePreviews(); smoothIcons(); windowTargets(); editableDiff(); editorCaret(); imeFallbackFonts(); imePositions(); editorWordSelection(); editorWordMovement(); editorLineShortcuts(); editorWrapping(); diffWrapping(); documentFind(); horizontalWheelScrolling(); continuousViewerScrolling(); selectionAutoScrolling(); terminalSelectionAutoScrolling(); themedScrollbars(); quickOpenStability();
+        statusBarLimits(); treeMultipleSelection(); inlineTreeInput(); cellPositions(); colorsAndClipping(); imagePreviews(); smoothIcons(); windowTargets(); editableDiff(); editorCaret(); imeFallbackFonts(); imePositions(); editorWordSelection(); editorWordMovement(); editorLineShortcuts(); editorWrapping(); diffWrapping(); documentFind(); horizontalWheelScrolling(); continuousViewerScrolling(); selectionAutoScrolling(); terminalGitBashSocketEnvironment(); terminalSelectionAutoScrolling(); themedScrollbars(); quickOpenStability();
         std::cout << "Direct2D rendering tests passed\n";
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; result = 1; }
     if (SUCCEEDED(com)) CoUninitialize();

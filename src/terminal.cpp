@@ -105,6 +105,13 @@ bool Terminal::start() {
     if (!inherited[L"AICONTAINER_EVENT_SOCKET"].empty()) {
         if (!wslenv.empty()) wslenv += L':';
         wslenv += L"AICONTAINER_EVENT_SOCKET/u";
+        // Git Bash converts environment paths before launching native children
+        // such as wsl.exe, before WSLENV can forward the Linux socket path.
+        auto& excluded = inherited[L"MSYS2_ENV_CONV_EXCL"];
+        if (excluded != L"*") {
+            if (!excluded.empty() && excluded.back() != L';') excluded += L';';
+            excluded += L"AICONTAINER_EVENT_SOCKET";
+        }
     }
     inherited[L"WSLENV"] = std::move(wslenv);
     std::vector<wchar_t> environment;
