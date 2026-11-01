@@ -59,9 +59,9 @@ public:
     void discard();
     void fill(const RECT& rect, COLORREF color, float opacity = 1.0f);
     void fillRounded(const RECT& rect, COLORREF color, float radius);
-    int textWidth(const std::wstring& text) const;
+    int textWidth(const std::wstring& text, bool italic = false) const;
     void label(const RECT& rect, const std::wstring& text, COLORREF color,
-               UINT flags = DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+               UINT flags = DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS, bool italic = false);
     void cells(int x, int y, int cellWidth, int cellHeight,
                const std::vector<Cell>& cells, int columns, const RECT& clip);
     // Preedit uses the exact same cell renderer as committed terminal text.

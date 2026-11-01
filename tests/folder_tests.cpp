@@ -230,6 +230,13 @@ void clickTab(const Application& app, int visibleIndex, bool middle = false, boo
     const int inset = MulDiv(close ? 14 : 16, GetDpiForWindow(app.window), 96);
     click(app.window, close ? rect.right - inset : rect.left + inset, (rect.top + rect.bottom) / 2, middle);
 }
+void keepTab(const Application& app, int visibleIndex) {
+    clickTab(app, visibleIndex);
+    const auto rect = tabBounds(app, visibleIndex);
+    const auto point = MAKELPARAM(rect.left + MulDiv(16, GetDpiForWindow(app.window), 96), (rect.top + rect.bottom) / 2);
+    send(app.window, WM_LBUTTONDBLCLK, MK_LBUTTON, point);
+    send(app.window, WM_LBUTTONUP, 0, point);
+}
 void beginTabDrag(const Application& app, int visibleIndex, POINT target) {
     const auto rect = tabBounds(app, visibleIndex);
     const POINT origin{rect.left + MulDiv(12, GetDpiForWindow(app.window), 96), (rect.top + rect.bottom) / 2};
@@ -276,6 +283,80 @@ void answerTabSave(const Application& app, const std::wstring& filename, int ans
     send(dialog, WM_COMMAND, answer);
     waitFor([&] { return !IsWindow(dialog); }, "The tab save confirmation did not close");
 }
+void previewTabTests(const fs::path& executable) {
+    Fixture fixture;
+    for (int i = 0; i < 3; ++i) writeLines(fixture.root / (std::wstring(1, L'a' + i) + L".txt"), 200 + i * 100);
+    {
+        Application app(executable, fixture.root);
+        const auto tree = app.tree(), viewer = FindWindowExW(app.window, nullptr, L"PoppyViewer", nullptr);
+        waitFor([&] { return send(tree, treeGetCount) == 4; }, "Preview fixture did not load");
+        const auto a = nextItem(tree, TreeRelation::Child, nextItem(tree, TreeRelation::Root));
+        const auto b = nextItem(tree, TreeRelation::Next, a), c = nextItem(tree, TreeRelation::Next, b);
+        send(tree, treeSelect, a); waitLines(viewer, 200);
+        send(viewer, WM_VSCROLL, SB_PAGEDOWN);
+        send(tree, treeSelect, b); waitLines(viewer, 300);
+        check(visibleTabCount(app) == 1 && scrollInfo(viewer).nPos == 0, "A new file did not replace the preview with a fresh view");
+        clickTab(app, 0);
+        send(tree, treeSelect, c); waitLines(viewer, 400);
+        check(visibleTabCount(app) == 1, "Single-clicking a preview made it permanent");
+        // Replace requests before their results arrive, then keep the final tab.
+        send(tree, treeSelect, a); send(tree, treeSelect, b); send(tree, treeSelect, a); waitLines(viewer, 200);
+        check(visibleTabCount(app) == 1, "Pending loads accumulated previews");
+        keepTab(app, 0);
+        send(viewer, WM_VSCROLL, SB_PAGEDOWN); const auto top = scrollInfo(viewer).nPos;
+        send(tree, treeSelect, b); waitLines(viewer, 300);
+        check(visibleTabCount(app) == 2, "Double-clicking did not keep a tab open");
+        clickTab(app, 0); waitLines(viewer, 200);
+        check(scrollInfo(viewer).nPos == top, "Keeping a preview lost its scroll position");
+        send(tree, treeSelect, c); waitLines(viewer, 400);
+        check(visibleTabCount(app) == 2, "Opening from a permanent tab did not reuse the inactive preview");
+        send(viewer, WM_CHAR, '!');
+        send(tree, treeSelect, b); waitLines(viewer, 300);
+        check(visibleTabCount(app) == 3, "Opening another file replaced an edited preview");
+        clickTab(app, 1); waitLines(viewer, 400);
+        check(AttachThreadInput(GetCurrentThreadId(), app.process.dwThreadId, TRUE), "Cannot attach preview Undo input");
+        BYTE previous[256]{}, keys[256]{}; GetKeyboardState(previous); keys[VK_CONTROL] = keys[VK_LCONTROL] = 0x80;
+        SetKeyboardState(keys); send(viewer, WM_KEYDOWN, 'Z'); SetKeyboardState(previous);
+        AttachThreadInput(GetCurrentThreadId(), app.process.dwThreadId, FALSE);
+        send(tree, treeSelect, b); waitLines(viewer, 300);
+    }
+    {
+        Application app(executable, fixture.root); const auto tree = app.tree();
+        const auto viewer = FindWindowExW(app.window, nullptr, L"PoppyViewer", nullptr);
+        waitLines(viewer, 200);
+        check(visibleTabCount(app) == 2, "Restart restored a preview or lost a kept/edited tab");
+        clickTab(app, 1); waitLines(viewer, 400);
+        const auto a = nextItem(tree, TreeRelation::Child, nextItem(tree, TreeRelation::Root));
+        send(tree, treeSelect, nextItem(tree, TreeRelation::Next, a)); waitLines(viewer, 300);
+        toggleTabPin(app, 2);
+        send(tree, treeSelect, a); waitLines(viewer, 200);
+        check(visibleTabCount(app) == 3, "Pinning did not keep the preview");
+    }
+}
+void previewTabSplitTests(const fs::path& executable) {
+    Fixture fixture;
+    for (int i = 0; i < 3; ++i) writeLines(fixture.root / (std::wstring(1, L'a' + i) + L".txt"), 200 + i * 100);
+    Application app(executable, fixture.root);
+    const auto tree = app.tree(), left = FindWindowExW(app.window, nullptr, L"PoppyViewer", nullptr);
+    const auto right = FindWindowExW(app.window, left, L"PoppyViewer", nullptr);
+    waitFor([&] { return send(tree, treeGetCount) == 4; }, "Split preview fixture did not load");
+    const auto a = nextItem(tree, TreeRelation::Child, nextItem(tree, TreeRelation::Root));
+    const auto b = nextItem(tree, TreeRelation::Next, a), c = nextItem(tree, TreeRelation::Next, b);
+    send(tree, treeSelect, a); waitLines(left, 200); keepTab(app, 0);
+    send(tree, treeSelect, b); waitLines(left, 300);
+    auto body = bounds(app.window, left);
+    dragTab(app, 1, {body.left + (body.right - body.left) * 3 / 4, body.top + 60});
+    waitLines(left, 200); waitLines(right, 300);
+    clickTab(app, 0);
+    send(tree, treeSelect, c); waitLines(left, 400);
+    check(visibleTabCount(app) == 3 && scrollInfo(right).nMax == 300, "Opening a left preview replaced the right preview");
+    body = bounds(app.window, right);
+    dragTab(app, 2, {body.left + (body.right - body.left) * 3 / 4, body.top + 60});
+    waitLines(left, 200); waitLines(right, 400);
+    check(visibleTabCount(app) == 2, "Moving a preview left two previews in its destination group");
+    send(tree, treeSelect, b); waitLines(right, 300);
+    check(visibleTabCount(app) == 2, "Dragging a preview made it permanent");
+}
 void bulkTabCloseTests(const fs::path& executable) {
     Fixture fixture;
     for (int i = 0; i < 4; ++i) writeLines(fixture.root / (std::wstring(1, L'a' + i) + L".txt"), 200 + i * 100);
@@ -287,7 +368,7 @@ void bulkTabCloseTests(const fs::path& executable) {
         TreeItem third = 0;
         for (int i = 0; i < 4; ++i) {
             if (i == 2) third = item;
-            send(tree, treeSelect, item); waitLines(viewer, 200 + i * 100);
+            send(tree, treeSelect, item); waitLines(viewer, 200 + i * 100); keepTab(app, i);
             item = nextItem(tree, TreeRelation::Next, item);
         }
         toggleTabPin(app, 0); toggleTabPin(app, 1);
@@ -372,7 +453,7 @@ void bulkTabSplitTests(const fs::path& executable) {
     waitFor([&] { return send(tree, treeGetCount) == 4; }, "Bulk split fixture did not load");
     auto item = nextItem(tree, TreeRelation::Child, nextItem(tree, TreeRelation::Root));
     for (int i = 0; i < 3; ++i) {
-        send(tree, treeSelect, item); waitLines(left, 200 + i * 100);
+        send(tree, treeSelect, item); waitLines(left, 200 + i * 100); keepTab(app, i);
         item = nextItem(tree, TreeRelation::Next, item);
     }
     const auto original = bounds(app.window, left);
@@ -406,7 +487,7 @@ void tabTests(const fs::path& executable) {
     const UINT dpi = GetDpiForWindow(app.window);
     const auto px = [dpi](int value) { return MulDiv(value, dpi, 96); };
     const auto empty = bounds(app.window, viewer);
-    send(tree, treeSelect, static_cast<WPARAM>(first)); waitLines(viewer, 200);
+    send(tree, treeSelect, static_cast<WPARAM>(first)); waitLines(viewer, 200); keepTab(app, 0);
     const auto pane = bounds(app.window, viewer);
     check(pane.top == empty.top + px(34), "Opening a file did not make room for tabs");
     for (int i = 0; i < 12; ++i) { send(viewer, WM_VSCROLL, SB_LINEDOWN); send(viewer, WM_HSCROLL, SB_LINEDOWN); }
@@ -434,7 +515,7 @@ void tabTests(const fs::path& executable) {
     check(bounds(app.window, viewer).top == empty.top && scrollInfo(viewer).nMax == 0, "Closing the last tab left a duplicate tab or document");
     // Reopen, then close a newly loading tab and its neighbor. Older results
     // must not repopulate the viewer or replace the next selected document.
-    send(tree, treeSelect, static_cast<WPARAM>(first)); waitLines(viewer, 220);
+    send(tree, treeSelect, static_cast<WPARAM>(first)); waitLines(viewer, 220); keepTab(app, 0);
     send(tree, treeSelect, static_cast<WPARAM>(second));
     clickTab(app, 1, true);
     click(app.window, pane.left + px(30), tabY, true);
@@ -453,7 +534,7 @@ void pinnedTabTests(const fs::path& executable) {
         waitFor([&] { return send(tree, treeGetCount) == 4; }, "The pinned tab test files did not appear");
         auto item = nextItem(tree, TreeRelation::Child, nextItem(tree, TreeRelation::Root));
         for (int lines : {200, 300, 400}) {
-            send(tree, treeSelect, item); waitLines(viewer, lines);
+            send(tree, treeSelect, item); waitLines(viewer, lines); keepTab(app, visibleTabCount(app) - 1);
             item = nextItem(tree, TreeRelation::Next, item);
         }
         const auto singleRow = bounds(app.window, viewer);
@@ -521,7 +602,7 @@ void tabDragTests(const fs::path& executable) {
         waitFor([&] { return send(tree, treeGetCount) == 5; }, "The drag test files did not appear");
         auto item = nextItem(tree, TreeRelation::Child, nextItem(tree, TreeRelation::Root));
         for (int lines : {200, 300, 400, 500}) {
-            send(tree, treeSelect, item); waitLines(viewer, lines);
+            send(tree, treeSelect, item); waitLines(viewer, lines); keepTab(app, visibleTabCount(app) - 1);
             item = nextItem(tree, TreeRelation::Next, item);
         }
         const auto before = [&](int index) { const auto r = tabBounds(app, index); return POINT{r.left + 1, (r.top + r.bottom) / 2}; };
@@ -594,7 +675,7 @@ void wrappingTabDragTests(const fs::path& executable) {
     waitFor([&] { return send(tree, treeGetCount) == 9; }, "The wrapped drag test files did not appear");
     auto item = nextItem(tree, TreeRelation::Child, nextItem(tree, TreeRelation::Root));
     for (int i = 0; i < 8; ++i) {
-        send(tree, treeSelect, item); waitLines(viewer, 100 + i);
+        send(tree, treeSelect, item); waitLines(viewer, 100 + i); keepTab(app, i);
         item = nextItem(tree, TreeRelation::Next, item);
     }
     const auto first = tabBounds(app, 0), last = tabBounds(app, 7);
@@ -660,7 +741,7 @@ void wrappingTabTests(const fs::path& executable) {
     TreeItem lastRemaining = 0;
     for (int i = 0; i < 8; ++i) {
         check(item != 0, "A tab test tree item is missing");
-        send(tree, treeSelect, static_cast<WPARAM>(item)); waitLines(viewer, 100 + i);
+        send(tree, treeSelect, static_cast<WPARAM>(item)); waitLines(viewer, 100 + i); keepTab(app, i);
         checkRows(i + 1);
         if (i == 6) lastRemaining = item;
         item = nextItem(tree, TreeRelation::Next, item);
@@ -740,6 +821,7 @@ void createItemTests(const fs::path& executable) {
     waitFor([&] { return expanded(tree, folder) && send(tree, treeGetCount) == 4; }, "Creation did not expand and refresh the parent");
     check(nextItem(tree, TreeRelation::Parent, static_cast<TreeItem>(send(tree, treeGetSelection))) == folder, "Created file was not selected");
     check(visibleTabCount(app) == 1, "Created file did not open in the editor");
+    keepTab(app, 0);
     edit = start(folder, true, L"空 フォルダー"); send(edit, WM_KEYDOWN, VK_RETURN);
     waitFor([&] { return fs::is_directory(created.parent_path() / L"空 フォルダー") && send(tree, treeGetCount) == 5; }, "New Folder did not create and display a folder");
     check(visibleTabCount(app) == 1, "Creating a folder opened a file tab");
@@ -792,6 +874,7 @@ void newFileShortcutTests(const fs::path& executable) {
     const auto file = fixture.root / L"chosen 日本語" / L"path" / L"to" / L"file.md";
     waitFor([&] { return fs::is_regular_file(file) && send(tree, treeGetCount) == 6; }, "Ctrl+N did not create and reveal nested parents");
     check(fs::file_size(file) == 0 && visibleTabCount(app) == 1, "New file was not empty or did not open a tab");
+    keepTab(app, 0);
     controlKey(app, tree, 'Z');
     waitFor([&] { return !fs::exists(fixture.root / L"chosen 日本語" / L"path") && send(tree, treeGetCount) == 3; }, "Undo did not remove automatically created intermediate folders");
     check(fs::exists(fixture.root / L"chosen 日本語" / L"existing.txt"), "Undo removed a preexisting parent or sibling");
@@ -808,6 +891,7 @@ void newFileShortcutTests(const fs::path& executable) {
     edit = start(tree, L"path/to/second.txt"); commit(edit);
     waitFor([&] { return fs::is_regular_file(file.parent_path() / L"second.txt") && send(tree, treeGetCount) == 9; }, "Could not reuse existing intermediate folders");
     check(visibleTabCount(app) == 2, "Second new file did not open a tab");
+    keepTab(app, 1);
     send(tree, treeSelect, root); expand(tree, root, false);
     edit = start(tree, L"cancelled/path.txt"); send(edit, WM_KEYDOWN, VK_ESCAPE);
     check(!fs::exists(fixture.root / L"cancelled") && !FindWindowExW(tree, nullptr, treeInputClassName, nullptr), "Escape created intermediate folders");
@@ -1134,7 +1218,7 @@ void splitPaneTests(const fs::path& executable) {
         const auto right = FindWindowExW(app.window, left, L"PoppyViewer", nullptr);
         waitFor([&] { return send(tree, treeGetCount) == 3; }, "Split fixture did not load");
         const auto first = nextItem(tree, TreeRelation::Child, nextItem(tree, TreeRelation::Root));
-        send(tree, treeSelect, first); waitLines(left, 120);
+        send(tree, treeSelect, first); waitLines(left, 120); keepTab(app, 0);
         send(tree, treeSelect, nextItem(tree, TreeRelation::Next, first)); waitLines(left, 240);
         const auto original = bounds(app.window, left);
         dragTab(app, 1, {original.left + (original.right-original.left)*3/4, original.top + 60});
@@ -1474,7 +1558,7 @@ void quickOpenTests(const fs::path& executable) {
         click(palette, px(24), px(86 + 44 + 22));
         return !IsWindowVisible(palette);
     }, "Quick open did not open the second match from collapsed directories");
-    waitLines(viewer, 301);
+    waitLines(viewer, 301); keepTab(app, 0);
     open(); type(L"missing-file"); send(palette, WM_KEYDOWN, VK_RETURN);
     check(IsWindowVisible(palette), "Enter opened a stale result while a new query was pending");
     send(palette, WM_KEYDOWN, VK_ESCAPE);
@@ -1538,7 +1622,7 @@ void explorerActiveFileTests(const fs::path& executable) {
         check(row >= scroll.nPos && row < scroll.nPos + scroll.nPage, "Active file selection is outside the visible rows");
     };
     send(tree, WM_VSCROLL, SB_BOTTOM);
-    open(L"日本語", 101); checkSelected(firstFolder);
+    open(L"日本語", 101); checkSelected(firstFolder); keepTab(app, 0);
     // Hidden Explorer follows file changes without switching the sidebar.
     send(gitButton, BM_CLICK); check(!IsWindowVisible(tree), "Source Control did not hide Explorer");
     open(L"second", 201); checkSelected(secondFolder);
@@ -1667,6 +1751,7 @@ void gitSidebarTests(const fs::path& executable) {
         const auto nested = nextItem(changes, TreeRelation::Child, src), file = nextItem(changes, TreeRelation::Child, nested);
         check(file != 0, "Git Tree lost a nested untracked file");
         send(changes, treeSelect, file); waitLines(viewer, 300);
+        check(visibleTabCount(app) == 1, "Browsing Source Control files accumulated preview tabs");
         view(false);
         send(changes, WM_KEYDOWN, VK_RETURN); waitLines(viewer, 300);
         view(true);
@@ -2091,7 +2176,9 @@ void branchSidebarTests(const fs::path& executable) {
         click(app.window, pane.left + (pane.right - pane.left) / 4, pane.top - MulDiv(14, GetDpiForWindow(app.window), 96));
         check(children(branches, nextItem(branches, TreeRelation::Child, latest)) == 1, "Tree did not restore loaded commit folders");
         send(branches, treeSelect, latest); send(branches, WM_KEYDOWN, VK_F4); waitLines(viewer, 4);
+        const auto previews = visibleTabCount(app);
         send(branches, treeSelect, rootCommit); send(branches, WM_KEYDOWN, VK_F4); waitLines(viewer, 5);
+        check(visibleTabCount(app) == previews, "Browsing All Changes for different commits accumulated tabs");
         waitFor([&] { return children(branches, rootCommit) == 2; }, "The oldest commit did not load its files");
         const auto oldFile = nextItem(branches, TreeRelation::Child, nextItem(branches, TreeRelation::Child, rootCommit));
         check(oldFile != 0, "The oldest commit is missing its nested file");
@@ -2106,6 +2193,7 @@ void branchSidebarTests(const fs::path& executable) {
         waitFor([&] { return viewerText() == L"committed\n"; }, "History Open File lost the working file's Undo history");
         send(branches, treeSelect, rootCommit); send(branches, WM_KEYDOWN, VK_F4); waitLines(viewer, 5);
         const auto oldWorking = gitGroup(branches, false);
+        keepTab(app, visibleTabCount(app) - 1);
         PostMessageW(app.window, WM_KEYDOWN, VK_F5, 0);
         waitFor([&] { return gitGroup(branches, false) != oldWorking; }, "Source Control did not refresh working changes");
         check(children(branches, branch) == 54 && children(branches, latest) == 2, "Refreshing working changes discarded loaded history");
@@ -2259,7 +2347,7 @@ void multiProjectTests(const fs::path& executable) {
     const auto treeA = app.tree(); const auto surfaceA = app.window;
     const auto viewerA = FindWindowExW(surfaceA, nullptr, L"PoppyViewer", nullptr);
     waitFor([&] { return nextItem(treeA, TreeRelation::Child, nextItem(treeA, TreeRelation::Root)) != 0; }, "Project A did not load");
-    send(treeA, treeSelect, nextItem(treeA, TreeRelation::Child, nextItem(treeA, TreeRelation::Root))); waitLines(viewerA, 200);
+    send(treeA, treeSelect, nextItem(treeA, TreeRelation::Child, nextItem(treeA, TreeRelation::Root))); waitLines(viewerA, 200); keepTab(app, 0);
     send(viewerA, WM_VSCROLL, SB_PAGEDOWN); const int top = scrollInfo(viewerA).nPos;
     const auto rootA = nextItem(treeA, TreeRelation::Root);
     const auto open = [&](const fs::path& path) {
@@ -2271,7 +2359,7 @@ void multiProjectTests(const fs::path& executable) {
     open(b.root); const auto surfaceB = app.window; const auto treeB = app.tree();
     const auto viewerB = FindWindowExW(surfaceB, nullptr, L"PoppyViewer", nullptr);
     waitFor([&] { return nextItem(treeB, TreeRelation::Child, nextItem(treeB, TreeRelation::Root)) != 0; }, "Project B did not load");
-    send(treeB, treeSelect, nextItem(treeB, TreeRelation::Child, nextItem(treeB, TreeRelation::Root))); waitLines(viewerB, 300);
+    send(treeB, treeSelect, nextItem(treeB, TreeRelation::Child, nextItem(treeB, TreeRelation::Root))); waitLines(viewerB, 300); keepTab(app, 0);
     open(c.root); check(app.window!=surfaceA && app.window!=surfaceB,"Projects reused a surface");
     select(0); check(app.window==surfaceA && nextItem(treeA,TreeRelation::Root)==rootA,"Switching rebuilt the explorer");
     check(scrollInfo(viewerA).nMax==200 && scrollInfo(viewerA).nPos==top,"A-B-A lost the document or its view position");
@@ -2375,6 +2463,7 @@ void recentProjectTests(const fs::path& executable) {
             waitFor([&] { return nextItem(tree, TreeRelation::Child, root) != 0; }, "History test project did not load");
             send(tree, treeSelect, nextItem(tree, TreeRelation::Child, root));
             waitLines(FindWindowExW(app.window, nullptr, L"PoppyViewer", nullptr), lines);
+            keepTab(app, 0);
             return app.window;
         };
         const auto surfaceA = open(a, 200), surfaceB = open(b, 300);
@@ -2421,6 +2510,7 @@ void projectDragTests(const fs::path& executable) {
             waitFor([&]{return nextItem(tree,TreeRelation::Child,root)!=0;},"A drag test project did not load");
             send(tree,treeSelect,nextItem(tree,TreeRelation::Child,root));
             waitLines(FindWindowExW(app.window,nullptr,L"PoppyViewer",nullptr),lines);
+            keepTab(app, 0);
             return app.window;
         };
         const auto open=[&](const fs::path& path,int lines){
@@ -2711,12 +2801,12 @@ void sessionTests(const fs::path& executable) {
             first = nextItem(tree, TreeRelation::Child, nested); second = nextItem(tree, TreeRelation::Next, first); third = nextItem(tree, TreeRelation::Next, second);
             return first && second && third;
         }, "Session fixture did not expand");
-        send(tree, treeSelect, first); waitLines(viewer, 200);
+        send(tree, treeSelect, first); waitLines(viewer, 200); keepTab(app, 0);
         for (int i = 0; i < 12; ++i) { send(viewer, WM_VSCROLL, SB_LINEDOWN); send(viewer, WM_HSCROLL, SB_LINEDOWN); }
         firstTop = scrollInfo(viewer).nPos; firstLeft = scrollInfo(viewer, SB_HORZ).nPos;
-        send(tree, treeSelect, second); waitLines(viewer, 300);
+        send(tree, treeSelect, second); waitLines(viewer, 300); keepTab(app, 1);
         send(viewer, WM_VSCROLL, SB_PAGEDOWN); secondTop = scrollInfo(viewer).nPos;
-        send(tree, treeSelect, third); waitLines(viewer, 100);
+        send(tree, treeSelect, third); waitLines(viewer, 100); keepTab(app, 2);
         send(tree, treeSelect, second); waitLines(viewer, 300);
         const auto px = [dpi = GetDpiForWindow(app.window)](int value) { return MulDiv(value, dpi, 96); };
         click(app.window, px(410), px(22));
@@ -2766,7 +2856,7 @@ int wmain(int argc, wchar_t** argv) {
     try {
         check(argc == 2, "Pass the path to Poppy.exe");
         SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
-        for (const auto test : {folderTests, explorerSortTests, sidebarTests, treeInteractionTests, tabTests, pinnedTabTests,
+        for (const auto test : {folderTests, explorerSortTests, sidebarTests, treeInteractionTests, previewTabTests, previewTabSplitTests, tabTests, pinnedTabTests,
                 bulkTabCloseTests, bulkTabSaveTests, bulkTabSplitTests, explorerActiveFileTests,
                 tabDragTests, wrappingTabDragTests, wrappingTabTests, renameTests, explorerMoveTests, explorerDeleteTests, explorerMultipleSelectionTests, createItemTests, newFileShortcutTests, pasteImageTests, splitPaneTests, quickOpenTests, fullSearchTests, gitSidebarTests, gitIgnoredExplorerTests, gitAutoRefreshTests, editableGitDiffTests, branchSidebarTests, multiRepositoryTests, sessionTests, multiProjectTests, recentProjectTests, projectDragTests, scrollingProjectDragTests, terminalTitleTests, terminalShellTests, terminalShortcutTests, terminalBackspaceTests}) {
             Fixture appData; AppDataEnvironment environment(appData.root);

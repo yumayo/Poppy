@@ -16,6 +16,7 @@
 #include "explorer_history.h"
 #include "explorer_clipboard.h"
 #include "status_bar.h"
+#include "editor_tabs.h"
 #include <commctrl.h>
 #include <dwmapi.h>
 #include <shobjidl.h>
@@ -72,14 +73,7 @@ std::unordered_set<std::string> ignoredNames(ProjectProvider& provider, const Re
     });
 }
 struct FileResult { std::shared_ptr<EditBuffer> buffer; std::shared_ptr<Document> document; std::wstring error; std::shared_ptr<const ImagePreview> image; };
-struct Tab {
-    ResourceId path; bool diff = false; Viewer::State fileView, diffView; bool pinned = false;
-    std::shared_ptr<EditBuffer> buffer; int group = 0; bool displayed = false;
-    GitDiffKind diffKind = GitDiffKind::Automatic; std::string revision; bool allChanges = false;
-    std::optional<ContentMatch> searchTarget; std::string searchQuery; bool searchMatchCase = false;
-    ResourceId gitRoot = {};
-    std::shared_ptr<const Document> diffBefore = {};
-};
+using Tab = EditorTab;
 std::wstring tabKey(const Tab& tab) {
     return pathKey(tab.path) + L"\n" + std::to_wstring(static_cast<int>(tab.diffKind)) + L"\n" + wide(tab.revision) + (tab.allChanges ? L"\nall" : L"") + (tab.gitRoot.empty() ? L"" : L"\n" + pathKey(tab.gitRoot));
 }
@@ -677,7 +671,7 @@ void ProjectRuntime::Impl::layout(bool revealTab) {
             for (size_t j = 0; j < pane.indices.size(); ++j) {
                 const size_t i = pane.indices[j]; const auto& tab = tabs_[i];
                 const auto title = tabTitle(tab);
-                const int width = std::min(std::max(0, available), renderer_.textWidth(title) + MulDiv(40, dpi_, 96));
+                const int width = std::min(std::max(0, available), renderer_.textWidth(title, tab.preview) + MulDiv(40, dpi_, 96));
                 if (!j || tab.pinned != tabs_[pane.indices[j - 1]].pinned || (x > start && x + width > start + available)) { pane.starts.push_back(j); x = start; ++row; }
                 tabRects_[i] = {x, toolbar_ + row * rowHeight, x + width, toolbar_ + (row + 1) * rowHeight}; x += width;
             }
@@ -777,7 +771,8 @@ void ProjectRuntime::Impl::paint() {
             dc.fill(rect, active ? panel : background);
             if (active) dc.fill({rect.left, rect.top, rect.right, rect.top + scaled(2)}, accent);
             const auto title = tabTitle(tabs_[i]);
-            dc.label({rect.left + scaled(12), rect.top, rect.right - scaled(28), rect.bottom}, title, active ? foreground : muted);
+            dc.label({rect.left + scaled(12), rect.top, rect.right - scaled(28), rect.bottom}, title, active ? foreground : muted,
+                DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS, tabs_[i].preview);
             if (tabs_[i].pinned) {
                 const float x = static_cast<float>(rect.right - scaled(16)), y = static_cast<float>((rect.top + rect.bottom) / 2);
                 const float unit = static_cast<float>(dpi_) / 96.0f;
@@ -1874,9 +1869,9 @@ ProjectSession ProjectRuntime::Impl::saveSession() {
     ProjectSession state;
     state.wslUid = wslUid_;
     state.sidebar = sidebar_; state.terminalHeight = terminalHeight_; state.terminalVisible = terminalVisible_;
-    state.gitSidebar = activeSidebar_ == Sidebar::Git; state.activeTab = activeTab_;
+    state.gitSidebar = activeSidebar_ == Sidebar::Git;
     state.diffInline = viewer().diffInline(); state.gitTree = gitTreeView_; state.firstTabRow = editorGroups_[0].firstRow; state.rightTabRow = editorGroups_[1].firstRow; state.editorRatio = editorRatio_;
-    for (const auto& tab : tabs_) state.tabs.push_back({tab.path.u8string(), tab.diff, tab.fileView, tab.diffView, tab.pinned, tab.group, tab.displayed, tab.diffKind, tab.revision, tab.allChanges, tab.gitRoot.u8string()});
+    saveEditorTabs(state, tabs_, activeTab_);
     for (const auto& entry : expandedPaths_) state.expanded.push_back(entry.second.u8string());
     if (!pendingExplorerFile_.empty()) state.selected = pendingExplorerFile_.u8string();
     else if (!pendingTreeSelection_.empty()) state.selected = pendingTreeSelection_.u8string();
@@ -2133,6 +2128,13 @@ void ProjectRuntime::Impl::endTabDrag(bool drop) {
             position = static_cast<size_t>(found - tabs_.begin());
         }
         tabs_.insert(tabs_.begin() + static_cast<std::ptrdiff_t>(position), std::move(tab));
+        // Moving a preview to another group replaces that group's clean preview.
+        if (tabs_[position].preview) for (size_t i = tabs_.size(); i-- > 0;) {
+            if (i != position && tabs_[i].group == targetGroup && tabs_[i].preview) {
+                tabs_.erase(tabs_.begin() + static_cast<std::ptrdiff_t>(i));
+                if (i < position) --position;
+            }
+        }
         focusedGroup_ = targetGroup; ++serial_[0]; ++serial_[1];
         normalizeGroups(); layout(); loadTab(false, 0); loadTab(false, 1); SetFocus(viewer().window()); return;
     }
@@ -2155,6 +2157,7 @@ void ProjectRuntime::Impl::saveTab() {
         auto& tab = tabs_[index]; (tab.diff ? tab.diffView : tab.fileView) = view.state();
         if (view.buffer()) tab.buffer = view.buffer();
     }
+    keepModifiedEditorTabs(tabs_);
 }
 std::shared_ptr<EditBuffer> ProjectRuntime::Impl::shareBuffer(const ResourceId& path, std::shared_ptr<EditBuffer> loaded) {
     std::shared_ptr<EditBuffer> buffer;
@@ -2165,6 +2168,7 @@ std::shared_ptr<EditBuffer> ProjectRuntime::Impl::shareBuffer(const ResourceId& 
         for (auto& view : viewers_) if (view.buffer() == buffer) view.refreshBuffer();
     }
     if (buffer) for (auto& tab : tabs_) if (tab.path == path && !tab.allChanges && (tab.diffKind == GitDiffKind::Automatic || tab.diffKind == GitDiffKind::Changes)) tab.buffer = buffer;
+    keepModifiedEditorTabs(tabs_);
     return buffer;
 }
 bool ProjectRuntime::Impl::saveFile(size_t index, bool wait) {
@@ -2209,20 +2213,20 @@ void ProjectRuntime::Impl::openFile(const ResourceId& path, bool diff) {
     endTabDrag();
     const auto key = pathKey(path);
     const auto found = std::find_if(tabs_.begin(), tabs_.end(), [&](const Tab& tab) { return tab.diffKind == GitDiffKind::Automatic && pathKey(tab.path) == key; });
-    const size_t index = static_cast<size_t>(found - tabs_.begin());
+    size_t index = static_cast<size_t>(found - tabs_.begin());
     if (found != tabs_.end() && index == activeTab_ && (!diff || found->diff)) { revealActiveFile(); updateTabs(); return; }
     saveTab();
-    if (found == tabs_.end()) { Tab tab; tab.path = path; tab.diff = diff; tab.group = focusedGroup_; tabs_.push_back(std::move(tab)); }
+    if (found == tabs_.end()) { Tab tab; tab.path = path; tab.diff = diff; tab.group = focusedGroup_; index = openEditorPreview(tabs_, std::move(tab)); }
     else if (diff) found->diff = true;
     focusedGroup_ = tabs_[index].group; for (auto& tab : tabs_) if (tab.group == focusedGroup_) tab.displayed = false; tabs_[index].displayed = true; activeTab_ = index; layout(); loadTab();
 }
 void ProjectRuntime::Impl::openContentResult(const ContentMatch& match, const std::string& query, bool matchCase) {
     const auto path = (root_ / std::string_view(match.relative)).lexically_normal();
     if (!root_.contains(path)) { status(L"Invalid search result path."); return; }
-    saveTab();
+    endTabDrag(); saveTab();
     auto found = std::find_if(tabs_.begin(), tabs_.end(), [&](const Tab& tab) { return tab.diffKind == GitDiffKind::Automatic && tab.path == path; });
     size_t index = static_cast<size_t>(found - tabs_.begin());
-    if (found == tabs_.end()) { Tab tab; tab.path = path; tab.group = focusedGroup_; tabs_.push_back(std::move(tab)); }
+    if (found == tabs_.end()) { Tab tab; tab.path = path; tab.group = focusedGroup_; index = openEditorPreview(tabs_, std::move(tab)); }
     auto& tab = tabs_[index]; tab.diff = false; tab.searchTarget = match; tab.searchQuery = query; tab.searchMatchCase = matchCase;
     focusedGroup_ = tab.group;
     for (auto& current : tabs_) if (current.group == focusedGroup_) current.displayed = false;
@@ -2238,10 +2242,7 @@ void ProjectRuntime::Impl::openGitDiff(const ResourceId& path, GitDiffKind kind,
     if (path.empty()) return;
     endTabDrag(); saveTab();
     Tab target; target.path = path; target.diff = true; target.diffKind = kind; target.revision = std::move(revision); target.allChanges = allChanges; target.group = focusedGroup_; target.gitRoot = std::move(root);
-    const auto key = tabKey(target);
-    const auto found = std::find_if(tabs_.begin(), tabs_.end(), [&](const Tab& tab) { return tabKey(tab) == key; });
-    const size_t index = static_cast<size_t>(found - tabs_.begin());
-    if (found == tabs_.end()) tabs_.push_back(std::move(target));
+    const size_t index = openEditorPreview(tabs_, std::move(target));
     focusedGroup_ = tabs_[index].group;
     for (auto& tab : tabs_) if (tab.group == focusedGroup_) tab.displayed = false;
     tabs_[index].displayed = true; activeTab_ = index; layout(); loadTab();
@@ -2292,6 +2293,7 @@ void ProjectRuntime::Impl::toggleTabPin(size_t index) {
     auto tab = std::move(tabs_[index]);
     tabs_.erase(tabs_.begin() + static_cast<std::ptrdiff_t>(index));
     tab.pinned = !tab.pinned;
+    tab.preview = false;
     const auto position = std::find_if(tabs_.begin(), tabs_.end(), [&](const Tab& value) { return value.group == tab.group && !value.pinned; });
     tabs_.insert(position, std::move(tab));
     activeTab_ = static_cast<size_t>(std::find_if(tabs_.begin(), tabs_.end(), [&](const Tab& value) { return tabKey(value) == activeKey; }) - tabs_.begin());
@@ -2738,6 +2740,17 @@ LRESULT ProjectRuntime::Impl::handle(UINT m, WPARAM a, LPARAM b) {
         if (dragging_) SetCapture(window_);
         return 0;
     }
+    case WM_LBUTTONDBLCLK: {
+        const POINT point{GET_X_LPARAM(b), GET_Y_LPARAM(b)};
+        const auto index = tabAt(point);
+        if (index < tabs_.size()) {
+            const auto rect = tabBounds(index);
+            if (!tabs_[index].pinned && point.x >= rect.right - MulDiv(28, dpi_, 96)) return 0;
+            selectTab(index); tabs_[index].preview = false; updateTabs(); SetFocus(viewer().window());
+            if (owner_ && owner_->changed) owner_->changed();
+        }
+        return 0;
+    }
     case WM_MBUTTONDOWN: { closeTab(tabAt({GET_X_LPARAM(b), GET_Y_LPARAM(b)})); return 0; }
     case WM_CONTEXTMENU:
         if (reinterpret_cast<HWND>(a) == window_) { tabMenu({GET_X_LPARAM(b), GET_Y_LPARAM(b)}); return 0; }
@@ -2833,7 +2846,7 @@ ProjectRuntime::~ProjectRuntime() {
 }
 void ProjectRuntime::create(HWND parent, HINSTANCE instance, AiEventQueue* hooks) {
     impl_->instance_ = instance;
-    WNDCLASSW cls{}; cls.lpfnWndProc = Impl::procedure; cls.hInstance = instance; cls.lpszClassName = L"PoppyProject"; cls.hCursor = LoadCursorW(nullptr, IDC_ARROW); RegisterClassW(&cls);
+    WNDCLASSW cls{}; cls.style = CS_DBLCLKS; cls.lpfnWndProc = Impl::procedure; cls.hInstance = instance; cls.lpszClassName = L"PoppyProject"; cls.hCursor = LoadCursorW(nullptr, IDC_ARROW); RegisterClassW(&cls);
     impl_->window_ = CreateWindowExW(0, cls.lpszClassName, L"Project", WS_CHILD | WS_CLIPCHILDREN | WS_CLIPSIBLINGS, 0, 0, 0, 0, parent, nullptr, instance, impl_.get());
     impl_->terminal_.connect(hooks);
 }

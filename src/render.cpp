@@ -321,11 +321,12 @@ void Renderer::fillRounded(const RECT& rect, COLORREF value, float radius) {
     if (empty(rect)) return;
     color(value); target_->FillRoundedRectangle(D2D1::RoundedRect(rectangle(rect), radius, radius), brush_.get());
 }
-int Renderer::textWidth(const std::wstring& text) const {
+int Renderer::textWidth(const std::wstring& text, bool italic) const {
     auto* format = font_ == Font::Code ? codeFont_.get() : uiFont_.get();
     if (!format || text.empty()) return 0;
     ComPtr<IDWriteTextLayout> layout;
     if (FAILED(factories().text->CreateTextLayout(text.data(), static_cast<UINT32>(text.size()), format, 1000000.0f, 1000000.0f, layout.put()))) return 0;
+    if (italic) layout->SetFontStyle(DWRITE_FONT_STYLE_ITALIC, {0, static_cast<UINT32>(text.size())});
     layout->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
     DWRITE_TEXT_METRICS metrics{};
     return SUCCEEDED(layout->GetMetrics(&metrics)) ? static_cast<int>(std::ceil(metrics.widthIncludingTrailingWhitespace)) : 0;
@@ -402,13 +403,14 @@ void InputLine::draw(Renderer& renderer, COLORREF color, COLORREF selection, boo
     if (showCaret) renderer.fill({caret_.x, caret_.y, caret_.x + caretWidth_, caret_.y + height_}, composition_.text.empty() ? color : accent);
     renderer.target_->PopAxisAlignedClip();
 }
-void Renderer::label(const RECT& rect, const std::wstring& text, COLORREF value, UINT flags) {
+void Renderer::label(const RECT& rect, const std::wstring& text, COLORREF value, UINT flags, bool italic) {
     auto* format = font_ == Font::Code ? codeFont_.get() : uiFont_.get();
     if (empty(rect) || text.empty() || !format) return;
     ComPtr<IDWriteTextLayout> layout;
     auto& factory = factories().text;
     if (FAILED(factory->CreateTextLayout(text.data(), static_cast<UINT32>(text.size()), format,
         static_cast<float>(rect.right - rect.left), static_cast<float>(rect.bottom - rect.top), layout.put()))) return;
+    if (italic) layout->SetFontStyle(DWRITE_FONT_STYLE_ITALIC, {0, static_cast<UINT32>(text.size())});
     layout->SetTextAlignment(flags & DT_RIGHT ? DWRITE_TEXT_ALIGNMENT_TRAILING : flags & DT_CENTER ? DWRITE_TEXT_ALIGNMENT_CENTER : DWRITE_TEXT_ALIGNMENT_LEADING);
     layout->SetParagraphAlignment(flags & DT_VCENTER ? DWRITE_PARAGRAPH_ALIGNMENT_CENTER : DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
     layout->SetWordWrapping(flags & DT_WORDBREAK ? DWRITE_WORD_WRAPPING_WRAP : DWRITE_WORD_WRAPPING_NO_WRAP);

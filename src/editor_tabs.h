@@ -1,0 +1,26 @@
+#pragma once
+#include "content_search.h"
+#include "edit_buffer.h"
+#include "resource.h"
+#include "session.h"
+#include <memory>
+#include <optional>
+
+namespace poppy {
+struct EditorTab {
+    ResourceId path; bool diff = false; ViewState fileView, diffView; bool pinned = false;
+    std::shared_ptr<EditBuffer> buffer; int group = 0; bool displayed = false;
+    GitDiffKind diffKind = GitDiffKind::Automatic; std::string revision; bool allChanges = false;
+    std::optional<ContentMatch> searchTarget; std::string searchQuery; bool searchMatchCase = false;
+    ResourceId gitRoot = {};
+    std::shared_ptr<const Document> diffBefore = {};
+    // Restored tabs stay permanent; only newly opened tabs start as previews.
+    bool preview = false;
+};
+
+// Reuse an existing tab, or replace the clean preview in the target group.
+size_t openEditorPreview(std::vector<EditorTab>& tabs, EditorTab target);
+void keepModifiedEditorTabs(std::vector<EditorTab>& tabs);
+// Preview tabs are session-local. Repair selection and groups after filtering.
+void saveEditorTabs(ProjectSession& state, const std::vector<EditorTab>& tabs, size_t active);
+}
