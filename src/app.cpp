@@ -586,7 +586,7 @@ void ProjectRuntime::Impl::create() {
         if (!hiddenGitFiles_.erase(path)) hiddenGitFiles_.insert(path);
         refreshAllChanges();
     };
-    changes_.persistentAction = [this](TreeItem item, unsigned slot) { return slot == 3 && !gitVisibilityPath(item).empty(); };
+    changes_.dimmed = [this](TreeItem item) { return hiddenGitFiles_.count(gitVisibilityPath(item)) != 0; };
     changes_.expanded = [this](TreeItem item, bool value) {
         const auto source = sourceNode(item);
         if (!source) {

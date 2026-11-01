@@ -138,7 +138,7 @@ void Tree::rename(TreeItem id, const std::wstring& name) {
         left_ = std::max(0, textLeft - MulDiv(5, dpi_, 96)); changed();
     }
     renameInput_.finished = [this](bool commit) { finishRename(commit); };
-    rename_ = renameInput_.create(window_, reinterpret_cast<HINSTANCE>(GetWindowLongPtrW(window_, GWLP_HINSTANCE)), name, item(id)->color);
+    rename_ = renameInput_.create(window_, reinterpret_cast<HINSTANCE>(GetWindowLongPtrW(window_, GWLP_HINSTANCE)), name, textColor(id));
     if (!rename_) { renaming_ = 0; return; }
     SendMessageW(rename_, EM_SETLIMITTEXT, 255, 0); layoutRename(); if (!rename_) return;
     const auto extension = item(id)->expandable ? std::wstring::npos : name.find_last_of(L'.');
@@ -243,7 +243,15 @@ RECT Tree::actionBounds(TreeItem id, unsigned slot) const {
 }
 bool Tree::actionVisible(TreeItem id, unsigned slot) const {
     const auto& label = actionLabelFor(slot);
-    return id && (!hoverActionsOnly || hotItem_ == id || (persistentAction && persistentAction(id, slot))) && label && !label(id).empty();
+    return id && (!hoverActionsOnly || hotItem_ == id) && label && !label(id).empty();
+}
+COLORREF Tree::textColor(TreeItem id) const {
+    const auto node = item(id);
+    if (!node) return foreground;
+    if (!dimmed || !dimmed(id)) return node->color;
+    return RGB((GetRValue(node->color) + GetRValue(panel)) / 2,
+        (GetGValue(node->color) + GetGValue(panel)) / 2,
+        (GetBValue(node->color) + GetBValue(panel)) / 2);
 }
 void Tree::hover(POINT point) {
     const auto content = Scrollbars::contentRect(window_);
@@ -328,7 +336,7 @@ void Tree::paint() {
             if (bounds.right) action = bounds;
         }
         if (row.item != renaming_) renderer_.label({x + indent_ + padding, y, action.right ? action.left - padding : std::max<LONG>(r.right, x + indent_ + widths_[row.item] + padding), y + rowHeight_},
-            node->text, node->color, DT_LEFT | DT_VCENTER | DT_SINGLELINE | (action.right ? DT_END_ELLIPSIS : 0));
+            node->text, textColor(row.item), DT_LEFT | DT_VCENTER | DT_SINGLELINE | (action.right ? DT_END_ELLIPSIS : 0));
         for (const unsigned slot : {0u, 1u, 2u, 3u}) if (actionVisible(row.item, slot)) {
             const auto bounds = actionBounds(row.item, slot);
             if (hotItem_ == row.item && hotAction_ == static_cast<int>(slot))
@@ -340,8 +348,7 @@ void Tree::paint() {
     }
     if (GetFocus() == window_ && !ime_.text().text.empty()) {
         renderer_.fill(searchBounds_, RGB(50, 70, 94));
-        const auto node = item(selection());
-        searchInput_.draw(renderer_, node ? node->color : foreground, RGB(75, 99, 129), true);
+        searchInput_.draw(renderer_, textColor(selection()), RGB(75, 99, 129), true);
     }
     scrollbars_.paint(window_, renderer_, panel);
 }
@@ -578,7 +585,7 @@ LRESULT Tree::handle(UINT m, WPARAM a, LPARAM b) {
     case treeIsSelected: return model_.selected(static_cast<TreeItem>(a));
     case treeGetRow: return row(static_cast<TreeItem>(a));
     case treeGetRowHeight: return rowHeight_;
-    case treeGetColor: { const auto node = item(static_cast<TreeItem>(a)); return node ? node->color : 0; }
+    case treeGetColor: return item(static_cast<TreeItem>(a)) ? textColor(static_cast<TreeItem>(a)) : 0;
     default: return DefWindowProcW(window_, m, a, b);
     }
 }

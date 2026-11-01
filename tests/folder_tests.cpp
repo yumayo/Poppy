@@ -1911,7 +1911,7 @@ void gitSidebarTests(const fs::path& executable) {
             RECT rect{}; GetClientRect(changes, &rect);
             const int height = static_cast<int>(send(changes, treeGetRowHeight));
             const int y = (static_cast<int>(send(changes, treeGetRow, rootFile)) - scrollInfo(changes).nPos) * height + height / 2;
-            // The eye remains visible without hovering; it follows Stage,
+            // The eye appears on hover; it follows Stage,
             // Discard and Open File without changing their hit regions.
             send(changes, WM_MOUSELEAVE);
             click(changes, rect.right - px(102), y);

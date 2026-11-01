@@ -84,7 +84,7 @@ public:
     std::function<Renderer::Icon(TreeItem)> quaternaryActionIcon;
     std::function<void(TreeItem)> quaternaryActionClicked;
     bool hoverActionsOnly = false;
-    std::function<bool(TreeItem, unsigned)> persistentAction;
+    std::function<bool(TreeItem)> dimmed;
 private:
     static LRESULT CALLBACK procedure(HWND, UINT, WPARAM, LPARAM);
     void finishRename(bool commit);
@@ -104,6 +104,7 @@ private:
     TreeItem hit(int y) const;
     RECT actionBounds(TreeItem id, unsigned slot = 0) const;
     bool actionVisible(TreeItem id, unsigned slot = 0) const;
+    COLORREF textColor(TreeItem id) const;
     const std::function<std::wstring(TreeItem)>& actionLabelFor(unsigned slot) const;
     void hover(POINT point);
     void scroll(int vertical, int horizontal = 0);
