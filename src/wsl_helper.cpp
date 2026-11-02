@@ -215,13 +215,14 @@ private:
     std::thread watcher_;
     poppy::WatchUsage watchBudget_;
     Fd notify_{inotify_init1(IN_NONBLOCK | IN_CLOEXEC)};
+    const int notifyError_ = notify_.value < 0 ? errno : 0;
     struct WatchPath { std::string path, gitRelative; std::set<std::string> gitRoots; };
     std::map<std::string, int> watched_;
     std::map<int, WatchPath> watchPaths_;
     std::map<std::string, std::set<std::string>> readAliases_;
     size_t readAliasCount_ = 0;
     bool watchLimited_ = false, drvfs_ = false;
-    std::string watchReason_;
+    std::string watchReason_, watchFailedPath_, watchError_;
     bool hello_ = false;
     size_t uploadBytes_ = 0;
 };
@@ -297,10 +298,24 @@ void Server::watch(const std::string& p, const std::string& gitRoot, const std::
         if (!gitRoot.empty()) { auto& entry = watchPaths_[found->second]; entry.gitRelative = gitRelative; entry.gitRoots.insert(gitRoot); }
         return;
     }
-    if (p.rfind("/mnt/", 0) == 0) drvfs_ = true;
-    if (watchPaths_.size() >= watchBudget_.limit || notify_.value < 0) { watchLimited_ = true; watchReason_ = watchPaths_.size() >= watchBudget_.limit ? "poppyLimit" : "watchFailed"; return; }
+    auto failed = [&](const char* reason, int error) {
+        watchLimited_ = true; watchReason_ = reason;
+        // Bound diagnostics so an invalid, oversized request path cannot make
+        // the watchUsage control frame itself exceed the protocol limit.
+        watchFailedPath_ = p.size() > 4096 ? "[path exceeds 4096 bytes]" : validUtf8(p) ? p : "[non-UTF-8 path]";
+        watchError_ = error ? std::strerror(error) : "";
+    };
+    if (watchPaths_.size() >= watchBudget_.limit || notify_.value < 0) { failed(watchPaths_.size() >= watchBudget_.limit ? "poppyLimit" : "watchFailed", notifyError_); return; }
     const auto wd = inotify_add_watch(notify_.value, p.c_str(), IN_CREATE | IN_DELETE | IN_MOVED_FROM | IN_MOVED_TO | IN_MODIFY | IN_ATTRIB | IN_DELETE_SELF | IN_MOVE_SELF | IN_ONLYDIR | IN_DONT_FOLLOW);
-    if (wd < 0) { watchLimited_ = true; watchReason_ = errno == ENOSPC ? "systemLimit" : "watchFailed"; return; }
+    if (wd < 0) {
+        const int error = errno;
+        // Scans race with deletes and renames; stale .git pointers and ordinary
+        // files are not directories that need watching. Keep their operation
+        // errors local instead of latching a warning on the shared connection.
+        if (error != ENOENT && error != ENOTDIR) failed(error == ENOSPC ? "systemLimit" : "watchFailed", error);
+        return;
+    }
+    if (p.rfind("/mnt/", 0) == 0) drvfs_ = true;
     auto& entry = watchPaths_[wd];
     if (!entry.path.empty()) watched_.erase(entry.path);
     entry.path = p;
@@ -354,14 +369,14 @@ void Server::events() {
             }
         }
         poppy::WatchUsage usage;
-        { std::lock_guard<std::mutex> lock(watchMutex_); usage = {watchPaths_.size(), watchBudget_.limit, watchBudget_.systemLimit, watchLimited_ || drvfs_, watchLimited_ ? watchReason_ : drvfs_ ? "drvfs" : ""}; }
+        { std::lock_guard<std::mutex> lock(watchMutex_); usage = {watchPaths_.size(), watchBudget_.limit, watchBudget_.systemLimit, watchLimited_ || drvfs_, watchLimited_ ? watchReason_ : drvfs_ ? "drvfs" : "", watchFailedPath_, watchError_}; }
         // Missing watches are not evidence of a change. Repeated unconditional
         // rescans keep large workspaces permanently busy and retransfer indexes.
         if (usage.limited && !warned && !stopping_) { send({{"event", "watchLimited"}}); warned = true; }
         // Progress is a cached status snapshot, never a reason to rescan.
         // Coalesce registrations while indexing and send nothing when idle.
         if ((!previousUsage || !(usage == *previousUsage)) && Clock::now() - reportedAt >= std::chrono::milliseconds(250) && !stopping_) {
-            send({{"event", "watchUsage"}, {"count", std::to_string(usage.count)}, {"limit", std::to_string(usage.limit)}, {"systemLimit", std::to_string(usage.systemLimit)}, {"limited", usage.limited ? "1" : "0"}, {"reason", usage.reason}});
+            send({{"event", "watchUsage"}, {"count", std::to_string(usage.count)}, {"limit", std::to_string(usage.limit)}, {"systemLimit", std::to_string(usage.systemLimit)}, {"limited", usage.limited ? "1" : "0"}, {"reason", usage.reason}, {"failedPath", usage.failedPath}, {"watchError", usage.error}});
             previousUsage = usage; reportedAt = Clock::now();
         }
         if (overflow && !stopping_) send({{"event", "rescanRequired"}, {"files", "1"}, {"content", "1"}});
@@ -475,7 +490,7 @@ void Server::execute(const std::shared_ptr<Request>& r) {
             if (snapshot.target != p) {
                 std::lock_guard<std::mutex> lock(watchMutex_);
                 if (readAliasCount_ < 8192) { if (readAliases_[snapshot.target].insert(p).second) ++readAliasCount_; }
-                else { watchLimited_ = true; watchReason_ = "aliases"; }
+                else { watchLimited_ = true; watchReason_ = "aliases"; watchFailedPath_ = p; watchError_.clear(); }
             }
             reply(*r, {{"body", "1"}, {"size", std::to_string(snapshot.bytes.size())}, {"version", snapshot.version}}); body(*r, snapshot.bytes); reply(*r, {{"done", "1"}});
         } else if (op == "saveFile") save(*r);

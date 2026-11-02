@@ -42,7 +42,13 @@ void limitStatuses() {
     auto status = watchLimitStatus(usage);
     check(status.text == L"Watch 1,234/262,144" && !status.warning && status.tooltip.find(L"524,288") != status.tooltip.npos && status.tooltip.find(L"Shared by all projects") != status.tooltip.npos && status.tooltip.find(L"half") != status.tooltip.npos && status.tooltip.find(L"startup") != status.tooltip.npos, "Watch tooltip omitted its scope or dynamic Linux budget");
     usage.limited = true; usage.reason = "systemLimit"; status = watchLimitStatus(usage);
-    check(status.warning && status.tooltip.find(L"Linux could not allocate") != status.tooltip.npos && status.tooltip.find(L"F5") != status.tooltip.npos, "Partial monitoring below the Poppy cap was not explained");
+    check(status.warning && status.tooltip.find(L"Linux could not allocate") != status.tooltip.npos && status.tooltip.find(L"fs.inotify.max_user_watches") != status.tooltip.npos && status.tooltip.find(L"does not restore automatic watching") != status.tooltip.npos, "Partial monitoring below the Poppy cap omitted recovery or misrepresented F5");
+    usage.reason = "watchFailed"; usage.failedPath = "/home/user/日本語/metadata"; usage.error = "Permission denied";
+    status = watchLimitStatus(usage);
+    check(status.warning && status.tooltip.find(L"/home/user/日本語/metadata") != status.tooltip.npos && status.tooltip.find(L"Permission denied") != status.tooltip.npos, "The Watch tooltip omitted failure diagnostics");
+    usage.failedPath.clear(); usage.error.clear(); usage.reason = "drvfs";
+    status = watchLimitStatus(usage);
+    check(status.warning && status.tooltip.find(L"WSL Linux filesystem") != status.tooltip.npos && status.tooltip.find(L"fs.inotify.max_user_watches") == status.tooltip.npos, "DrvFs guidance suggested increasing the unrelated watch quota");
     usage.count = usage.limit; usage.reason = "poppyLimit"; status = watchLimitStatus(usage);
     check(status.warning && status.tooltip.find(L"Poppy's directory watch limit") != status.tooltip.npos, "Watch capacity was not highlighted");
     std::istringstream unavailable;

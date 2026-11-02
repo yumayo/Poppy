@@ -86,7 +86,7 @@ Gitの出力上限4 MiBは、通常はそのGit操作だけを失敗させます
 | `WSL operation timed out. Reconnect and verify the file before retrying a save or rename.` | 軽い操作10秒、Git20秒、一覧・検出60秒、またはキャンセル応答2秒を超過。接続を停止 |
 | `WSL content search timed out; narrow the search and retry.` | 全文検索10分を超過。検索をキャンセルし、2秒以内に完了すれば接続を維持 |
 | `Git operation timed out` | ヘルパー内のGit処理が15秒超過。Gitの子プロセス群を終了し、Git操作だけが失敗 |
-| `Some WSL changes cannot be watched automatically. Use F5 to refresh.` | Poppyの監視上限（起動時のLinux上限の半分、取得失敗時は65,536件）、Linux側の監視上限などによる追加失敗、`/mnt/`配下で監視の制限を表示。監視できる範囲は更新を継続し、通知のない変更はF5で反映 |
+| Watchの理由別警告と`F5 refreshes files manually; it does not restore automatic watching.` | Poppyの監視上限（起動時のLinux上限の半分、取得失敗時は65,536件）、Linux側の監視上限などによる追加失敗、`/mnt/`配下で監視の制限を表示。対象パス・Linuxのエラーと理由別の対処をWatchの説明に表示。監視できる範囲は更新を継続し、通知のない変更はF5で反映。F5だけでは監視制限を解消しない |
 | エラー文字列なし：一覧の打ち切り | 単一フォルダー一覧1万件、Git検出5万ディレクトリ・20万エントリー、表示256リポジトリ・合計5万変更件数など。切断せず制限を表示 |
 
 この表はWSLの容量・件数・時間の制限を対象にしています。権限不足、外部変更、保存形式、接続設定などの一般エラーは [WSL対応](wsl-support.md) を参照してください。

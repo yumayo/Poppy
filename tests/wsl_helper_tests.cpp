@@ -170,6 +170,50 @@ void watching(const std::string& executable) {
     check(std::any_of(events.begin(), events.end(), [&](const Message& event) { return field(event, "path") == (project / "link.txt").string() && field(event, "content") == "1"; }), "A symlink target update did not notify the opened logical path");
     helper.eof();
 }
+void missingWatchDirectories(const std::string& executable) {
+    using namespace std::chrono_literals;
+    Fixture fixture;
+    const auto project = fixture.root / "project", other = fixture.root / "other";
+    fs::create_directory(project); fs::create_directory(other);
+    write(project / "file.txt", "original");
+    // A stale Explorer request or an incomplete .git pointer must fail only
+    // that operation, rather than mark the entire shared connection limited.
+    const auto removedMetadata = fs::path("/mnt") / fixture.root.filename() / "removed-metadata";
+    write(project / ".git", "gitdir: " + removedMetadata.string() + '\n');
+    Helper helper(executable); helper.hello();
+    helper.call("connect", project); helper.call("connect", other);
+    helper.call("indexFiles", project);
+    helper.call("listDirectory", project / "removed", {}, nullptr, false);
+    helper.call("listDirectory", project / "file.txt", {}, nullptr, false);
+    helper.call("indexFiles", other);
+    auto events = helper.takeEvents(400ms);
+    check(field(helper.watchUsage(), "limited") == "0" && field(helper.watchUsage(), "reason").empty(), "Missing or non-directory paths left a shared watch warning");
+    check(std::none_of(events.begin(), events.end(), [](const Message& event) { return field(event, "event") == "watchLimited"; }), "A stale path emitted a watch-limit notification");
+    const auto added = other / "added.txt"; write(added, "new");
+    events = helper.takeEvents(300ms);
+    check(std::any_of(events.begin(), events.end(), [&](const Message& event) { return field(event, "path") == added.string() && field(event, "files") == "1"; }), "A stale path stopped another project's watch notifications");
+    helper.eof();
+}
+void watchFailureDetails(const std::string& executable) {
+    using namespace std::chrono_literals;
+    Fixture fixture;
+    const auto loop = fixture.root / "loop", target = loop / "metadata";
+    fs::create_symlink("loop", loop);
+    write(fixture.root / ".git", "gitdir: " + target.string() + '\n');
+    Helper helper(executable); helper.hello(); helper.call("connect", fixture.root);
+    helper.call("indexFiles", fixture.root);
+    const auto events = helper.takeEvents(400ms);
+    check(field(helper.watchUsage(), "limited") == "1" && field(helper.watchUsage(), "reason") == "watchFailed", "A real watch failure was hidden below the directory budget");
+    check(field(helper.watchUsage(), "failedPath") == target.string() && !field(helper.watchUsage(), "watchError").empty(), "Watch failure omitted the failing directory or Linux error");
+    check(std::any_of(events.begin(), events.end(), [](const Message& event) { return field(event, "event") == "watchLimited"; }), "A real watch failure did not notify the client");
+    // A path can fit in an input frame but overflow a larger diagnostic frame
+    // when JSON escaping is included. The failed operation must stay local.
+    helper.call("listDirectory", fixture.root / std::string(32600, '\\'), {}, nullptr, false);
+    helper.takeEvents(400ms);
+    check(field(helper.watchUsage(), "failedPath") == "[path exceeds 4096 bytes]", "An oversized diagnostic path was not bounded");
+    check(helper.call("readFile", fixture.root / ".git").bytes == disk(fixture.root / ".git"), "Watch diagnostics disconnected the shared helper");
+    helper.eof();
+}
 void watchLimitIdle(const std::string& executable) {
     using namespace std::chrono_literals;
     uint64_t systemLimit = 0;
@@ -665,6 +709,6 @@ void terminals(const std::string& executable) {
 }
 int main(int argc,char** argv) {
     signal(SIGPIPE,SIG_IGN);
-    try { check(argc == 2,"Expected helper executable argument"); const std::string executable = argv[1]; installation(executable); watching(executable); watchLimitIdle(executable); creation(executable); batchedListings(executable); files(executable); moving(executable); copying(executable); explorerHistory(executable); repositories(executable); protocolFailures(executable); gitAndCancellation(executable); contentSearch(executable); terminals(executable); std::cout << "WSL helper integration tests passed\n"; }
+    try { check(argc == 2,"Expected helper executable argument"); const std::string executable = argv[1]; installation(executable); watching(executable); missingWatchDirectories(executable); watchFailureDetails(executable); watchLimitIdle(executable); creation(executable); batchedListings(executable); files(executable); moving(executable); copying(executable); explorerHistory(executable); repositories(executable); protocolFailures(executable); gitAndCancellation(executable); contentSearch(executable); terminals(executable); std::cout << "WSL helper integration tests passed\n"; }
     catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
 }

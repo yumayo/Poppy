@@ -32,6 +32,16 @@ std::wstring mib(size_t bytes) {
     return groupedCount(tenths / 10) + L"." + std::to_wstring(tenths % 10);
 }
 }
+std::wstring watchLimitMessage(const std::optional<WatchUsage>& usage) {
+    std::wstring message;
+    const auto reason = usage ? usage->reason : std::string{};
+    if (reason == "poppyLimit") message = L"Poppy's directory watch limit was reached. Open a smaller folder or fewer projects, then restart Poppy.";
+    else if (reason == "systemLimit") message = L"Linux could not allocate more watches. Close other applications using watches or increase fs.inotify.max_user_watches, then restart Poppy.";
+    else if (reason == "drvfs") message = L"Windows-side changes under /mnt/ may not generate notifications. Use a folder in the WSL Linux filesystem for automatic watching.";
+    else if (reason == "aliases") message = L"The limit for tracking opened symbolic-link targets was reached. Open fewer linked files, then restart Poppy.";
+    else message = L"Some WSL directories could not be watched. Check the path and permissions in the Watch tooltip, then restart Poppy after resolving the error.";
+    return message + L" F5 refreshes files manually; it does not restore automatic watching.";
+}
 LimitStatus watchLimitStatus(const std::optional<WatchUsage>& usage) {
     LimitStatus result;
     result.text = L"Watch " + (usage ? ratio(usage->count, usage->limit) : L"—/—");
@@ -45,12 +55,9 @@ LimitStatus watchLimitStatus(const std::optional<WatchUsage>& usage) {
     result.warning = usage->limited || usage->count >= usage->limit;
     if (usage->limited) {
         result.text += L" !";
-        if (usage->reason == "poppyLimit") result.tooltip += L"\nPoppy's directory watch limit was reached.";
-        else if (usage->reason == "systemLimit") result.tooltip += L"\nLinux could not allocate more watches. The user quota or kernel resources may be exhausted.";
-        else if (usage->reason == "drvfs") result.tooltip += L"\nWindows-side changes under /mnt/ may not generate notifications.";
-        else if (usage->reason == "aliases") result.tooltip += L"\nThe limit for tracking opened symbolic-link targets was reached.";
-        else result.tooltip += L"\nSome directories could not be watched.";
-        result.tooltip += L"\nChanges without notifications need F5 to refresh.";
+        result.tooltip += L"\n" + watchLimitMessage(usage);
+        if (!usage->failedPath.empty()) result.tooltip += L"\nFailed path: " + resourceWide(usage->failedPath);
+        if (!usage->error.empty()) result.tooltip += L"\nLinux error: " + resourceWide(usage->error);
     } else {
         if (usage->count >= usage->limit) result.tooltip += L"\nAt capacity. Additional directories cannot be watched.";
         result.tooltip += L"\nWatches wait for changes; this count does not cause periodic rescans.";

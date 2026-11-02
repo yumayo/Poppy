@@ -2784,11 +2784,12 @@ void ProjectRuntime::Impl::pollWatch() {
     const auto now = GetTickCount64();
     if (root_.wsl() && provider_) {
         const auto usage = provider_->watchUsage();
-        if (!(usage == watchUsage_)) { watchUsage_ = usage; statusDirty_ = true; }
+        const bool usageChanged = !(usage == watchUsage_);
+        if (usageChanged) { watchUsage_ = usage; statusDirty_ = true; }
         const auto changes = connected_ ? provider_->takeChanges() : ProviderChanges{};
         if (connected_ && provider_->state() != ConnectionState::Ready) { connected_ = false; ++generation_; ++serial_[0]; ++serial_[1]; connectionError_ = provider_->error(); status(L"WSL disconnected. " + connectionError_ + L" Your edits have been kept. Use F5 to reconnect."); if (owner_ && owner_->changed) owner_->changed(); }
         else if (connected_) {
-            if (changes.watchLimited) { watchLimited_ = true; status(L"Some WSL changes cannot be watched automatically. Use F5 to refresh."); }
+            if (changes.watchLimited || (usageChanged && usage && usage->limited)) { watchLimited_ = true; status(watchLimitMessage(usage)); }
             if (changes.changed) {
                 if (!dirty_) dirtySince_ = now;
                 dirty_ = true; filesDirty_ |= changes.files; lastEvent_ = now;
@@ -2853,7 +2854,7 @@ LRESULT ProjectRuntime::Impl::handle(UINT m, WPARAM a, LPARAM b) {
             pollWatch();
             if (!root_.wsl() || connected_) {
                 for (int group = 0; group < 2; ++group) if (groupTab(group) < tabs_.size() && !viewers_[group].hasDocument()) loadTab(true, group);
-                if (watchLimited_) status(L"Some WSL changes cannot be watched automatically. Use F5 to refresh.");
+                if (watchLimited_) status(watchLimitMessage(watchUsage_));
             }
         }
         return 0;
@@ -3072,7 +3073,7 @@ bool ProjectRuntime::key(const MSG& message) { return impl_->key(message); }
 bool ProjectRuntime::terminalInput(HWND window) const { return impl_->terminal_.contains(window); }
 ProjectSession ProjectRuntime::snapshot() { return impl_->saveSession(); }
 AiSummary ProjectRuntime::summary() const { return impl_->terminal_.summary(); }
-std::wstring ProjectRuntime::description() const { return (impl_->root_.wsl() ? L"\n" + (impl_->connectionError_.empty() ? impl_->provider_->error() : impl_->connectionError_) + (impl_->watchLimited_ ? L"\nSome changes cannot be watched automatically. Use F5 to refresh." : L"") : L"") + impl_->terminal_.description(); }
+std::wstring ProjectRuntime::description() const { return (impl_->root_.wsl() ? L"\n" + (impl_->connectionError_.empty() ? impl_->provider_->error() : impl_->connectionError_) + (impl_->watchLimited_ ? L"\n" + watchLimitMessage(impl_->watchUsage_) : L"") : L"") + impl_->terminal_.description(); }
 bool ProjectRuntime::apply(const AiEvent& event) { return impl_->terminal_.apply(event); }
 void ProjectRuntime::focusAttention() { impl_->terminalVisible_ = true; impl_->layout(false); impl_->terminal_.focusAttention(); }
 size_t ProjectRuntime::documentBytes() const {
