@@ -88,8 +88,9 @@ std::vector<std::string> gitRevisionFileArguments(const std::string& hash, const
     return {"git.exe", "--no-optional-locks", "show", "--no-ext-diff", "--no-textconv", hash + ":" + path, "--"};
 }
 std::vector<std::string> gitDiffArguments(GitDiffKind kind, const std::string& hash, const std::string& path, const std::string& previousPath) {
+    // Include the complete file up to the viewer's one-million-line limit.
     std::vector<std::string> args{"git.exe", "--literal-pathspecs", "--no-optional-locks", "-c", "diff.suppressBlankEmpty=false",
-        "-c", "core.quotePath=false", kind == GitDiffKind::Commit ? "show" : "diff", "--patch", "--no-ext-diff", "--no-textconv",
+        "-c", "core.quotePath=false", kind == GitDiffKind::Commit ? "show" : "diff", "--patch", "--unified=1000000", "--no-ext-diff", "--no-textconv",
         "--find-renames", "--color=never", "--output-indicator-old=-", "--output-indicator-new=+", "--output-indicator-context= "};
     if (kind == GitDiffKind::Commit) args.insert(args.end(), {"--format=", "--first-parent", "--diff-merges=first-parent", hash});
     else if (kind == GitDiffKind::Staged) args.push_back("--cached");

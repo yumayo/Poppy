@@ -931,6 +931,31 @@ void repositoryRevisions() {
     const auto ranges = revisionAddedLines(diff, 41);
     check(ranges.size() == 1 && ranges[0].begin == 20 && ranges[0].end == 22,
         "Historical highlights differed from the commit patch after a rename, addition and deletion");
+    Document beforeDocument, afterDocument;
+    beforeDocument.text = before; afterDocument.text = after;
+    indexDocument(beforeDocument); indexDocument(afterDocument);
+    for (const bool allChanges : {false, true}) {
+        DiffDocument complete;
+        complete.patch.text = repo.git(gitDiffArguments(GitDiffKind::Commit, revision,
+            allChanges ? "" : renamed, allChanges ? "" : original));
+        indexDiff(complete, allChanges, true);
+        for (const bool inlineView : {false, true}) {
+            size_t beforeLine = 0, afterLine = 0;
+            for (size_t i = 0; i < complete.rowCount(inlineView); ++i) {
+                const auto row = complete.displayRow(i, inlineView);
+                if (row.before.number) {
+                    check(row.before.number == ++beforeLine && complete.line(row.before) == beforeDocument.line(beforeLine - 1),
+                        "Historical diffs skipped or changed a before-side line");
+                }
+                if (row.after.number) {
+                    check(row.after.number == ++afterLine && complete.line(row.after) == afterDocument.line(afterLine - 1),
+                        "Historical diffs skipped or changed an after-side line");
+                }
+            }
+            check(beforeLine == 40 && afterLine == 40,
+                "Individual and All Changes historical diffs must include the full file in Inline and Split");
+        }
+    }
     repo.git({"rm", "-f", renamed}); repo.git({"commit", "-qm", "delete"});
     check(repo.git(gitRevisionFileArguments(revision, renamed)) == after && repo.git(gitRevisionFileArguments(root, original)) == before,
         "Deleting the working file made its earlier revisions unavailable");
