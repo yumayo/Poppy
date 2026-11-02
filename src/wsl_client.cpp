@@ -345,7 +345,7 @@ public:
                     if (!root.contains(path) || root == path) throw std::runtime_error("Invalid WSL indexed path");
                     delivery->limited = !addIndexedFile(delivery->index, path.lexically_relative(root).u8string());
                 });
-            if (field(response.metadata, "truncated") == "1") error = "WSL file list reached its 200,000-file or 50,000-directory limit.";
+            if (field(response.metadata, "truncated") == "1") error = "WSL file list reached its 400,000-file or 100,000-directory limit.";
         } catch (const std::exception& failure) { error = failure.what(); }
         // A failed connection may wake call() while its reader is delivering
         // an entry. Freeze the collector before returning the snapshot.

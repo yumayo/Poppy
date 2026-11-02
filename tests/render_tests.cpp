@@ -113,7 +113,7 @@ void statusBarLimits() {
                 SendMessageW(bar.window(), WM_NOTIFY, tool.uId, reinterpret_cast<LPARAM>(&display));
                 const std::wstring tip = display.lpszText ? display.lpszText : L"";
                 hasWatch |= tip.find(L"WSL directory watches") != tip.npos;
-                hasOverflow |= tip.find(L"Files 1,234/200,000") != tip.npos && tip.find(L"WSL file list") != tip.npos;
+                hasOverflow |= tip.find(L"Files 1,234/400,000") != tip.npos && tip.find(L"WSL file list") != tip.npos;
                 hasEditor |= tip == L"UTF-8  ·  CRLF";
             }
             check(hasWatch, "Narrowing the status bar lost watch-limit explanations");

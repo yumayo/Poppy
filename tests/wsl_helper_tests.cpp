@@ -178,7 +178,7 @@ void watchLimitIdle(const std::string& executable) {
     Fixture fixture;
     const auto first = fixture.root / "first", second = fixture.root / "second";
     fs::create_directory(first); fs::create_directory(second);
-    // Each scan stays below the 50,000-directory index limit. Verify shared
+    // Each scan stays below the 100,000-directory index limit. Verify shared
     // accounting beyond the old 65,536 cap without allocating half a large
     // host quota just for a test. Small quotas also exercise partial watching.
     const auto directoryCount = static_cast<size_t>(std::min<uint64_t>(watchLimit, 65536 + 16));
