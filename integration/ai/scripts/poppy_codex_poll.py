@@ -2,6 +2,7 @@
 """Codexのローカル履歴を定期確認し、Poppyの表示を修復する。外部通信はしない。"""
 
 import argparse
+from datetime import datetime
 import fcntl
 import hashlib
 import json
@@ -144,6 +145,7 @@ class Transcript:
         self.status = None
         self.turn = None
         self.activity = ""
+        self.changed_at = None
         self.saw_metadata = False
 
     def read(self):
@@ -203,6 +205,13 @@ class Transcript:
             elif kind == "agent_message" and isinstance(payload.get("message"), str):
                 if payload.get("phase") in (None, "commentary", "final_answer"):
                     self.activity = excerpt(payload["message"])
+            if kind in ("task_started", "task_complete", "turn_aborted"):
+                try:
+                    # DBのstarted_at/completed_atはUnix秒。精度を合わせ、
+                    # 同じ秒の開始ログでDBの完了を上書きしない。
+                    self.changed_at = int(datetime.fromisoformat(record["timestamp"].replace("Z", "+00:00")).timestamp())
+                except (KeyError, TypeError, ValueError, AttributeError, OverflowError):
+                    self.changed_at = None
         elif (record.get("type") == "response_item" and payload.get("role") == "assistant"
               and payload.get("recipient") in (None, "all")
               and payload.get("phase") in (None, "commentary", "final_answer")):
@@ -220,25 +229,34 @@ class Snapshot:
         self.database_observed = False
 
     def read(self):
-        # 新しいCodexではJSONLを省略する保存形式もあるため、履歴DBを優先する。
+        # JSONLも毎回追跡する。再開後にDBだけが更新されなくなる形式では、
+        # 古い完了・中断のレコードより新しいJSONLの状態を使う。
+        transcript = self.transcript.read()
         try:
             if self.database is None and self.root:
                 paths = sorted(self.root.glob("thread_history_*.sqlite"), key=lambda p: p.stat().st_mtime, reverse=True)
                 if paths:
                     self.database = sqlite3.connect(f"file:{quote(str(paths[0]))}?mode=ro", uri=True, timeout=0.1)
+                    self.database.row_factory = sqlite3.Row
             if self.database:
                 thread = self.metadata.get("id")
                 row = self.database.execute(
-                    "SELECT turn_id,status FROM thread_turns WHERE thread_id=? ORDER BY rollout_ordinal DESC LIMIT 1",
+                    "SELECT * FROM thread_turns WHERE thread_id=? ORDER BY rollout_ordinal DESC LIMIT 1",
                     (thread,)).fetchone()
                 if row:
                     status = {"inProgress": "running", "completed": "completed", "interrupted": "interrupted",
-                              "failed": "interrupted"}.get(row[1])
+                              "failed": "interrupted"}.get(row["status"])
                     if status:
+                        timestamp = "started_at" if status == "running" else "completed_at"
+                        updated = row[timestamp] if timestamp in row.keys() else None
+                        if (transcript and self.transcript.changed_at is not None
+                                and isinstance(updated, (int, float)) and self.transcript.changed_at > updated):
+                            self.database_observed = True
+                            return transcript
                         activity = ""
                         for (raw,) in self.database.execute(
                                 "SELECT item_json FROM thread_items WHERE thread_id=? AND turn_id=? AND item_type='agentMessage' "
-                                "ORDER BY rollout_ordinal DESC LIMIT 4", (thread, row[0])):
+                                "ORDER BY rollout_ordinal DESC LIMIT 4", (thread, row["turn_id"])):
                             try:
                                 item = json.loads(raw)
                             except ValueError:
@@ -248,12 +266,12 @@ class Snapshot:
                                 activity = excerpt(item["text"])
                                 break
                         self.database_observed = True
-                        return status, row[0], activity
+                        return status, row["turn_id"], activity
         except (OSError, sqlite3.Error, ValueError, TypeError):
             if self.database_observed:
                 return None  # DBの一時的な読取失敗を、古いJSONLの状態で上書きしない。
             # 旧スキーマ・DBなしではJSONLを使い、表示をnoneにしない。
-        return self.transcript.read()
+        return transcript
 
     def close(self):
         if self.database:

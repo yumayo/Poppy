@@ -2,6 +2,7 @@
 import sys
 sys.dont_write_bytecode = True
 import importlib.util
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -12,6 +13,7 @@ import subprocess
 import tempfile
 import threading
 import unittest
+from unittest import mock
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "integration" / "ai" / "scripts"
 
@@ -24,6 +26,81 @@ def module(name):
 
 
 sender = module("poppy_status")
+
+
+class LogTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix="poppy-log-")
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.script = self.root / "poppy_status.py"
+        self.script.write_bytes((SCRIPTS / self.script.name).read_bytes())
+        self.log = self.script.with_suffix(".log")
+        patch = mock.patch.object(sender, "__file__", str(self.script))
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def emit(self, action):
+        with mock.patch.object(sys, "argv", [str(self.script), action]):
+            sender.log_invocation()
+
+    def test_rotates_before_exceeding_the_utf8_byte_limit(self):
+        self.emit("日本語😀")
+        entry_size = self.log.stat().st_size
+        self.assertEqual(sender.MAX_LOG_BYTES, 10 * 1024 * 1024)
+        with self.log.open("wb") as stream:
+            stream.truncate(sender.MAX_LOG_BYTES - entry_size)
+        self.emit("日本語😀")
+        self.assertEqual(self.log.stat().st_size, sender.MAX_LOG_BYTES)
+        self.assertFalse(self.log.with_name(self.log.name + ".1").exists())
+        self.emit("日本語😀")
+        self.assertEqual(self.log.with_name(self.log.name + ".1").stat().st_size, sender.MAX_LOG_BYTES)
+        self.assertEqual(json.loads(self.log.read_text())["args"], ["日本語😀"])
+
+    def test_keeps_the_latest_ten_backups_in_order(self):
+        self.emit("00")
+        with mock.patch.object(sender, "MAX_LOG_BYTES", self.log.stat().st_size):
+            for index in range(1, 15):
+                self.emit(f"{index:02d}")
+        self.assertEqual(json.loads(self.log.read_text())["args"], ["14"])
+        for index in range(1, 11):
+            backup = self.log.with_name(f"{self.log.name}.{index}")
+            self.assertEqual(json.loads(backup.read_text())["args"], [f"{14 - index:02d}"])
+        backups = [path for path in self.root.glob("poppy_status.log.*") if path.suffix != ".lock"]
+        self.assertEqual(len(backups), 10)
+
+    def test_parallel_hooks_preserve_records_during_rotation(self):
+        code = ("import sys\n"
+                "sys.path.insert(0, sys.argv[1])\n"
+                "import poppy_status\n"
+                "poppy_status.MAX_LOG_BYTES = 1024\n"
+                "sys.argv = ['poppy_status.py', sys.argv[2]]\n"
+                "poppy_status.log_invocation()\n")
+        processes = []
+        try:
+            with self.log.with_name(self.log.name + ".lock").open("a") as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX)
+                for index in range(24):
+                    processes.append(subprocess.Popen(
+                        [sys.executable, "-c", code, str(self.root), str(index)],
+                        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    ))
+            for process in processes:
+                _, error = process.communicate(timeout=10)
+                self.assertEqual(process.returncode, 0, error.decode())
+        finally:
+            for process in processes:
+                if process.poll() is None:
+                    process.kill()
+                process.communicate()
+        records = []
+        logs = [path for path in self.root.glob("poppy_status.log*") if path.suffix != ".lock"]
+        self.assertGreater(len(logs), 1)
+        for path in logs:
+            self.assertLessEqual(path.stat().st_size, 1024)
+            records.extend(json.loads(line)["args"][-1] for line in path.read_text().splitlines())
+        self.assertEqual(len(records), 24)
+        self.assertEqual(set(records), {str(index) for index in range(24)})
 
 
 class HookDeliveryTests(unittest.TestCase):
@@ -96,6 +173,18 @@ class HookDeliveryTests(unittest.TestCase):
         del environment["AICONTAINER_EVENT_SOCKET"]
         self.invoke(command, {}, environment)
         self.assertTrue(self.requests.empty())
+
+    def test_rotation_failure_does_not_block_notification(self):
+        script = Path(self.temp.name) / "poppy_status.py"
+        script.write_bytes((SCRIPTS / script.name).read_bytes())
+        log = script.with_suffix(".log")
+        with log.open("wb") as stream:
+            stream.truncate(sender.MAX_LOG_BYTES)
+        # A directory at the next backup path makes the rename fail.
+        log.with_name(log.name + ".1").mkdir()
+        command = shlex.join([sys.executable, str(script), "running"])
+        self.invoke(command, {})
+        self.assertEqual(self.requests.get(timeout=1), ("status", {"status": "running"}))
 
 
 

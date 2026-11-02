@@ -15,14 +15,18 @@ import threading
 import time
 import unittest
 from unittest import mock
+from datetime import datetime
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "integration/ai/scripts"
 sys.path.insert(0, str(SCRIPTS))
 import poppy_codex_poll as poller
 
 
-def record(kind, **payload):
-    return json.dumps({"type": kind, "payload": payload}, ensure_ascii=False) + "\n"
+def record(kind, timestamp=None, **payload):
+    value = {"type": kind, "payload": payload}
+    if timestamp is not None:
+        value["timestamp"] = timestamp
+    return json.dumps(value, ensure_ascii=False) + "\n"
 
 
 class HistoryFixture(unittest.TestCase):
@@ -107,6 +111,49 @@ class HistoryTests(HistoryFixture):
         reader = poller.Snapshot(self.path)
         self.addCleanup(reader.close)
         self.assertEqual(reader.read()[:2], ("running", "legacy"))
+
+    def test_stale_database_does_not_hide_newer_jsonl_turns(self):
+        database = self.database()
+        database.execute("ALTER TABLE thread_turns ADD COLUMN started_at INTEGER")
+        database.execute("ALTER TABLE thread_turns ADD COLUMN completed_at INTEGER")
+        old_time = int(datetime.fromisoformat("2026-11-02T13:01:06+00:00").timestamp())
+        database.execute("INSERT INTO thread_turns VALUES ('thread','old','interrupted',1,?,?)", (old_time - 2, old_time))
+        database.commit()
+        self.append(record("event_msg", timestamp="2026-11-02T13:03:01.465Z", type="task_started", turn_id="current"))
+        reader = poller.Snapshot(self.path)
+        self.addCleanup(reader.close)
+        self.assertEqual(reader.read()[:2], ("running", "current"))
+        self.append(record("event_msg", timestamp="2026-11-02T13:09:47.261Z", type="task_complete", turn_id="current",
+                           last_agent_message="完了しました。"))
+        self.assertEqual(reader.read(), ("completed", "current", "完了しました。"))
+        self.append(record("event_msg", timestamp="2026-11-02T13:13:34.717Z", type="task_started", turn_id="next"))
+        self.assertEqual(reader.read()[:2], ("running", "next"))
+
+    def test_newer_database_wins_over_old_jsonl_and_same_second_start(self):
+        database = self.database()
+        database.execute("ALTER TABLE thread_turns ADD COLUMN started_at INTEGER")
+        database.execute("ALTER TABLE thread_turns ADD COLUMN completed_at INTEGER")
+        completed = int(datetime.fromisoformat("2026-11-02T13:09:47+00:00").timestamp())
+        database.execute("INSERT INTO thread_turns VALUES ('thread','current','completed',10,?,?)", (completed, completed))
+        database.commit()
+        self.append(record("event_msg", timestamp="2026-11-02T13:03:01.465Z", type="task_started", turn_id="old"))
+        reader = poller.Snapshot(self.path)
+        self.addCleanup(reader.close)
+        self.assertEqual(reader.read()[:2], ("completed", "current"))
+        self.append(record("event_msg", timestamp="2026-11-02T13:09:47.100Z", type="task_started", turn_id="current"))
+        self.assertEqual(reader.read()[:2], ("completed", "current"))
+
+    def test_jsonl_completion_can_advance_a_stale_running_database(self):
+        database = self.database()
+        database.execute("ALTER TABLE thread_turns ADD COLUMN started_at INTEGER")
+        database.execute("ALTER TABLE thread_turns ADD COLUMN completed_at INTEGER")
+        started = int(datetime.fromisoformat("2026-11-02T13:03:01+00:00").timestamp())
+        database.execute("INSERT INTO thread_turns VALUES ('thread','current','inProgress',1,?,NULL)", (started,))
+        database.commit()
+        self.append(record("event_msg", timestamp="2026-11-02T13:09:47.261Z", type="task_complete", turn_id="current"))
+        reader = poller.Snapshot(self.path)
+        self.addCleanup(reader.close)
+        self.assertEqual(reader.read()[:2], ("completed", "current"))
 
     def test_subagent_hooks_do_not_start_another_monitor(self):
         self.path.write_text(record("session_meta", id="child", source={"subagent": {"parent_thread_id": "parent"}}))
@@ -221,6 +268,22 @@ class PollingTests(HistoryFixture):
         self.wait_status("interrupted")  # No Interrupt hook.
         self.stop_owner()
         self.wait_status("none")  # No SessionEnd hook.
+
+    def test_stale_database_after_resume_delivers_jsonl_updates(self):
+        database = self.database_connection
+        database.execute("ALTER TABLE thread_turns ADD COLUMN started_at INTEGER")
+        database.execute("ALTER TABLE thread_turns ADD COLUMN completed_at INTEGER")
+        old_time = int(datetime.fromisoformat("2026-11-02T13:01:06+00:00").timestamp())
+        database.execute("INSERT INTO thread_turns VALUES ('thread','old','interrupted',1,?,?)", (old_time - 2, old_time))
+        database.commit()
+        self.append(record("event_msg", timestamp="2026-11-02T13:03:01.465Z", type="task_started", turn_id="current"))
+        self.hook("resume")
+        self.wait_status("running")
+        self.append(record("event_msg", type="agent_message", phase="commentary", message="処理しています。"))
+        self.assertEqual(self.wait_status("running").get("activityText"), "処理しています。")
+        self.append(record("event_msg", timestamp="2026-11-02T13:09:47.261Z", type="task_complete", turn_id="current",
+                           last_agent_message="完了しました。"))
+        self.assertEqual(self.wait_status("completed").get("activityText"), "完了しました。")
 
     def test_retries_a_rejected_notification_and_refreshes_unchanged_state(self):
         self.reject = 1

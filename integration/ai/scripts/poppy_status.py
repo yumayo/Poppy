@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """AIフックからPoppyへ状態と公開応答の抜粋を通知する。通知失敗でAIを止めない。"""
 
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -13,7 +14,38 @@ import time
 MAX_INPUT_BYTES = 1024 * 1024
 MAX_TRANSCRIPT_BYTES = 512 * 1024
 MAX_TEXT_LENGTH = 120
+MAX_LOG_BYTES = 10 * 1024 * 1024
+LOG_BACKUP_COUNT = 10
 ACTIONS = ("running", "waiting", "interrupted", "completed", "none", "resume", "tool-failed", "activity")
+
+
+def log_invocation():
+    # 通知先が未設定でも、hook自体が呼ばれたか確認できるようにする。
+    try:
+        record = {
+            "time": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "pid": os.getpid(),
+            "args": sys.argv[1:],
+            "event_socket": os.environ.get("AICONTAINER_EVENT_SOCKET"),
+        }
+        entry = (json.dumps(record, ensure_ascii=False) + "\n").encode("utf-8")
+        path = Path(__file__).with_suffix(".log")
+        # ローテーションでinodeが変わるログ本体とは別のファイルで、
+        # 並列hookのサイズ確認・世代移動・追記をまとめて排他制御する。
+        with path.with_name(path.name + ".lock").open("a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            size = path.stat().st_size if path.exists() else 0
+            if size and size + len(entry) > MAX_LOG_BYTES:
+                path.with_name(f"{path.name}.{LOG_BACKUP_COUNT}").unlink(missing_ok=True)
+                for index in range(LOG_BACKUP_COUNT - 1, 0, -1):
+                    previous = path.with_name(f"{path.name}.{index}")
+                    if previous.exists():
+                        previous.replace(path.with_name(f"{path.name}.{index + 1}"))
+                path.replace(path.with_name(path.name + ".1"))
+            with path.open("ab") as log:
+                log.write(entry)
+    except (OSError, ValueError):
+        pass  # ログを書けなくても、従来の通知処理を続ける。
 
 
 def send_relay(filename, kind, payload, timeout):
@@ -210,4 +242,5 @@ def main():
 
 
 if __name__ == "__main__":
+    log_invocation()
     sys.exit(main())

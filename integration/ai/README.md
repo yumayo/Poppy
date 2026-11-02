@@ -47,6 +47,12 @@ python3 /path/to/ai/scripts/uninstall-hooks.py claude
 
 解除は`hooks/poppy/poppy_status.py`の通知コマンドだけを除去し、他のhookと設定を残します。
 
+## hookの起動ログ
+
+`poppy_status.py`は、同じディレクトリの`poppy_status.log`へ起動ごとに1行のJSONを追記します。UTC時刻（`time`）、プロセスID（`pid`）、引数（`args`）、通知ソケット（`event_socket`）を記録します。ソケット未設定時も`event_socket: null`として記録し、ログを書き込めない場合も通知処理を続けます。このログはhookが起動されたことを示すもので、送信成功やPoppy画面への反映を確認するものではありません。
+
+ログは10 MiB（10 × 1024 × 1024バイト）を超える追記の前にローテーションします。現在の`poppy_status.log`に加えて、過去10ファイルを`poppy_status.log.1`（最新）から`poppy_status.log.10`（最古）まで保持し、それより古いログは削除します。並列hookのローテーションと追記は`poppy_status.log.lock`で排他制御します。
+
 ## Codexのpolling監視
 
 Codexでは、AIコンテナ内の監視プロセスが**0.5秒ごとにローカル履歴を読み取り**、実行中・完了・中断を反映します。状態が変わったときと2秒ごとに状態を再送するため、開始・終了のhookや通知を取りこぼしても表示を修復できます。モデルへの問い合わせや外部通信は行いません。Poppy.exeの通知形式は変更していないため、スクリプトの更新だけで利用できます。
@@ -59,7 +65,7 @@ python3 "${CODEX_HOME:-$HOME/.codex}/hooks/poppy/poppy_codex_poll.py"
 python3 "${CODEX_HOME:-$HOME/.codex}/hooks/poppy/poppy_codex_poll.py" --pid 123
 ```
 
-CLIが開いている会話ファイルで対象を特定し、別ターミナルや子エージェントの履歴を選びません。新しいCodexの履歴DBを読み取り専用で参照し、DBのない形式では会話JSONLの追記を読みます。入力・承認待ちはhookの情報で補助します。無出力時間、コンパクト、履歴の一時的な読取失敗を理由に`none`へ変更しません。CLIの終了時に監視も終了して`none`を送ります。CLIとコンテナが同時に終了する構成に備え、`SessionEnd`のhookからも終了通知を直接送ります。
+CLIが開いている会話ファイルで対象を特定し、別ターミナルや子エージェントの履歴を選びません。履歴DBを読み取り専用で参照しながら、会話JSONLの追記も追跡します。開始・終了時刻がDBより新しいJSONLの状態を採用するため、会話の再開後にDBが古いままでも更新を続けます。DBのない形式ではJSONLだけを使います。入力・承認待ちはhookの情報で補助します。無出力時間、コンパクト、履歴の一時的な読取失敗を理由に`none`へ変更しません。CLIの終了時に監視も終了して`none`を送ります。CLIとコンテナが同時に終了する構成に備え、`SessionEnd`のhookからも終了通知を直接送ります。
 
 Claude Codeは引き続きhookで通知します。Codexの履歴DBとJSONLはCLI内部の保存形式なので、今後の形式変更には追従が必要です。現在導入されているCodex 0.166.0の履歴形式と、旧形式のJSONLをテスト対象にしています。
 

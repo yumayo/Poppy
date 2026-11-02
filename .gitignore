@@ -8,3 +8,5 @@
 .poppy-runtime/
 __pycache__/
 *.pyc
+/integration/ai/scripts/poppy_status.log
+/integration/ai/scripts/poppy_status.log.*
