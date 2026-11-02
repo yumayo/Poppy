@@ -130,6 +130,44 @@ void editorChangeMarks() {
     changedWorkingLines(buffer.document, buffer.document, &ranges);
     check(ranges.empty(), "Updating HEAD retained old overview marks");
 }
+void longDocumentChangeMarks() {
+    // 20,000 visual rows, 44 visible rows, and a 20px minimum thumb. The
+    // proportional viewport would only be 1px tall on this 833px track.
+    const ChangeMarkViewport viewport{5000, 5044, 220, 240};
+    const auto below = changeMark(5200, 5201, 20000, 17, 850, 3, viewport);
+    check(below.top >= 240, "An offscreen change overlaps the minimum-sized scrollbar thumb");
+    for (const auto view : {ChangeMarkViewport{0, 44, 17, 37}, viewport, ChangeMarkViewport{19956, 20000, 830, 850}}) {
+        // Include boundaries next to the viewport: minimum-height marks must
+        // not spill across them, including zero-height deletion ranges.
+        for (size_t row = 0; row < 20000; ++row) for (const size_t count : {size_t{0}, size_t{1}, size_t{100}}) {
+            const size_t end = std::min(size_t{20000}, row + count);
+            const auto mark = changeMark(row, end, 20000, 17, 850, 3, view);
+            check(mark.top >= 17 && mark.bottom <= 850 && mark.bottom > mark.top, "A long-document mark escaped or disappeared from its track");
+            if (row >= view.end) check(mark.top >= view.bottom, "A change below the viewport overlaps the thumb");
+            else if (end <= view.begin && row < view.begin) check(mark.bottom <= view.top, "A change above the viewport overlaps the thumb");
+            else {
+                check(mark.top < view.bottom && mark.bottom > view.top, "A visible change missed the thumb");
+                if (row >= view.begin && end <= view.end)
+                    check(mark.top >= view.top && mark.bottom <= view.bottom, "A visible change escaped the thumb");
+            }
+        }
+        const auto eof = changeMark(20000, 20000, 20000, 17, 850, 3, view);
+        check(eof.top == 847 && eof.bottom == 850, "An EOF deletion disappeared with an enlarged thumb");
+    }
+    for (const int scale : {1, 2, 3}) {
+        const auto mark = changeMark(5022, 5023, 20000, 17 * scale, 850 * scale, 3 * scale,
+            {5000, 5044, 220 * scale, 240 * scale});
+        check(mark.top == 230 * scale && mark.bottom == 233 * scale, "DPI scaling shifted a visible change away from its thumb position");
+    }
+    const auto all = changeMark(0, 20000, 20000, 17, 850, 3, viewport);
+    check(all.top == 17 && all.bottom == 850, "A change spanning the viewport lost its offscreen extent");
+    const auto shortFile = changeMark(2, 3, 10, 0, 200, 3, {0, 10, 0, 200});
+    check(shortFile.top == 40 && shortFile.bottom == 60, "A full viewport changed proportional positions in a short document");
+    const auto tiny = changeMark(4999, 5000, 20000, 17, 40, 6, {5000, 5044, 18, 38});
+    check(tiny.top == 17 && tiny.bottom == 18, "A minimum-height change spilled into the thumb on a small track");
+    const auto eofBelow = changeMark(20000, 20000, 20000, 17, 850, 3, {19954, 19998, 829, 849});
+    check(eofBelow.top == 849 && eofBelow.bottom == 850, "An offscreen EOF deletion overlaps the thumb near the bottom");
+}
 void editableComparisons() {
     const auto verify = [](const Document& before, const Document& after) {
         const auto diff = workingDiff(before, after);
@@ -646,6 +684,6 @@ void wrapping() {
 }
 }
 int main() {
-    try { revisionHighlights(); editorLineChanges(); editorChangeMarks(); diffChangeMarks(); editableComparisons(); syntaxHighlighting(); multilineSyntax(); syntaxLanguages(); fileHeadings(); alignment(); additionsAndDeletions(); inlineLayout(); edgeCases(); viewPositions(); wrapping(); std::cout << "Diff tests passed.\n"; return EXIT_SUCCESS; }
+    try { revisionHighlights(); editorLineChanges(); editorChangeMarks(); longDocumentChangeMarks(); diffChangeMarks(); editableComparisons(); syntaxHighlighting(); multilineSyntax(); syntaxLanguages(); fileHeadings(); alignment(); additionsAndDeletions(); inlineLayout(); edgeCases(); viewPositions(); wrapping(); std::cout << "Diff tests passed.\n"; return EXIT_SUCCESS; }
     catch (const std::exception& error) { std::cerr << error.what() << '\n'; return EXIT_FAILURE; }
 }

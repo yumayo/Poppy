@@ -2284,6 +2284,9 @@ void themedScrollbars() {
             }
         }
         check(first >= 0 && last > first, "A scrollbar thumb is missing its theme color");
+        const auto thumb = Scrollbars::thumbRect(pane.window, bar);
+        check((bar == SB_VERT ? thumb.top : thumb.left) == first && (bar == SB_VERT ? thumb.bottom : thumb.right) == last + 1,
+            "Overview markers use different thumb boundaries from the painted scrollbar");
         const int along = (first + last) / 2;
         const POINT point = bar == SB_VERT ? POINT{cross, along} : POINT{along, cross};
         const LPARAM location = MAKELPARAM(point.x, point.y);
