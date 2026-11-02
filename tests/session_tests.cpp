@@ -67,6 +67,21 @@ void editorTabTests() {
     openEditorPreview(tabs, target("last.cpp"));
     check(tabs.size() == 5 && !tabs[3].preview, "Pinning a preview did not protect it");
 
+    // A commit's full file and patch have separate identities and view state.
+    tabs.clear();
+    auto historic = target("historic.cpp", 0, GitDiffKind::Commit); historic.revision = "abc123";
+    openEditorPreview(tabs, historic); tabs[0].preview = false; tabs[0].diffView.top = 15;
+    historic.diff = false;
+    check(openEditorPreview(tabs, historic) == 1 && !tabs[1].diff && !tabs[1].buffer,
+        "Open Revision reused a diff tab or acquired the working buffer");
+    tabs[1].preview = false; tabs[1].fileView.top = 27;
+    check(openEditorPreview(tabs, historic) == 1 && tabs[1].fileView.top == 27 && tabs[0].diffView.top == 15,
+        "Reopening a revision lost its view state or changed the diff's position");
+    ProjectSession revisions; saveEditorTabs(revisions, tabs, 1);
+    check(revisions.tabs.size() == 2 && revisions.tabs[0].diff && !revisions.tabs[1].diff &&
+        revisions.tabs[1].diffKind == GitDiffKind::Commit && revisions.tabs[1].revision == "abc123",
+        "Saving tabs lost the distinction between a historical file and its diff");
+
     // Clean file/diff transitions also share Undo history before replacement.
     tabs.clear(); openEditorPreview(tabs, target("clean.cpp")); tabs[0].buffer = buffer;
     openEditorPreview(tabs, target("clean.cpp", 0, GitDiffKind::Changes));

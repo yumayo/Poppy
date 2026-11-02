@@ -908,6 +908,34 @@ void repositoryDiffOrdering() {
     repo.git({"commit", "-qm", "ordered changes"});
     verify(GitDiffKind::Commit, repo.hash());
 }
+void repositoryRevisions() {
+    Repository repo;
+    repo.git({"init", "--quiet", "--template=", "--initial-branch=main"});
+    repo.git({"config", "user.name", "Poppy Test"}); repo.git({"config", "user.email", "poppy@example.invalid"});
+    repo.git({"config", "core.autocrlf", "false"}); repo.git({"config", "commit.gpgsign", "false"});
+    const std::string original = "src/日本語 [1].cpp", renamed = "src/renamed [1].cpp";
+    std::string before;
+    for (int i = 0; i < 40; ++i) before += "line " + std::to_string(i) + "\r\n";
+    repo.write(original, before); repo.write("empty.txt", "");
+    repo.git({"add", "."}); repo.git({"commit", "-qm", "root"}); const auto root = repo.hash();
+    repo.git({"mv", original, renamed});
+    auto after = before;
+    after.replace(after.find("line 20\r\n"), 9, "new 日本😀\r\nextra\r\n");
+    after.erase(after.find("line 30\r\n"), 9);
+    repo.write(renamed, after); repo.git({"add", "."}); repo.git({"commit", "-qm", "rename and edit"}); const auto revision = repo.hash();
+    repo.write(renamed, "current working content\n");
+    check(repo.git(gitRevisionFileArguments(root, original)) == before && repo.git(gitRevisionFileArguments(revision, renamed)) == after,
+        "A historical file omitted context, changed CRLF/Unicode, or read the working tree");
+    check(repo.git(gitRevisionFileArguments(root, "empty.txt")).empty(), "An empty historical file became unavailable");
+    DiffDocument diff; diff.patch.text = repo.git(gitDiffArguments(GitDiffKind::Commit, revision, renamed, original)); indexDiff(diff);
+    const auto ranges = revisionAddedLines(diff, 41);
+    check(ranges.size() == 1 && ranges[0].begin == 20 && ranges[0].end == 22,
+        "Historical highlights differed from the commit patch after a rename, addition and deletion");
+    repo.git({"rm", "-f", renamed}); repo.git({"commit", "-qm", "delete"});
+    check(repo.git(gitRevisionFileArguments(revision, renamed)) == after && repo.git(gitRevisionFileArguments(root, original)) == before,
+        "Deleting the working file made its earlier revisions unavailable");
+    check(repo.git({"status", "--porcelain"}).empty(), "Opening historical files modified the index or working tree");
+}
 void repositoryHistory() {
     Repository repo;
     repo.git({"init", "--quiet", "--template=", "--initial-branch=main"});
@@ -965,7 +993,7 @@ int main() {
     try {
         statusGroups(); records(); patchLists(); repositoryOwnership(); ignoredNameBatches(); editorBaseFailures(); commitValidation();
 #ifndef _WIN32
-        repositoryEditorBase(); repositoryCommits(); repositoryIgnores(); repositoryStaging(); repositoryStageAll(); repositoryUnstageAll(); repositoryDiscardAll(); repositoryDiscardFile(); repositoryStashUnstaged(); repositoryStashStaged(); repositorySyntax(); repositoryRenames(); repositoryDiffOrdering(); repositoryHistory(); multipleRepositories();
+        repositoryEditorBase(); repositoryCommits(); repositoryIgnores(); repositoryStaging(); repositoryStageAll(); repositoryUnstageAll(); repositoryDiscardAll(); repositoryDiscardFile(); repositoryStashUnstaged(); repositoryStashStaged(); repositorySyntax(); repositoryRenames(); repositoryDiffOrdering(); repositoryRevisions(); repositoryHistory(); multipleRepositories();
 #endif
         std::cout << "Git history tests passed.\n"; return 0;
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }

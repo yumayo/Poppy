@@ -84,6 +84,9 @@ std::vector<std::string> gitCommitFilesArguments(const std::string& hash) {
     return {"git.exe", "--no-optional-locks", "show", "--format=", "--first-parent", "--diff-merges=first-parent",
         "--name-status", "--find-renames", "-z", hash, "--"};
 }
+std::vector<std::string> gitRevisionFileArguments(const std::string& hash, const std::string& path) {
+    return {"git.exe", "--no-optional-locks", "show", "--no-ext-diff", "--no-textconv", hash + ":" + path, "--"};
+}
 std::vector<std::string> gitDiffArguments(GitDiffKind kind, const std::string& hash, const std::string& path, const std::string& previousPath) {
     std::vector<std::string> args{"git.exe", "--literal-pathspecs", "--no-optional-locks", "-c", "diff.suppressBlankEmpty=false",
         "-c", "core.quotePath=false", kind == GitDiffKind::Commit ? "show" : "diff", "--patch", "--no-ext-diff", "--no-textconv",

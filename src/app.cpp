@@ -76,7 +76,8 @@ std::unordered_set<std::string> ignoredNames(ProjectProvider& provider, const Re
 struct FileResult { std::shared_ptr<EditBuffer> buffer; std::shared_ptr<Document> document; std::wstring error; std::shared_ptr<const ImagePreview> image; };
 using Tab = EditorTab;
 std::wstring tabKey(const Tab& tab) {
-    return pathKey(tab.path) + L"\n" + std::to_wstring(static_cast<int>(tab.diffKind)) + L"\n" + wide(tab.revision) + (tab.allChanges ? L"\nall" : L"") + (tab.gitRoot.empty() ? L"" : L"\n" + pathKey(tab.gitRoot));
+    return pathKey(tab.path) + L"\n" + std::to_wstring(static_cast<int>(tab.diffKind)) + L"\n" + wide(tab.revision) +
+        (tab.diffKind == GitDiffKind::Commit && !tab.diff ? L"\nrevision" : L"") + (tab.allChanges ? L"\nall" : L"") + (tab.gitRoot.empty() ? L"" : L"\n" + pathKey(tab.gitRoot));
 }
 std::wstring tabTitle(const Tab& tab) {
     auto title = tab.allChanges ? L"All Changes · " + tab.path.filename().native() : tab.path.filename().native();
@@ -284,7 +285,7 @@ private:
     void discardGitChanges(TreeItem item, bool all = false);
     void stashGitChanges(TreeItem item);
     void commitGitChanges(const ResourceId& root, std::wstring message, bool amend);
-    void openGitDiff(const ResourceId& path, GitDiffKind kind, std::string revision = {}, bool allChanges = false, ResourceId root = {});
+    void openGitDiff(const ResourceId& path, GitDiffKind kind, std::string revision = {}, bool allChanges = false, ResourceId root = {}, bool fullContext = false);
     std::wstring repositoryLabel(const ResourceId& root) const;
     void refreshBranches();
     void requestHistory(TreeItem item, bool more = false);
@@ -533,19 +534,24 @@ void ProjectRuntime::Impl::create() {
     };
     changes_.secondaryActionLabel = [this](TreeItem item) {
         const auto source = sourceNode(item);
-        if (!source) return L"";
+        if (!source) { const auto n = historyNode(item); return n && n->kind == HistoryKind::File ? L"Open Revision" : L""; }
         const auto& node = *source;
         if (node.group) return changes_.child(item) ? node.staged ? L"Unstage All Changes" : L"Stage All Changes" : L"";
         return node.directory ? L"" : node.staged ? L"Open File" : L"Discard Changes";
     };
     changes_.secondaryActionIcon = [this](TreeItem item) {
         const auto source = sourceNode(item);
+        if (!source) return Renderer::Icon::OpenRevision;
         if (source && !source->group) return source->staged ? Renderer::Icon::OpenFile : Renderer::Icon::DiscardChanges;
         return source && source->staged ? Renderer::Icon::UnstageChanges : Renderer::Icon::StageChanges;
     };
     changes_.secondaryActionClicked = [this](TreeItem item) {
         const auto source = sourceNode(item);
-        if (!source) return;
+        if (!source) {
+            if (const auto n = historyNode(item); n && n->kind == HistoryKind::File)
+                openGitDiff(n->path, GitDiffKind::Commit, n->revision, false, n->root, true);
+            return;
+        }
         if (source->group) stageGitChanges(item, true);
         else if (source->staged) openGitFile(item, false);
         else discardGitChanges(item);
@@ -2165,7 +2171,7 @@ void ProjectRuntime::Impl::normalizeGroups() {
 RECT ProjectRuntime::Impl::tabBounds(size_t index) const { return tabRects_[index]; }
 bool ProjectRuntime::Impl::htmlTab(int group) const {
     const auto index = groupTab(group);
-    return index < tabs_.size() && !tabs_[index].diff && isHtmlExtension(tabs_[index].path.extension().native());
+    return index < tabs_.size() && !tabs_[index].diff && tabs_[index].diffKind != GitDiffKind::Commit && isHtmlExtension(tabs_[index].path.extension().native());
 }
 RECT ProjectRuntime::Impl::editorModeButton(int group, bool second) const {
     auto rect = editorGroups_[group].tools;
@@ -2376,10 +2382,10 @@ void ProjectRuntime::Impl::applyContentResult(size_t index) {
     if (!viewers_[tab.group].selectSearch(match.begin, match.end, tab.searchQuery, tab.searchMatchCase))
         status(L"File changed since the search. Press F5 in Search to refresh the results.");
 }
-void ProjectRuntime::Impl::openGitDiff(const ResourceId& path, GitDiffKind kind, std::string revision, bool allChanges, ResourceId root) {
+void ProjectRuntime::Impl::openGitDiff(const ResourceId& path, GitDiffKind kind, std::string revision, bool allChanges, ResourceId root, bool fullContext) {
     if (path.empty()) return;
     endTabDrag(); saveTab();
-    Tab target; target.path = path; target.diff = true; target.diffKind = kind; target.revision = std::move(revision); target.allChanges = allChanges; target.group = focusedGroup_; target.gitRoot = std::move(root);
+    Tab target; target.path = path; target.diff = !fullContext; target.diffKind = kind; target.revision = std::move(revision); target.allChanges = allChanges; target.group = focusedGroup_; target.gitRoot = std::move(root);
     const size_t index = openEditorPreview(tabs_, std::move(target));
     focusedGroup_ = tabs_[index].group;
     for (auto& tab : tabs_) if (tab.group == focusedGroup_) tab.displayed = false;
@@ -2509,7 +2515,7 @@ void ProjectRuntime::Impl::loadTab(bool preserve, int group) {
     // Retain only tab metadata and view positions; reload the active document.
     if (!preserve) viewers_[group].loading(tab.diff ? L"Loading Git diff…" : L"Loading…", path);
     status((tab.diff ? L"Git diff: " : L"") + path.filename().native());
-    if (!tab.diff) {
+    if (!tab.diff && tab.diffKind != GitDiffKind::Commit) {
         worker_->submit(L"file:" + std::to_wstring(group), [this, group, path, serial, generation, preserve, state] {
             auto result = readDocument(*provider_, path);
             worker_->complete([this, group, result, path, serial, generation, preserve, state] {
@@ -2535,6 +2541,7 @@ void ProjectRuntime::Impl::loadTab(bool preserve, int group) {
     if (!repo || !repo->error.empty() || (!tab.gitRoot.empty() && pathKey(repo->root) != pathKey(tab.gitRoot))) { viewers_[group].message(L"Git repository unavailable for this file. Press F5 to refresh.", path); return; }
     const auto root = tab.gitRoot.empty() ? repo->root : tab.gitRoot;
     const auto kind = tab.diffKind; const auto revision = tab.revision; const auto allChanges = tab.allChanges;
+    const bool fullContext = kind == GitDiffKind::Commit && !tab.diff;
     const bool unsaved = tab.buffer && (tab.buffer->dirty() || tab.buffer->saving);
     const auto roots = git_->roots; const bool treeView = gitTreeView_;
     GitChangeVisibility visibility;
@@ -2545,7 +2552,7 @@ void ProjectRuntime::Impl::loadTab(bool preserve, int group) {
         for (const auto& path : hiddenGitFiles_) if (path.compare(0, prefix.size(), prefix) == 0)
             visibility.hiddenFiles.insert(path.substr(prefix.size()));
     }
-    gitWorker_->submit(L"diff:" + std::to_wstring(group), [this, group, serial, generation, path, root, preserve, state, kind, revision, allChanges, roots, unsaved, treeView, visibility] {
+    gitWorker_->submit(L"diff:" + std::to_wstring(group), [this, group, serial, generation, path, root, preserve, state, kind, revision, allChanges, roots, unsaved, treeView, visibility, fullContext] {
         constexpr size_t maxPatchBytes = 4 * 1024 * 1024;
         const auto relative = allChanges ? std::string{} : path.lexically_relative(root).generic_u8string();
         auto readDiff = [&](GitDiffKind scope) {
@@ -2553,7 +2560,10 @@ void ProjectRuntime::Impl::loadTab(bool preserve, int group) {
             if (!relative.empty() && scope == GitDiffKind::Commit) {
                 auto files = provider_->git(gitArguments(gitCommitFilesArguments(revision)), root, gitWorker_->cancellation());
                 if (files.code) return files;
-                for (const auto& file : parseGitCommitFiles(files.output)) if (file.path == relative) { previousPath = file.previousPath; break; }
+                for (const auto& file : parseGitCommitFiles(files.output)) if (file.path == relative) {
+                    if (fullContext && file.state == 'D') return ProcessResult{1, {}, L"This file was deleted in the selected commit and has no revision to display."};
+                    previousPath = file.previousPath; break;
+                }
             } else if (!relative.empty() && scope == GitDiffKind::Staged) {
                 auto status = provider_->git(gitArguments(gitStatusArguments()), root, gitWorker_->cancellation());
                 if (status.code) return status;
@@ -2622,8 +2632,21 @@ void ProjectRuntime::Impl::loadTab(bool preserve, int group) {
                 hideDiffFiles(*doc, hidden);
             }
         }
+        std::shared_ptr<Document> revisionDocument;
+        if (!result.code && fullContext) {
+            auto file = provider_->git(gitArguments(gitRevisionFileArguments(revision, relative)), root, gitWorker_->cancellation());
+            if (file.code) { result.code = file.code; result.error = file.error; }
+            else {
+                auto document = std::make_shared<Document>(); std::string error;
+                document->language = path.filename() == L"CMakeLists.txt" ? Language::Config : languageFor(utf8(path.extension().native()));
+                if (!decodeText(std::move(file.output), document->text, document->encoding, error)) { result.code = 1; result.error = wide(error); }
+                else if (static_cast<size_t>(std::count(document->text.begin(), document->text.end(), '\n')) >= maxLines) {
+                    result.code = 1; result.error = L"This revision exceeds the 1,000,000-line preview limit.";
+                } else { indexDocument(*document); revisionDocument = std::move(document); }
+            }
+        }
         const auto error = result.error; const auto code = result.code;
-        gitWorker_->complete([this, group, serial, generation, path, doc, code, error, scope, preserve, state, allChanges, working, before] {
+        gitWorker_->complete([this, group, serial, generation, path, doc, code, error, scope, preserve, state, allChanges, working, before, revisionDocument, fullContext] {
             if (generation != generation_ || serial != serial_[group]) return;
             const auto index = groupTab(group);
             if (before && working && working->buffer) {
@@ -2633,6 +2656,15 @@ void ProjectRuntime::Impl::loadTab(bool preserve, int group) {
             }
             // Failed or stale refreshes must not replace an unsaved editor.
             if (viewers_[group].buffer() && (viewers_[group].buffer()->dirty() || viewers_[group].buffer()->saving)) return;
+            if (fullContext) {
+                if (code) { viewers_[group].message(error, path); status(L"Revision unavailable"); }
+                else {
+                    viewers_[group].showRevision(revisionDocument, *doc, path, preserve);
+                    if (!preserve) viewers_[group].restore(state);
+                    status(std::to_wstring(revisionDocument->lines.size()) + L" lines · Commit revision · READ ONLY");
+                }
+                return;
+            }
             if (code) viewers_[group].message(error, path);
             else if (doc->patch.text.empty()) viewers_[group].message(L"No changes to display.", path);
             else if (doc->rows.empty()) viewers_[group].message(L"No text changes to display.", path);

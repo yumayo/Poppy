@@ -36,9 +36,10 @@ void Viewer::setDpi(UINT dpi) {
     findBar_.setDpi(dpi);
     scrollbars(); findLayout(); htmlLayout(); caretPosition(); InvalidateRect(window_, nullptr, FALSE);
 }
-void Viewer::show(std::shared_ptr<const Document> d, const ResourceId& path, bool preserve) {
+void Viewer::show(std::shared_ptr<const Document> d, const ResourceId& path, bool preserve, bool allowHtml) {
     const bool preview = preserve && path_ == path && htmlAvailable() ? html_.active() : true;
     html_.hide();
+    htmlAllowed_ = allowHtml;
     stopLoading();
     stopSelection();
     ime_.cancel(window_);
@@ -53,6 +54,14 @@ void Viewer::show(std::shared_ptr<const Document> d, const ResourceId& path, boo
     if (previous) restore(*previous);
     if (preview) setHtmlPreview(true);
     if (statusChanged) statusChanged();
+}
+void Viewer::showRevision(std::shared_ptr<const Document> d, const DiffDocument& changes, const ResourceId& path, bool preserve) {
+    show(std::move(d), path, preserve, false);
+    gitChangeRanges_ = revisionAddedLines(changes, document_->lines.size());
+    gitChangedLines_.assign(document_->lines.size(), false);
+    for (const auto& range : gitChangeRanges_)
+        std::fill(gitChangedLines_.begin() + range.begin, gitChangedLines_.begin() + range.end, true);
+    InvalidateRect(window_, nullptr, FALSE);
 }
 void Viewer::edit(std::shared_ptr<EditBuffer> buffer, const ResourceId& path, bool preserve) {
     const auto before = edit_ == buffer && path_ == path ? gitBefore_ : nullptr;

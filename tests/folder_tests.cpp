@@ -2460,6 +2460,12 @@ void branchSidebarTests(const fs::path& executable) {
         waitFor([&] { return children(branches, rootCommit) == 2; }, "The oldest commit did not load its files");
         const auto oldFile = nextItem(branches, TreeRelation::Child, nextItem(branches, TreeRelation::Child, rootCommit));
         check(oldFile != 0, "The oldest commit is missing its nested file");
+        // Open Revision sits immediately to the left of Open File.
+        clickFileAction(oldFile, 46);
+        waitFor([&] { return viewerText() == L"initial\n"; }, "Open Revision did not display the selected commit's full file");
+        send(viewer, WM_CHAR, '!');
+        check(viewerText() == L"initial\n" && readText(fixture.root / L"src/file.txt") == "committed\n",
+            "Open Revision allowed editing or changed the current working file");
         clickFileAction(oldFile, 18);
         waitFor([&] { return viewerText() == L"committed\n"; }, "History Open File opened the old revision instead of the current working file");
         viewerKey(VK_END, true); send(viewer, WM_CHAR, '!');

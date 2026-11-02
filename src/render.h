@@ -30,7 +30,7 @@ class Renderer {
 public:
     explicit Renderer(D2D1_PRESENT_OPTIONS presentOptions = D2D1_PRESENT_OPTIONS_NONE) : presentOptions_(presentOptions) {}
     enum class Font { Ui, Code };
-    enum class Icon { Explorer, SourceControl, Branch, OpenAllChanges, Search, StageChanges, UnstageChanges, DiscardChanges, StashChanges, OpenFile, Eye, EyeClosed, CollapseAll, Spinner };
+    enum class Icon { Explorer, SourceControl, Branch, OpenAllChanges, Search, StageChanges, UnstageChanges, DiscardChanges, StashChanges, OpenFile, Eye, EyeClosed, CollapseAll, Spinner, OpenRevision };
     // Keeps both the Win32 paint validation and the Direct2D drawing balanced,
     // including empty windows and failed render-target creation.
     class Paint {

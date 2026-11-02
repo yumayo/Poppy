@@ -50,6 +50,9 @@ DiffDocument workingDiff(const Document& before, const Document& after);
 // Optional overview ranges use working line boundaries [begin, end).
 // An empty range marks a deletion at that boundary, including EOF.
 struct LineChange { size_t begin = 0, end = 0; };
+// Added/replaced lines in a complete single-file revision, using the patch's
+// after-side line numbers. Omitted context and deleted lines stay unmarked.
+std::vector<LineChange> revisionAddedLines(const DiffDocument& changes, size_t lineCount);
 std::vector<bool> changedWorkingLines(const Document& before, const Document& after, std::vector<LineChange>* ranges = nullptr);
 // Contiguous changed display rows [begin, end), excluding file/metadata headings.
 // Split replacements use the added/modified color; removal-only rows use red.

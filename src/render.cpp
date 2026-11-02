@@ -17,7 +17,7 @@ struct Factories {
     ComPtr<IDWriteFactory> text;
     ComPtr<IDWriteTypography> typography;
     ComPtr<ID2D1StrokeStyle> iconStroke;
-    std::array<ComPtr<ID2D1PathGeometry>, 14> icons;
+    std::array<ComPtr<ID2D1PathGeometry>, 15> icons;
     Factories() {
         check(D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, drawing.put()), "Direct2D initialization failed");
         check(DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory), reinterpret_cast<IUnknown**>(text.put())), "DirectWrite initialization failed");
@@ -93,6 +93,15 @@ struct Factories {
                 path({{10, 3}, {4, 3}, {4, 21}, {20, 21}, {20, 14}});
                 path({{14, 3}, {21, 3}, {21, 10}});
                 path({{21, 3}, {11, 13}});
+                break;
+            case Renderer::Icon::OpenRevision:
+                path({{18, 7}, {18, 2}, {3, 2}, {3, 22}, {9, 22}});
+                sink->BeginFigure({22, 16}, D2D1_FIGURE_BEGIN_HOLLOW);
+                sink->AddArc(D2D1::ArcSegment({10, 16}, {6, 6}, 0.0f, D2D1_SWEEP_DIRECTION_CLOCKWISE, D2D1_ARC_SIZE_SMALL));
+                sink->AddArc(D2D1::ArcSegment({22, 16}, {6, 6}, 0.0f, D2D1_SWEEP_DIRECTION_CLOCKWISE, D2D1_ARC_SIZE_SMALL));
+                sink->EndFigure(D2D1_FIGURE_END_CLOSED);
+                path({{16, 12}, {16, 16}, {19, 18}});
+                path({{6, 6}, {12, 6}}); path({{6, 10}, {9, 10}});
                 break;
             case Renderer::Icon::Eye:
             case Renderer::Icon::EyeClosed:

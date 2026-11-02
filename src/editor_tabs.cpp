@@ -10,6 +10,7 @@ size_t openEditorPreview(std::vector<EditorTab>& tabs, EditorTab target) {
     keepModifiedEditorTabs(tabs);
     const auto found = std::find_if(tabs.begin(), tabs.end(), [&](const EditorTab& tab) {
         return tab.path.key() == target.path.key() && tab.diffKind == target.diffKind && tab.revision == target.revision &&
+            (tab.diffKind != GitDiffKind::Commit || tab.diff == target.diff) &&
             tab.allChanges == target.allChanges && tab.gitRoot.key() == target.gitRoot.key();
     });
     if (found != tabs.end()) return static_cast<size_t>(found - tabs.begin());

@@ -107,6 +107,16 @@ std::vector<DiffChange> changedDiffRows(const DiffDocument& document, bool inlin
     }
     return ranges;
 }
+std::vector<LineChange> revisionAddedLines(const DiffDocument& changes, size_t lineCount) {
+    std::vector<LineChange> ranges;
+    for (const auto& row : changes.rows) {
+        if (!row.changed || !row.after.number || row.after.number > lineCount) continue;
+        const size_t line = row.after.number - 1;
+        if (!ranges.empty() && ranges.back().end == line) ranges.back().end = line + 1;
+        else ranges.push_back({line, line + 1});
+    }
+    return ranges;
+}
 const DiffFile* DiffDocument::fileForRow(size_t index, bool inlineView) const {
     if (index >= rowCount(inlineView)) return nullptr;
     const size_t splitRow = inlineView ? inlineOrder[index] / 2 : index;

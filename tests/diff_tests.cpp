@@ -15,6 +15,27 @@ void check(bool condition, const char* message) { if (!condition) throw std::run
 Document sourceDocument(std::string text) {
     Document document; document.text = std::move(text); document.language = Language::CLike; indexDocument(document); return document;
 }
+void revisionHighlights() {
+    DiffDocument diff;
+    diff.patch.text = "diff --git a/file.cpp b/file.cpp\n--- a/file.cpp\n+++ b/file.cpp\n"
+        "@@ -10,3 +10,4 @@\n context\n-old\n+new\n+extra\n tail\n"
+        "@@ -30,2 +31 @@\n-removed\n context\n"
+        "@@ -50 +51 @@\n-old\n+日本😀\n\\ No newline at end of file\n";
+    indexDiff(diff, false, true);
+    const auto ranges = revisionAddedLines(diff, 51);
+    check(ranges.size() == 2 && ranges[0].begin == 10 && ranges[0].end == 12 && ranges[1].begin == 50 && ranges[1].end == 51,
+        "Revision highlights lost after-side line numbers or marked omitted context/deletions");
+    check(revisionAddedLines(diff, 0).empty(), "An empty revision acquired line highlights");
+    diff.patch.text = "@@ -1,2 +1 @@\n same\n-deleted\n"; indexDiff(diff);
+    check(revisionAddedLines(diff, 2).empty(), "A removal-only revision acquired a red or green line range");
+    diff.patch.text = untrackedPatch("file.cpp", "first\n\nlast\n"); indexDiff(diff);
+    const auto added = revisionAddedLines(diff, 4);
+    check(added.size() == 1 && added[0].begin == 0 && added[0].end == 3,
+        "A new revision missed empty added lines or highlighted the EOF caret row");
+    diff.patch.text = "diff --git a/old.cpp b/new.cpp\nsimilarity index 100%\nrename from old.cpp\nrename to new.cpp\n";
+    indexDiff(diff, false, true);
+    check(revisionAddedLines(diff, 40).empty(), "A rename-only revision marked unchanged content");
+}
 void editorLineChanges() {
     struct Case { std::string before, after; std::vector<bool> changed; };
     const std::vector<Case> cases{
@@ -625,6 +646,6 @@ void wrapping() {
 }
 }
 int main() {
-    try { editorLineChanges(); editorChangeMarks(); diffChangeMarks(); editableComparisons(); syntaxHighlighting(); multilineSyntax(); syntaxLanguages(); fileHeadings(); alignment(); additionsAndDeletions(); inlineLayout(); edgeCases(); viewPositions(); wrapping(); std::cout << "Diff tests passed.\n"; return EXIT_SUCCESS; }
+    try { revisionHighlights(); editorLineChanges(); editorChangeMarks(); diffChangeMarks(); editableComparisons(); syntaxHighlighting(); multilineSyntax(); syntaxLanguages(); fileHeadings(); alignment(); additionsAndDeletions(); inlineLayout(); edgeCases(); viewPositions(); wrapping(); std::cout << "Diff tests passed.\n"; return EXIT_SUCCESS; }
     catch (const std::exception& error) { std::cerr << error.what() << '\n'; return EXIT_FAILURE; }
 }

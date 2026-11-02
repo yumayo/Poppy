@@ -32,6 +32,8 @@ using GitBaseRun = std::function<std::optional<std::string>(const std::vector<st
 std::optional<std::string> gitEditorBase(const GitStatusEntry& entry, const GitBaseRun& run);
 std::vector<std::string> gitLogArguments(const std::string& tip, size_t skip);
 std::vector<std::string> gitCommitFilesArguments(const std::string& hash);
+// Read the complete file from this commit, independently of the working tree.
+std::vector<std::string> gitRevisionFileArguments(const std::string& hash, const std::string& path);
 // Include both paths of a rename: filtering on its destination alone makes
 // Git treat it as an addition before rename detection can run.
 std::vector<std::string> gitDiffArguments(GitDiffKind kind, const std::string& hash, const std::string& path, const std::string& previousPath = {});

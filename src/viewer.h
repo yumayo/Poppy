@@ -16,7 +16,8 @@ public:
     using State = ViewState;
     void create(HWND parent, HINSTANCE instance);
     void setDpi(UINT dpi);
-    void show(std::shared_ptr<const Document> document, const ResourceId& path, bool preserve = false);
+    void show(std::shared_ptr<const Document> document, const ResourceId& path, bool preserve = false, bool allowHtml = true);
+    void showRevision(std::shared_ptr<const Document> document, const DiffDocument& changes, const ResourceId& path, bool preserve = false);
     void edit(std::shared_ptr<EditBuffer> buffer, const ResourceId& path, bool preserve = false);
     void setGitBase(std::shared_ptr<const Document> before);
     void showImage(std::shared_ptr<const ImagePreview> image, const ResourceId& path);
@@ -41,7 +42,7 @@ public:
     void findNext(bool backwards = false);
     bool findKey(const MSG& message);
     bool selectSearch(size_t begin, size_t end, const std::string& query, bool matchCase);
-    bool htmlAvailable() const { return document_ && !diff_ && isHtmlExtension(path_.extension().native()); }
+    bool htmlAvailable() const { return htmlAllowed_ && document_ && !diff_ && isHtmlExtension(path_.extension().native()); }
     void setHtmlPreview(bool enabled);
     bool htmlPreview() const { return html_.active(); }
     HWND window() const { return window_; }
@@ -107,6 +108,7 @@ private:
     static constexpr UINT_PTR selectionTimer = 0x5058;
     static constexpr UINT_PTR loadingTimer = 0x5059;
     bool loading_ = false;
+    bool htmlAllowed_ = true;
     ULONGLONG loadingDue_ = 0;
     bool caretVisible_ = false;
     std::shared_ptr<const Document> document_;

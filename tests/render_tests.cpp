@@ -524,6 +524,12 @@ void htmlPreviewSwitching() {
     check(viewer.htmlPreview(), "Reopening HTML did not default to Preview mode");
     viewer.showDiff(std::make_shared<DiffDocument>(workingDiff(buffer->document, buffer->document)), path);
     check(!viewer.htmlAvailable() && !viewer.htmlPreview(), "An HTML diff activated the preview");
+    const auto revision = std::make_shared<Document>(buffer->document);
+    viewer.showRevision(revision, DiffDocument{}, path);
+    check(!viewer.htmlAvailable() && !viewer.htmlPreview() && !viewer.buffer(),
+        "A historical HTML revision activated the current file's preview or retained an editable buffer");
+    SendMessageW(viewer.window(), WM_CHAR, '!', 0);
+    check(revision->text == buffer->document.text, "A historical revision accepted text input");
     viewer.edit(buffer, path, true);
     check(viewer.htmlPreview(), "Returning from an HTML diff did not default to Preview mode");
     viewer.message(L"Closed");
@@ -673,7 +679,7 @@ void smoothIcons() {
         const int size = MulDiv(24, dpi, 96);
         const std::vector<Renderer::Icon> icons{Renderer::Icon::Explorer, Renderer::Icon::SourceControl, Renderer::Icon::Branch,
             Renderer::Icon::OpenAllChanges, Renderer::Icon::StageChanges, Renderer::Icon::UnstageChanges, Renderer::Icon::DiscardChanges, Renderer::Icon::StashChanges, Renderer::Icon::OpenFile,
-            Renderer::Icon::Eye, Renderer::Icon::EyeClosed, Renderer::Icon::CollapseAll};
+            Renderer::Icon::Eye, Renderer::Icon::EyeClosed, Renderer::Icon::CollapseAll, Renderer::Icon::OpenRevision};
         for (size_t i = 0; i < icons.size(); ++i) {
             const int x = 8 + static_cast<int>(i % 9) * 56, y = 8 + static_cast<int>(i / 9) * 56;
             renderer.icon(icons[i], {x, y, x + size, y + size}, RGB(255, 255, 255));
