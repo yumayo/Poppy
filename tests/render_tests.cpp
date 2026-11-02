@@ -2036,6 +2036,85 @@ void selectionAutoScrolling() {
     }
     check(!buffer->dirty(), "Selection scrolling edited the buffer");
 }
+void terminalAsyncStartup() {
+    const auto instance = GetModuleHandleW(nullptr);
+    const auto parent = CreateWindowExW(0, L"STATIC", L"Poppy", WS_POPUP | WS_CLIPCHILDREN,
+        0, 0, 640, 360, nullptr, nullptr, instance, nullptr);
+    check(parent != nullptr, "Cannot create the asynchronous terminal test window");
+    struct WindowOwner { HWND value; ~WindowOwner() { DestroyWindow(value); } } owner{parent};
+    Handle gate(CreateEventW(nullptr, TRUE, FALSE, nullptr)), entered(CreateEventW(nullptr, TRUE, FALSE, nullptr));
+    check(gate && entered, "Cannot create terminal startup gates");
+    Terminal terminal; terminal.create(parent, instance); terminal.setDirectory(fs::temp_directory_path());
+    MoveWindow(terminal.window(), 0, 0, 640, 360, FALSE);
+    const auto uiThread = GetCurrentThreadId();
+    std::atomic<unsigned> preparations{0}, failures{0};
+    unsigned ready = 0, probes = 0;
+    bool invalidCommand = false;
+    wchar_t system[MAX_PATH]{}; GetSystemDirectoryW(system, MAX_PATH);
+    const auto command = std::wstring(system) + L"\\cmd.exe";
+    struct StopOnExit {
+        Terminal& terminal; HANDLE gate;
+        ~StopOnExit() { SetEvent(gate); terminal.stop(); terminal.starting = {}; terminal.focused = {}; }
+    } stopOnExit{terminal, gate.value};
+    terminal.focused = [&] { ++probes; };
+    terminal.starting = [&]() -> Terminal::StartupTask {
+        check(GetCurrentThreadId() == uiThread, "Startup snapshot did not run on the UI thread");
+        return [&, invalidCommand] {
+            ++preparations; SetEvent(entered.value);
+            check(GetCurrentThreadId() != uiThread, "Blocking terminal preparation ran on the UI thread");
+            check(WaitForSingleObject(gate.value, 10000) == WAIT_OBJECT_0, "Terminal startup gate timed out");
+            Terminal::LaunchOptions options;
+            options.command = {invalidCommand ? command + L".missing" : command, L"/D", L"/Q", L"/K"};
+            options.ready = [&] { check(GetCurrentThreadId() == uiThread, "Terminal readiness touched UI from a worker"); ++ready; };
+            options.failed = [&] { ++failures; };
+            return options;
+        };
+    };
+    const auto dispatch = [&] {
+        MSG message{};
+        while (PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE)) { TranslateMessage(&message); DispatchMessageW(&message); }
+        Terminal::pump();
+    };
+    const auto wait = [&](const auto& done) {
+        const auto start = GetTickCount64();
+        while (!done()) { dispatch(); check(GetTickCount64() - start < 10000, "Asynchronous terminal startup did not complete"); Sleep(10); }
+    };
+    const auto start = GetTickCount64();
+    check(terminal.launch() && GetTickCount64() - start < 1000, "Launching a terminal waited for preparation");
+    check(WaitForSingleObject(entered.value, 1000) == WAIT_OBJECT_0, "Terminal preparation did not begin");
+    check(terminal.launch() && preparations == 1, "Repeated activation duplicated a pending launch");
+    SendMessageW(terminal.window(), WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(10, 10));
+    PostMessageW(terminal.window(), WM_SETFOCUS, 0, 0); dispatch();
+    check(probes && terminal.launching() && !ready, "UI messages stopped while terminal startup was pending");
+    terminal.setDpi(144); MoveWindow(terminal.window(), 0, 0, 800, 500, FALSE);
+    // Preserve input received while the notification relay is still starting.
+    for (const auto c : std::wstring(L"title Poppy async ready\r")) SendMessageW(terminal.window(), WM_CHAR, c, 0);
+    SetEvent(gate.value);
+    wait([&] { return terminal.title() == "Poppy async ready"; });
+    check(ready == 1 && preparations == 1 && terminal.running(), "A pending launch lost input or completed more than once");
+    wchar_t title[64]{}; GetWindowTextW(parent, title, 64);
+    check(std::wstring(title) == L"Poppy", "Terminal startup changed the main window title");
+    terminal.stop();
+
+    // A failed child launch cleans up on the worker and permits another try.
+    invalidCommand = true; check(terminal.launch(), "Cannot schedule the failing terminal launch");
+    wait([&] { return !terminal.launching(); });
+    check(!terminal.running() && ready == 1 && failures == 1, "Failed startup retained a process or invoked readiness");
+    invalidCommand = false; check(terminal.launch(), "Cannot retry a failed terminal launch");
+    wait([&] { return ready == 2; }); terminal.stop();
+
+    // Closing during preparation must join it without applying a stale result.
+    ResetEvent(gate.value); ResetEvent(entered.value);
+    check(terminal.launch(), "Cannot schedule the cancelled terminal launch");
+    check(WaitForSingleObject(entered.value, 1000) == WAIT_OBJECT_0, "Cancelled preparation did not begin");
+    NativeThread release([&] { Sleep(50); SetEvent(gate.value); });
+    { ShutdownDialog dialog(parent, instance); terminal.stop(&dialog); }
+    release.join(); dispatch();
+    check(!terminal.launching() && !terminal.running() && ready == 2 && failures == 2,
+        "Closing a pending terminal applied its result or left its process running");
+    check(terminal.launch(), "Cannot restart a terminal after cancelling preparation");
+    wait([&] { return ready == 3; }); terminal.stop();
+}
 void terminalProcessShutdown() {
     std::wstring module(32768, L'\0'); const auto count = GetModuleFileNameW(nullptr, module.data(), static_cast<DWORD>(module.size()));
     check(count && count < module.size(), "Cannot locate terminal lifetime fixture"); module.resize(count);
@@ -2322,7 +2401,7 @@ int main(int argc, char** argv) {
         } else {
             shutdownProgress();
             htmlPreviewSwitching();
-            terminalProcessShutdown();
+            terminalAsyncStartup(); terminalProcessShutdown();
             statusBarLimits(); treeMultipleSelection(); inlineTreeInput(); inlineTreeCreation(); gitCommitInput(); cellPositions(); colorsAndClipping(); imagePreviews(); smoothIcons(); windowTargets(); editableDiff(); editorCaret(); delayedLoadingMessages(); imeCellRendering(); imeTerminalInsertion(); imeUiRendering(); imePositions(); editorWordSelection(); editorWordMovement(); editorLineShortcuts(); editorWrapping(); diffWrapping(); documentFind(); horizontalWheelScrolling(); continuousViewerScrolling(); selectionAutoScrolling(); terminalGitBashSocketEnvironment(); terminalSelectionAutoScrolling(); themedScrollbars(); quickOpenStability();
             std::cout << "Direct2D rendering tests passed\n";
         }

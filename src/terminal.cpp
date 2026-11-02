@@ -31,14 +31,13 @@ void Terminal::setDpi(UINT dpi) {
     scrollbars(); resize(); imePosition(); InvalidateRect(window_, nullptr, FALSE);
 }
 void Terminal::setDirectory(const fs::path& directory) {
-    if (!started_) { directory_ = directory; error_.clear(); InvalidateRect(window_, nullptr, FALSE); }
+    if (!started_ && !launching_) { directory_ = directory; error_.clear(); InvalidateRect(window_, nullptr, FALSE); }
 }
 bool Terminal::start() {
-    if (running()) return true;
+    if (launching_ || running()) return true;
     stop();
-    std::error_code directoryError;
-    if (directory_.empty() || !fs::is_directory(directory_, directoryError)) { error_ = L"Project folder is missing. Restore the folder before starting a shell."; return false; }
-    try { if (starting) starting(); }
+    StartupTask prepare;
+    try { if (starting) prepare = starting(); }
     catch (const std::exception& failure) { error_ = wide(failure.what()); stop(); return false; }
     error_.clear(); model_ = TerminalModel(model_.columns(), model_.rows()); model_.reply = [this](std::string s) { send(std::move(s), false); };
     scroll_ = 0; display_.clearSelection();
@@ -46,38 +45,66 @@ bool Terminal::start() {
     display_ = TerminalDisplay{}; display_.update(model_, scroll_, GetTickCount64(), true);
     scrollbars(); imePosition();
     if (titleChanged) titleChanged();
+    stopping_ = false; launchFinished_ = false; launching_ = true; launchError_.clear();
+    try {
+        launcher_.start([this, prepare = std::move(prepare), directory = directory_, command = command_, environment = environment_,
+                         columns = model_.columns(), rows = model_.rows(), target = window_]() mutable {
+            LaunchOptions options;
+            try {
+                std::error_code directoryError;
+                if (directory.empty() || !fs::is_directory(directory, directoryError)) throw std::runtime_error("Project folder is missing. Restore the folder before starting a shell.");
+                options = prepare ? prepare() : LaunchOptions{std::move(command), std::move(environment), {}, {}};
+                if (!stopping_) startProcess(directory, options, columns, rows, target);
+                if (!stopping_) launchReady_ = std::move(options.ready);
+                else { if (options.failed) options.failed(); stopProcesses(); }
+            } catch (const std::exception& failure) {
+                launchError_ = wide(failure.what());
+                stopping_ = true; condition_.notify_all();
+                if (options.failed) options.failed();
+                stopProcesses();
+            }
+            launchFinished_ = true;
+            PostMessageW(target, wmTerminal, 0, 0);
+        });
+    } catch (const std::exception& failure) {
+        launching_ = false; error_ = wide(failure.what()); stop(); return false;
+    }
+    InvalidateRect(window_, nullptr, FALSE); return true;
+}
+void Terminal::startProcess(const fs::path& directory, const LaunchOptions& options, int columns, int rows, HWND target) {
+    const auto fail = [](std::wstring message) { throw std::runtime_error(utf8(message)); };
     HANDLE read = nullptr, write = nullptr;
-    if (!CreatePipe(&read, &write, nullptr, 0)) { error_ = winError(); stop(); return false; }
+    if (!CreatePipe(&read, &write, nullptr, 0)) fail(winError());
     Handle childInput(read); input_.reset(write);
-    if (!CreatePipe(&read, &write, nullptr, 0)) { error_ = winError(); stop(); return false; }
+    if (!CreatePipe(&read, &write, nullptr, 0)) fail(winError());
     output_.reset(read); Handle childOutput(write);
-    const HRESULT hr = CreatePseudoConsole({static_cast<SHORT>(model_.columns()), static_cast<SHORT>(model_.rows())}, childInput.value, childOutput.value, 0, &console_);
-    if (FAILED(hr)) { error_ = L"ConPTY could not start (HRESULT " + std::to_wstring(static_cast<unsigned long>(hr)) + L")."; stop(); return false; }
+    const HRESULT hr = CreatePseudoConsole({static_cast<SHORT>(columns), static_cast<SHORT>(rows)}, childInput.value, childOutput.value, 0, &console_);
+    if (FAILED(hr)) fail(L"ConPTY could not start (HRESULT " + std::to_wstring(static_cast<unsigned long>(hr)) + L").");
     childInput.reset(); childOutput.reset();
     // Read concurrently even during creation/teardown, as ClosePseudoConsole can emit output.
-    stopping_ = false;
-    reader_.start([this] {
+    reader_.start([this, target] {
         char buffer[8192]; DWORD count = 0;
         while (ReadFile(output_.value, buffer, sizeof(buffer), &count, nullptr) && count) {
             std::unique_lock<std::mutex> lock(mutex_);
             condition_.wait(lock, [&] { return stopping_ || received_.size() + count <= 256 * 1024; });
             if (!stopping_) {
                 received_.append(buffer, count);
-                if (!notified_) { notified_ = true; PostMessageW(window_, wmTerminal, 0, 0); }
+                if (!notified_) { notified_ = true; PostMessageW(target, wmTerminal, 0, 0); }
             }
         }
-        PostMessageW(window_, wmTerminal, 0, 0);
+        PostMessageW(target, wmTerminal, 0, 0);
     });
     SIZE_T size = 0; InitializeProcThreadAttributeList(nullptr, 1, 0, &size);
     std::vector<unsigned char> storage(size); auto attributes = reinterpret_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(storage.data());
-    if (!InitializeProcThreadAttributeList(attributes, 1, 0, &size)) { error_ = winError(); stop(); return false; }
-    if (!UpdateProcThreadAttribute(attributes, 0, PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, console_, sizeof(console_), nullptr, nullptr)) { error_ = winError(); DeleteProcThreadAttributeList(attributes); stop(); return false; }
+    if (!InitializeProcThreadAttributeList(attributes, 1, 0, &size)) fail(winError());
+    struct Delete { LPPROC_THREAD_ATTRIBUTE_LIST value; ~Delete() { DeleteProcThreadAttributeList(value); } } cleanup{attributes};
+    if (!UpdateProcThreadAttribute(attributes, 0, PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, console_, sizeof(console_), nullptr, nullptr)) fail(winError());
     STARTUPINFOEXW si{}; si.StartupInfo.cb = sizeof(si); si.lpAttributeList = attributes;
     wchar_t system[MAX_PATH]{}; GetSystemDirectoryW(system, MAX_PATH);
-    const auto args = command_.empty() ? terminalShellCommand(TerminalShell::PowerShell, system) : command_;
+    const auto args = options.command.empty() ? terminalShellCommand(TerminalShell::PowerShell, system) : options.command;
     const auto& shell = args.front();
     std::wstring command = processCommandLine(args);
-    if (!job_.create()) { error_ = winError(); DeleteProcThreadAttributeList(attributes); stop(); return false; }
+    if (!job_.create()) fail(winError());
     PROCESS_INFORMATION pi{};
     struct Less { bool operator()(const std::wstring& a, const std::wstring& b) const { return CompareStringOrdinal(a.c_str(), -1, b.c_str(), -1, TRUE) == CSTR_LESS_THAN; } };
     std::map<std::wstring, std::wstring, Less> inherited;
@@ -88,7 +115,7 @@ bool Terminal::start() {
         }
         FreeEnvironmentStringsW(block);
     }
-    for (const auto& value : environment_) inherited[value.first] = value.second;
+    for (const auto& value : options.environment) inherited[value.first] = value.second;
     // Replace the socket entry so its Linux path is passed without translation.
     const auto previous = inherited[L"WSLENV"]; std::wstring wslenv;
     for (size_t p = 0; p < previous.size();) {
@@ -117,11 +144,10 @@ bool Terminal::start() {
     std::vector<wchar_t> environment;
     for (const auto& value : inherited) { const auto entry = value.first + L"=" + value.second; environment.insert(environment.end(),entry.begin(),entry.end()); environment.push_back(0); }
     environment.push_back(0);
-    const BOOL ok = CreateProcessW(shell.c_str(), command.data(), nullptr, nullptr, FALSE, CREATE_UNICODE_ENVIRONMENT | CREATE_SUSPENDED | EXTENDED_STARTUPINFO_PRESENT, environment.data(), directory_.empty() ? nullptr : directory_.c_str(), &si.StartupInfo, &pi);
-    const DWORD error = ok ? 0 : GetLastError(); DeleteProcThreadAttributeList(attributes);
-    if (!ok) { error_ = L"Could not start " + shell + L": " + winError(error); stop(); return false; }
+    const BOOL ok = CreateProcessW(shell.c_str(), command.data(), nullptr, nullptr, FALSE, CREATE_UNICODE_ENVIRONMENT | CREATE_SUSPENDED | EXTENDED_STARTUPINFO_PRESENT, environment.data(), directory.c_str(), &si.StartupInfo, &pi);
+    if (!ok) fail(L"Could not start " + shell + L": " + winError());
     process_.reset(pi.hProcess); Handle thread(pi.hThread);
-    if (!AssignProcessToJobObject(job_.handle(), process_.value)) { error_ = winError(); TerminateProcess(process_.value, 1); WaitForSingleObject(process_.value, INFINITE); stop(); return false; }
+    if (!AssignProcessToJobObject(job_.handle(), process_.value)) { const auto error = winError(); TerminateProcess(process_.value, 1); WaitForSingleObject(process_.value, INFINITE); fail(error); }
     writer_.start([this] {
         for (;;) {
             std::string text; bool changeSize = false; COORD size{};
@@ -137,37 +163,57 @@ bool Terminal::start() {
             }
         }
     });
-    if (ResumeThread(thread.value) == static_cast<DWORD>(-1)) { error_ = winError(); stop(); return false; }
-    started_ = true; InvalidateRect(window_, nullptr, FALSE); return true;
+    if (!stopping_ && ResumeThread(thread.value) == static_cast<DWORD>(-1)) fail(winError());
+}
+void Terminal::completeStart() {
+    if (!launching_ || !launchFinished_) return;
+    launcher_.join(); launching_ = false;
+    error_ = std::move(launchError_);
+    if (error_.empty()) {
+        started_ = true;
+        if (launchReady_) { auto ready = std::move(launchReady_); ready(); }
+        // Layout and DPI may have changed while ConPTY was being created.
+        { std::lock_guard<std::mutex> lock(mutex_); requestedColumns_ = model_.columns(); requestedRows_ = model_.rows(); resizePending_ = true; }
+        condition_.notify_all();
+    } else {
+        // Remove notification registrations and remote tokens after a failed launch.
+        stop();
+    }
+    InvalidateRect(window_, nullptr, FALSE);
 }
 void Terminal::stop(ShutdownDialog* progress) {
     stopSelection();
     ime_.cancel(window_);
+    stopping_ = true; condition_.notify_all();
+    // Preparation owns the relay and process handles until its thread exits.
+    const auto joinLaunch = [this] { launcher_.join(); launchReady_ = {}; };
+    if (launcher_.joinable()) { if (progress) progress->wait(joinLaunch); else joinLaunch(); }
+    launching_ = false;
     if (stopping) stopping();
     if (ended) ended();
     if (window_) KillTimer(window_, 2);
-    const auto stopProcesses = [this] {
-        stopping_ = true; condition_.notify_all();
-        job_.stop(0);
-        if (writer_.joinable()) {
-            // Repeat cancellation to cover a stop arriving just before WriteFile begins.
-            while (WaitForSingleObject(writer_.native_handle(), 0) == WAIT_TIMEOUT) { CancelSynchronousIo(writer_.native_handle()); WaitForSingleObject(writer_.native_handle(), 10); }
-            writer_.join();
-        }
-        // The reader keeps draining while ConPTY sends its final output.
-        if (console_) { ClosePseudoConsole(console_); console_ = nullptr; }
-        if (reader_.joinable()) { CancelSynchronousIo(reader_.native_handle()); reader_.join(); }
-        input_.reset(); output_.reset(); process_.reset();
-    };
-    if (progress) progress->wait(stopProcesses); else stopProcesses();
+    if (progress) progress->wait([this] { stopProcesses(); }); else stopProcesses();
     started_ = false;
     { std::lock_guard<std::mutex> lock(mutex_); received_.clear(); writes_.clear(); writeBytes_ = 0; notified_ = resizePending_ = false; }
     continuationPosted_ = false;
     display_.update(model_, scroll_, GetTickCount64(), true);
     scrollbars();
 }
+void Terminal::stopProcesses() {
+    stopping_ = true; condition_.notify_all();
+    job_.stop(0);
+    if (writer_.joinable()) {
+        // Repeat cancellation to cover a stop arriving just before WriteFile begins.
+        while (WaitForSingleObject(writer_.native_handle(), 0) == WAIT_TIMEOUT) { CancelSynchronousIo(writer_.native_handle()); WaitForSingleObject(writer_.native_handle(), 10); }
+        writer_.join();
+    }
+    // The reader keeps draining while ConPTY sends its final output.
+    if (console_) { ClosePseudoConsole(console_); console_ = nullptr; }
+    if (reader_.joinable()) { CancelSynchronousIo(reader_.native_handle()); reader_.join(); }
+    input_.reset(); output_.reset(); process_.reset();
+}
 void Terminal::send(std::string text, bool userInput) {
-    if (!running() || text.empty()) return;
+    if ((!launching_ && !running()) || text.empty()) return;
     { std::lock_guard<std::mutex> lock(mutex_); if (writeBytes_ + text.size() > 1024 * 1024) { MessageBeep(MB_ICONWARNING); return; } writeBytes_ += text.size(); writes_.push_back(std::move(text)); }
     condition_.notify_all();
     if (userInput) {
@@ -196,6 +242,7 @@ bool Terminal::receive() {
     return true;
 }
 void Terminal::pump() {
+    for (const auto terminal : liveTerminals) terminal->completeStart();
     LONGLONG spent = 0;
     LARGE_INTEGER frequency{}; QueryPerformanceFrequency(&frequency);
     HWND root = nullptr;
@@ -261,14 +308,14 @@ void Terminal::resize() {
     model_.resize(columns, rows); scroll_ = 0; display_.clearSelection();
     scrollbars();
     display_.changed();
-    if (console_) {
+    if (!launching_ && console_) {
         { std::lock_guard<std::mutex> lock(mutex_); requestedColumns_ = columns; requestedRows_ = rows; resizePending_ = true; }
         condition_.notify_all();
     }
     else display_.update(model_, scroll_, GetTickCount64(), true);
     imePosition();
     InvalidateRect(window_, nullptr, FALSE);
-    if (console_) pump();
+    if (!launching_ && console_) pump();
 }
 void Terminal::scrollbars() {
     if (!window_) return;
@@ -351,7 +398,7 @@ void Terminal::paint() {
     dc.fill(rect, background);
     if (!started_) {
         RECT text{20, 18, std::max<LONG>(20, rect.right - 20), rect.bottom};
-        dc.label(text, error_.empty() ? !displayDirectory_.empty() ? L"Click to start the WSL shell.\nThe shell starts only when needed." : L"Click to start PowerShell, then run your AI CLI.\nThe shell starts only when needed." : error_ + L"\nClick to retry.", muted, DT_LEFT | DT_TOP | DT_WORDBREAK);
+        dc.label(text, launching_ ? L"Starting terminal…" : error_.empty() ? !displayDirectory_.empty() ? L"Click to start the WSL shell.\nThe shell starts only when needed." : L"Click to start PowerShell, then run your AI CLI.\nThe shell starts only when needed." : error_ + L"\nClick to retry.", muted, DT_LEFT | DT_TOP | DT_WORDBREAK);
     } else {
         RECT clip{6, 4, rect.right - 6, rect.bottom};
         const auto [begin, end] = display_.selectionRange();

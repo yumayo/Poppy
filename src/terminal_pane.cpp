@@ -3,6 +3,7 @@
 #include <commctrl.h>
 #include <algorithm>
 #include <cstdlib>
+#include <stdexcept>
 
 namespace poppy {
 TerminalPane::~TerminalPane() { stop(); sessions_.clear(); }
@@ -30,40 +31,57 @@ void TerminalPane::add(SavedTerminal configuration) {
         const auto found = std::find_if(sessions_.begin(), sessions_.end(), [ptr](const auto& s) { return s.get() == ptr; });
         if (found != sessions_.end()) { active_ = static_cast<size_t>(found - sessions_.begin()); acknowledge(); InvalidateRect(window_, nullptr, FALSE); }
     };
-    session->terminal->starting = [this,ptr] {
+    session->terminal->starting = [this,ptr]() -> Terminal::StartupTask {
         ptr->ai = {}; ptr->notificationError.clear();
-        std::string eventSocket;
-        if (directory_.wsl()) {
-            ptr->wslToken = newSessionId();
-            ptr->terminal->setCommand(provider_->terminalCommand(directory_.at(ptr->configuration.directory), ptr->wslToken, ptr->wslTool));
-        } else {
-            wchar_t system[MAX_PATH]{}; GetSystemDirectoryW(system, MAX_PATH);
-            ptr->terminal->setCommand(terminalShellCommand(ptr->configuration.shell, system));
-        }
+        const auto directory = directory_.at(ptr->configuration.directory);
+        const auto provider = provider_;
+        const auto shell = ptr->configuration.shell;
+        const auto tool = ptr->wslTool;
+        ptr->wslToken = directory.wsl() ? newSessionId() : std::string{};
+        const auto token = ptr->wslToken;
         if (events_) {
             ptr->notificationId = newSessionId(); events_->add(ptr->notificationId);
-            const auto id = ptr->notificationId; const auto hooks = events_;
-            try {
-                auto launch = directory_.wsl() ? WslEventLaunch{provider_->terminalEventsCommand(), {}} : defaultWslTerminalEvents();
-                eventSocket = ptr->events.start(launch.command, [hooks, id](const wsl::Message& message) {
-                    const auto kind = wsl::field(message, "type");
-                    if (message.size() == 2 && (kind == "status" || kind == "activity")) hooks->publish(id, kind == "activity", wsl::field(message, "body"));
-                }, std::move(launch.input));
-            } catch (const std::exception& failure) {
-                events_->remove(id); ptr->notificationId.clear();
-                if (directory_.wsl()) throw;
-                // A missing WSL installation must not prevent a Windows shell.
-                ptr->notificationError = wide(failure.what());
-            }
         }
-        std::vector<std::pair<std::wstring, std::wstring>> environment{{L"AICONTAINER_EVENT_SOCKET", wide(eventSocket)}};
-        if (!directory_.wsl() && ptr->configuration.shell == TerminalShell::GitBash) {
-            // Git's login profile otherwise changes to HOME and uses MSYS mode.
-            environment.emplace_back(L"CHERE_INVOKING", L"1");
-            environment.emplace_back(L"MSYSTEM", L"MINGW64");
-        }
-        ptr->terminal->setEnvironment(std::move(environment));
         if (changed) changed();
+        const auto id = ptr->notificationId; const auto hooks = events_;
+        return [this, ptr, directory, provider, shell, tool, token, id, hooks] {
+            Terminal::LaunchOptions options;
+            if (directory.wsl()) {
+                if (!provider) throw std::runtime_error("Reconnect the WSL project before starting a terminal");
+                options.command = provider->terminalCommand(directory, token, tool);
+            } else {
+                wchar_t system[MAX_PATH]{}; GetSystemDirectoryW(system, MAX_PATH);
+                options.command = terminalShellCommand(shell, system);
+            }
+            std::string eventSocket;
+            std::wstring notificationError;
+            if (hooks) {
+                try {
+                    auto launch = directory.wsl() ? WslEventLaunch{provider->terminalEventsCommand(), {}} : defaultWslTerminalEvents();
+                    eventSocket = ptr->events.start(launch.command, [hooks, id](const wsl::Message& message) {
+                        const auto kind = wsl::field(message, "type");
+                        if (message.size() == 2 && (kind == "status" || kind == "activity")) hooks->publish(id, kind == "activity", wsl::field(message, "body"));
+                    }, std::move(launch.input));
+                } catch (const std::exception& failure) {
+                    if (directory.wsl()) throw;
+                    // A missing WSL installation must not prevent a Windows shell.
+                    notificationError = wide(failure.what());
+                }
+            }
+            options.environment = {{L"AICONTAINER_EVENT_SOCKET", wide(eventSocket)}};
+            if (!directory.wsl() && shell == TerminalShell::GitBash) {
+                // Git's login profile otherwise changes to HOME and uses MSYS mode.
+                options.environment.emplace_back(L"CHERE_INVOKING", L"1");
+                options.environment.emplace_back(L"MSYSTEM", L"MINGW64");
+            }
+            options.ready = [this, ptr, hooks, id, notificationError = std::move(notificationError)] {
+                ptr->notificationError = notificationError;
+                if (hooks && !notificationError.empty()) { hooks->remove(id); ptr->notificationId.clear(); }
+                if (changed) changed();
+            };
+            options.failed = [ptr] { ptr->events.stop(); };
+            return options;
+        };
     };
     session->terminal->stopping = [this, ptr] {
         // Stop Docker-owned AI processes before their WSL/Windows launchers.
