@@ -46,6 +46,8 @@ public:
     bool dragging() const { return drag_.has_value(); }
     void rename(TreeItem item, const std::wstring& name);
     void createItem(TreeItem parent, bool directory);
+    // Resolve a context-menu item to the folder that will contain new items.
+    std::function<TreeItem(TreeItem)> creationParent;
     std::function<bool(TreeItem)> canCreate;
     std::function<void(TreeItem, const std::wstring&, bool)> createCommitted;
     std::function<bool(TreeItem)> canRename;

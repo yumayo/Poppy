@@ -481,6 +481,10 @@ void ProjectRuntime::Impl::create() {
         else { expandedPaths_.erase(pathKey(n->path)); n->expandRequested = false; pendingExplorerFile_.clear(); }
     };
     explorer_.removed = [this](uintptr_t data) { const auto n = reinterpret_cast<Node*>(data); if (n) { nodes_.erase(n->id); if (n->truncated) --partialFolders_; statusDirty_ = true; delete n; } };
+    explorer_.creationParent = [this](TreeItem item) -> TreeItem {
+        const auto n = node(item); if (!n || n->unsupported) return 0;
+        return n->directory ? item : explorer_.item(item)->parent;
+    };
     explorer_.canCreate = [this](TreeItem item) { return canCreateItem(item); };
     explorer_.createCommitted = [this](TreeItem item, const std::wstring& name, bool directory) { createItem(item, name, directory); };
     explorer_.canRename = [this](TreeItem item) { return item != rootItem_ && node(item) && !node(item)->unsupported && !renamePending_ && !pastePending_ && !createPending_ && !gitDiscardPending_ && !gitStashPending_ && !gitCommitPending_ && (!root_.wsl() || (connected_ && provider_->state() == ConnectionState::Ready)); };

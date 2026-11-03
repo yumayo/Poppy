@@ -469,7 +469,8 @@ LRESULT Tree::handle(UINT m, WPARAM a, LPARAM b) {
         const bool single = selections().size() == 1;
         const bool canOpen = single && id && openWithDefaultAppRequested && (!canOpenWithDefaultApp || canOpenWithDefaultApp(id));
         const bool canReveal = single && id && revealInFileExplorerRequested && (!canRevealInFileExplorer || canRevealInFileExplorer(id));
-        const bool create = single && id && createCommitted && canCreate && canCreate(id);
+        const auto parent = creationParent ? creationParent(id) : id;
+        const bool create = single && id && parent && createCommitted && canCreate && canCreate(parent);
         HMENU menu = CreatePopupMenu(); if (!menu) return 0;
         if (create) {
             AppendMenuW(menu, MF_STRING, 4, L"New File…");
@@ -498,7 +499,7 @@ LRESULT Tree::handle(UINT m, WPARAM a, LPARAM b) {
         if (command == 3 && pasteImageRequested && (!canPasteImage || canPasteImage(id))) { pasteImageRequested(id); return 0; }
         if (command == 12 && pasteFilesRequested && canPasteFiles && canPasteFiles(id)) { pasteFilesRequested(id); return 0; }
         if (!item(id)) return 0;
-        if (command == 4 || command == 5) createItem(id, command == 5);
+        if (command == 4 || command == 5) createItem(parent, command == 5);
         else if (command == 6 && revealInFileExplorerRequested && (!canRevealInFileExplorer || canRevealInFileExplorer(id))) revealInFileExplorerRequested(id);
         else if (command == 2 && openWithDefaultAppRequested && (!canOpenWithDefaultApp || canOpenWithDefaultApp(id))) openWithDefaultAppRequested(id);
         else if (command == 1 && renameRequested && (!canRename || canRename(id))) renameRequested(id);

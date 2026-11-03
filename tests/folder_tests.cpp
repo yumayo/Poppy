@@ -1090,15 +1090,22 @@ void createItemTests(const fs::path& executable) {
     Application app(executable, fixture.root); const auto tree = app.tree();
     waitFor([&] { return send(tree, treeGetCount) == 2; }, "Creation fixture did not load");
     const auto root = nextItem(tree, TreeRelation::Root), folder = nextItem(tree, TreeRelation::Child, root);
-    const auto start = [&](TreeItem parent, bool directory, const wchar_t* name) {
-        send(tree, treeSelect, parent);
-        check(PostMessageW(tree, WM_CONTEXTMENU, reinterpret_cast<WPARAM>(tree), MAKELPARAM(-1, -1)), "Cannot open folder context menu");
+    const auto start = [&](TreeItem target, bool directory, const wchar_t* name, TreeItem parent = 0) {
+        send(tree, treeSelect, parent ? parent : target);
+        POINT screen{-1, -1};
+        if (parent) {
+            const auto scroll = scrollInfo(tree);
+            const int height = static_cast<int>(send(tree, treeGetRowHeight));
+            screen = {MulDiv(70, GetDpiForWindow(tree), 96), static_cast<LONG>((send(tree, treeGetRow, target) - scroll.nPos) * height + height / 2)};
+            check(ClientToScreen(tree, &screen), "Cannot locate the file context menu");
+        } else parent = target;
+        check(PostMessageW(tree, WM_CONTEXTMENU, reinterpret_cast<WPARAM>(tree), MAKELPARAM(screen.x, screen.y)), "Cannot open creation context menu");
         const auto menuOpen = [&] { GUITHREADINFO info{}; info.cbSize = sizeof(info); check(GetGUIThreadInfo(app.process.dwThreadId, &info), "Cannot inspect creation menu"); return (info.flags & GUI_INMENUMODE) != 0; };
-        waitFor(menuOpen, "Folder context menu did not open");
+        waitFor(menuOpen, "Creation context menu did not open");
         PostMessageW(tree, WM_KEYDOWN, VK_HOME, 0);
         if (directory) PostMessageW(tree, WM_KEYDOWN, VK_DOWN, 0);
         PostMessageW(tree, WM_KEYDOWN, VK_RETURN, 0);
-        waitFor([&] { return !menuOpen(); }, "Folder context menu did not close");
+        waitFor([&] { return !menuOpen(); }, "Creation context menu did not close");
         HWND edit = nullptr;
         waitFor([&] { edit = FindWindowExW(tree, nullptr, treeInputClassName, nullptr); return edit != nullptr; }, "Creation did not show the name input");
         const auto inputBounds = bounds(tree, edit);
@@ -1129,6 +1136,7 @@ void createItemTests(const fs::path& executable) {
     check(fs::file_size(created) == 0, "New File did not create an empty file");
     waitFor([&] { return expanded(tree, folder) && send(tree, treeGetCount) == 4; }, "Creation did not expand and refresh the parent");
     check(nextItem(tree, TreeRelation::Parent, static_cast<TreeItem>(send(tree, treeGetSelection))) == folder, "Created file was not selected");
+    const auto createdFile = static_cast<TreeItem>(send(tree, treeGetSelection));
     check(visibleTabCount(app) == 1, "Created file did not open in the editor");
     keepTab(app, 0);
     edit = start(folder, true, L"空 フォルダー"); send(edit, WM_KEYDOWN, VK_RETURN);
@@ -1150,6 +1158,21 @@ void createItemTests(const fs::path& executable) {
     fail(false, L"../escape.txt"); fail(true, L"CON"); fail(false, L"");
     check(fs::file_size(fixture.root / L"root.txt") == 0 && fs::is_directory(created.parent_path()) && fs::exists(created), "Creation collision changed an existing item");
     check(visibleTabCount(app) == 2, "Failed or cancelled creation changed file tabs");
+    keepTab(app, 1);
+    const auto rootFile = nextItem(tree, TreeRelation::Next, folder);
+    check(rootFile != 0, "Root file is missing before sibling creation");
+    for (const auto target : {createdFile, rootFile}) {
+        const auto parent = nextItem(tree, TreeRelation::Parent, target);
+        const auto directory = target == createdFile ? created.parent_path() : fixture.root;
+        edit = start(target, false, L"隣の ファイル.txt", parent); send(edit, WM_KEYDOWN, VK_RETURN);
+        waitFor([&] { return fs::is_regular_file(directory / L"隣の ファイル.txt") && visibleTabCount(app) == 3; }, "File context menu did not create and open a sibling file");
+        check(fs::file_size(directory / L"隣の ファイル.txt") == 0, "File context menu did not create an empty sibling file");
+        waitFor([&] { return nextItem(tree, TreeRelation::Parent, static_cast<TreeItem>(send(tree, treeGetSelection))) == parent; }, "Sibling file was not selected in the same folder");
+        edit = start(target, true, L"隣の フォルダー", parent); send(edit, WM_KEYDOWN, VK_RETURN);
+        waitFor([&] { return fs::is_directory(directory / L"隣の フォルダー"); }, "File context menu did not create a sibling folder");
+        waitFor([&] { return nextItem(tree, TreeRelation::Parent, static_cast<TreeItem>(send(tree, treeGetSelection))) == parent; }, "Sibling folder was not selected in the same folder");
+        check(visibleTabCount(app) == 3, "Creating a sibling folder opened a file tab");
+    }
 }
 void newFileShortcutTests(const fs::path& executable) {
     Fixture fixture; fs::create_directory(fixture.root / L"chosen 日本語");
