@@ -107,8 +107,14 @@ void Viewer::editDiff(std::shared_ptr<EditBuffer> buffer, std::shared_ptr<const 
     else if (anchor && caret) { anchor_ = diff_->patchOffset(*anchor); caret_ = diff_->patchOffset(*caret); after_ = true; }
     caretPosition();
 }
-void Viewer::refreshBuffer() {
+void Viewer::refreshBuffer(bool externalUpdate) {
     if (!edit_) return;
+    // The shared document has already changed, but the scroll range still
+    // describes the old layout. Sample it before rebuilding wrapped rows.
+    SCROLLINFO viewport{sizeof(viewport), SIF_RANGE | SIF_PAGE | SIF_POS, 0, 0, 0, 0, 0};
+    const bool followTail = externalUpdate && !diff_ && !html_.active() &&
+        GetScrollInfo(window_, SB_VERT, &viewport) &&
+        viewport.nPos >= std::max(0, viewport.nMax - static_cast<int>(viewport.nPage) + 1);
     if (diff_) {
         const auto previous = state();
         const auto anchor = diff_->workingOffset(anchor_), caret = diff_->workingOffset(caret_);
@@ -122,7 +128,7 @@ void Viewer::refreshBuffer() {
         anchor_ = std::min(anchor_, document_->text.size()); caret_ = std::min(caret_, document_->text.size());
         updateGitLines();
     }
-    layoutDirty_ = true; requestFind(false, false, false); scrollbars(); caretPosition(); InvalidateRect(window_, nullptr, FALSE);
+    layoutDirty_ = true; requestFind(false, false, false); scrollbars(followTail); caretPosition(); InvalidateRect(window_, nullptr, FALSE);
 }
 void Viewer::message(const std::wstring& text, const ResourceId& path) {
     html_.hide();
@@ -250,7 +256,7 @@ RECT Viewer::contentRect() const {
     return rect;
 }
 int Viewer::visibleRows() const { const auto r = contentRect(); return std::max(1, (static_cast<int>(r.bottom) - contentTop()) / cellHeight_); }
-void Viewer::scrollbars() {
+void Viewer::scrollbars(bool followTail) {
     if (!window_) return;
     if (html_.active()) {
         SCROLLINFO info{sizeof(info), SIF_RANGE | SIF_PAGE | SIF_POS, 0, 0, 1, 0, 0};
@@ -276,7 +282,8 @@ void Viewer::scrollbars() {
             }
         }
         const int rows = document_ ? std::max(1, static_cast<int>(rowCount())) : 1;
-        top_ = std::clamp(top_, 0, std::max(0, rows - pageRows)); left_ = std::clamp(left_, 0, std::max(0, cols - pageCols));
+        top_ = followTail ? std::max(0, rows - pageRows) : std::clamp(top_, 0, std::max(0, rows - pageRows));
+        left_ = std::clamp(left_, 0, std::max(0, cols - pageCols));
         if (wrapping()) left_ = 0;
         SCROLLINFO vertical{sizeof(vertical), SIF_RANGE | SIF_PAGE | SIF_POS, 0, rows - 1, static_cast<UINT>(pageRows), top_, 0}; SetScrollInfo(window_, SB_VERT, &vertical, FALSE);
         SCROLLINFO horizontal{sizeof(horizontal), SIF_RANGE | SIF_PAGE | SIF_POS, 0, wrapping() ? 0 : cols - 1, static_cast<UINT>(pageCols), left_, 0}; SetScrollInfo(window_, SB_HORZ, &horizontal, FALSE);

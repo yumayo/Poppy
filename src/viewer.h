@@ -27,7 +27,8 @@ public:
     std::wstring textStatus() const;
     void showDiff(std::shared_ptr<const DiffDocument> document, const ResourceId& path, bool preserve = false);
     void editDiff(std::shared_ptr<EditBuffer> buffer, std::shared_ptr<const Document> before, const ResourceId& path, bool preserve = false);
-    void refreshBuffer();
+    // External reloads follow the tail only when the old viewport was at EOF.
+    void refreshBuffer(bool externalUpdate = false);
     void toggleDiffLayout();
     void setDiffLayout(bool inlineView);
     bool diffInline() const { return inlineView_; }
@@ -53,7 +54,7 @@ private:
     void paint();
     void paintGitMarks();
     RECT contentRect() const;
-    void scrollbars();
+    void scrollbars(bool followTail = false);
     void scroll(int vertical, int horizontal);
     void extendSelection(int x, int y);
     void scrollSelection();

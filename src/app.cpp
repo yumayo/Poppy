@@ -2316,7 +2316,7 @@ std::shared_ptr<EditBuffer> ProjectRuntime::Impl::shareBuffer(const ResourceId& 
     if (!buffer) buffer = std::move(loaded);
     else if (loaded && !buffer->dirty() && !buffer->saving && (buffer->baseline != loaded->baseline || buffer->fileVersion != loaded->fileVersion)) {
         *buffer = std::move(*loaded);
-        for (auto& view : viewers_) if (view.buffer() == buffer) view.refreshBuffer();
+        for (auto& view : viewers_) if (view.buffer() == buffer) view.refreshBuffer(true);
     }
     if (buffer) for (auto& tab : tabs_) if (tab.path == path && !tab.allChanges && (tab.diffKind == GitDiffKind::Automatic || tab.diffKind == GitDiffKind::Changes)) tab.buffer = buffer;
     keepModifiedEditorTabs(tabs_);

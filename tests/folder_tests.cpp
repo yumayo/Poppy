@@ -351,6 +351,48 @@ void previewTabTests(const fs::path& executable) {
         check(visibleTabCount(app) == 3, "Pinning did not keep the preview");
     }
 }
+void editorTailTests(const fs::path& executable) {
+    Fixture fixture;
+    const auto path = fixture.root / L"output.log";
+    writeLines(path, 200);
+    Application app(executable, fixture.root);
+    const auto tree = app.tree(), viewer = FindWindowExW(app.window, nullptr, L"PoppyViewer", nullptr);
+    waitFor([&] { return send(tree, treeGetCount) == 2; }, "Tail fixture did not load");
+    send(tree, treeSelect, nextItem(tree, TreeRelation::Child, nextItem(tree, TreeRelation::Root)));
+    waitLines(viewer, 200);
+    const auto atBottom = [&] {
+        const auto info = scrollInfo(viewer);
+        return info.nPos == std::max(0, info.nMax - static_cast<int>(info.nPage) + 1);
+    };
+    const auto append = [&] {
+        std::ofstream file(path, std::ios::app);
+        for (int i = 0; i < 100; ++i) file << "appended entry\n";
+        file.close(); check(!file.fail(), "Cannot append to the tail fixture");
+    };
+    send(viewer, WM_VSCROLL, SB_BOTTOM);
+    append(); waitLines(viewer, 300);
+    check(atBottom(), "The file watcher reloaded an append without following the tail");
+    send(viewer, WM_VSCROLL, SB_LINEUP); const auto paused = scrollInfo(viewer).nPos;
+    append(); waitLines(viewer, 400);
+    check(scrollInfo(viewer).nPos == paused && !atBottom(), "The file watcher moved a viewport that was scrolled up");
+    send(viewer, WM_VSCROLL, SB_BOTTOM);
+    append(); waitLines(viewer, 500);
+    check(atBottom(), "File watcher tail following did not resume at the bottom");
+    writeLines(path, 10); waitLines(viewer, 10);
+    check(atBottom() && scrollInfo(viewer).nPos == 0, "File truncation left tail following outside the file");
+    append(); waitLines(viewer, 110);
+    check(atBottom(), "Growing a short file did not keep following the tail");
+    send(viewer, WM_CHAR, '!');
+    append(); send(app.window, WM_KEYDOWN, VK_F5);
+    // Confirm completion of F5 independently of the dirty editor's row count.
+    writeFile(fixture.root / L"refresh-marker.txt");
+    waitFor([&] { return send(tree, treeGetCount) == 3; }, "The dirty tail fixture did not refresh");
+    check(scrollInfo(viewer).nMax == 110, "Tail following replaced unsaved text with an external append");
+    // Let the application close without saving over the external append.
+    check(PostMessageW(app.host, WM_CLOSE, 0, 0) != FALSE, "Could not close the tail test");
+    answerTabSave(app, L"output.log", IDNO);
+    waitFor([&] { return WaitForSingleObject(app.process.hProcess, 0) == WAIT_OBJECT_0; }, "The tail test did not close");
+}
 void explorerPreviewTabTests(const fs::path& executable) {
     Fixture fixture;
     for (int i = 0; i < 3; ++i) writeLines(fixture.root / (std::wstring(1, L'a' + i) + L".txt"), 200 + i * 100);
@@ -3143,7 +3185,7 @@ int wmain(int argc, wchar_t** argv) {
         check(argc == 2, "Pass the path to Poppy.exe");
         SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         for (const auto test : {folderTests, explorerSortTests, sidebarTests, treeInteractionTests, collapseAllSidebarTests, previewTabTests, explorerPreviewTabTests, previewTabSplitTests, tabTests, rapidTabMiddleClickTests, pinnedTabTests,
-                bulkTabCloseTests, bulkTabSaveTests, bulkTabSplitTests, explorerActiveFileTests, htmlTabToolsTests,
+                bulkTabCloseTests, bulkTabSaveTests, bulkTabSplitTests, explorerActiveFileTests, htmlTabToolsTests, editorTailTests,
                 tabDragTests, wrappingTabDragTests, wrappingTabTests, renameTests, explorerMoveTests, explorerDeleteTests, explorerMultipleSelectionTests, createItemTests, newFileShortcutTests, pasteImageTests, splitPaneTests, quickOpenTests, fullSearchTests, gitSidebarTests, gitIgnoredExplorerTests, gitAutoRefreshTests, editableGitDiffTests, branchSidebarTests, multiRepositoryTests, sessionTests, multiProjectTests, recentProjectTests, projectDragTests, scrollingProjectDragTests, terminalTitleTests, terminalShellTests, terminalShortcutTests, terminalBackspaceTests}) {
             Fixture appData; AppDataEnvironment environment(appData.root);
             test(fs::absolute(argv[1]));

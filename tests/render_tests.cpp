@@ -1980,6 +1980,86 @@ void horizontalWheelScrolling() {
         && ScrollbarWindow::info(pane.window, SB_VERT).nPos == 0,
         "A pane without horizontal overflow did not consume horizontal input");
 }
+void editorTailFollowing() {
+    const auto instance = GetModuleHandleW(nullptr);
+    const auto parent = CreateWindowExW(0, L"STATIC", L"Tail following test", WS_POPUP | WS_CLIPCHILDREN,
+        0, 0, 640, 360, nullptr, nullptr, instance, nullptr);
+    check(parent != nullptr, "Could not create the tail following test window");
+    struct WindowOwner { HWND value; ~WindowOwner() { DestroyWindow(value); } } owner{parent};
+    Viewer viewer, other;
+    viewer.create(parent, instance); other.create(parent, instance);
+    MoveWindow(viewer.window(), 0, 0, 640, 360, FALSE); MoveWindow(other.window(), 0, 0, 480, 240, FALSE);
+    const auto scrollInfo = [](HWND window) {
+        SCROLLINFO info{sizeof(info), SIF_RANGE | SIF_PAGE | SIF_POS, 0, 0, 0, 0, 0};
+        check(GetScrollInfo(window, SB_VERT, &info) != FALSE, "Cannot read tail viewport");
+        return info;
+    };
+    const auto atBottom = [&](HWND window) {
+        const auto info = scrollInfo(window);
+        return info.nPos == std::max(0, info.nMax - static_cast<int>(info.nPage) + 1);
+    };
+    const auto lines = [](int count) { std::string text; while (count--) text += "log entry 日本語\r\n"; return text; };
+    for (const bool wrap : {false, true}) for (const UINT dpi : {96u, 144u, 192u}) {
+        viewer.setDpi(dpi); viewer.setWordWrap(wrap); other.setDpi(dpi); other.setWordWrap(wrap);
+        auto buffer = std::make_shared<EditBuffer>(); buffer->document.text = lines(100) + "partial";
+        indexDocument(buffer->document); buffer->initialize(buffer->document.text);
+        viewer.edit(buffer, L"output.log"); other.edit(buffer, L"output.log");
+        viewer.restore({0, 0, 2, 5});
+        const auto reload = [&](std::string text, bool external = true) {
+            EditBuffer loaded; loaded.document.text = std::move(text);
+            indexDocument(loaded.document); loaded.initialize(loaded.document.text);
+            *buffer = std::move(loaded);
+            viewer.refreshBuffer(external); other.refreshBuffer(external);
+            // The application's load completion also reattaches the shared buffer.
+            viewer.edit(buffer, L"output.log", true);
+        };
+        SendMessageW(viewer.window(), WM_VSCROLL, SB_BOTTOM, 0);
+        const int oldTop = scrollInfo(viewer.window()).nPos;
+        reload(buffer->document.text + " completed\r\n" + lines(30));
+        check(atBottom(viewer.window()) && scrollInfo(viewer.window()).nPos > oldTop, "External append did not follow the tail");
+        check(scrollInfo(other.window()).nPos == 0, "A shared buffer forced the other pane to the tail");
+        check(viewer.state().anchor == 2 && viewer.state().caret == 5 && !buffer->dirty(), "Tail following moved the selection or dirtied the buffer");
+        SendMessageW(viewer.window(), WM_VSCROLL, SB_LINEUP, 0);
+        const auto paused = viewer.state();
+        reload(buffer->document.text + lines(30));
+        check(viewer.state().top == paused.top && viewer.state().wrapOffset == paused.wrapOffset && !atBottom(viewer.window()), "Scrolling up one row did not pause tail following");
+        SendMessageW(viewer.window(), WM_VSCROLL, SB_BOTTOM, 0);
+        reload(buffer->document.text + lines(30));
+        check(atBottom(viewer.window()), "Returning to the bottom did not resume tail following");
+        const auto localTop = scrollInfo(viewer.window()).nPos;
+        reload(buffer->document.text + lines(30), false);
+        check(scrollInfo(viewer.window()).nPos == localTop && !atBottom(viewer.window()), "A local buffer refresh unexpectedly enabled tail following");
+        SendMessageW(viewer.window(), WM_VSCROLL, SB_BOTTOM, 0);
+        reload("short\r\n");
+        check(atBottom(viewer.window()) && scrollInfo(viewer.window()).nPos == 0, "Truncating a tailed file left an invalid viewport");
+        reload(lines(100));
+        check(atBottom(viewer.window()), "A file growing beyond its first page did not follow the tail");
+        reload(std::string(1000, 'x'));
+        SendMessageW(viewer.window(), WM_VSCROLL, SB_BOTTOM, 0);
+        const auto range = scrollInfo(viewer.window()).nMax;
+        reload(buffer->document.text + std::string(3000, 'y'));
+        check(atBottom(viewer.window()) && (!wrap || scrollInfo(viewer.window()).nMax > range), "Appending within a wrapped line did not follow visual rows");
+        if (!wrap) {
+            SendMessageW(viewer.window(), WM_HSCROLL, SB_LINERIGHT, 0);
+            const auto left = viewer.state().left;
+            reload(buffer->document.text + "\r\n" + lines(100));
+            check(atBottom(viewer.window()) && viewer.state().left == left, "Tail following lost horizontal scroll position");
+        }
+        auto before = std::make_shared<Document>(buffer->document);
+        for (const bool inlineView : {false, true}) {
+            viewer.setDiffLayout(inlineView); viewer.editDiff(buffer, before, L"output.log");
+            SendMessageW(viewer.window(), WM_VSCROLL, SB_BOTTOM, 0);
+            const auto diffTop = viewer.state();
+            buffer->document.text += "\r\n";
+            for (int row = 0; row < 100; ++row) buffer->document.text += "new external diff entry\r\n";
+            indexDocument(buffer->document);
+            viewer.refreshBuffer(true);
+            check(viewer.state().top == diffTop.top && viewer.state().wrapOffset == diffTop.wrapOffset, "An external refresh forced a Git comparison to the tail");
+        }
+        viewer.edit(buffer, L"another.log");
+        check(scrollInfo(viewer.window()).nPos == 0, "Opening another file inherited tail following");
+    }
+}
 void continuousViewerScrolling() {
     Viewer viewer;
     const HWND parent = CreateWindowExW(0, L"STATIC", L"Continuous scrolling test", WS_POPUP | WS_CLIPCHILDREN,
@@ -2510,6 +2590,7 @@ int main(int argc, char** argv) {
             std::cout << "WebView2 runtime reuse tests passed\n";
         } else {
             shutdownProgress();
+            editorTailFollowing();
             htmlPreviewSwitching();
             terminalAsyncStartup(); terminalProcessShutdown();
             statusBarLimits(); treeMultipleSelection(); commitMessagePopup(); inlineTreeInput(); inlineTreeCreation(); gitCommitInput(); cellPositions(); colorsAndClipping(); imagePreviews(); smoothIcons(); windowTargets(); editableDiff(); editorCaret(); delayedLoadingMessages(); imeCellRendering(); imeTerminalInsertion(); imeUiRendering(); imePositions(); editorWordSelection(); editorWordMovement(); editorLineShortcuts(); editorWrapping(); diffWrapping(); documentFind(); horizontalWheelScrolling(); continuousViewerScrolling(); selectionAutoScrolling(); terminalGitBashSocketEnvironment(); terminalSelectionAutoScrolling(); themedScrollbars(); quickOpenStability();
