@@ -41,12 +41,6 @@ RECT Scrollbars::trackRect(HWND window, int bar) {
     else { g.bounds.left = g.start; g.bounds.right = g.end; }
     return g.bounds;
 }
-RECT Scrollbars::thumbRect(HWND window, int bar) {
-    auto g = geometry(window, bar);
-    if (bar == SB_VERT) { g.bounds.top = g.thumbStart; g.bounds.bottom = g.thumbEnd; }
-    else { g.bounds.left = g.thumbStart; g.bounds.right = g.thumbEnd; }
-    return g.bounds;
-}
 Scrollbars::Hit Scrollbars::hit(HWND window, POINT point) {
     for (const int bar : {SB_VERT, SB_HORZ}) {
         const auto g = geometry(window, bar);
