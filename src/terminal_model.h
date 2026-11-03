@@ -41,6 +41,8 @@ public:
     const std::string& title() const { return title_; }
     void endSynchronizedOutput() { synchronizedOutput_ = false; }
     std::function<void(std::string)> reply;
+    // Fixed diagnostic codes only; AI status still travels over its socket.
+    std::function<void(std::string)> notificationError;
 private:
     struct Screen { std::vector<std::vector<Cell>> cells; std::vector<int> wrapped; int x = 0, y = 0, savedX = 0, savedY = 0; bool wrap = false; };
     enum class Parse { Text, Escape, Csi, CsiDiscard, Osc, OscEscape, Discard, DiscardEscape, Charset };

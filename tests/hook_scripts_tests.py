@@ -7,6 +7,8 @@ import json
 import os
 from pathlib import Path
 import queue
+import pty
+import select
 import shlex
 import socket
 import subprocess
@@ -168,11 +170,38 @@ class HookDeliveryTests(unittest.TestCase):
         self.check_tool("claude")
 
     def test_missing_socket_does_not_send(self):
-        command = shlex.join([sys.executable, str(SCRIPTS / "poppy_status.py"), "running"])
-        environment = self.environment.copy()
-        del environment["AICONTAINER_EVENT_SOCKET"]
-        self.invoke(command, {}, environment)
+        with mock.patch.dict(os.environ, {}, clear=True), \
+                mock.patch.object(sender, "MOUNTED_SOCKET", Path(self.temp.name) / "missing.sock"), \
+                mock.patch.object(sys, "argv", ["poppy_status.py", "running"]), \
+                mock.patch.object(sender, "report_error") as report:
+            self.assertEqual(sender.main(), 0)
+        self.assertEqual(report.call_args.args[0], "missing-event-socket")
         self.assertTrue(self.requests.empty())
+
+    def test_missing_environment_recovers_only_the_explicit_mounted_socket(self):
+        with mock.patch.dict(os.environ, {}, clear=True), \
+                mock.patch.object(sender, "MOUNTED_SOCKET", Path(self.filename)), \
+                mock.patch.object(sys, "argv", ["poppy_status.py", "running"]), \
+                mock.patch.object(sender, "read_hook_input", return_value={}), \
+                mock.patch.object(sender, "log_invocation"), \
+                mock.patch.object(sender, "report_error") as report:
+            self.assertEqual(sender.main(), 0)
+        self.assertEqual(report.call_args.args[0], "event-socket-recovered")
+        self.assertEqual(self.requests.get(timeout=1), ("status", {"status": "running"}))
+
+    def test_explicit_socket_is_not_replaced_by_another_mount(self):
+        with mock.patch.dict(os.environ, {"AICONTAINER_EVENT_SOCKET": "/missing/explicit.sock"}), \
+                mock.patch.object(sender, "MOUNTED_SOCKET", Path(self.filename)):
+            self.assertEqual(sender.notification_socket(), "/missing/explicit.sock")
+
+    def test_failed_delivery_reports_an_error_without_failing_the_hook(self):
+        with mock.patch.dict(os.environ, {"AICONTAINER_EVENT_SOCKET": "/missing/explicit.sock"}), \
+                mock.patch.object(sys, "argv", ["poppy_status.py", "running"]), \
+                mock.patch.object(sender, "read_hook_input", return_value={}), \
+                mock.patch.object(sender, "send_relay", side_effect=OSError("relay unavailable")), \
+                mock.patch.object(sender, "report_error") as report:
+            self.assertEqual(sender.main(), 0)
+        self.assertEqual(report.call_args.args[0], "relay-send-failed")
 
     def test_rotation_failure_does_not_block_notification(self):
         script = Path(self.temp.name) / "poppy_status.py"
@@ -189,6 +218,34 @@ class HookDeliveryTests(unittest.TestCase):
 
 
 class SenderTests(unittest.TestCase):
+    def test_diagnostic_uses_tty_when_hook_output_is_captured(self):
+        master, slave = pty.openpty()
+        self.addCleanup(os.close, master)
+        with mock.patch.object(sender, "log_invocation") as log, \
+                mock.patch.object(sender.os, "open", return_value=slave), \
+                mock.patch("sys.stderr"):
+            sender.report_error("missing-event-socket", "接続先が未設定です")
+        self.assertTrue(select.select([master], [], [], 1)[0])
+        self.assertEqual(os.read(master, 1024), b"\x1b]777;poppy;error;missing-event-socket\x07")
+        self.assertEqual(log.call_args.kwargs["error"], "missing-event-socket")
+
+    def test_diagnostic_failure_does_not_interrupt_ai(self):
+        with mock.patch.object(sender, "log_invocation"), \
+                mock.patch.object(sender.os, "open", side_effect=OSError("no terminal")), \
+                mock.patch("sys.stderr"):
+            sender.report_error("relay-send-failed", "送信できません")
+
+    def test_detached_monitor_can_use_its_own_cli_terminal(self):
+        master, slave = pty.openpty()
+        self.addCleanup(os.close, master)
+        with mock.patch.object(sender, "log_invocation"), \
+                mock.patch.object(sender.os, "open", side_effect=[OSError("no controlling tty"), slave]) as opened, \
+                mock.patch("sys.stderr"):
+            sender.report_error("relay-send-failed", "送信できません", tty_pid=123)
+        self.assertEqual(opened.call_args.args[0], "/proc/123/fd/0")
+        self.assertTrue(select.select([master], [], [], 1)[0])
+        self.assertEqual(os.read(master, 1024), b"\x1b]777;poppy;error;relay-send-failed\x07")
+
     def test_resume_is_conditional(self):
         self.assertEqual(sender.build_payload("resume", {}), {"status": "running", "onlyIfActive": True})
 

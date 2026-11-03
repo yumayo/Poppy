@@ -663,6 +663,9 @@ void ProjectRuntime::Impl::create() {
     terminal_.create(window_, instance_);
     dropPreview_.create(window_, instance_);
     terminal_.changed = [this] { if (owner_ && owner_->changed) owner_->changed(); };
+    terminal_.error = [this](const std::string& key, const std::wstring& title, const std::wstring& message) {
+        if (owner_ && owner_->error) owner_->error(key, title, root_.native() + L"\n\n" + message);
+    };
     quickOpen_.create(window_, instance_);
     quickOpen_.updated = [this] { statusDirty_ = true; };
     quickOpen_.opened = [this](const ResourceId& path) { openFile(path); SetFocus(viewer().window()); };
@@ -3106,7 +3109,7 @@ void ProjectRuntime::activate(bool active) {
     }
 }
 void ProjectRuntime::setDpi(UINT dpi) { impl_->dpi(dpi); }
-void ProjectRuntime::poll() { if (ready()) impl_->pollWatch(); if (IsWindowVisible(impl_->terminal_.container())) impl_->terminal_.acknowledge(); }
+void ProjectRuntime::poll() { if (ready()) impl_->pollWatch(); impl_->terminal_.pollNotifications(); if (IsWindowVisible(impl_->terminal_.container())) impl_->terminal_.acknowledge(); }
 bool ProjectRuntime::animateAiStatus() { return impl_->terminal_.animateAiStatus(); }
 bool ProjectRuntime::key(const MSG& message) { return impl_->key(message); }
 bool ProjectRuntime::terminalInput(HWND window) const { return impl_->terminal_.contains(window); }

@@ -160,6 +160,23 @@ void terminalTitleTests() {
     terminal.feed("\x1b" "c");
     check(terminal.title().empty(), "terminal reset clears the previous process title");
 }
+void terminalNotificationErrorTests() {
+    TerminalModel terminal(12, 3);
+    std::vector<std::string> errors;
+    terminal.notificationError = [&](std::string code) { errors.push_back(std::move(code)); };
+    terminal.feed("abc\x1b]777;poppy;error;missing-event-");
+    check(errors.empty(), "An incomplete diagnostic opened an error popup");
+    terminal.feed("socket\a");
+    const std::string split = "\x1b]777;poppy;error;relay-send-failed\x1b\\";
+    for (const char ch : split) terminal.feed(std::string_view(&ch, 1));
+    terminal.feed("\x1b]777;poppy;error;event-socket-recovered\a");
+    check(errors == std::vector<std::string>{"missing-event-socket", "relay-send-failed", "event-socket-recovered"},
+        "Notification errors were lost or mixed across split terminal output");
+    terminal.feed("\x1b]777;poppy;error;unknown\a\x1b]777;poppy;error;relay-send-failed;extra\a");
+    terminal.feed("\x1b]777;poppy;error;" + std::string(300, 'x') + "\a");
+    check(errors.size() == 3 && line(terminal, 0) == "abc" && terminal.title().empty(),
+        "Invalid diagnostics changed the UI or diagnostic codes leaked into terminal text");
+}
 void terminalDisplayTests() {
     TerminalModel query(4, 2); std::string response;
     query.reply = [&](std::string bytes) { response += bytes; };
@@ -469,6 +486,6 @@ void terminalWrapMetadataTests() {
 }
 }
 int main() {
-    try { textTests(); terminalTests(); terminalTitleTests(); terminalDisplayTests(); terminalInputTests(); terminalScrollTests(); terminalCopyTests(); terminalSelectionScrollTests(); terminalPreeditTests(); terminalWrapMetadataTests(); std::cout << "Text and terminal core tests passed.\n"; return EXIT_SUCCESS; }
+    try { textTests(); terminalTests(); terminalTitleTests(); terminalNotificationErrorTests(); terminalDisplayTests(); terminalInputTests(); terminalScrollTests(); terminalCopyTests(); terminalSelectionScrollTests(); terminalPreeditTests(); terminalWrapMetadataTests(); std::cout << "Text and terminal core tests passed.\n"; return EXIT_SUCCESS; }
     catch (const std::exception& error) { std::cerr << error.what() << '\n'; return EXIT_FAILURE; }
 }

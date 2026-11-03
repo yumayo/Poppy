@@ -26,13 +26,24 @@ void TerminalPane::add(SavedTerminal configuration) {
     session->terminal->setDpi(dpi_); session->terminal->setDirectory(directory_.wsl() ? windowsProcessDirectory() : fs::u8path(session->configuration.directory));
     if (directory_.wsl()) session->terminal->setDisplayDirectory(wide(session->configuration.directory) + L" · WSL · " + wide(directory_.location().distro));
     auto ptr = session.get();
+    session->terminal->notificationError = [this, ptr](const std::string& code) {
+        std::wstring message;
+        if (code == "missing-event-socket") message = L"AI通知の接続先が未設定です。AICONTAINER_EVENT_SOCKETがhookへ引き継がれず、通知ソケットもマウントされていません。";
+        else if (code == "event-socket-recovered") message = L"AICONTAINER_EVENT_SOCKETがhookへ引き継がれていません。マウント済みソケットで通知を継続しています。";
+        else message = L"AIのhookまたは監視プロセスから通知ソケットへ送信できません。";
+        reportError(*ptr, code, message + L"\n\nPoppyのターミナルを開き直し、その中からAIコンテナを作り直してください。更新時はPoppy.exeとwsl/を一緒に置き換え、aicontainerも更新してください。");
+    };
+    session->terminal->launchFailed = [this, ptr](const std::wstring& message) {
+        reportError(*ptr, "terminal-start-failed", L"ターミナルまたはAI通知リレーを起動できませんでした。\n\n" + message +
+            L"\n\nWSLと同梱のwsl/poppy-wsl-helperを確認し、ターミナルを開き直してください。");
+    };
     session->terminal->titleChanged = [this] { layout(); };
     session->terminal->focused = [this, ptr] {
         const auto found = std::find_if(sessions_.begin(), sessions_.end(), [ptr](const auto& s) { return s.get() == ptr; });
         if (found != sessions_.end()) { active_ = static_cast<size_t>(found - sessions_.begin()); acknowledge(); InvalidateRect(window_, nullptr, FALSE); }
     };
     session->terminal->starting = [this,ptr]() -> Terminal::StartupTask {
-        ptr->ai = {}; ptr->notificationError.clear();
+        ptr->ai = {}; ptr->notificationError.clear(); ptr->reportedErrors.clear();
         const auto directory = directory_.at(ptr->configuration.directory);
         const auto provider = provider_;
         const auto shell = ptr->configuration.shell;
@@ -77,6 +88,8 @@ void TerminalPane::add(SavedTerminal configuration) {
             options.ready = [this, ptr, hooks, id, notificationError = std::move(notificationError)] {
                 ptr->notificationError = notificationError;
                 if (hooks && !notificationError.empty()) { hooks->remove(id); ptr->notificationId.clear(); }
+                if (!notificationError.empty()) reportError(*ptr, "relay-start-failed", L"AI通知リレーを起動できませんでした。\n\n" + notificationError +
+                    L"\n\nWSLと同梱のwsl/poppy-wsl-helperを確認し、Poppyのターミナルを開き直してください。");
                 if (changed) changed();
             };
             options.failed = [ptr] { ptr->events.stop(); };
@@ -114,6 +127,16 @@ void TerminalPane::add(SavedTerminal configuration) {
         if (registered) { InvalidateRect(window_, nullptr, FALSE); if (changed) changed(); }
     };
     sessions_.push_back(std::move(session)); select(sessions_.size()-1);
+}
+void TerminalPane::reportError(TerminalSession& session, const std::string& code, const std::wstring& message) {
+    if (error && session.reportedErrors.insert(code).second)
+        error(session.configuration.id + ":" + code,
+            (code == "terminal-start-failed" ? L"ターミナル起動エラー · " : L"AI通知エラー · ") + sessionName(session), message);
+}
+void TerminalPane::pollNotifications() {
+    for (auto& session : sessions_) if (session->terminal->running() && !session->notificationId.empty() && !session->events.running())
+        reportError(*session, "relay-disconnected", L"AI通知リレーとの接続が切れました。このターミナルのAI状態を更新できません。"
+            L"\n\nPoppyのターミナルを開き直し、その中からAIコンテナを起動し直してください。");
 }
 void TerminalPane::setDpi(UINT dpi) { dpi_=dpi; renderer_.setDpi(dpi); renameInput_.setDpi(dpi); header_=MulDiv(32,dpi,96); for(auto& s:sessions_) s->terminal->setDpi(dpi); layout(); }
 void TerminalPane::setDirectory(const ResourceId& directory) {

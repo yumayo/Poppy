@@ -215,6 +215,13 @@ void TerminalModel::csi(char command) {
 }
 void TerminalModel::osc() {
     if (oscOverflow_) return;
+    constexpr std::string_view diagnostic = "777;poppy;error;";
+    if (sequence_.compare(0, diagnostic.size(), diagnostic) == 0) {
+        const auto code = sequence_.substr(diagnostic.size());
+        if (notificationError && (code == "missing-event-socket" || code == "relay-send-failed" || code == "event-socket-recovered"))
+            notificationError(code);
+        return;
+    }
     if (sequence_.compare(0, 2, "0;") == 0 || sequence_.compare(0, 2, "2;") == 0) {
         std::string title;
         for (size_t p = 2; p < sequence_.size();) {

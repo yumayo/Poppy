@@ -7,6 +7,7 @@
 #include "project_provider.h"
 #include <memory>
 #include <optional>
+#include <set>
 
 namespace poppy {
 class ShutdownDialog;
@@ -18,6 +19,7 @@ struct TerminalSession {
     HookPipe events;
     std::string notificationId;
     std::wstring notificationError;
+    std::set<std::string> reportedErrors;
     AiStatus ai;
     std::string wslToken;
     std::wstring wslTool;
@@ -36,6 +38,7 @@ public:
     bool apply(const AiEvent& event);
     void acknowledge();
     bool animateAiStatus();
+    void pollNotifications();
     void focusAttention();
     AiSummary summary() const;
     std::wstring description() const;
@@ -45,6 +48,7 @@ public:
     HWND window() const { return active().terminal->window(); }
     HWND container() const { return window_; }
     std::function<void()> changed;
+    std::function<void(const std::string&, const std::wstring&, const std::wstring&)> error;
 private:
     static LRESULT CALLBACK procedure(HWND, UINT, WPARAM, LPARAM);
     void finishRename(bool commit);
@@ -60,6 +64,7 @@ private:
     void addMenu(int group, POINT point);
     void layout();
     void paint();
+    void reportError(TerminalSession& session, const std::string& code, const std::wstring& message);
     std::wstring sessionName(const TerminalSession& session) const;
     std::vector<RECT> bounds() const;
     void normalizeGroups();

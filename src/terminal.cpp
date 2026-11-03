@@ -23,6 +23,7 @@ void Terminal::create(HWND parent, HINSTANCE instance) {
     WNDCLASSW cls{}; cls.lpfnWndProc = procedure; cls.hInstance = instance; cls.lpszClassName = L"PoppyTerminal"; cls.hCursor = LoadCursorW(nullptr, IDC_IBEAM); RegisterClassW(&cls);
     window_ = CreateWindowExW(0, cls.lpszClassName, L"AI terminal", WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_VSCROLL, 0, 0, 0, 0, parent, nullptr, instance, this);
     model_.reply = [this](std::string response) { send(std::move(response), false); };
+    model_.notificationError = [this](std::string code) { if (notificationError) notificationError(code); };
     setDpi(GetDpiForWindow(parent));
 }
 void Terminal::setDpi(UINT dpi) {
@@ -38,8 +39,9 @@ bool Terminal::start() {
     stop();
     StartupTask prepare;
     try { if (starting) prepare = starting(); }
-    catch (const std::exception& failure) { error_ = wide(failure.what()); stop(); return false; }
+    catch (const std::exception& failure) { error_ = wide(failure.what()); stop(); if (launchFailed) launchFailed(error_); return false; }
     error_.clear(); model_ = TerminalModel(model_.columns(), model_.rows()); model_.reply = [this](std::string s) { send(std::move(s), false); };
+    model_.notificationError = [this](std::string code) { if (notificationError) notificationError(code); };
     scroll_ = 0; display_.clearSelection();
     endedNotified_ = false;
     display_ = TerminalDisplay{}; display_.update(model_, scroll_, GetTickCount64(), true);
@@ -67,7 +69,7 @@ bool Terminal::start() {
             PostMessageW(target, wmTerminal, 0, 0);
         });
     } catch (const std::exception& failure) {
-        launching_ = false; error_ = wide(failure.what()); stop(); return false;
+        launching_ = false; error_ = wide(failure.what()); stop(); if (launchFailed) launchFailed(error_); return false;
     }
     InvalidateRect(window_, nullptr, FALSE); return true;
 }
@@ -178,6 +180,7 @@ void Terminal::completeStart() {
     } else {
         // Remove notification registrations and remote tokens after a failed launch.
         stop();
+        if (launchFailed) launchFailed(error_);
     }
     InvalidateRect(window_, nullptr, FALSE);
 }

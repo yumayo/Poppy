@@ -40,6 +40,7 @@ public:
     std::function<void()> chooseProject;
     std::function<void(const ResourceId&)> resolved;
     std::function<void()> changed;
+    std::function<void(const std::string&, const std::wstring&, const std::wstring&)> error;
 private:
     class Impl;
     std::unique_ptr<Impl> impl_;

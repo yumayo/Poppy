@@ -7,6 +7,7 @@
 #include "tree.h"
 #include "git_commit_pane.h"
 #include "shutdown_dialog.h"
+#include "error_popup.h"
 #include <commctrl.h>
 #include <imm.h>
 #include <algorithm>
@@ -76,6 +77,59 @@ void shutdownProgress() {
         RemoveWindowSubclass(dialog.window(), observe, 1);
     }
     check(IsWindowEnabled(parent), "Shutdown dialog did not restore its owner");
+}
+void persistentErrorPopup() {
+    const auto instance = GetModuleHandleW(nullptr);
+    const auto parent = CreateWindowExW(0, L"STATIC", L"Error notification test", WS_POPUP | WS_CLIPCHILDREN,
+        80, 80, 900, 600, nullptr, nullptr, instance, nullptr);
+    check(parent != nullptr, "Cannot create error popup owner");
+    struct Owner { HWND value; ~Owner() { DestroyWindow(value); } } owner{parent};
+    ShowWindow(parent, SW_SHOWNOACTIVATE); SetFocus(parent);
+    ErrorPopup popup;
+    for (const UINT dpi : {96u, 144u, 192u}) {
+        popup.show(parent, "terminal:missing-event-socket", L"AI通知エラー · Codex", L"接続先が未設定です。\n\nAIコンテナを起動し直してください。", dpi);
+        const auto window = popup.window();
+        check(popup.visible() && GetFocus() == parent && IsWindowEnabled(parent), "An error popup stole focus or blocked the workspace");
+        const auto body = FindWindowExW(window, nullptr, L"PoppyViewer", nullptr);
+        check(body != nullptr, "Error details are not selectable and scrollable");
+        RECT bounds{}; GetWindowRect(window, &bounds);
+        MONITORINFO monitor{sizeof(monitor), {}, {}, 0}; GetMonitorInfoW(MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST), &monitor);
+        check(bounds.left >= monitor.rcWork.left && bounds.top >= monitor.rcWork.top && bounds.right <= monitor.rcWork.right && bounds.bottom <= monitor.rcWork.bottom,
+            "The error popup escaped the monitor at a different DPI");
+        SendMessageW(window, WM_ACTIVATEAPP, FALSE, 0);
+        SendMessageW(window, WM_MOUSELEAVE, 0, 0);
+        SendMessageW(window, WM_TIMER, 1, 0);
+        SendMessageW(window, WM_KEYDOWN, VK_ESCAPE, 0);
+        check(popup.visible(), "An error disappeared without pressing its close button");
+        popup.show(parent, "terminal:missing-event-socket", L"duplicate", L"duplicate", dpi);
+        wchar_t title[128]{}; GetWindowTextW(window, title, 128);
+        check(std::wstring(title).find(L"(1)") != std::wstring::npos, "A repeated failure duplicated a persistent error");
+        popup.show(parent, "terminal:relay-disconnected", L"接続切断", L"別のエラーも保持します。", dpi);
+        GetWindowTextW(window, title, 128);
+        check(std::wstring(title).find(L"(2)") != std::wstring::npos, "A second error replaced an unacknowledged error");
+        SendMessageW(window, WM_SYSCOMMAND, SC_CLOSE, 0);
+        check(!popup.visible(), "The error popup close button did not dismiss it");
+    }
+    // Exercise the actual ConPTY path as well as the model's OSC parser.
+    Terminal terminal;
+    terminal.create(parent, instance); terminal.setDirectory(fs::temp_directory_path());
+    MoveWindow(terminal.window(), 0, 0, 600, 120, FALSE);
+    terminal.notificationError = [&](const std::string& code) {
+        check(code == "missing-event-socket", "ConPTY changed the notification error code");
+        popup.show(parent, "conpty:missing-event-socket", L"AI通知エラー", L"通知ソケットが未設定です。", 96);
+    };
+    wchar_t system[MAX_PATH]{}; GetSystemDirectoryW(system, MAX_PATH);
+    terminal.setCommand({std::wstring(system) + L"\\WindowsPowerShell\\v1.0\\powershell.exe", L"-NoLogo", L"-NoProfile", L"-NonInteractive", L"-Command",
+        L"[Console]::Write([char]27 + ']777;poppy;error;missing-event-socket' + [char]7)"});
+    check(terminal.launch(), "Could not start notification diagnostic fixture");
+    const auto start = GetTickCount64();
+    while (!popup.visible() && GetTickCount64() - start < 5000) {
+        MSG message{};
+        while (PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE)) { TranslateMessage(&message); DispatchMessageW(&message); }
+        Terminal::pump(); Sleep(5);
+    }
+    check(popup.visible(), "A missing notification socket did not reach the popup through ConPTY");
+    terminal.stop();
 }
 void statusBarLimits() {
     INITCOMMONCONTROLSEX controls{sizeof(controls), ICC_WIN95_CLASSES};
@@ -2587,6 +2641,7 @@ int main(int argc, char** argv) {
             std::cout << "WebView2 runtime reuse tests passed\n";
         } else {
             shutdownProgress();
+            persistentErrorPopup();
             editorTailFollowing();
             htmlPreviewSwitching();
             terminalAsyncStartup(); terminalProcessShutdown();

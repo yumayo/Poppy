@@ -16,10 +16,11 @@ MAX_TRANSCRIPT_BYTES = 512 * 1024
 MAX_TEXT_LENGTH = 120
 MAX_LOG_BYTES = 10 * 1024 * 1024
 LOG_BACKUP_COUNT = 10
+MOUNTED_SOCKET = Path("/tmp/aicontainer-events.sock")
 ACTIONS = ("running", "waiting", "interrupted", "completed", "none", "resume", "tool-failed", "activity")
 
 
-def log_invocation():
+def log_invocation(**diagnostic):
     # 通知先が未設定でも、hook自体が呼ばれたか確認できるようにする。
     try:
         record = {
@@ -27,6 +28,7 @@ def log_invocation():
             "pid": os.getpid(),
             "args": sys.argv[1:],
             "event_socket": os.environ.get("AICONTAINER_EVENT_SOCKET"),
+            **diagnostic,
         }
         entry = (json.dumps(record, ensure_ascii=False) + "\n").encode("utf-8")
         path = Path(__file__).with_suffix(".log")
@@ -46,6 +48,55 @@ def log_invocation():
                 log.write(entry)
     except (OSError, ValueError):
         pass  # ログを書けなくても、従来の通知処理を続ける。
+
+
+def report_error(code, message, tty_pid=None):
+    """壊れた通知ソケットに依存せず、元の端末へ固定形式の診断を送る。"""
+    log_invocation(error=code, detail=str(message)[:512])
+    try:
+        print(f"Poppy: {message}", file=sys.stderr)
+    except (OSError, ValueError):
+        pass
+    if code not in ("missing-event-socket", "relay-send-failed", "event-socket-recovered"):
+        return
+    paths = ["/dev/tty"]
+    if tty_pid:
+        paths.extend(f"/proc/{int(tty_pid)}/fd/{fd}" for fd in (0, 1, 2))
+    for path in paths:
+        try:
+            fd = os.open(path, os.O_WRONLY | os.O_NOCTTY | os.O_NONBLOCK)
+            try:
+                if not os.isatty(fd):
+                    continue
+                os.write(fd, f"\x1b]777;poppy;error;{code}\x07".encode("ascii"))
+                return
+            finally:
+                os.close(fd)
+        except OSError:
+            pass
+
+
+def notification_socket():
+    relay = os.environ.get("AICONTAINER_EVENT_SOCKET", "")
+    if relay:
+        return relay
+    # aicontainerがこの端末専用にマウントした既知のソケットだけを使う。
+    # 他セッションの/tmp/poppy-events-*は探索しない。
+    try:
+        mounted = MOUNTED_SOCKET.is_socket()
+    except OSError:
+        mounted = False
+    if mounted:
+        relay = str(MOUNTED_SOCKET)
+        report_error("event-socket-recovered",
+                     "AICONTAINER_EVENT_SOCKETが未設定です。マウント済みソケットで通知を継続します。"
+                     "PoppyのターミナルからAIコンテナを起動し直してください。")
+        log_invocation(resolved_socket=relay)
+        return relay
+    report_error("missing-event-socket",
+                 "AICONTAINER_EVENT_SOCKETが未設定で、通知ソケットもマウントされていません。"
+                 "Poppyのターミナルを開き直し、そこからAIコンテナを作り直してください。")
+    return ""
 
 
 def send_relay(filename, kind, payload, timeout):
@@ -211,7 +262,7 @@ def main():
         return 2
 
     # 通知経路は起動元が自動設定するUnixソケットだけを使う。
-    relay = os.environ.get("AICONTAINER_EVENT_SOCKET", "")
+    relay = notification_socket()
     if not relay:
         return 0
 
@@ -236,8 +287,9 @@ def main():
     endpoint = "activity" if action == "activity" else "status"
     try:
         send_relay(relay, endpoint, payload, timeout)
-    except (OSError, ValueError):
-        print("Poppy: 通知リレーへ送信できませんでした。PoppyのWSLターミナルを開き直してください。", file=sys.stderr)
+    except (OSError, ValueError) as error:
+        report_error("relay-send-failed", f"通知リレーへ送信できませんでした（{error}）。"
+                     "PoppyのターミナルとAIコンテナを起動し直してください。")
     return 0
 
 

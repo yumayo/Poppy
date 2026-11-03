@@ -6,6 +6,7 @@
 #include "wsl_dialog.h"
 #include "quick_open.h"
 #include "single_instance.h"
+#include "error_popup.h"
 #include <commctrl.h>
 #include <dwmapi.h>
 #include <shlobj.h>
@@ -91,6 +92,7 @@ private:
     // Present both indicator surfaces without serial waits for vertical sync.
     Renderer renderer_{D2D1_PRESENT_OPTIONS_IMMEDIATELY};
     QuickOpen recent_;
+    ErrorPopup errors_;
     AiEventQueue events_{[this] { PostMessageW(window_, wmAiEvent, 0, 0); }};
     std::unique_ptr<Worker> storageWorker_;
     // This connection is created, used and destroyed on storageWorker_ only.
@@ -133,7 +135,7 @@ int Workspace::run(HINSTANCE instance,int show,const StartupOptions& options,Sin
         if(recent_.visible() && message.hwnd!=recent_.window() &&
             (message.message==WM_LBUTTONDOWN || message.message==WM_MBUTTONDOWN || message.message==WM_RBUTTONDOWN))recent_.close();
         // Application shortcuts must not intercept input destined for a terminal.
-        const bool key=message.message==WM_KEYDOWN && (projects_.empty() || !projects_[active_].runtime->terminalInput(message.hwnd));
+        const bool key=message.message==WM_KEYDOWN && !errors_.contains(message.hwnd) && (projects_.empty() || !projects_[active_].runtime->terminalInput(message.hwnd));
         if(key && message.wParam==VK_ESCAPE && projectDrag_){endProjectDrag();continue;}
         if(key && (GetKeyState(VK_CONTROL)&0x8000) && message.wParam=='O'){choose();continue;}
         if(key && (GetKeyState(VK_CONTROL)&0x8000) && !(GetKeyState(VK_SHIFT)&0x8000) && !(GetKeyState(VK_MENU)&0x8000) && message.wParam=='R'){showRecent();continue;}
@@ -281,6 +283,9 @@ void Workspace::open(ResourceId path,bool shouldSelect){
     project.runtime->openFolder=[this](const fs::path& folder){open(folder);};
     project.runtime->chooseProject=[this]{choose();};
     project.runtime->changed=[this, id = project.id]{ if (auto project = find(id)) { project->dirty = true; project->changedAt = GetTickCount64(); } InvalidateRect(window_,nullptr,FALSE); };
+    project.runtime->error = [this, id = project.id](const std::string& key, const std::wstring& title, const std::wstring& message) {
+        if (!closing_) errors_.show(window_, std::to_string(id) + ":" + key, title, message, dpi_);
+    };
     project.runtime->resolved=[this, id = project.id](const ResourceId& resolved){
         if (auto project = find(id)) {
             for (const auto& existing : projects_) if (existing.id != id && pathKey(existing.path) == pathKey(resolved)) {
@@ -522,6 +527,7 @@ void Workspace::layout(){
     // Repaint the complete layout after the new positions have been applied.
     if(!projects_.empty())SetWindowPos(projects_[active_].runtime->window(),nullptr,left,0,std::max(0L,r.right-left),r.bottom,SWP_NOZORDER|SWP_NOACTIVATE|SWP_NOREDRAW|SWP_NOCOPYBITS);
     recent_.layout();
+    errors_.layout();
     updateTools();
     // A continuous stream of mouse moves can delay queued WM_PAINT messages.
     RedrawWindow(window_,nullptr,nullptr,RDW_INVALIDATE|RDW_ALLCHILDREN|RDW_UPDATENOW);
@@ -562,7 +568,8 @@ LRESULT CALLBACK Workspace::procedure(HWND w,UINT m,WPARAM a,LPARAM b){auto self
 LRESULT Workspace::handle(UINT m,WPARAM a,LPARAM b){switch(m){
 case WM_CREATE:create();return 0;case WM_PAINT:paint();return 0;case WM_ERASEBKGND:return 1;case WM_SIZE:endProjectDrag();layout();if(!restoring_){appDirty_=true;appChanged_=GetTickCount64();}return 0;
 case WM_GETMINMAXINFO:reinterpret_cast<MINMAXINFO*>(b)->ptMinTrackSize={px(900),px(480)};return 0;
-case WM_DPICHANGED:{endProjectDrag();dpi_=HIWORD(a);renderer_.setDpi(dpi_);recent_.setDpi(dpi_);for(auto& project:projects_)project.runtime->setDpi(dpi_);const auto rect=reinterpret_cast<RECT*>(b);SetWindowPos(window_,nullptr,rect->left,rect->top,rect->right-rect->left,rect->bottom-rect->top,SWP_NOZORDER|SWP_NOACTIVATE);layout();return 0;}
+case WM_DPICHANGED:{endProjectDrag();dpi_=HIWORD(a);renderer_.setDpi(dpi_);recent_.setDpi(dpi_);errors_.setDpi(dpi_);for(auto& project:projects_)project.runtime->setDpi(dpi_);const auto rect=reinterpret_cast<RECT*>(b);SetWindowPos(window_,nullptr,rect->left,rect->top,rect->right-rect->left,rect->bottom-rect->top,SWP_NOZORDER|SWP_NOACTIVATE);layout();return 0;}
+case WM_MOVE: errors_.layout(); return 0;
 case wmWork:if(!closing_&&storageWorker_)storageWorker_->dispatch();return 0;
 case wmStartup:applyStartupRequests();return 0;
 case WM_APP + 21:{ const auto project = find(static_cast<uint64_t>(a)); if (!project || project->runtime->hasUnsaved()) return 0; const bool active = project == &projects_[active_]; const auto index = static_cast<size_t>(project - projects_.data()); close(index); if (active) for (size_t i = 0; i < projects_.size(); ++i) if (projects_[i].id == static_cast<uint64_t>(b)) { select(i); break; } return 0; }
@@ -604,7 +611,7 @@ case WM_COPYDATA:{
 case WM_QUERYENDSESSION:if(!closing_){for(auto& project:projects_)if(!project.runtime->canClose())return FALSE;saveAll();}return TRUE;
 case WM_ENDSESSION:if(a&&!closing_){closing_=true;saveAll();for(auto& project:projects_)project.runtime->shutdown();DestroyWindow(window_);}return 0;
 case WM_CLOSE:if(closing_)return 0;for(auto& project:projects_)if(!project.runtime->canClose())return 0;finishClose();return 0;
-case WM_DESTROY:singleInstance_->unpublish(window_);KillTimer(window_,1);KillTimer(window_,aiAnimationTimerId);projects_.clear();if(storageWorker_){storageWorker_->submit(L"release-storage",[this]{storage_.reset();});storageWorker_->drain();storageWorker_->stop();}PostQuitMessage(0);return 0;
+case WM_DESTROY:singleInstance_->unpublish(window_);KillTimer(window_,1);KillTimer(window_,aiAnimationTimerId);errors_.destroy();projects_.clear();if(storageWorker_){storageWorker_->submit(L"release-storage",[this]{storage_.reset();});storageWorker_->drain();storageWorker_->stop();}PostQuitMessage(0);return 0;
 }return DefWindowProcW(window_,m,a,b);}
 }
 }

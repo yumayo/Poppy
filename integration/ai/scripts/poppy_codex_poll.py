@@ -17,7 +17,7 @@ import threading
 import time
 from urllib.parse import quote
 
-from poppy_status import excerpt, message_text, send_relay
+from poppy_status import excerpt, message_text, notification_socket, report_error, send_relay
 
 INTERVAL = 0.5
 HEARTBEAT = 2
@@ -293,6 +293,7 @@ def monitor(state_path):
     sent = 0
     waiting_token = None
     waiting_turn = None
+    delivery_failed = False
     state = json.loads(Path(state_path).read_text())
     try:
         while not stopped:
@@ -324,8 +325,15 @@ def monitor(state_path):
                         payload["activityText"] = activity
                     now = time.monotonic()
                     if payload != last or now - sent >= HEARTBEAT:
-                        send_relay(state["relay"], "status", payload, 1)
-                        last, sent = payload, now
+                        try:
+                            send_relay(state["relay"], "status", payload, 1)
+                            delivery_failed = False
+                            last, sent = payload, now
+                        except (OSError, ValueError) as error:
+                            if not delivery_failed:
+                                report_error("relay-send-failed", f"Codexの状態を通知できませんでした（{error}）。"
+                                             "PoppyのターミナルとAIコンテナを起動し直してください。", state["pid"])
+                            delivery_failed = True
             except (OSError, ValueError, KeyError):
                 pass  # 失敗を記録済みにせず、次のpollで再送する。
             time.sleep(INTERVAL)
@@ -404,7 +412,7 @@ def main():
     elif args.state:
         monitor(args.state)
     else:
-        relay = os.environ.get("AICONTAINER_EVENT_SOCKET", "")
+        relay = notification_socket()
         if not relay or not attach(relay, args.pid):
             parser.exit(1, "Poppy: 同じターミナルで動くCodexの会話が見つかりませんでした。\n")
         print("Poppy: Codexのpolling監視を開始しました。")

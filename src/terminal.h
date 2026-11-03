@@ -29,6 +29,8 @@ public:
     std::function<StartupTask()> starting;
     std::function<void()> ended, focused, stopping;
     std::function<void()> titleChanged;
+    std::function<void(const std::string&)> notificationError;
+    std::function<void(const std::wstring&)> launchFailed;
     const std::string& title() const { return model_.title(); }
     HWND window() const { return window_; }
     bool launching() const { return launching_; }
