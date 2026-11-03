@@ -1,5 +1,4 @@
 #include "scrollbars.h"
-#include "change_marks.h"
 #include <algorithm>
 #include <cstdint>
 #include <cstdlib>
@@ -36,13 +35,10 @@ Scrollbars::Geometry Scrollbars::geometry(HWND window, int bar) {
     g.thumbEnd = g.thumbStart + thumb;
     return g;
 }
-RECT Scrollbars::markerTrackRect(HWND window, int bar) {
+RECT Scrollbars::trackRect(HWND window, int bar) {
     auto g = geometry(window, bar);
-    const auto range = static_cast<int64_t>(g.info.nMax) - g.info.nMin + 1;
-    const int inset = changeMarkInset(g.end - g.start, g.thumbEnd - g.thumbStart,
-        range > 0 ? static_cast<size_t>(range) : 0, g.info.nPage);
-    if (bar == SB_VERT) { g.bounds.top = g.start + inset; g.bounds.bottom = g.end - inset; }
-    else { g.bounds.left = g.start + inset; g.bounds.right = g.end - inset; }
+    if (bar == SB_VERT) { g.bounds.top = g.start; g.bounds.bottom = g.end; }
+    else { g.bounds.left = g.start; g.bounds.right = g.end; }
     return g.bounds;
 }
 RECT Scrollbars::thumbRect(HWND window, int bar) {

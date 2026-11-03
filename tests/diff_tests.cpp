@@ -4,6 +4,7 @@
 #include "edit_buffer.h"
 #include "change_marks.h"
 #include <algorithm>
+#include <cmath>
 #include <cstdlib>
 #include <iostream>
 #include <stdexcept>
@@ -91,8 +92,8 @@ void editorChangeMarks() {
             check(ranges[i].begin == test.ranges[i].begin && ranges[i].end == test.ranges[i].end,
                 "Git overview used the wrong working line boundary for an addition/deletion");
     }
-    const auto verify = [](ChangeMark mark, int top, int bottom) {
-        check(mark.top == top && mark.bottom == bottom, "Git overview projection lost its position, extent or minimum height");
+    const auto verify = [](ChangeMark mark, double top, double bottom) {
+        check(std::abs(mark.top - top) < 1e-9 && std::abs(mark.bottom - bottom) < 1e-9, "Git overview projection lost its position, extent or minimum height");
     };
     verify(changeMark(50, 60, 100, 34, 234, 3), 134, 154);
     verify(changeMark(0, 1, 1000000, 0, 200, 3), 0, 3);
@@ -102,12 +103,12 @@ void editorChangeMarks() {
     verify(changeMark(0, 1, 0, 34, 234, 3), 34, 34);
     verify(changeMark(0, 1, 10, 34, 34, 3), 34, 34);
     // The projection stays proportional within the supplied marker track.
-    verify(changeMark(5000, 5044, 20000, 17, 850, 3), 225, 228);
-    verify(changeMark(5200, 5201, 20000, 17, 850, 3), 233, 236);
-    verify(changeMark(5000, 10000, 20000, 17, 850, 3), 225, 434);
+    verify(changeMark(5000, 5044, 20000, 17, 850, 3), 225.25, 228.25);
+    verify(changeMark(5200, 5201, 20000, 17, 850, 3), 233.58, 236.58);
+    verify(changeMark(5000, 10000, 20000, 17, 850, 3), 225.25, 433.5);
     verify(changeMark(20000, 20000, 20000, 17, 850, 3), 847, 850);
-    verify(changeMark(5000, 5044, 20000, 34, 1700, 6), 450, 456);
-    verify(changeMark(4999, 5000, 20000, 17, 40, 6), 22, 28);
+    verify(changeMark(5000, 5044, 20000, 34, 1700, 6), 450.5, 456.5);
+    verify(changeMark(4999, 5000, 20000, 17, 40, 6), 22.74885, 28.74885);
     // The same logical change grows and moves with wrapping, including an EOF
     // deletion after the last source line. No source rescanning is needed.
     const auto document = sourceDocument("head\nabcdefghijkl\ntail");
@@ -118,7 +119,7 @@ void editorChangeMarks() {
         check(end - begin == wrappedLineRows(document.line(1), columns) && layout.lineStart(3) == layout.rows(),
             "Git overview did not include all wrapped continuations or the EOF boundary");
         const auto mark = changeMark(begin, end, layout.rows(), 0, 400, 3);
-        check(mark.top == static_cast<int>(begin * 400 / layout.rows()) && mark.bottom > mark.top,
+        check(std::abs(mark.top - begin * 400.0 / layout.rows()) < 1e-9 && mark.bottom > mark.top,
             "Resizing or changing wrapping left a Git overview at its old position");
     }
     EditBuffer buffer; buffer.document = sourceDocument("head\nremoved\ntail"); buffer.initialize(buffer.document.text);
@@ -137,54 +138,63 @@ void editorChangeMarks() {
     changedWorkingLines(buffer.document, buffer.document, &ranges);
     check(ranges.empty(), "Updating HEAD retained old overview marks");
 }
-void minimumThumbChangeMarks() {
-    check(changeMarkInset(833, 20, 20000, 44) == 9, "A long document did not reserve half the excess thumb height");
-    check(changeMarkInset(833, 20, 2000, 44) == 1, "A nearly proportional thumb reserved too much marker space");
-    check(changeMarkInset(833, 20, 1833, 44) == 0, "The minimum-thumb threshold shifted marks by a full half-thumb");
-    check(changeMarkInset(833, 41, 20000, 1000) == 0, "A proportional thumb changed the marker track");
-    check(changeMarkInset(200, 200, 10, 10) == 0 && changeMarkInset(200, 200, 0, 10) == 0,
-        "A full viewport or empty document acquired marker margins");
-    check(changeMarkInset(0, 0, 20000, 44) == 0 && changeMarkInset(1, 1, 20000, 44) == 0,
-        "An empty or one-pixel track acquired invalid margins");
+void expandedChangeMarks() {
+    const ChangeMarkViewport viewport{5000, 5044, 20};
+    const auto visible = changeMark(5000, 5044, 20000, 17, 850, 3, viewport);
+    check(std::abs(visible.bottom - visible.top - 20) < 1e-9,
+        "The visible rows did not expand to the minimum thumb height");
+    const auto shortFile = changeMark(2, 3, 10, 0, 200, 3, {0, 10, 200});
+    check(shortFile.top == 40 && shortFile.bottom == 60, "A full viewport changed a short document's projection");
+    const auto all = changeMark(0, 20000, 20000, 17, 850, 3, viewport);
+    check(all.top == 17 && all.bottom == 850, "A change spanning the viewport lost its outside extent");
     for (const int track : {2, 3, 20, 21, 23}) {
-        const int inset = changeMarkInset(track, std::min(20, track), 20000, 44);
-        const auto eof = changeMark(20000, 20000, 20000, 17 + inset, 17 + track - inset, 6);
-        check(eof.top >= 17 + inset && eof.bottom == 17 + track - inset && eof.bottom > eof.top,
-            "An EOF deletion disappeared from a short inset track");
+        const auto eof = changeMark(20000, 20000, 20000, 17, 17 + track, 6, {5000, 5044, std::min(20, track)});
+        check(eof.top >= 17 && eof.bottom == 17 + track && eof.bottom > eof.top,
+            "An EOF deletion disappeared from a short track");
     }
-    // Compare to actual thumb travel, including a nearly proportional thumb
-    // where simply reserving H/2 would leave visible rows outside the thumb.
-    for (const size_t rows : {size_t{1833}, size_t{2000}, size_t{20000}, size_t{1000000}}) {
-        for (const int scale : {1, 2, 3}) {
-            const int top = 17 * scale, track = 833 * scale, thumb = 20 * scale;
-            const size_t page = 44, span = rows - page;
-            const int inset = changeMarkInset(track, thumb, rows, page);
-            for (const size_t position : {size_t{0}, size_t{1}, span / 4, span / 2, span - 1, span}) {
-                const int thumbTop = top + static_cast<int>((track - thumb) * position / span);
-                const auto visible = changeMark(position, position + page, rows, top + inset, top + track - inset, 1);
-                check(std::abs((visible.top + visible.bottom) - (2 * thumbTop + thumb)) <= 3,
-                    "The visible row center and thumb center disagree by more than pixel rounding");
-                check(visible.top >= thumbTop - 1 && visible.bottom <= thumbTop + thumb + 1,
-                    "Visible rows project outside the enlarged thumb");
+    // The former implementation reused rounded thumb coordinates, making
+    // every outside marker oscillate by a pixel as the thumb advanced.
+    // Sweep every scroll position, also with a partial row/sticky filename.
+    for (const int scale : {1, 2, 3}) for (const size_t page : {size_t{44}, size_t{45}}) {
+        for (const size_t sticky : {size_t{0}, size_t{1}}) for (const size_t count : {size_t{0}, size_t{1}, size_t{10}, size_t{100}}) {
+            const size_t rows = 20000, begin = 5200, end = begin + count;
+            const int top = 17 * scale, bottom = 850 * scale;
+            auto previous = changeMark(begin, end, rows, top, bottom, 3 * scale, {sticky, sticky + page, 20 * scale});
+            for (size_t position = 1; position <= rows - page; ++position) {
+                const size_t first = std::min(position + sticky, rows - page);
+                const size_t previousFirst = std::min(position - 1 + sticky, rows - page);
+                const auto mark = changeMark(begin, end, rows, top, bottom, 3 * scale, {first, first + page, 20 * scale});
+                check(mark.top >= top && mark.bottom <= bottom && mark.bottom > mark.top,
+                    "An expanded marker escaped or disappeared from its track");
+                check(mark.top <= previous.top + 1e-9 && mark.bottom <= previous.bottom + 1e-9,
+                    "Scrolling forward reversed an expanding marker's motion");
+                if (end <= previousFirst || begin >= first + page)
+                    check(mark.top == previous.top && mark.bottom == previous.bottom,
+                        "An outside marker moved or resized while another marker was magnified");
+                previous = mark;
             }
-            const auto first = changeMark(0, 1, rows, top + inset, top + track - inset, 3 * scale);
-            const auto eof = changeMark(rows, rows, rows, top + inset, top + track - inset, 3 * scale);
-            check(first.top == top + inset && eof.bottom == top + track - inset,
-                "First-row or EOF marks escaped the inset track");
         }
+    }
+    // Fractional positions retain exact DPI scaling instead of rounding each
+    // edge separately and alternating the height between adjacent pixels.
+    const auto normal = changeMark(5010, 5020, 20000, 17, 850, 3, viewport);
+    for (const int scale : {2, 3}) {
+        const auto scaled = changeMark(5010, 5020, 20000, 17 * scale, 850 * scale, 3 * scale, {5000, 5044, 20 * scale});
+        check(std::abs(scaled.top - normal.top * scale) < 1e-9 && std::abs(scaled.bottom - normal.bottom * scale) < 1e-9,
+            "DPI scaling changed an expanded marker's fractional position or height");
     }
 }
 void changeMarkCenterVisibility() {
-    // A 3px mark above the viewport still covers the center of this 20px
-    // thumb after correcting the track. The mask must remove this false hit.
-    const int inset = changeMarkInset(833, 20, 20000, 44);
-    const auto offscreen = changeMark(4990, 4991, 20000, 17 + inset, 850 - inset, 3);
-    check(offscreen.top <= 230 && offscreen.bottom > 230, "The minimum-height false-hit fixture no longer covers the thumb center");
     ChangeMarkVisibility viewport{5000, 5044, 220, 240};
-    viewport.include(4990, 4991);
     const auto mask = viewport.mask();
-    check(mask.top == 225 && mask.bottom == 235 && mask.top <= offscreen.top && mask.bottom >= offscreen.bottom,
-        "An offscreen minimum-height marker remained in the center of the thumb");
+    check(mask.top == 225 && mask.bottom == 235, "The center guard does not match the middle half of the thumb");
+    // Magnification keeps normal offscreen marks outside the center guard:
+    // they remain visible rather than disappearing as the thumb approaches.
+    for (const auto range : {LineChange{0, 1}, LineChange{4990, 4991}, LineChange{5044, 5045}, LineChange{19999, 20000}}) {
+        const auto mark = changeMark(range.begin, range.end, 20000, 17, 850, 3, {5000, 5044, 20});
+        check(mark.bottom <= mask.top || mark.top >= mask.bottom,
+            "Magnification left an offscreen change in the center guard");
+    }
     viewport.include(5010, 5011);
     check(viewport.mask().top == viewport.mask().bottom, "A visible highlighted change lost its center markers");
     viewport.include(5100, 5101);
@@ -717,6 +727,6 @@ void wrapping() {
 }
 }
 int main() {
-    try { revisionHighlights(); editorLineChanges(); editorChangeMarks(); minimumThumbChangeMarks(); changeMarkCenterVisibility(); diffChangeMarks(); editableComparisons(); syntaxHighlighting(); multilineSyntax(); syntaxLanguages(); fileHeadings(); alignment(); additionsAndDeletions(); inlineLayout(); edgeCases(); viewPositions(); wrapping(); std::cout << "Diff tests passed.\n"; return EXIT_SUCCESS; }
+    try { revisionHighlights(); editorLineChanges(); editorChangeMarks(); expandedChangeMarks(); changeMarkCenterVisibility(); diffChangeMarks(); editableComparisons(); syntaxHighlighting(); multilineSyntax(); syntaxLanguages(); fileHeadings(); alignment(); additionsAndDeletions(); inlineLayout(); edgeCases(); viewPositions(); wrapping(); std::cout << "Diff tests passed.\n"; return EXIT_SUCCESS; }
     catch (const std::exception& error) { std::cerr << error.what() << '\n'; return EXIT_FAILURE; }
 }

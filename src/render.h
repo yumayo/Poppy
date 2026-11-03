@@ -58,6 +58,8 @@ public:
     HRESULT end();
     void discard();
     void fill(const RECT& rect, COLORREF color, float opacity = 1.0f);
+    // Preserve fractional positions for smoothly moving overview markers.
+    void fill(float left, float top, float right, float bottom, COLORREF color);
     void fillRounded(const RECT& rect, COLORREF color, float radius);
     int textWidth(const std::wstring& text, bool italic = false) const;
     void label(const RECT& rect, const std::wstring& text, COLORREF color,

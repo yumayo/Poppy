@@ -825,6 +825,21 @@ void imagePreviews() {
     viewer.message(L"Closed"); renderer.setImage({});
     check(!viewer.hasDocument() && viewer.documentBytes() == 0 && lifetime.expired(), "Closing an image retained its pixels");
 }
+void fractionalMarkers() {
+    Renderer renderer; renderer.setDpi(96); Bitmap bitmap;
+    const auto draw = [&](float top) {
+        check(renderer.begin(bitmap.bitmap.get()), "Could not create the fractional marker test target");
+        renderer.fill(bitmap.bounds(), RGB(0, 0, 0));
+        renderer.fill(10.0f, top, 14.0f, top + 3.0f, RGB(255, 255, 255));
+        renderer.fill({40, 30, 44, 34}, accent);
+        finish(renderer); bitmap.read();
+    };
+    draw(30.25f); const int first = GetRValue(bitmap.pixel(11, 30));
+    draw(30.75f); const int next = GetRValue(bitmap.pixel(11, 30));
+    check(first < 255 && next > 0 && next < first, "Fractional marker motion was rounded to whole pixels");
+    check(bitmap.pixel(11, 31) == RGB(255, 255, 255) && bitmap.pixel(11, 29) == RGB(0, 0, 0) && bitmap.pixel(41, 31) == accent,
+        "Fractional marker drawing changed its solid interior or an unrelated region");
+}
 void smoothIcons() {
     Renderer renderer; Bitmap bitmap;
     for (const UINT dpi : {96u, 120u, 144u, 192u}) {
@@ -2522,10 +2537,9 @@ void themedScrollbars() {
         const auto thumb = Scrollbars::thumbRect(pane.window, bar);
         check((bar == SB_VERT ? thumb.top : thumb.left) == first && (bar == SB_VERT ? thumb.bottom : thumb.right) == last + 1,
             "The marker mask uses different thumb boundaries from the painted scrollbar");
-        const auto markers = Scrollbars::markerTrackRect(pane.window, bar);
-        check((bar == SB_VERT ? markers.top : markers.left) > first &&
-            (bar == SB_VERT ? markers.top : markers.left) < last + 1,
-            "The marker track does not start inside the minimum-sized thumb");
+        const auto markers = Scrollbars::trackRect(pane.window, bar);
+        check((bar == SB_VERT ? markers.top : markers.left) == first,
+            "Expanded markers do not start at the scrollbar track");
         const int along = (first + last) / 2;
         const POINT point = bar == SB_VERT ? POINT{cross, along} : POINT{along, cross};
         const LPARAM location = MAKELPARAM(point.x, point.y);
@@ -2537,7 +2551,7 @@ void themedScrollbars() {
         const POINT end = bar == SB_VERT ? POINT{cross, client.bottom + 100} : POINT{client.right + 100, cross};
         SendMessageW(pane.window, WM_MOUSEMOVE, MK_LBUTTON, MAKELPARAM(end.x, end.y));
         check(ScrollbarWindow::info(pane.window, bar).nPos == 999900, "Dragging truncated a scroll position above 65535 or did not reach the end");
-        const auto scrolledMarkers = Scrollbars::markerTrackRect(pane.window, bar);
+        const auto scrolledMarkers = Scrollbars::trackRect(pane.window, bar);
         check(EqualRect(&markers, &scrolledMarkers), "Scrolling moved the marker track");
         SendMessageW(pane.window, WM_LBUTTONUP, 0, MAKELPARAM(end.x, end.y));
         check(GetCapture() != pane.window, "Releasing the thumb left the pointer captured");
@@ -2654,7 +2668,7 @@ int main(int argc, char** argv) {
             editorTailFollowing();
             htmlPreviewSwitching();
             terminalAsyncStartup(); terminalProcessShutdown();
-            statusBarLimits(); treeMultipleSelection(); commitMessagePopup(); inlineTreeInput(); inlineTreeCreation(); gitCommitInput(); cellPositions(); colorsAndClipping(); imagePreviews(); smoothIcons(); windowTargets(); editableDiff(); editorCaret(); delayedLoadingMessages(); imeCellRendering(); imeTerminalInsertion(); imeUiRendering(); imePositions(); editorWordSelection(); editorWordMovement(); editorLineShortcuts(); editorWrapping(); diffWrapping(); documentFind(); horizontalWheelScrolling(); continuousViewerScrolling(); selectionAutoScrolling(); terminalGitBashSocketEnvironment(); terminalSelectionAutoScrolling(); themedScrollbars(); quickOpenStability();
+            statusBarLimits(); treeMultipleSelection(); commitMessagePopup(); inlineTreeInput(); inlineTreeCreation(); gitCommitInput(); cellPositions(); colorsAndClipping(); imagePreviews(); fractionalMarkers(); smoothIcons(); windowTargets(); editableDiff(); editorCaret(); delayedLoadingMessages(); imeCellRendering(); imeTerminalInsertion(); imeUiRendering(); imePositions(); editorWordSelection(); editorWordMovement(); editorLineShortcuts(); editorWrapping(); diffWrapping(); documentFind(); horizontalWheelScrolling(); continuousViewerScrolling(); selectionAutoScrolling(); terminalGitBashSocketEnvironment(); terminalSelectionAutoScrolling(); themedScrollbars(); quickOpenStability();
             std::cout << "Direct2D rendering tests passed\n";
         }
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; result = 1; }

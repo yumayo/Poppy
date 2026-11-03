@@ -345,6 +345,10 @@ void Renderer::fill(const RECT& rect, COLORREF value, float opacity) {
     if (empty(rect)) return;
     color(value, opacity); target_->FillRectangle(rectangle(rect), brush_.get());
 }
+void Renderer::fill(float left, float top, float right, float bottom, COLORREF value) {
+    if (right <= left || bottom <= top) return;
+    color(value); target_->FillRectangle(D2D1::RectF(left, top, right, bottom), brush_.get());
+}
 void Renderer::fillRounded(const RECT& rect, COLORREF value, float radius) {
     if (empty(rect)) return;
     color(value); target_->FillRoundedRectangle(D2D1::RoundedRect(rectangle(rect), radius, radius), brush_.get());

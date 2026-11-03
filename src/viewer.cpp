@@ -630,7 +630,7 @@ void Viewer::paintGitMarks() {
     const auto r = Scrollbars::contentRect(window_);
     const int left = contentRect().right;
     renderer_.fill({left, 0, r.right, r.bottom}, background);
-    auto track = Scrollbars::markerTrackRect(window_, SB_VERT);
+    auto track = Scrollbars::trackRect(window_, SB_VERT);
     if (!(GetWindowLongPtrW(window_, GWL_STYLE) & WS_VSCROLL)) track = {left, contentTop(), r.right, r.bottom};
     const size_t rows = std::max(rowCount(), static_cast<size_t>(visibleRows()));
     const auto thumb = Scrollbars::thumbRect(window_, SB_VERT);
@@ -639,11 +639,13 @@ void Viewer::paintGitMarks() {
     const size_t first = static_cast<size_t>(top_ + (stickyFile() ? 1 : 0));
     const size_t last = static_cast<size_t>(top_ + std::max(0, (static_cast<int>(r.bottom) - contentTop() + cellHeight_ - 1) / cellHeight_));
     ChangeMarkVisibility visibility{first, last, thumb.top, thumb.bottom};
+    const ChangeMarkViewport viewport{first, last, static_cast<int>(thumb.bottom - thumb.top)};
     const int minimum = std::max(1, MulDiv(3, dpi_, 96));
     const auto paintMark = [&](size_t begin, size_t end, bool removed) {
         visibility.include(begin, end);
-        const auto mark = changeMark(begin, end, rows, track.top, track.bottom, minimum);
-        renderer_.fill({left, mark.top, r.right, mark.bottom}, removed ? rgb(231,112,118) : rgb(151,195,121));
+        const auto mark = changeMark(begin, end, rows, track.top, track.bottom, minimum, viewport);
+        renderer_.fill(static_cast<float>(left), static_cast<float>(mark.top), static_cast<float>(r.right), static_cast<float>(mark.bottom),
+            removed ? rgb(231,112,118) : rgb(151,195,121));
     };
     if (diff_) {
         for (const auto& change : diffChangeRanges_) {
@@ -657,7 +659,7 @@ void Viewer::paintGitMarks() {
         paintMark(begin, end, change.begin == change.end);
     }
     const auto mask = visibility.mask();
-    renderer_.fill({left, mask.top, r.right, mask.bottom}, background);
+    renderer_.fill(static_cast<float>(left), static_cast<float>(mask.top), static_cast<float>(r.right), static_cast<float>(mask.bottom), background);
 }
 void Viewer::paint() {
     Renderer::Paint paint(renderer_, window_); if (!paint) return;
