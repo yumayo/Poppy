@@ -1288,6 +1288,19 @@ void renameTests(const fs::path& executable) {
         check(visibleTabCount(app)==1,"Restart lost the renamed tab");
     }
 }
+HWND explorerDeleteConfirmation(const Application& app) {
+    HWND dialog = nullptr;
+    waitFor([&] {
+        dialog = FindWindowW(L"#32770", L"Poppy — Delete");
+        DWORD pid = 0; if (dialog) GetWindowThreadProcessId(dialog, &pid);
+        return dialog && pid == app.process.dwProcessId;
+    }, "Nonempty folder deletion did not ask for confirmation");
+    wchar_t cancel[32]{}, remove[32]{};
+    GetDlgItemTextW(dialog, IDCANCEL, cancel, 32); GetDlgItemTextW(dialog, IDOK, remove, 32);
+    check(std::wstring(cancel) == L"Cancel" && std::wstring(remove) == L"Delete", "Folder confirmation has incorrect button labels");
+    check(send(dialog, DM_GETDEFID) == MAKELONG(IDCANCEL, DC_HASDEFID), "Folder deletion must default to Cancel");
+    return dialog;
+}
 void explorerDeleteTests(const fs::path& executable) {
     Fixture fixture;
     const auto folder = fixture.root / L"a folder 日本語", single = fixture.root / L"b file 日本語.txt", keep = fixture.root / L"c keep.txt";
@@ -1322,11 +1335,23 @@ void explorerDeleteTests(const fs::path& executable) {
     controlKey(app, tree, 'Z');
     waitFor([&] { return fs::exists(single) && send(tree, treeGetCount) == 4; }, "Second undo did not restore the file");
     waitLines(viewer, 121); send(viewer, WM_KEYDOWN, VK_BACK); waitLines(viewer, 120);
+    // A collapsed folder must be checked on disk. Every cancellation path
+    // leaves the resource and the existing Redo history intact.
+    for (const auto cancel : {static_cast<int>(TDM_CLICK_BUTTON), WM_KEYDOWN, WM_CLOSE}) {
+        send(tree, treeSelect, directory); PostMessageW(tree, WM_KEYDOWN, VK_DELETE, 0);
+        const auto confirmation = explorerDeleteConfirmation(app);
+        check(fs::exists(folder / L"nested" / L"child.txt") && fs::exists(single), "Folder deletion started before confirmation");
+        if (cancel == TDM_CLICK_BUTTON) send(confirmation, cancel, IDCANCEL);
+        else PostMessageW(confirmation, cancel, cancel == WM_KEYDOWN ? VK_ESCAPE : 0, 0);
+        waitFor([&] { return !IsWindow(confirmation) && send(tree, treeCanRedo); }, "Cancellation changed Explorer history or left deletion pending");
+        check(fs::exists(folder / L"nested" / L"child.txt") && send(tree, treeGetCount) == 4, "Cancellation deleted a collapsed folder");
+    }
     expand(tree, directory);
     waitFor([&] { return nextItem(tree, TreeRelation::Child, directory) != 0; }, "Delete folder did not expand");
     expand(tree, nextItem(tree, TreeRelation::Child, directory));
     waitFor([&] { return send(tree, treeGetCount) == 6; }, "Delete subtree did not load");
     send(tree, treeSelect, directory); PostMessageW(tree, WM_KEYDOWN, VK_DELETE, 0);
+    send(explorerDeleteConfirmation(app), TDM_CLICK_BUTTON, IDOK);
     waitFor([&] { return !fs::exists(folder) && send(tree, treeGetCount) == 3; }, "Delete did not remove a nonempty folder");
     check(fs::exists(single) && fs::exists(keep), "Folder deletion removed a sibling");
     controlKey(app, tree, 'Z');
@@ -1345,6 +1370,37 @@ void explorerDeleteTests(const fs::path& executable) {
     waitFor([&] { dialog = FindWindowW(L"#32770", L"Poppy — Delete"); return dialog != nullptr; }, "Failed deletion did not report an error");
     CloseHandle(locked); send(dialog, WM_COMMAND, IDOK);
     check(fs::exists(keep) && fs::exists(single) && fs::exists(folder), "Failed deletion changed a live resource");
+}
+void explorerDeleteConfirmationTests(const fs::path& executable) {
+    Fixture fixture;
+    const auto folder = fixture.root / L"a nonempty 日本語", empty = fixture.root / L"b empty", file = fixture.root / L"c.txt";
+    fs::create_directory(folder); fs::create_directory(empty); writeFile(file);
+    const auto hidden = folder / L".hidden"; writeFile(hidden);
+    check(SetFileAttributesW(hidden.c_str(), FILE_ATTRIBUTE_HIDDEN) != FALSE, "Could not hide the deletion fixture");
+    Application app(executable, fixture.root); const auto tree = app.tree();
+    waitFor([&] { return send(tree, treeGetCount) == 4; }, "Batch confirmation fixture did not load");
+    controlShortcut(app, tree, 'A', [&] { return send(tree, treeGetSelectionCount) == 3; }, "Could not select the deletion batch");
+    PostMessageW(tree, WM_KEYDOWN, VK_DELETE, 0);
+    auto dialog = explorerDeleteConfirmation(app);
+    check(fs::exists(hidden) && fs::exists(empty) && fs::exists(file), "A mixed batch deleted items before confirmation");
+    send(dialog, TDM_CLICK_BUTTON, IDCANCEL);
+    waitFor([&] { return !IsWindow(dialog); }, "Batch cancellation did not close the confirmation");
+    check(fs::exists(hidden) && fs::exists(empty) && fs::exists(file) && !send(tree, treeCanUndo), "Batch cancellation changed resources or Undo history");
+    PostMessageW(tree, WM_KEYDOWN, VK_DELETE, 0);
+    dialog = explorerDeleteConfirmation(app);
+    // UI completions may change the selection during a modal dialog. Deletion
+    // must still use the complete batch that the user was asked to confirm.
+    const auto root = nextItem(tree, TreeRelation::Root);
+    const auto emptyItem = nextItem(tree, TreeRelation::Next, nextItem(tree, TreeRelation::Child, root));
+    send(tree, treeSelect, emptyItem);
+    send(dialog, TDM_CLICK_BUTTON, IDOK);
+    waitFor([&] { return !fs::exists(folder) && !fs::exists(empty) && !fs::exists(file) && send(tree, treeGetCount) == 1; }, "Confirmation did not delete the original batch");
+    controlKey(app, tree, 'Z');
+    waitFor([&] { return fs::exists(hidden) && fs::exists(empty) && fs::exists(file) && send(tree, treeGetCount) == 4; }, "Undo did not restore the confirmed batch");
+    const auto restoredEmpty = nextItem(tree, TreeRelation::Next, nextItem(tree, TreeRelation::Child, root));
+    send(tree, treeSelect, restoredEmpty); PostMessageW(tree, WM_KEYDOWN, VK_DELETE, 0);
+    waitFor([&] { return !fs::exists(empty) && send(tree, treeGetCount) == 3; }, "Empty folder deletion unnecessarily asked for confirmation");
+    check(fs::exists(hidden) && fs::exists(file), "Empty folder deletion removed another selected item");
 }
 void explorerMultipleSelectionTests(const fs::path& executable) {
     Fixture fixture;
@@ -3429,7 +3485,7 @@ int wmain(int argc, wchar_t** argv) {
         SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         for (const auto test : {folderTests, explorerSortTests, sidebarTests, treeInteractionTests, collapseAllSidebarTests, navigationHistoryTests, previewTabTests, explorerPreviewTabTests, previewTabSplitTests, tabTests, rapidTabMiddleClickTests, pinnedTabTests,
                 bulkTabCloseTests, bulkTabSaveTests, bulkTabSplitTests, explorerActiveFileTests, htmlTabToolsTests, editorTailTests,
-                tabDragTests, wrappingTabDragTests, wrappingTabTests, renameTests, explorerMoveTests, explorerDeleteTests, explorerMultipleSelectionTests, crossProjectFolderCopyTests, createItemTests, newFileShortcutTests, pasteImageTests, splitPaneTests, quickOpenTests, fullSearchTests, searchRetentionTests, gitSidebarTests, gitIgnoredExplorerTests, gitAutoRefreshTests, editableGitDiffTests, branchSidebarTests, multiRepositoryTests, sessionTests, multiProjectTests, recentProjectTests, projectDragTests, scrollingProjectDragTests, terminalTitleTests, terminalShellTests, terminalShortcutTests, terminalBackspaceTests}) {
+                tabDragTests, wrappingTabDragTests, wrappingTabTests, renameTests, explorerMoveTests, explorerDeleteTests, explorerDeleteConfirmationTests, explorerMultipleSelectionTests, crossProjectFolderCopyTests, createItemTests, newFileShortcutTests, pasteImageTests, splitPaneTests, quickOpenTests, fullSearchTests, searchRetentionTests, gitSidebarTests, gitIgnoredExplorerTests, gitAutoRefreshTests, editableGitDiffTests, branchSidebarTests, multiRepositoryTests, sessionTests, multiProjectTests, recentProjectTests, projectDragTests, scrollingProjectDragTests, terminalTitleTests, terminalShellTests, terminalShortcutTests, terminalBackspaceTests}) {
             Fixture appData; AppDataEnvironment environment(appData.root);
             test(fs::absolute(argv[1]));
         }

@@ -1641,13 +1641,60 @@ bool ProjectRuntime::Impl::canMoveFile(TreeItem item, TreeItem parent) const {
 void ProjectRuntime::Impl::deleteItems(const std::vector<TreeItem>& items) {
     if (items.empty() || !std::all_of(items.begin(), items.end(), [this](TreeItem item) { return explorer_.canDelete(item); })) return;
     std::vector<ExplorerEdit> edits;
+    std::vector<ResourceId> directories;
     for (const auto item : items) {
-        const auto source = node(item)->path;
+        const auto n = node(item);
+        const auto source = n->path;
+        if (n->directory && !n->reparse) directories.push_back(source);
         ExplorerEdit edit{source, root_.parent_path() / (L".poppy-undo-" + wide(newSessionId())), ExplorerEditKind::Delete, source};
         for (const auto& pair : expandedPaths_) if (source.contains(pair.second)) edit.expanded.push_back(pair.second);
         edits.push_back(std::move(edit));
     }
-    executeExplorerBatch(std::move(edits));
+    if (directories.empty()) { executeExplorerBatch(std::move(edits)); return; }
+    // Inspect disk contents even when the folder is collapsed or its tree is stale.
+    // Keep resource snapshots across worker completions and the modal dialog.
+    renamePending_ = true;
+    status(L"Checking folders before deletion…");
+    const auto generation = generation_;
+    worker_->submit(L"explorer-delete-check", [this, edits = std::move(edits), directories = std::move(directories), generation]() mutable {
+        ResourceId nonempty;
+        std::wstring error;
+        for (const auto& directory : directories) {
+            try {
+                const auto listing = provider_->listDirectory(directory, true);
+                error = listing.error;
+                if (error.empty() && (!listing.entries.empty() || listing.truncated)) { nonempty = directory; break; }
+            } catch (const std::exception& failure) { error = wide(failure.what()); }
+            if (!error.empty()) { error = directory.native() + L"\n\n" + error; break; }
+        }
+        worker_->complete([this, edits = std::move(edits), nonempty, error, generation]() mutable {
+            if (generation != generation_) { renamePending_ = false; return; }
+            if (!error.empty()) {
+                status(L"Delete failed");
+                MessageBoxW(window_, error.c_str(), L"Poppy — Delete", MB_OK | MB_ICONWARNING);
+                renamePending_ = false; return;
+            }
+            if (!nonempty.empty()) {
+                const auto content = L"The folder is not empty:\n\n" + nonempty.native() +
+                    (edits.size() == 1 ? L"\n\nDelete this folder and its contents?" :
+                        L"\n\nDelete all " + std::to_wstring(edits.size()) + L" selected items, including this folder and its contents?");
+                const TASKDIALOG_BUTTON buttons[]{{IDCANCEL, L"Cancel"}, {IDOK, L"Delete"}};
+                TASKDIALOGCONFIG dialog{};
+                dialog.cbSize = sizeof(dialog); dialog.hwndParent = GetAncestor(window_, GA_ROOT);
+                dialog.dwFlags = TDF_ALLOW_DIALOG_CANCELLATION | TDF_SIZE_TO_CONTENT;
+                dialog.pszWindowTitle = L"Poppy — Delete"; dialog.pszMainIcon = TD_WARNING_ICON;
+                dialog.pszMainInstruction = L"Delete selected items?"; dialog.pszContent = content.c_str();
+                dialog.cButtons = 2; dialog.pButtons = buttons; dialog.nDefaultButton = IDCANCEL;
+                int answer = IDCANCEL;
+                const auto result = TaskDialogIndirect(&dialog, &answer, nullptr, nullptr);
+                if (FAILED(result) || answer != IDOK || generation != generation_) {
+                    renamePending_ = false; status(L"Delete cancelled"); return;
+                }
+            }
+            renamePending_ = false;
+            executeExplorerBatch(std::move(edits));
+        });
+    });
 }
 void ProjectRuntime::Impl::copyItems(const std::vector<TreeItem>& items, bool cut) {
     if (items.empty() || !std::all_of(items.begin(), items.end(), [this, cut](TreeItem item) { return cut ? explorer_.canDrag(item) : explorer_.canCopy(item); })) return;

@@ -30,17 +30,22 @@ std::wstring removeBackup(const fs::path& path) {
 class WindowsProvider final : public ProjectProvider {
 public:
     ResourceId connect(const ResourceId& root) override { return root; }
-    ProviderListing listDirectory(const ResourceId& path) override {
+    ProviderListing listDirectory(const ResourceId& path, bool requireAccess = false) override {
         ProviderListing result; std::error_code error;
-        fs::directory_iterator iterator(path.local(), fs::directory_options::skip_permission_denied, error), end;
+        fs::directory_iterator iterator(path.local(), requireAccess ? fs::directory_options::none : fs::directory_options::skip_permission_denied, error), end;
         if (error) { result.error = wide(error.message()); return result; }
         for (; iterator != end; iterator.increment(error)) {
             if (error) { result.error = wide(error.message()); break; }
             const auto& entry = *iterator;
             if (result.entries.size() == 10000) { result.truncated = true; break; }
-            const DWORD attributes = GetFileAttributesW(entry.path().c_str()); if (attributes == INVALID_FILE_ATTRIBUTES) continue;
+            const DWORD attributes = GetFileAttributesW(entry.path().c_str());
+            if (attributes == INVALID_FILE_ATTRIBUTES) {
+                if (requireAccess) { result.error = winError(); break; }
+                continue;
+            }
             result.entries.push_back({entry.path(), (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0, (attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0, false, {}});
         }
+        if (requireAccess && error) result.error = wide(error.message());
         return result;
     }
     ProviderFile readFile(const ResourceId& path) override {

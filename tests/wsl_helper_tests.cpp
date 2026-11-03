@@ -307,6 +307,13 @@ void batchedListings(const std::string& executable) {
     }
     Helper helper(executable); helper.hello(); helper.call("connect", fixture.root);
     check(helper.call("listDirectory", empty).entries.empty(), "An empty listing did not complete");
+    const Message deletionCheck{{"requireAccess", "1"}};
+    check(helper.call("listDirectory", empty, deletionCheck).entries.empty(), "Deletion check did not recognize an empty WSL folder");
+    write(empty / ".hidden", "keep");
+    const auto hidden = helper.call("listDirectory", empty, deletionCheck);
+    check(hidden.entries.size() == 1 && field(hidden.entries[0], "name") == ".hidden", "Deletion check treated hidden WSL contents as empty");
+    fs::remove(empty / ".hidden");
+    helper.call("listDirectory", fixture.root / "missing", deletionCheck, nullptr, false);
     const auto single = helper.call("listDirectory", small);
     check(single.entries.size() == 1 && field(single.entries[0], "path") == unusual.string(),
         "A short listing tail was delayed, lost or changed an escaped name");

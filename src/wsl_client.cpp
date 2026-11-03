@@ -290,9 +290,9 @@ public:
         } catch (const std::exception& error) { result.error = error.what(); }
         return result;
     }
-    ProviderListing listDirectory(const ResourceId& path) override {
+    ProviderListing listDirectory(const ResourceId& path, bool requireAccess = false) override {
         ProviderListing result;
-        try { const auto response = call("listDirectory", path); result.truncated = field(response.metadata, "truncated") == "1"; for (const auto& item : response.entries) { const bool unsupported = field(item, "unsupported") == "1"; result.entries.push_back({unsupported ? ResourceId{} : path.at(field(item, "path")), field(item, "directory") == "1", field(item, "link") == "1", unsupported, wide(field(item, "name"))}); } } catch (const std::exception& error) { result.error = wide(error.what()); }
+        try { const auto response = call("listDirectory", path, {{"requireAccess", requireAccess ? "1" : "0"}}); result.truncated = field(response.metadata, "truncated") == "1"; for (const auto& item : response.entries) { const bool unsupported = field(item, "unsupported") == "1"; result.entries.push_back({unsupported ? ResourceId{} : path.at(field(item, "path")), field(item, "directory") == "1", field(item, "link") == "1", unsupported, wide(field(item, "name"))}); } } catch (const std::exception& error) { result.error = wide(error.what()); }
         return result;
     }
     ProviderFile readFile(const ResourceId& path) override { try { auto response = call("readFile", path); return {std::move(response.bytes), field(response.metadata, "version"), {}}; } catch (const std::exception& error) { return {{}, {}, wide(error.what())}; } }

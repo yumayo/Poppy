@@ -24,7 +24,8 @@ class ProjectProvider {
 public:
     virtual ~ProjectProvider() = default;
     virtual ResourceId connect(const ResourceId& root) = 0;
-    virtual ProviderListing listDirectory(const ResourceId& path) = 0;
+    // Deletion checks must report inaccessible contents instead of hiding them.
+    virtual ProviderListing listDirectory(const ResourceId& path, bool requireAccess = false) = 0;
     virtual ProviderFile readFile(const ResourceId& path) = 0;
     virtual ProviderSave saveFile(const ResourceId& path, const std::string& bytes, const std::string& version, const std::string& baseline) = 0;
     // Publish a new file only after writing it completely; never replace a name.

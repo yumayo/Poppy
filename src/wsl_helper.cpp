@@ -542,12 +542,16 @@ void Server::execute(const std::shared_ptr<Request>& r) {
             reply(*r, {{"truncated", result.truncated ? "1" : "0"}, {"scanError", validUtf8(result.error) ? result.error : "Repository scan failed"}, {"done", "1"}});
         } else if (op == "listDirectory" || op == "indexFiles") {
             const auto root = path(r->message); std::deque<std::string> pending{root}; size_t entries = 0, directories = 0; bool truncated = false;
+            const bool requireAccess = op == "listDirectory" && field(r->message, "requireAccess") == "1";
             while (!pending.empty()) {
                 if (r->cancelled || stopping_) throw std::runtime_error("Request cancelled");
                 const auto directory = std::move(pending.front()); pending.pop_front(); watch(directory);
                 DIR* raw = opendir(directory.c_str()); if (!raw) { if (directory == root) failure("Cannot list directory"); continue; }
                 std::unique_ptr<DIR, int(*)(DIR*)> dir(raw, closedir);
-                while (auto entry = readdir(dir.get())) {
+                for (;;) {
+                    errno = 0;
+                    const auto entry = readdir(dir.get());
+                    if (!entry) { if (requireAccess && errno) failure("Cannot list directory"); break; }
                     if (r->cancelled || stopping_) throw std::runtime_error("Request cancelled");
                     const std::string name = entry->d_name; if (name == "." || name == "..") continue;
                     const auto p = directory + (directory.back() == '/' ? "" : "/") + name;
@@ -555,7 +559,11 @@ void Server::execute(const std::shared_ptr<Request>& r) {
                         watchGit(directory);
                         if (op == "indexFiles") continue;
                     }
-                    struct stat info{}; if (fstatat(dirfd(dir.get()), name.c_str(), &info, AT_SYMLINK_NOFOLLOW)) continue;
+                    struct stat info{};
+                    if (fstatat(dirfd(dir.get()), name.c_str(), &info, AT_SYMLINK_NOFOLLOW)) {
+                        if (requireAccess) failure("Cannot inspect directory entry");
+                        continue;
+                    }
                     const bool link = S_ISLNK(info.st_mode); bool isDirectory = S_ISDIR(info.st_mode);
                     if (link) { struct stat target{}; isDirectory = !fstatat(dirfd(dir.get()), name.c_str(), &target, 0) && S_ISDIR(target.st_mode); }
                     if (op == "indexFiles") {
