@@ -27,6 +27,8 @@ constexpr int projectMessageLines = 3;
 constexpr int projectCardMargin = 8;
 constexpr int projectCardGap = 8;
 constexpr int projectBorderWidth = 5;
+constexpr int projectCardBorderWidth = 2;
+constexpr int projectCardRadius = 6;
 constexpr int projectCardHeight = projectHeadingHeight + projectMessageLineHeight * projectMessageLines + 8;
 constexpr int projectRowHeight = projectCardHeight + projectCardGap;
 fs::path stateDirectory() {
@@ -576,13 +578,14 @@ void Workspace::updateTools(){
 void Workspace::paint(){
     Renderer::Paint paint(renderer_,window_);if(!paint)return;RECT client{};GetClientRect(window_,&client);renderer_.fill(client,background);
     const int width=px(session_.projectListWidth),borderWidth=px(projectBorderWidth);renderer_.fill({width,0,width+borderWidth,client.bottom},border);
+    const int cardBorderWidth=px(projectCardBorderWidth),cardRadius=px(projectCardRadius);
     const auto addButton=addButtonBounds();
     renderer_.label({px(12),0,addButton.left,px(44)},L"PROJECTS",foreground);
     renderer_.fill(addButton,panel);renderer_.label(addButton,L"+",accent,DT_CENTER|DT_VCENTER|DT_SINGLELINE);
     for(size_t i=0;i<projects_.size();++i){auto rect=row(i);if(rect.bottom<=px(44)||rect.top>=client.bottom)continue;
         const auto& project=projects_[i];const auto summary=project.runtime->summary();
-        renderer_.fillRounded(rect,i==active_?accent:border,px(6));
-        auto inside=rect;InflateRect(&inside,-borderWidth,-borderWidth);renderer_.fillRounded(inside,panel,px(6)-borderWidth);
+        renderer_.fillRounded(rect,i==active_?accent:border,cardRadius);
+        auto inside=rect;InflateRect(&inside,-cardBorderWidth,-cardBorderWidth);renderer_.fillRounded(inside,panel,cardRadius-cardBorderWidth);
         const int headingBottom=rect.top+px(projectHeadingHeight);
         drawAiStatus(renderer_,{rect.left+px(4),rect.top,rect.left+px(30),headingBottom},summary.state,dpi_);
         const auto secondary=subtitle(i);const auto title=project.path.filename().empty()?project.path.native():project.path.filename().native();
