@@ -1,4 +1,5 @@
 #include "activity_button.h"
+#include "layout_config.h"
 #include <algorithm>
 
 namespace poppy {
@@ -45,7 +46,10 @@ void ActivityButton::paint() {
         renderer_.fillRounded(badge, enabled ? accent : muted, height / 2.0f);
         renderer_.label(badge, text, background, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     }
-    if (selected_) renderer_.fill({0, MulDiv(8, dpi_, 96), MulDiv(3, dpi_, 96), rect.bottom - MulDiv(8, dpi_, 96)}, accent);
+    if (selected_) {
+        const int width = MulDiv(3, dpi_, 96), left = sidebarOnRight ? rect.right - width : 0;
+        renderer_.fill({left, MulDiv(8, dpi_, 96), left + width, rect.bottom - MulDiv(8, dpi_, 96)}, accent);
+    }
     if (enabled && GetFocus() == window_) { RECT focus = rect; InflateRect(&focus, -4, -4); renderer_.outline(focus, muted); }
 }
 LRESULT CALLBACK ActivityButton::procedure(HWND w, UINT m, WPARAM a, LPARAM b) {

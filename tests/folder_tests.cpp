@@ -6,6 +6,7 @@
 #include <vector>
 #include "tree_messages.h"
 #include "activity_button.h"
+#include "layout_config.h"
 #include <filesystem>
 #include <fstream>
 #include <initializer_list>
@@ -1734,8 +1735,14 @@ void sidebarTests(const fs::path& executable) {
     check(SetWindowPos(app.window, nullptr, 0, 0, MulDiv(1180, dpi, 96), MulDiv(820, dpi, 96), SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE) != FALSE,
           "Could not size the test window for its DPI");
     const auto activityRect = bounds(app.window, explorer), treeRect = bounds(app.window, tree), viewerRect = bounds(app.window, viewer);
-    check(activityRect.left == 0 && activityRect.right <= treeRect.left && treeRect.right < viewerRect.left,
-          "Activity bar, sidebar and editor are not arranged from left to right");
+    if constexpr (sidebarOnRight) {
+        RECT client{}; GetClientRect(app.window, &client);
+        check(viewerRect.left == 0 && viewerRect.right < treeRect.left && treeRect.right < activityRect.left && activityRect.right == client.right,
+              "Editor, sidebar and activity bar are not arranged from left to right");
+    } else {
+        check(activityRect.left == 0 && activityRect.right <= treeRect.left && treeRect.right < viewerRect.left,
+              "Activity bar, sidebar and editor are not arranged from left to right");
+    }
     check(activityRect.top == 0 && viewerRect.top == 0, "The removed toolbar still reserves space above the workspace");
     check(treeRect.top > viewerRect.top, "Explorer is missing its sidebar heading");
     send(git, WM_KEYDOWN, VK_SPACE);
@@ -1764,17 +1771,24 @@ void sidebarTests(const fs::path& executable) {
     send(explorer, BM_CLICK);
 
     const int delta = MulDiv(48, dpi, 96);
-    const int x = (treeRect.right + viewerRect.left) / 2, y = treeRect.top + 20;
+    const int x = sidebarOnRight ? (viewerRect.right + treeRect.left) / 2 : (treeRect.right + viewerRect.left) / 2;
+    const int y = treeRect.top + 20;
     send(app.window, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(x, y));
     // Keep the button held while reversing direction, as in a live resize.
     for (const int offset : {delta, 2 * delta, -delta, 0, delta}) {
         send(app.window, WM_MOUSEMOVE, MK_LBUTTON, MAKELPARAM(x + offset, y));
         const auto resizedTree = bounds(app.window, tree), resizedViewer = bounds(app.window, viewer);
         const auto resizedTerminal = bounds(app.window, terminal);
-        check(resizedTree.right >= treeRect.right + offset - 1 && resizedTree.right <= treeRect.right + offset + 1,
+        const int edge = sidebarOnRight ? resizedTree.left : resizedTree.right;
+        const int originalEdge = sidebarOnRight ? treeRect.left : treeRect.right;
+        check(edge >= originalEdge + offset - 1 && edge <= originalEdge + offset + 1,
               "Dragging the sidebar boundary did not resize the sidebar");
-        check(resizedViewer.left - resizedTree.right == viewerRect.left - treeRect.right && resizedTree.left == treeRect.left,
+        check(sidebarOnRight
+                  ? resizedTree.left - resizedViewer.right == treeRect.left - viewerRect.right && resizedTree.right == treeRect.right && resizedViewer.left == viewerRect.left
+                  : resizedViewer.left - resizedTree.right == viewerRect.left - treeRect.right && resizedTree.left == treeRect.left && resizedViewer.right == viewerRect.right,
               "Resizing moved the activity bar or overlapped the editor");
+        auto resizedActivity = bounds(app.window, explorer);
+        check(EqualRect(&resizedActivity, &activityRect) != FALSE, "Resizing moved the activity bar");
         check(resizedTerminal.left == resizedViewer.left && resizedTerminal.right == resizedViewer.right,
               "Dragging the sidebar boundary did not align the terminal with the editor");
     }
@@ -3497,11 +3511,16 @@ void sessionTests(const fs::path& executable) {
         check(terminal && IsWindowVisible(terminal), "Session terminal is missing");
         controlShortcut(app, viewer, 'J', [&] { return !IsWindowVisible(terminal); }, "Ctrl+J did not hide the session terminal");
         const auto pane = bounds(app.window, viewer);
-        const int splitter = pane.left - px(3), y = pane.top + px(50);
+        const int splitter = sidebarOnRight ? pane.right + px(2) : pane.left - px(3);
+        const int y = pane.top + px(50);
         send(app.window, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(splitter, y));
         send(app.window, WM_MOUSEMOVE, MK_LBUTTON, MAKELPARAM(splitter + px(60), y));
         send(app.window, WM_LBUTTONUP, 0, MAKELPARAM(splitter + px(60), y));
-        sidebarEdge = bounds(app.window, viewer).left;
+        const auto resizedPane = bounds(app.window, viewer);
+        sidebarEdge = sidebarOnRight ? resizedPane.right : resizedPane.left;
+        const int originalEdge = sidebarOnRight ? pane.right : pane.left;
+        check(sidebarEdge >= originalEdge + px(60) - 1 && sidebarEdge <= originalEdge + px(60) + 1,
+              "Session test did not resize the sidebar");
         send(GetDlgItem(app.window, 3), BM_CLICK);
         check(!IsWindowVisible(tree), "Session test did not select the Git sidebar");
     }
@@ -3515,7 +3534,7 @@ void sessionTests(const fs::path& executable) {
         check(!IsWindowVisible(FindWindowExW(app.window, nullptr, L"PoppyTerminalPane", nullptr)), "Restart lost terminal visibility");
         check(!IsWindowVisible(tree), "Restart lost the active sidebar");
         const auto pane = bounds(app.window, viewer);
-        check(pane.left == sidebarEdge, "Restart lost sidebar width");
+        check((sidebarOnRight ? pane.right : pane.left) == sidebarEdge, "Restart lost sidebar width");
         TreeItem nested = 0, first = 0;
         waitFor([&] {
             nested = nextItem(tree, TreeRelation::Child, nextItem(tree, TreeRelation::Root));

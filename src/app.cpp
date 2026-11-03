@@ -8,6 +8,7 @@
 #include "git_ignore.h"
 #include "git_commit_pane.h"
 #include "activity_button.h"
+#include "layout_config.h"
 #include "quick_open.h"
 #include "search_pane.h"
 #include "file_name.h"
@@ -379,7 +380,7 @@ private:
     UINT dpi_ = 96;
     int sidebar_ = 245, terminalHeight_ = 260, footer_ = 26, splitter_ = 5;
     int activityWidth_ = 48, sidebarHeader_ = 34, gitHeader_ = 180;
-    RECT sidebarRect_{}, sidebarSplitter_{}, terminalSplitter_{}, tabsRect_{};
+    RECT activityRect_{}, sidebarRect_{}, sidebarSplitter_{}, terminalSplitter_{}, tabsRect_{};
     int dragging_ = 0, dragOffset_ = 0;
     bool terminalVisible_ = true;
     bool updatingGitFiles_ = false;
@@ -718,24 +719,29 @@ void ProjectRuntime::Impl::layout(bool revealTab) {
     RECT r{}; GetClientRect(window_, &r);
     const int width = static_cast<int>(r.right), height = static_cast<int>(r.bottom);
     const int side = std::clamp(MulDiv(sidebar_, dpi_, 96), MulDiv(130, dpi_, 96), std::max(MulDiv(130, dpi_, 96), width - activityWidth_ - splitter_ - MulDiv(250, dpi_, 96)));
-    const int right = activityWidth_ + side + splitter_, content = std::max(0, height - footer_);
+    const int activityLeft = sidebarOnRight ? width - activityWidth_ : 0;
+    const int sidebarLeft = sidebarOnRight ? activityLeft - side : activityWidth_;
+    const int editorLeft = sidebarOnRight ? 0 : sidebarLeft + side + splitter_;
+    const int editorRight = sidebarOnRight ? sidebarLeft - splitter_ : width;
+    const int content = std::max(0, height - footer_);
     const int terminalSize = terminalVisible_ ? std::min(MulDiv(terminalHeight_, dpi_, 96), std::max(0, content - MulDiv(100, dpi_, 96))) : 0;
     const int viewerSize = std::max(0, content - terminalSize - (terminalVisible_ ? splitter_ : 0));
-    sidebarRect_ = {activityWidth_, 0, activityWidth_ + side, content};
+    activityRect_ = {activityLeft, 0, activityLeft + activityWidth_, content};
+    sidebarRect_ = {sidebarLeft, 0, sidebarLeft + side, content};
     TOOLINFOW collapseTip{}; collapseTip.cbSize = sizeof(collapseTip); collapseTip.hwnd = window_; collapseTip.uId = 50;
     collapseTip.rect = collapseButton();
     SendMessageW(tooltips_, TTM_NEWTOOLRECTW, 0, reinterpret_cast<LPARAM>(&collapseTip));
     POINT pointer{}; GetCursorPos(&pointer); ScreenToClient(window_, &pointer);
     collapseHover_ = PtInRect(&collapseTip.rect, pointer) != FALSE;
-    sidebarSplitter_ = {sidebarRect_.right, 0, right, content};
-    terminalSplitter_ = {right, viewerSize, width, viewerSize + (terminalVisible_ ? splitter_ : 0)};
+    sidebarSplitter_ = sidebarOnRight ? RECT{editorRight, 0, sidebarLeft, content} : RECT{sidebarRect_.right, 0, editorLeft, content};
+    terminalSplitter_ = {editorLeft, viewerSize, editorRight, viewerSize + (terminalVisible_ ? splitter_ : 0)};
     const int gitTop = sidebarHeader_ + gitHeader_;
     const bool showExplorer = activeSidebar_ == Sidebar::Explorer && !root_.empty();
     const bool showGitFiles = activeSidebar_ == Sidebar::Git && changes_.child();
     normalizeGroups();
-    editorRect_ = {right, 0, width, viewerSize};
+    editorRect_ = {editorLeft, 0, editorRight, viewerSize};
     const bool split = std::any_of(tabs_.begin(), tabs_.end(), [](const Tab& tab) { return tab.group == 1; });
-    const int middle = right + MulDiv(std::max(0, width - right - splitter_), editorRatio_, 1000);
+    const int middle = editorLeft + MulDiv(std::max(0, editorRight - editorLeft - splitter_), editorRatio_, 1000);
     editorSplitter_ = split ? RECT{middle, 0, middle + splitter_, viewerSize} : RECT{};
     const int rowHeight = MulDiv(34, dpi_, 96);
     const size_t maxRows = static_cast<size_t>(std::max(1, (viewerSize - MulDiv(100, dpi_, 96)) / rowHeight));
@@ -743,7 +749,7 @@ void ProjectRuntime::Impl::layout(bool revealTab) {
     for (int group = 0; group < 2; ++group) {
         auto& pane = editorGroups_[group]; pane.indices.clear();
         for (size_t i = 0; i < tabs_.size(); ++i) if (tabs_[i].group == group) pane.indices.push_back(i);
-        const int start = group ? middle + splitter_ : right, edge = group || !split ? width : middle;
+        const int start = group ? middle + splitter_ : editorLeft, edge = group || !split ? editorRight : middle;
         pane.tabs = {start, 0, edge, 0};
         const auto selected = groupTab(group);
         // Keep the tab tools clear of every wrapped row and its scroll buttons.
@@ -778,23 +784,24 @@ void ProjectRuntime::Impl::layout(bool revealTab) {
         pane.body = {start, pane.tabs.bottom, edge, viewerSize};
         for (const auto i : pane.indices) OffsetRect(&tabRects_[i], 0, -static_cast<int>(pane.firstRow) * rowHeight);
     }
-    tabsRect_ = {right, 0, width, std::max(editorGroups_[0].tabs.bottom, editorGroups_[1].tabs.bottom)};
+    tabsRect_ = {editorLeft, 0, editorRight, std::max(editorGroups_[0].tabs.bottom, editorGroups_[1].tabs.bottom)};
     updateTabs(false);
     if (tabDrag_ && tabDrag_->active) tabDrag_->target = tabDropAt(tabDrag_->point);
 
     struct Placement { HWND window; int x, y, width, height, flags; };
+    const int activityButtonLeft = activityLeft + (sidebarOnRight ? 1 : 0);
     const std::array<Placement, 11> panes{{
         {statusBar_.window(), 0, std::max(0, height - footer_), width, footer_, SWP_SHOWWINDOW},
-        {explorerButton_, 0, 0, activityWidth_ - 1, activityWidth_, SWP_SHOWWINDOW},
-        {searchButton_, 0, activityWidth_, activityWidth_ - 1, activityWidth_, SWP_SHOWWINDOW},
-        {gitButton_, 0, 2 * activityWidth_, activityWidth_ - 1, activityWidth_, SWP_SHOWWINDOW},
-        {tree_, activityWidth_, sidebarHeader_, side, std::max(0, content - sidebarHeader_), showExplorer ? SWP_SHOWWINDOW : SWP_HIDEWINDOW},
-        {gitTree_, activityWidth_, gitTop, side, std::max(0, content - gitTop), showGitFiles ? SWP_SHOWWINDOW : SWP_HIDEWINDOW},
-        {gitCommit_.window(), activityWidth_ + MulDiv(12, dpi_, 96), sidebarHeader_ + MulDiv(56, dpi_, 96), side - MulDiv(24, dpi_, 96), MulDiv(90, dpi_, 96), activeSidebar_ == Sidebar::Git ? SWP_SHOWWINDOW : SWP_HIDEWINDOW},
-        {searchPane_.window(), activityWidth_, sidebarHeader_, side, std::max(0, content - sidebarHeader_), activeSidebar_ == Sidebar::Search ? SWP_SHOWWINDOW : SWP_HIDEWINDOW},
+        {explorerButton_, activityButtonLeft, 0, activityWidth_ - 1, activityWidth_, SWP_SHOWWINDOW},
+        {searchButton_, activityButtonLeft, activityWidth_, activityWidth_ - 1, activityWidth_, SWP_SHOWWINDOW},
+        {gitButton_, activityButtonLeft, 2 * activityWidth_, activityWidth_ - 1, activityWidth_, SWP_SHOWWINDOW},
+        {tree_, sidebarLeft, sidebarHeader_, side, std::max(0, content - sidebarHeader_), showExplorer ? SWP_SHOWWINDOW : SWP_HIDEWINDOW},
+        {gitTree_, sidebarLeft, gitTop, side, std::max(0, content - gitTop), showGitFiles ? SWP_SHOWWINDOW : SWP_HIDEWINDOW},
+        {gitCommit_.window(), sidebarLeft + MulDiv(12, dpi_, 96), sidebarHeader_ + MulDiv(56, dpi_, 96), side - MulDiv(24, dpi_, 96), MulDiv(90, dpi_, 96), activeSidebar_ == Sidebar::Git ? SWP_SHOWWINDOW : SWP_HIDEWINDOW},
+        {searchPane_.window(), sidebarLeft, sidebarHeader_, side, std::max(0, content - sidebarHeader_), activeSidebar_ == Sidebar::Search ? SWP_SHOWWINDOW : SWP_HIDEWINDOW},
         {viewers_[0].window(), editorGroups_[0].body.left, editorGroups_[0].body.top, std::max(0L, editorGroups_[0].body.right - editorGroups_[0].body.left), std::max(0L, editorGroups_[0].body.bottom - editorGroups_[0].body.top), SWP_SHOWWINDOW},
         {viewers_[1].window(), editorGroups_[1].body.left, editorGroups_[1].body.top, std::max(0L, editorGroups_[1].body.right - editorGroups_[1].body.left), std::max(0L, editorGroups_[1].body.bottom - editorGroups_[1].body.top), split ? SWP_SHOWWINDOW : SWP_HIDEWINDOW},
-        {terminal_.container(), right, viewerSize + splitter_, std::max(0, width - right), terminalSize,
+        {terminal_.container(), editorLeft, viewerSize + splitter_, std::max(0, editorRight - editorLeft), terminalSize,
             terminalVisible_ ? SWP_SHOWWINDOW : SWP_HIDEWINDOW | SWP_NOMOVE | SWP_NOSIZE}
     }};
     // Move every pane before painting. Copying old window pixels during a
@@ -821,8 +828,9 @@ void ProjectRuntime::Impl::paint() {
     RECT r{}; GetClientRect(window_, &r);
     dc.fill(r, border); dc.fill({0, r.bottom - footer_, r.right, r.bottom}, panel);
     auto scaled = [&](int v) { return MulDiv(v, dpi_, 96); };
-    dc.fill({0, 0, activityWidth_, r.bottom - footer_}, background);
-    dc.fill({activityWidth_ - 1, 0, activityWidth_, r.bottom - footer_}, border);
+    dc.fill(activityRect_, background);
+    const int activityBorder = sidebarOnRight ? activityRect_.left : activityRect_.right - 1;
+    dc.fill({activityBorder, 0, activityBorder + 1, activityRect_.bottom}, border);
     dc.fill(sidebarRect_, panel);
     const int left = sidebarRect_.left + scaled(14), edge = sidebarRect_.right - scaled(12), top = sidebarHeader_;
     const auto collapse = collapseButton();
@@ -3074,7 +3082,11 @@ LRESULT ProjectRuntime::Impl::handle(UINT m, WPARAM a, LPARAM b) {
         if (tabDrag_) { updateTabDrag({GET_X_LPARAM(b), GET_Y_LPARAM(b)}); return 0; }
         if (dragging_) {
             RECT r{}; GetClientRect(window_, &r);
-            if (dragging_ == 1) sidebar_ = std::clamp(MulDiv(GET_X_LPARAM(b) - activityWidth_ - dragOffset_, 96, dpi_), 130, std::max(130, MulDiv(r.right - activityWidth_ - splitter_, 96, dpi_) - 250));
+            if (dragging_ == 1) {
+                const int boundary = GET_X_LPARAM(b) - dragOffset_;
+                const int side = sidebarOnRight ? r.right - activityWidth_ - splitter_ - boundary : boundary - activityWidth_;
+                sidebar_ = std::clamp(MulDiv(side, 96, dpi_), 130, std::max(130, MulDiv(r.right - activityWidth_ - splitter_, 96, dpi_) - 250));
+            }
             else if (dragging_ == 3) editorRatio_ = std::clamp(MulDiv(GET_X_LPARAM(b) - editorRect_.left, 1000, std::max(1L, editorRect_.right - editorRect_.left - splitter_)), 200, 800);
             else terminalHeight_ = std::clamp(MulDiv(r.bottom - footer_ - GET_Y_LPARAM(b), 96, dpi_), 100, std::max(100, MulDiv(r.bottom - footer_, 96, dpi_) - 120));
             layout();
