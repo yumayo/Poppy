@@ -4,6 +4,7 @@
 #include "content_search_protocol.h"
 #include "wsl_bootstrap.h"
 #include "explorer_history.h"
+#include "explorer_clipboard_paths.h"
 #include "text.h"
 #include <algorithm>
 #include <chrono>
@@ -412,9 +413,9 @@ void moving(const std::string& executable) {
     helper.eof();
 }
 void copying(const std::string& executable) {
-    Fixture fixture;
+    Fixture fixture, outside;
     const auto source = fixture.root / "source 日本語", target = fixture.root / "target";
-    fs::create_directories(source / "nested"); fs::create_directory(target);
+    fs::create_directories(source / "nested" / "empty"); fs::create_directory(target);
     write(source / "nested" / "data\\name.txt", "copied bytes");
     chmod((source / "nested" / "data\\name.txt").c_str(), 0751);
     fs::create_symlink("nested/data\\name.txt", source / "link");
@@ -424,6 +425,24 @@ void copying(const std::string& executable) {
         fs::is_symlink(target / "copy 日本語" / "link") && fs::exists(source / "nested" / "data\\name.txt"), "WSL copy lost contents, a link or its source");
     struct stat info{}; stat((target / "copy 日本語" / "nested" / "data\\name.txt").c_str(), &info);
     check((info.st_mode & 0777) == 0751, "WSL copy lost file permissions");
+    const auto connection = poppy::ResourceId::wsl("Ubuntu", target.string(), "alice");
+    const auto shellFolder = poppy::explorerShellPath(connection.at(source.string()));
+    check(shellFolder.has_value(), "A WSL folder cannot be copied to the Shell clipboard");
+    const auto importedFolder = poppy::explorerClipboardPath(*shellFolder, connection);
+    check(importedFolder.sameAuthority(connection), "A Shell WSL folder lost the selected connection");
+    helper.call("copyResource", fs::u8path(importedFolder.u8string()), {{"destination", (target / "from shell").string()}});
+    check(disk(target / "from shell" / "nested" / "data\\name.txt") == "copied bytes" && fs::is_empty(target / "from shell" / "nested" / "empty"),
+        "A WSL folder imported from the Shell clipboard lost files or empty directories");
+    write(source / "file 日本語.txt", "individual file");
+    const auto shellFile = poppy::explorerShellPath(connection.at((source / "file 日本語.txt").string()));
+    check(shellFile.has_value(), "A WSL file cannot be copied to the Shell clipboard");
+    const auto importedFile = poppy::explorerClipboardPath(*shellFile, connection);
+    helper.call("copyResource", fs::u8path(importedFile.u8string()), {{"destination", (target / "file 日本語.txt").string()}});
+    check(disk(target / "file 日本語.txt") == "individual file" && disk(source / "file 日本語.txt") == "individual file",
+        "A WSL file imported from the Shell clipboard lost contents or its source");
+    helper.call("copyResource", fixture.root, {{"destination", (outside.root / "project root").string()}});
+    check(disk(outside.root / "project root" / source.filename() / "file 日本語.txt") == "individual file",
+        "The connected WSL project root could not be copied to another project");
     helper.call("copyResource", source, {{"destination", (target / "copy 日本語").string()}}, nullptr, false);
     helper.call("copyResource", source, {{"destination", (source / "nested" / "recursive").string()}}, nullptr, false);
     helper.call("copyResource", source, {{"destination", "relative"}}, nullptr, false);

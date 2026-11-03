@@ -1419,16 +1419,24 @@ void explorerMultipleSelectionTests(const fs::path& executable) {
     shortcut('A');
     check(!send(tree, treeIsSelected, root) && send(tree, treeGetSelectionCount) >= 5, "Select all included the protected project root");
 }
-void crossProjectFolderCopyTests(const fs::path& executable) {
+void copyFolderAcrossProjects(const fs::path& executable, bool copyRoot) {
     Fixture a, b;
-    const auto source = a.root / L"folder 日本語", destination = b.root / source.filename();
+    const auto source = a.root / L"folder 日本語";
+    const auto copied = copyRoot ? a.root : source, destination = b.root / copied.filename();
+    const auto destinationFolder = copyRoot ? destination / source.filename() : destination;
     fs::create_directories(source / L"nested" / L"empty");
     writeLines(source / L"nested" / L"data.txt", 3);
     Application app(executable, a.root); const auto treeA = app.tree();
     waitFor([&] { return send(treeA, treeGetCount) == 2; }, "Folder copy source project did not load");
-    send(treeA, treeSelect, nextItem(treeA, TreeRelation::Child, nextItem(treeA, TreeRelation::Root)));
+    const auto rootA = nextItem(treeA, TreeRelation::Root);
+    send(treeA, treeSelect, copyRoot ? rootA : nextItem(treeA, TreeRelation::Child, rootA));
     const auto sequence = GetClipboardSequenceNumber();
-    controlShortcut(app, treeA, 'C', [&] { return GetClipboardSequenceNumber() != sequence; }, "Could not copy a project folder");
+    if (copyRoot) {
+        send(treeA, WM_CUT);
+        check(GetClipboardSequenceNumber() == sequence && fs::exists(source), "The project root was cut");
+        send(treeA, WM_COPY);
+        check(GetClipboardSequenceNumber() != sequence, "The project root could not be copied");
+    } else controlShortcut(app, treeA, 'C', [&] { return GetClipboardSequenceNumber() != sequence; }, "Could not copy a project folder");
     check(IsClipboardFormatAvailable(CF_HDROP), "Folder copy did not publish file clipboard data");
     const auto text = b.root.native();
     COPYDATASTRUCT data{0x50505901, static_cast<DWORD>((text.size() + 1) * sizeof(wchar_t)), const_cast<wchar_t*>(text.c_str())};
@@ -1438,11 +1446,11 @@ void crossProjectFolderCopyTests(const fs::path& executable) {
     const auto rootB = nextItem(treeB, TreeRelation::Root);
     send(treeB, treeSelect, rootB);
     controlShortcut(app, treeB, 'V', [&] {
-        return fs::exists(destination / L"nested" / L"data.txt") && send(treeB, treeCanUndo) != 0;
+        return fs::exists(destinationFolder / L"nested" / L"data.txt") && send(treeB, treeCanUndo) != 0;
     }, "Cross-project folder paste did not finish");
     const auto checkContents = [&] {
-        check(readText(destination / L"nested" / L"data.txt") == readText(source / L"nested" / L"data.txt") &&
-            fs::is_empty(destination / L"nested" / L"empty"), "Cross-project folder copy lost contents or an empty directory");
+        check(readText(destinationFolder / L"nested" / L"data.txt") == readText(source / L"nested" / L"data.txt") &&
+            fs::is_empty(destinationFolder / L"nested" / L"empty"), "Cross-project folder copy lost contents or an empty directory");
     };
     checkContents();
     waitFor([&] {
@@ -1454,8 +1462,12 @@ void crossProjectFolderCopyTests(const fs::path& executable) {
     waitFor([&] { return !fs::exists(destination); }, "Undo did not remove the copied folder");
     check(fs::exists(source / L"nested" / L"data.txt"), "Undo of a folder copy changed its source project");
     controlKey(app, treeB, 'Y');
-    waitFor([&] { return fs::exists(destination / L"nested" / L"data.txt"); }, "Redo did not restore the copied folder");
+    waitFor([&] { return fs::exists(destinationFolder / L"nested" / L"data.txt"); }, "Redo did not restore the copied folder");
     checkContents();
+}
+void crossProjectFolderCopyTests(const fs::path& executable) {
+    copyFolderAcrossProjects(executable, false);
+    copyFolderAcrossProjects(executable, true);
 }
 void explorerMoveTests(const fs::path& executable) {
     Fixture fixture;

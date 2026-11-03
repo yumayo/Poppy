@@ -574,7 +574,7 @@ LRESULT Tree::handle(UINT m, WPARAM a, LPARAM b) {
             const bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
             if (!shift && a == 'A' && multipleSelection) { if (selectionChanged) selectionChanged(); model_.selectAll(false); changed(); return 0; }
             if (!shift && (a == 'C' || a == 'X')) {
-                if (copyRequested && selectionAllowed(a == 'X' ? canDrag : canCopy)) copyRequested(selections(true), a == 'X');
+                SendMessageW(window_, a == 'X' ? WM_CUT : WM_COPY, 0, 0);
                 return 0;
             }
             if (a == 'Z' || (a == 'Y' && !shift)) {
@@ -617,6 +617,9 @@ LRESULT Tree::handle(UINT m, WPARAM a, LPARAM b) {
         } else select(target);
         return 0;
     }
+    case WM_COPY: case WM_CUT:
+        if (copyRequested && selectionAllowed(m == WM_CUT ? canDrag : canCopy)) copyRequested(selections(true), m == WM_CUT);
+        return 0;
     case WM_PASTE:
         if (pasteFilesRequested && canPasteFiles && canPasteFiles(selection())) pasteFilesRequested(selection());
         else if (pasteImageRequested && (!canPasteImage || canPasteImage(selection()))) pasteImageRequested(selection());

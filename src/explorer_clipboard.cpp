@@ -1,8 +1,8 @@
 #include "explorer_clipboard.h"
+#include "explorer_clipboard_paths.h"
 #include <shellapi.h>
 #include <shlobj.h>
 #include <cstring>
-#include <algorithm>
 #include <stdexcept>
 
 namespace poppy {
@@ -18,7 +18,7 @@ bool put(UINT format, const void* bytes, size_t size) {
 }
 }
 bool clipboardHasFiles() { return IsClipboardFormatAvailable(resourceFormat()) || IsClipboardFormatAvailable(CF_HDROP); }
-ExplorerClipboard readExplorerClipboard(HWND owner) {
+ExplorerClipboard readExplorerClipboard(HWND owner, const ResourceId& destination) {
     ExplorerClipboard result;
     if (!OpenClipboard(owner)) return result;
     struct Close { ~Close() { CloseClipboard(); } } close;
@@ -46,8 +46,11 @@ ExplorerClipboard readExplorerClipboard(HWND owner) {
             const auto length = DragQueryFileW(drop, i, nullptr, 0);
             if (!length || length > 32767) { result.paths.clear(); return result; }
             std::wstring path(length + 1, 0); DragQueryFileW(drop, i, path.data(), length + 1); path.resize(length);
-            if (const auto location = wslUncLocation(utf8(path))) result.paths.push_back(ResourceId::wsl(location->distro, location->root));
-            else result.paths.emplace_back(fs::path(path));
+            try {
+                auto resource = explorerClipboardPath(path, destination);
+                if (!resource.is_absolute()) { result.paths.clear(); return result; }
+                result.paths.push_back(std::move(resource));
+            } catch (const std::exception&) { result.paths.clear(); return result; }
         }
     }
     const auto effect = GetClipboardData(effectFormat());
@@ -63,13 +66,9 @@ bool writeExplorerClipboard(HWND owner, const std::vector<ResourceId>& paths, bo
     bool shellPaths = true;
     for (const auto& path : paths) {
         resources += path.serialized(); resources.push_back(0);
-        auto name = path.native();
-        if (path.wsl()) {
-            if (name.find(L'\\') != name.npos) shellPaths = false;
-            std::replace(name.begin(), name.end(), L'/', L'\\');
-            name = L"\\\\wsl.localhost\\" + wide(path.location().distro) + name;
-        }
-        native += name; native.push_back(0);
+        const auto name = explorerShellPath(path);
+        if (!name) shellPaths = false;
+        else { native += *name; native.push_back(0); }
     }
     resources.push_back(0); native.push_back(0);
     if (resources.size() > 4 * 1024 * 1024 || !OpenClipboard(owner)) return false;

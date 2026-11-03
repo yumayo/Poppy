@@ -488,7 +488,12 @@ void ProjectRuntime::Impl::create() {
     explorer_.renameCommitted = [this](TreeItem item, const std::wstring& name) { renameFile(item, name); };
     explorer_.canDelete = [this](TreeItem item) { const auto n = node(item); return explorer_.canRename(item) && !gitStagePending_ && n && root_.contains(n->path) && pathKey(n->path) != pathKey(root_); };
     explorer_.deleteRequested = [this](const std::vector<TreeItem>& items) { deleteItems(items); };
-    explorer_.canCopy = [this](TreeItem item) { return explorer_.canDelete(item); };
+    explorer_.canCopy = [this](TreeItem item) {
+        const auto n = node(item);
+        return n && !n->unsupported && n->path.is_absolute() && !n->path.filename().empty() && root_.contains(n->path) &&
+            !renamePending_ && !pastePending_ && !createPending_ && !gitStagePending_ && !gitDiscardPending_ && !gitStashPending_ && !gitCommitPending_ &&
+            (!root_.wsl() || (connected_ && provider_->state() == ConnectionState::Ready));
+    };
     explorer_.copyRequested = [this](const std::vector<TreeItem>& items, bool cut) { copyItems(items, cut); };
     explorer_.canPasteFiles = [this](TreeItem item) { return canPasteImage(item) && !gitStagePending_ && clipboardHasFiles(); };
     explorer_.pasteFilesRequested = [this](TreeItem item) { pasteFiles(item); };
@@ -1655,7 +1660,7 @@ void ProjectRuntime::Impl::copyItems(const std::vector<TreeItem>& items, bool cu
 }
 void ProjectRuntime::Impl::pasteFiles(TreeItem item) {
     if (!explorer_.canPasteFiles(item)) return;
-    auto clipboard = readExplorerClipboard(window_);
+    auto clipboard = readExplorerClipboard(window_, root_);
     if (clipboard.paths.empty()) return;
     const auto target = node(item ? item : rootItem_);
     if (!target) return;
@@ -1667,8 +1672,7 @@ void ProjectRuntime::Impl::pasteFiles(TreeItem item) {
     std::set<std::wstring> clipboardPaths, sources;
     for (auto& source : clipboard.paths) { source = source.lexically_normal(); clipboardPaths.insert(pathKey(source)); }
     for (const auto& source : clipboard.paths) {
-        if (!source.is_absolute() || !source.sameAuthority(directory) || source.filename().empty() ||
-            pathKey(source) == pathKey(root_) || source.contains(directory)) {
+        if (!source.is_absolute() || !source.sameAuthority(directory) || source.filename().empty() || source.contains(directory)) {
             MessageBoxW(window_, L"Choose files or folders from the same Windows or WSL connection. A folder cannot be pasted into itself or its descendants.", L"Poppy — Paste", MB_OK | MB_ICONWARNING); return;
         }
         bool covered = false;
