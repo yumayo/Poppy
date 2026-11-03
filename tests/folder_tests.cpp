@@ -310,6 +310,99 @@ void answerTabSave(const Application& app, const std::wstring& filename, int ans
     send(dialog, WM_COMMAND, answer);
     waitFor([&] { return !IsWindow(dialog); }, "The tab save confirmation did not close");
 }
+void navigationHistoryTests(const fs::path& executable) {
+    Fixture fixture, other;
+    writeLines(fixture.root / L"a.txt", 200); writeLines(fixture.root / L"b.txt", 300);
+    writeLines(fixture.root / L"c.txt", 400); writeLines(other.root / L"d.txt", 500);
+    Application app(executable, fixture.root);
+    const auto tree = app.tree(), surface = app.window;
+    const auto left = FindWindowExW(surface, nullptr, L"PoppyViewer", nullptr);
+    const auto right = FindWindowExW(surface, left, L"PoppyViewer", nullptr);
+    waitFor([&] { return send(tree, treeGetCount) == 4; }, "Navigation fixture did not load");
+    const auto a = nextItem(tree, TreeRelation::Child, nextItem(tree, TreeRelation::Root));
+    const auto b = nextItem(tree, TreeRelation::Next, a), c = nextItem(tree, TreeRelation::Next, b);
+    const auto focused = [&](HWND expected) {
+        GUITHREADINFO info{}; info.cbSize = sizeof(info);
+        return GetGUIThreadInfo(app.process.dwThreadId, &info) && info.hwndFocus == expected;
+    };
+    const auto mouse = [](HWND target, bool forward) {
+        const auto button = MAKEWPARAM(0, forward ? XBUTTON2 : XBUTTON1);
+        check(PostMessageW(target, WM_XBUTTONDOWN, button, 0) && PostMessageW(target, WM_XBUTTONUP, button, 0),
+            "Cannot post navigation mouse buttons");
+    };
+    const auto command = [](HWND target, bool forward) {
+        const auto code = forward ? APPCOMMAND_BROWSER_FORWARD : APPCOMMAND_BROWSER_BACKWARD;
+        check(send(target, WM_APPCOMMAND, reinterpret_cast<WPARAM>(target), MAKELPARAM(0, code | FAPPCOMMAND_MOUSE)) == TRUE,
+            "Navigation app command was not handled");
+    };
+    send(tree, treeSelect, a); waitLines(left, 200);
+    send(left, WM_VSCROLL, SB_PAGEDOWN); const auto top = scrollInfo(left).nPos;
+    send(tree, treeSelect, b); waitLines(left, 300);
+    mouse(left, false); waitLines(left, 200);
+    check(visibleTabCount(app) == 1 && scrollInfo(left).nPos == top && focused(left),
+        "Back did not restore a replaced preview, its position and focus");
+    mouse(left, true); waitLines(left, 300);
+    command(tree, false); waitLines(left, 200);
+    send(tree, treeSelect, c); waitLines(left, 400); keepTab(app, 0);
+    send(app.host, WM_XBUTTONDOWN, MAKEWPARAM(0, XBUTTON2)); send(app.host, WM_XBUTTONUP, MAKEWPARAM(0, XBUTTON2));
+    waitLines(left, 400);
+    check(visibleTabCount(app) == 1, "A new activation retained Forward or accumulated previews");
+    send(tree, treeSelect, a); waitLines(left, 200); keepTab(app, 1);
+    send(tree, treeSelect, b); waitLines(left, 300);
+    clickTab(app, 1, false, true); // Close inactive a; all visits to it must be skipped.
+    command(left, false); waitLines(left, 400);
+    command(left, true); waitLines(left, 300);
+
+    const auto pane = bounds(surface, left);
+    const auto px = [dpi = GetDpiForWindow(surface)](int value) { return MulDiv(value, dpi, 96); };
+    dragTab(app, 0, {pane.left + (pane.right - pane.left) * 3 / 4, pane.top + px(80)});
+    waitFor([&] { return IsWindowVisible(right) != FALSE; }, "Navigation split did not open");
+    waitLines(right, 400); waitLines(left, 300);
+    click(left, px(30), px(40)); command(left, false);
+    waitFor([&] { return focused(right); }, "Back did not focus the right editor group");
+    command(right, true);
+    waitFor([&] { return focused(left); }, "Forward did not focus the left editor group");
+
+    const auto terminals = FindWindowExW(surface, nullptr, L"PoppyTerminalPane", nullptr);
+    const auto first = FindWindowExW(terminals, nullptr, L"PoppyTerminal", nullptr);
+    click(terminals, px(40), px(16));
+    RECT client{}; GetClientRect(terminals, &client); click(terminals, client.right - px(41), px(16));
+    const auto second = FindWindowExW(terminals, first, L"PoppyTerminal", nullptr);
+    check(second && focused(second), "Adding a terminal did not focus its session");
+    mouse(second, false);
+    waitFor([&] { return focused(first) && IsWindowVisible(first) && !IsWindowVisible(second); }, "Back did not select the first terminal");
+    command(first, false);
+    waitFor([&] { return focused(left); }, "Back did not move from Terminal to Editor");
+    controlShortcut(app, left, 'J', [&] { return !IsWindowVisible(terminals); }, "Cannot hide Terminal for navigation");
+    command(left, true);
+    waitFor([&] { return IsWindowVisible(terminals) && focused(first); }, "Forward did not reveal and focus Terminal");
+    command(first, true);
+    waitFor([&] { return focused(second); }, "Forward lost the second terminal");
+    check(PostMessageW(terminals, WM_CONTEXTMENU, reinterpret_cast<WPARAM>(terminals), MAKELPARAM(-1, -1)), "Cannot open the terminal menu");
+    waitFor([&] { GUITHREADINFO info{}; info.cbSize = sizeof(info); return GetGUIThreadInfo(app.process.dwThreadId, &info) && (info.flags & GUI_INMENUMODE); }, "Terminal menu did not open");
+    PostMessageW(terminals, WM_KEYDOWN, VK_END, 0); PostMessageW(terminals, WM_KEYDOWN, VK_RETURN, 0);
+    waitFor([&] { return !IsWindow(second); }, "Cannot close the second terminal");
+    command(first, false);
+    waitFor([&] { return focused(left); }, "Back did not skip the closed terminal and duplicate current session");
+
+    const auto path = other.root.native();
+    COPYDATASTRUCT data{0x50505901, static_cast<DWORD>((path.size() + 1) * sizeof(wchar_t)), const_cast<wchar_t*>(path.c_str())};
+    check(send(app.host, WM_COPYDATA, 0, reinterpret_cast<LPARAM>(&data)), "Cannot add a navigation project");
+    const auto otherTree = app.tree(), otherSurface = app.window;
+    const auto otherViewer = FindWindowExW(otherSurface, nullptr, L"PoppyViewer", nullptr);
+    waitFor([&] { return send(otherTree, treeGetCount) == 2; }, "Second navigation project did not load");
+    send(otherTree, treeSelect, nextItem(otherTree, TreeRelation::Child, nextItem(otherTree, TreeRelation::Root)));
+    waitLines(otherViewer, 500); mouse(otherViewer, false);
+    waitFor([&] { return IsWindowVisible(surface) && focused(left); }, "Back did not return to the previous project's editor");
+    command(left, true);
+    waitFor([&] { return IsWindowVisible(otherSurface) && focused(otherViewer); }, "Forward did not restore the next project's editor");
+    command(otherViewer, false);
+    waitFor([&] { return IsWindowVisible(surface) && focused(left); }, "Cannot return before closing a project");
+    click(app.host, px(60), px(44 + projectRowHeight + 24), true);
+    check(!IsWindow(otherSurface), "Navigation project did not close");
+    command(left, true);
+    check(IsWindowVisible(surface) && focused(left), "Forward reopened a closed project");
+}
 void previewTabTests(const fs::path& executable) {
     Fixture fixture;
     for (int i = 0; i < 3; ++i) writeLines(fixture.root / (std::wstring(1, L'a' + i) + L".txt"), 200 + i * 100);
@@ -3211,7 +3304,7 @@ int wmain(int argc, wchar_t** argv) {
     try {
         check(argc == 2, "Pass the path to Poppy.exe");
         SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
-        for (const auto test : {folderTests, explorerSortTests, sidebarTests, treeInteractionTests, collapseAllSidebarTests, previewTabTests, explorerPreviewTabTests, previewTabSplitTests, tabTests, rapidTabMiddleClickTests, pinnedTabTests,
+        for (const auto test : {folderTests, explorerSortTests, sidebarTests, treeInteractionTests, collapseAllSidebarTests, navigationHistoryTests, previewTabTests, explorerPreviewTabTests, previewTabSplitTests, tabTests, rapidTabMiddleClickTests, pinnedTabTests,
                 bulkTabCloseTests, bulkTabSaveTests, bulkTabSplitTests, explorerActiveFileTests, htmlTabToolsTests, editorTailTests,
                 tabDragTests, wrappingTabDragTests, wrappingTabTests, renameTests, explorerMoveTests, explorerDeleteTests, explorerMultipleSelectionTests, createItemTests, newFileShortcutTests, pasteImageTests, splitPaneTests, quickOpenTests, fullSearchTests, gitSidebarTests, gitIgnoredExplorerTests, gitAutoRefreshTests, editableGitDiffTests, branchSidebarTests, multiRepositoryTests, sessionTests, multiProjectTests, recentProjectTests, projectDragTests, scrollingProjectDragTests, terminalTitleTests, terminalShellTests, terminalShortcutTests, terminalBackspaceTests}) {
             Fixture appData; AppDataEnvironment environment(appData.root);

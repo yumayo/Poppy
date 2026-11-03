@@ -66,6 +66,7 @@ private:
     void open(fs::path path, bool select = true);
     void open(ResourceId path, bool select = true);
     void select(size_t index, bool attention = false);
+    void navigate(bool forward);
     void close(size_t index);
     void tick();
     void animateAiStatus();
@@ -99,6 +100,7 @@ private:
     std::unique_ptr<Storage> storage_;
     std::vector<OpenProject> projects_;
     std::vector<ResourceId> history_;
+    NavigationHistory navigation_;
     std::optional<ProjectDrag> projectDrag_;
     AppSession session_;
     std::vector<fs::path> pendingProjects_;
@@ -132,6 +134,11 @@ int Workspace::run(HINSTANCE instance,int show,const StartupOptions& options,Sin
         constexpr UINT uiMessages = PM_REMOVE | ((QS_INPUT | QS_PAINT | QS_TIMER) << 16);
         if (!PeekMessageW(&message, nullptr, 0, 0, uiMessages) && GetMessageW(&message, nullptr, 0, 0) <= 0) break;
         if (message.message == WM_QUIT) break;
+        if ((message.hwnd == window_ || IsChild(window_, message.hwnd)) &&
+            (message.message == WM_XBUTTONDOWN || message.message == WM_XBUTTONUP || message.message == WM_XBUTTONDBLCLK)) {
+            if (message.message != WM_XBUTTONUP) navigate(GET_XBUTTON_WPARAM(message.wParam) == XBUTTON2);
+            continue;
+        }
         if(recent_.visible() && message.hwnd!=recent_.window() &&
             (message.message==WM_LBUTTONDOWN || message.message==WM_MBUTTONDOWN || message.message==WM_RBUTTONDOWN))recent_.close();
         // Application shortcuts must not intercept input destined for a terminal.
@@ -283,6 +290,10 @@ void Workspace::open(ResourceId path,bool shouldSelect){
     project.runtime->openFolder=[this](const fs::path& folder){open(folder);};
     project.runtime->chooseProject=[this]{choose();};
     project.runtime->changed=[this, id = project.id]{ if (auto project = find(id)) { project->dirty = true; project->changedAt = GetTickCount64(); } InvalidateRect(window_,nullptr,FALSE); };
+    project.runtime->activated = [this, id = project.id](NavigationTarget target) {
+        if (closing_ || projects_.empty() || projects_[active_].id != id) return;
+        target.project = id; navigation_.visit(std::move(target));
+    };
     project.runtime->error = [this, id = project.id](const std::string& key, const std::wstring& title, const std::wstring& message) {
         if (!closing_) errors_.show(window_, std::to_string(id) + ":" + key, title, message, dpi_);
     };
@@ -350,6 +361,16 @@ void Workspace::trimDocuments() {
         if (!oldest) break;
         total -= oldest->runtime->documentBytes(); oldest->runtime->releaseDocument();
     }
+}
+void Workspace::navigate(bool forward) {
+    if (closing_) return;
+    navigation_.move(forward, [this](const NavigationTarget& target) {
+        auto project = find(target.project);
+        if (!project || !project->runtime->canNavigate(target)) return false;
+        recent_.close(false); endProjectDrag();
+        select(static_cast<size_t>(project - projects_.data()));
+        project->runtime->navigate(target); markDirty(); return true;
+    });
 }
 void Workspace::save(OpenProject& project){
     if(!project.runtime->ready()||!project.storageAvailable)return;
@@ -577,6 +598,9 @@ case wmAiEvent:for(const auto& event:events_.drain())for(auto& project:projects_
 case WM_TIMER:if(closing_)return 0;if(a==77)Terminal::pump();else if(a==aiAnimationTimerId)animateAiStatus();else if(a==1)tick();return 0;
 case WM_ACTIVATE:if(closing_)return 0;if(LOWORD(a)==WA_INACTIVE)endProjectDrag();else if(!projects_.empty())PostMessageW(projects_[active_].runtime->window(),WM_APP+12,0,0);return 0;
 case WM_SETFOCUS:if(closing_)return 0;if(!projects_.empty())projects_[active_].runtime->activate(true);return 0;
+case WM_XBUTTONDOWN:case WM_XBUTTONDBLCLK:navigate(GET_XBUTTON_WPARAM(a)==XBUTTON2);return TRUE;
+case WM_XBUTTONUP:return TRUE;
+case WM_APPCOMMAND:{const auto command=GET_APPCOMMAND_LPARAM(b);if(command==APPCOMMAND_BROWSER_BACKWARD||command==APPCOMMAND_BROWSER_FORWARD){navigate(command==APPCOMMAND_BROWSER_FORWARD);return TRUE;}break;}
 case WM_LBUTTONDOWN:{recent_.close();endProjectDrag();const POINT point{GET_X_LPARAM(b),GET_Y_LPARAM(b)};const auto addButton=addButtonBounds();const int width=px(session_.projectListWidth);if(point.x>=width&&point.x<width+px(5)){dragging_=true;SetCapture(window_);}else if(PtInRect(&addButton,point))choose();else if(const auto index=hit(point);index<projects_.size()){select(index,point.x<px(30));projectDrag_=ProjectDrag{projects_[index].id,point,point,false,std::nullopt};SetCapture(window_);}return 0;}
 case WM_MOUSEMOVE:if(projectDrag_){updateProjectDrag({GET_X_LPARAM(b),GET_Y_LPARAM(b)});return 0;}if(dragging_){session_.projectListWidth=std::clamp(MulDiv(GET_X_LPARAM(b),96,dpi_),100,600);appDirty_=true;appChanged_=GetTickCount64();layout();}return 0;
 case WM_LBUTTONUP:if(projectDrag_&&projectDrag_->active)updateProjectDrag({GET_X_LPARAM(b),GET_Y_LPARAM(b)});endProjectDrag(true);dragging_=false;if(GetCapture()==window_)ReleaseCapture();return 0;

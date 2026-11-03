@@ -40,7 +40,10 @@ void TerminalPane::add(SavedTerminal configuration) {
     session->terminal->titleChanged = [this] { layout(); };
     session->terminal->focused = [this, ptr] {
         const auto found = std::find_if(sessions_.begin(), sessions_.end(), [ptr](const auto& s) { return s.get() == ptr; });
-        if (found != sessions_.end()) { active_ = static_cast<size_t>(found - sessions_.begin()); acknowledge(); InvalidateRect(window_, nullptr, FALSE); }
+        if (found != sessions_.end()) {
+            active_ = static_cast<size_t>(found - sessions_.begin()); acknowledge(); InvalidateRect(window_, nullptr, FALSE);
+            if (activated) activated(ptr->configuration.id);
+        }
     };
     session->terminal->starting = [this,ptr]() -> Terminal::StartupTask {
         ptr->ai = {}; ptr->notificationError.clear(); ptr->reportedErrors.clear();
@@ -178,6 +181,14 @@ void TerminalPane::focusAttention() {
     for (size_t i = 0; i < sessions_.size(); ++i) if (sessions_[i]->ai.detected && sessions_[i]->ai.state == state) { select(i); break; }
     SetFocus(window());
 }
+bool TerminalPane::hasSession(const std::string& id) const {
+    return std::any_of(sessions_.begin(), sessions_.end(), [&](const auto& session) { return session->configuration.id == id; });
+}
+void TerminalPane::activateSession(const std::string& id) {
+    const auto found = std::find_if(sessions_.begin(), sessions_.end(), [&](const auto& session) { return session->configuration.id == id; });
+    if (found == sessions_.end()) return;
+    select(static_cast<size_t>(found - sessions_.begin())); SetFocus(window());
+}
 void TerminalPane::acknowledge() { if(IsWindowVisible(window_) && GetForegroundWindow()==GetAncestor(window_,GA_ROOT) && !IsIconic(GetAncestor(window_,GA_ROOT))) for (const auto& session : sessions_) if (session->configuration.displayed) session->ai.acknowledge(); }
 bool TerminalPane::animateAiStatus() {
     if (!IsWindowVisible(window_)) return false;
@@ -214,6 +225,7 @@ void TerminalPane::select(size_t index) {
     for (auto& s : sessions_) if (s->configuration.group == group) s->configuration.displayed = false;
     active().configuration.displayed = true;
     layout(); acknowledge(); if(changed)changed();
+    if (activated) activated(active().configuration.id);
 }
 void TerminalPane::close(size_t index) {
     if(index>=sessions_.size())return;

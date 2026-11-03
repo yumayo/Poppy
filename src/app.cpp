@@ -328,6 +328,7 @@ private:
     void pasteImage(TreeItem item);
     wchar_t stateFor(const ResourceId& path) const;
     void openFile(const ResourceId& path, bool diff = false);
+    void recordEditorNavigation();
     void openContentResult(const ContentMatch& match, const std::string& query, bool matchCase);
     void applyContentResult(size_t index);
     void openWithDefaultApp(ResourceId path);
@@ -427,6 +428,8 @@ private:
     std::map<std::wstring, ResourceId> pendingTreeSelections_;
     bool waitingForGit_[2]{};
     std::vector<Tab> tabs_;
+    std::vector<std::weak_ptr<EditorNavigation>> navigationTabs_;
+    bool restoringProject_ = true;
     std::vector<RECT> tabRects_;
     std::vector<size_t> visibleTabs_;
     size_t activeTab_ = 0, tabTools_ = 0;
@@ -658,11 +661,15 @@ void ProjectRuntime::Impl::create() {
             focusedGroup_ = group; if (groupTab(group) < tabs_.size()) activeTab_ = groupTab(group);
             if (changed) revealActiveFile();
             updateTabs(false);
+            recordEditorNavigation();
         };
     }
     terminal_.create(window_, instance_);
     dropPreview_.create(window_, instance_);
     terminal_.changed = [this] { if (owner_ && owner_->changed) owner_->changed(); };
+    terminal_.activated = [this](const std::string& id) {
+        if (active_ && !restoringProject_ && owner_ && owner_->activated) owner_->activated({0, {}, id});
+    };
     terminal_.error = [this](const std::string& key, const std::wstring& title, const std::wstring& message) {
         if (owner_ && owner_->error) owner_->error(key, title, root_.native() + L"\n\n" + message);
     };
@@ -1865,6 +1872,13 @@ void ProjectRuntime::Impl::applyRelocation(const ResourceId& source, const Resou
         tab.path = path;
         if (tab.buffer) { tab.buffer->document.language = path.filename() == L"CMakeLists.txt" ? Language::Config : languageFor(utf8(path.extension().native())); indexDocument(tab.buffer->document); }
     }
+    for (const auto& weak : navigationTabs_) if (const auto entry = weak.lock()) {
+        auto& tab = entry->tab;
+        const auto gitRoot = relocateResource(tab.gitRoot, source, destination);
+        const bool repositoryMoved = pathKey(gitRoot) != pathKey(tab.gitRoot);
+        tab.gitRoot = gitRoot;
+        if (tab.diffKind != GitDiffKind::Commit || repositoryMoved) tab.path = relocateResource(tab.path, source, destination);
+    }
     terminal_.relocate(source, destination);
     if (refreshView) { layout(); refresh(); }
 }
@@ -1947,6 +1961,7 @@ TreeItem ProjectRuntime::Impl::insert(TreeItem parent, const Entry& entry) {
     return item;
 }
 void ProjectRuntime::Impl::openFolder(ResourceId path) {
+    restoringProject_ = true;
     quickOpen_.close();
     endTabDrag();
     root_ = std::move(path); provider_ = createProjectProvider(root_); connected_ = !root_.wsl();
@@ -1964,6 +1979,7 @@ void ProjectRuntime::Impl::openFolder(ResourceId path) {
     SetWindowTextW(window_, (L"Poppy — " + root_.native()).c_str()); status(L"F5: refresh  ·  F6: diff  ·  Ctrl+J: terminal"); InvalidateRect(window_, nullptr, FALSE);
     if (root_.wsl() && active_) connectRemote();
     if (!tabs_.empty()) { if (activeTab_ < tabs_.size()) { focusedGroup_ = tabs_[activeTab_].group; for (auto& tab : tabs_) if (tab.group == focusedGroup_) tab.displayed = false; tabs_[activeTab_].displayed = true; } normalizeGroups(); layout(false); loadTab(false, 0); loadTab(false, 1); }
+    restoringProject_ = false;
 }
 void ProjectRuntime::Impl::connectRemote() {
     if (connecting_ || !provider_ || !root_.wsl()) return;
@@ -1987,6 +2003,10 @@ void ProjectRuntime::Impl::connectRemote() {
                 pendingTreeSelection_ = relocateResource(pendingTreeSelection_, previous, root_);
                 pendingExplorerFile_ = relocateResource(pendingExplorerFile_, previous, root_);
                 for (auto& tab : tabs_) { tab.path = relocateResource(tab.path, previous, root_); tab.gitRoot = relocateResource(tab.gitRoot, previous, root_); }
+                for (const auto& weak : navigationTabs_) if (const auto entry = weak.lock()) {
+                    entry->tab.path = relocateResource(entry->tab.path, previous, root_);
+                    entry->tab.gitRoot = relocateResource(entry->tab.gitRoot, previous, root_);
+                }
                 for (const auto& pair : nodes_) if (auto n = node(pair.second)) { n->path = relocateResource(n->path, previous, root_); n->loading = false; updateLabel(pair.second); }
                 terminal_.relocate(previous, root_); terminal_.setDirectory(root_); quickOpen_.setRoot(root_); searchPane_.setContext(root_, provider_);
                 fileDirty_ = true; requestDirectory(rootItem_); refresh(false); status(L"WSL connected · " + wide(root_.location().distro));
@@ -2315,6 +2335,7 @@ void ProjectRuntime::Impl::saveTab() {
         if (view.buffer()) tab.buffer = view.buffer();
     }
     keepModifiedEditorTabs(tabs_);
+    for (auto& tab : tabs_) if (tab.navigation) rememberEditorTab(tab);
 }
 std::shared_ptr<EditBuffer> ProjectRuntime::Impl::shareBuffer(const ResourceId& path, std::shared_ptr<EditBuffer> loaded) {
     std::shared_ptr<EditBuffer> buffer;
@@ -2371,11 +2392,12 @@ void ProjectRuntime::Impl::openFile(const ResourceId& path, bool diff) {
     const auto key = pathKey(path);
     const auto found = std::find_if(tabs_.begin(), tabs_.end(), [&](const Tab& tab) { return tab.diffKind == GitDiffKind::Automatic && pathKey(tab.path) == key; });
     size_t index = static_cast<size_t>(found - tabs_.begin());
-    if (found != tabs_.end() && index == activeTab_ && (!diff || found->diff)) { revealActiveFile(); updateTabs(); return; }
+    if (found != tabs_.end() && index == activeTab_ && (!diff || found->diff)) { revealActiveFile(); updateTabs(); recordEditorNavigation(); return; }
     saveTab();
     if (found == tabs_.end()) { Tab tab; tab.path = path; tab.diff = diff; tab.group = focusedGroup_; index = openEditorPreview(tabs_, std::move(tab)); }
     else if (diff) found->diff = true;
     focusedGroup_ = tabs_[index].group; for (auto& tab : tabs_) if (tab.group == focusedGroup_) tab.displayed = false; tabs_[index].displayed = true; activeTab_ = index; layout(); loadTab();
+    recordEditorNavigation();
 }
 void ProjectRuntime::Impl::openContentResult(const ContentMatch& match, const std::string& query, bool matchCase) {
     const auto path = (root_ / std::string_view(match.relative)).lexically_normal();
@@ -2388,6 +2410,7 @@ void ProjectRuntime::Impl::openContentResult(const ContentMatch& match, const st
     focusedGroup_ = tab.group;
     for (auto& current : tabs_) if (current.group == focusedGroup_) current.displayed = false;
     tab.displayed = true; activeTab_ = index; layout(); loadTab(false, focusedGroup_); SetFocus(viewer().window());
+    recordEditorNavigation();
 }
 void ProjectRuntime::Impl::applyContentResult(size_t index) {
     if (index >= tabs_.size() || !tabs_[index].searchTarget) return;
@@ -2403,12 +2426,24 @@ void ProjectRuntime::Impl::openGitDiff(const ResourceId& path, GitDiffKind kind,
     focusedGroup_ = tabs_[index].group;
     for (auto& tab : tabs_) if (tab.group == focusedGroup_) tab.displayed = false;
     tabs_[index].displayed = true; activeTab_ = index; layout(); loadTab();
+    recordEditorNavigation();
+}
+void ProjectRuntime::Impl::recordEditorNavigation() {
+    if (!active_ || restoringProject_ || activeTab_ >= tabs_.size() || !owner_ || !owner_->activated) return;
+    auto& tab = tabs_[activeTab_];
+    if (!tab.navigation) {
+        rememberEditorTab(tab);
+        navigationTabs_.erase(std::remove_if(navigationTabs_.begin(), navigationTabs_.end(), [](const auto& item) { return item.expired(); }), navigationTabs_.end());
+        navigationTabs_.push_back(tab.navigation);
+    } else rememberEditorTab(tab);
+    owner_->activated({0, tab.navigation, {}});
 }
 void ProjectRuntime::Impl::selectTab(size_t index) {
     endTabDrag();
     if (index >= tabs_.size()) return;
-    if (index == activeTab_) { revealActiveFile(); return; }
+    if (index == activeTab_) { revealActiveFile(); recordEditorNavigation(); return; }
     saveTab(); focusedGroup_ = tabs_[index].group; for (auto& tab : tabs_) if (tab.group == focusedGroup_) tab.displayed = false; tabs_[index].displayed = true; activeTab_ = index; updateTabs(); loadTab();
+    recordEditorNavigation();
 }
 void ProjectRuntime::Impl::closeTab(size_t index) {
     closeTabs({index});
@@ -2431,7 +2466,12 @@ void ProjectRuntime::Impl::closeTabs(const std::vector<size_t>& indices) {
         for (size_t i = 0; i < tabs_.size(); ++i) if (tabs_[i].group == group && !closing[i]) { replacement = i; if (i >= selected) break; }
         if (replacement < tabs_.size()) tabs_[replacement].displayed = true;
     }
-    for (size_t i = tabs_.size(); i-- > 0;) if (closing[i]) tabs_.erase(tabs_.begin() + static_cast<std::ptrdiff_t>(i));
+    for (size_t i = tabs_.size(); i-- > 0;) if (closing[i]) {
+        const auto key = tabKey(tabs_[i]);
+        for (const auto& weak : navigationTabs_) if (const auto entry = weak.lock())
+            if (tabKey(entry->tab) == key) entry->closed = true;
+        tabs_.erase(tabs_.begin() + static_cast<std::ptrdiff_t>(i));
+    }
     if (activeSidebar_ == Sidebar::Search) searchPane_.refresh();
     layout();
     if (active) {
@@ -2441,6 +2481,7 @@ void ProjectRuntime::Impl::closeTabs(const std::vector<size_t>& indices) {
         else { viewer().message(L"Select a file on the left.\n\nEdit here and save with Ctrl+S, or use your AI CLI in the terminal."); status(L"Ready"); }
     }
     SetFocus(viewer().window());
+    recordEditorNavigation();
 }
 void ProjectRuntime::Impl::toggleTabPin(size_t index) {
     endTabDrag();
@@ -3110,6 +3151,9 @@ void ProjectRuntime::activate(bool active) {
             focus = impl_->focusedPane_ == "terminal" && impl_->terminalVisible_ ? impl_->terminal_.window() : impl_->focusedPane_ == "explorer" && IsWindowVisible(impl_->tree_) ? impl_->tree_ : impl_->focusedPane_ == "git" && IsWindowVisible(impl_->gitTree_) ? impl_->gitTree_ : impl_->viewer().window();
         }
         SetFocus(focus); impl_->terminal_.acknowledge(); PostMessageW(window(), WM_APP+12, 0, 0);
+        if (!impl_->restoringProject_ && focus == impl_->terminal_.window() && activated)
+            activated({0, {}, impl_->terminal_.activeSessionId()});
+        else if (focus == impl_->viewer().window() || IsChild(impl_->viewer().window(), focus)) impl_->recordEditorNavigation();
     }
 }
 void ProjectRuntime::setDpi(UINT dpi) { impl_->dpi(dpi); }
@@ -3122,6 +3166,33 @@ AiSummary ProjectRuntime::summary() const { return impl_->terminal_.summary(); }
 std::wstring ProjectRuntime::description() const { return (impl_->root_.wsl() ? L"\n" + (impl_->connectionError_.empty() ? impl_->provider_->error() : impl_->connectionError_) + (impl_->watchLimited_ ? L"\n" + watchLimitMessage(impl_->watchUsage_) : L"") : L"") + impl_->terminal_.description(); }
 bool ProjectRuntime::apply(const AiEvent& event) { return impl_->terminal_.apply(event); }
 void ProjectRuntime::focusAttention() { impl_->terminalVisible_ = true; impl_->layout(false); impl_->terminal_.focusAttention(); }
+bool ProjectRuntime::canNavigate(const NavigationTarget& target) const {
+    return ready() && (target.editor ? !target.editor->closed : impl_->terminal_.hasSession(target.terminal));
+}
+void ProjectRuntime::navigate(const NavigationTarget& target) {
+    if (!canNavigate(target)) return;
+    if (!target.editor) {
+        impl_->terminalVisible_ = true; impl_->layout(false); impl_->terminal_.activateSession(target.terminal); return;
+    }
+    impl_->saveTab();
+    auto found = std::find_if(impl_->tabs_.begin(), impl_->tabs_.end(), [&](const Tab& tab) {
+        return tab.navigation == target.editor || sameEditorTab(tab, target.editor->tab);
+    });
+    size_t index = static_cast<size_t>(found - impl_->tabs_.begin());
+    if (found == impl_->tabs_.end()) {
+        auto tab = target.editor->tab; tab.navigation = target.editor;
+        // A previously split group may have disappeared while this preview was hidden.
+        if (impl_->groupTab(tab.group) == impl_->tabs_.size()) tab.group = impl_->focusedGroup_;
+        index = openEditorPreview(impl_->tabs_, std::move(tab));
+        impl_->tabs_[index].navigation = target.editor;
+        // The replacement can occupy the active index, but needs a fresh document.
+        impl_->focusedGroup_ = impl_->tabs_[index].group;
+        for (auto& current : impl_->tabs_) if (current.group == impl_->focusedGroup_) current.displayed = false;
+        impl_->tabs_[index].displayed = true; impl_->activeTab_ = index;
+        impl_->layout(); impl_->loadTab();
+    } else impl_->selectTab(index);
+    SetFocus(impl_->viewer().window());
+}
 size_t ProjectRuntime::documentBytes() const {
     if (std::any_of(impl_->tabs_.begin(), impl_->tabs_.end(), [](const Tab& tab) { return tab.buffer && (tab.buffer->dirty() || tab.buffer->saving); })) return 0;
     size_t bytes = 0; for (const auto& view : impl_->viewers_) bytes += view.documentBytes();

@@ -2,16 +2,26 @@
 #include <algorithm>
 
 namespace poppy {
+void rememberEditorTab(EditorTab& tab) {
+    if (!tab.navigation) tab.navigation = std::make_shared<EditorNavigation>();
+    auto& saved = tab.navigation->tab;
+    saved = tab;
+    saved.navigation.reset();
+    saved.buffer.reset(); saved.diffBefore.reset(); saved.searchTarget.reset();
+}
 void keepModifiedEditorTabs(std::vector<EditorTab>& tabs) {
     for (auto& tab : tabs)
         if (tab.pinned || (tab.buffer && (tab.buffer->dirty() || tab.buffer->saving))) tab.preview = false;
 }
+bool sameEditorTab(const EditorTab& left, const EditorTab& right) {
+    return left.path.key() == right.path.key() && left.diffKind == right.diffKind && left.revision == right.revision &&
+        (left.diffKind != GitDiffKind::Commit || left.diff == right.diff) &&
+        left.allChanges == right.allChanges && left.gitRoot.key() == right.gitRoot.key();
+}
 size_t openEditorPreview(std::vector<EditorTab>& tabs, EditorTab target) {
     keepModifiedEditorTabs(tabs);
     const auto found = std::find_if(tabs.begin(), tabs.end(), [&](const EditorTab& tab) {
-        return tab.path.key() == target.path.key() && tab.diffKind == target.diffKind && tab.revision == target.revision &&
-            (tab.diffKind != GitDiffKind::Commit || tab.diff == target.diff) &&
-            tab.allChanges == target.allChanges && tab.gitRoot.key() == target.gitRoot.key();
+        return sameEditorTab(tab, target);
     });
     if (found != tabs.end()) return static_cast<size_t>(found - tabs.begin());
     target.preview = true;

@@ -40,6 +40,9 @@ public:
     bool animateAiStatus();
     void pollNotifications();
     void focusAttention();
+    bool hasSession(const std::string& id) const;
+    void activateSession(const std::string& id);
+    const std::string& activeSessionId() const { return active().configuration.id; }
     AiSummary summary() const;
     std::wstring description() const;
     void stop(ShutdownDialog* progress = nullptr);
@@ -48,6 +51,7 @@ public:
     HWND window() const { return active().terminal->window(); }
     HWND container() const { return window_; }
     std::function<void()> changed;
+    std::function<void(const std::string&)> activated;
     std::function<void(const std::string&, const std::wstring&, const std::wstring&)> error;
 private:
     static LRESULT CALLBACK procedure(HWND, UINT, WPARAM, LPARAM);

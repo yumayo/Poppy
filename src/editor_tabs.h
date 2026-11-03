@@ -7,6 +7,7 @@
 #include <optional>
 
 namespace poppy {
+struct EditorNavigation;
 struct EditorTab {
     ResourceId path; bool diff = false; ViewState fileView, diffView; bool pinned = false;
     std::shared_ptr<EditBuffer> buffer; int group = 0; bool displayed = false;
@@ -16,7 +17,16 @@ struct EditorTab {
     std::shared_ptr<const Document> diffBefore = {};
     // Restored tabs stay permanent; only newly opened tabs start as previews.
     bool preview = false;
+    std::shared_ptr<EditorNavigation> navigation = {};
 };
+
+// History retains metadata only, including previews replaced by another file.
+struct EditorNavigation {
+    EditorTab tab;
+    bool closed = false;
+};
+void rememberEditorTab(EditorTab& tab);
+bool sameEditorTab(const EditorTab& left, const EditorTab& right);
 
 // Reuse an existing tab, or replace the clean preview in the target group.
 size_t openEditorPreview(std::vector<EditorTab>& tabs, EditorTab target);

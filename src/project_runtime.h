@@ -2,6 +2,7 @@
 #include "render.h"
 #include "session.h"
 #include "ai_status_win.h"
+#include "navigation_history.h"
 #include <memory>
 
 namespace poppy {
@@ -30,6 +31,8 @@ public:
     std::wstring description() const;
     bool apply(const AiEvent& event);
     void focusAttention();
+    bool canNavigate(const NavigationTarget& target) const;
+    void navigate(const NavigationTarget& target);
     size_t documentBytes() const;
     void releaseDocument();
     HWND window() const;
@@ -40,6 +43,7 @@ public:
     std::function<void()> chooseProject;
     std::function<void(const ResourceId&)> resolved;
     std::function<void()> changed;
+    std::function<void(NavigationTarget)> activated;
     std::function<void(const std::string&, const std::wstring&, const std::wstring&)> error;
 private:
     class Impl;
