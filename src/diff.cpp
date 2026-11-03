@@ -81,6 +81,21 @@ std::string diffHeaderPath(std::string_view text) {
     if (separator == text.npos) separator = text.rfind(" \"b/");
     return sourcePath(separator == text.npos ? text : text.substr(separator + 1));
 }
+void updateDiffColumns(DiffDocument& document) {
+    document.maxColumns = 0;
+    for (const auto& row : document.rows) {
+        if (row.heading) document.maxColumns = std::max(document.maxColumns,
+            static_cast<uint32_t>(std::min(document.patch.line(row.heading - 1).size(), maxLineColumns)));
+        for (const auto source : {row.before, row.after}) {
+            const auto text = document.line(source); uint32_t columns = 0;
+            for (size_t p = 0; p < text.size() && columns < maxLineColumns;) {
+                const auto c = decodeUtf8(text, p);
+                columns += c == '\t' ? 4 - columns % 4 : std::max(1, cellWidth(c));
+            }
+            document.maxColumns = std::max(document.maxColumns, columns);
+        }
+    }
+}
 }
 std::string_view DiffDocument::line(DiffLine source) const {
     return source.number ? patch.line(source.row).substr(1) : std::string_view{};
@@ -225,7 +240,6 @@ void indexDiff(DiffDocument& d, bool fileHeadings, bool fileDetails) {
              text.substr(0, 11) == "Empty file " || text.substr(0, 12) == "rename from " || text.substr(0, 10) == "rename to ")))) {
             d.inlineOrder.push_back(static_cast<uint32_t>(d.rows.size() * 2));
             d.rows.push_back({{}, {}, false, static_cast<uint32_t>(row + 1)});
-            d.maxColumns = std::max(d.maxColumns, static_cast<uint32_t>(std::min(text.size(), maxLineColumns)));
             continue;
         }
         if (text.substr(0, 3) == "@@ ") {
@@ -254,14 +268,7 @@ void indexDiff(DiffDocument& d, bool fileHeadings, bool fileDetails) {
         if (!beforeCount && !afterCount) flush();
     }
     flush();
-    for (const auto& row : d.rows) for (const auto source : {row.before, row.after}) {
-        const auto text = d.line(source); uint32_t columns = 0;
-        for (size_t p = 0; p < text.size() && columns < maxLineColumns;) {
-            const auto c = decodeUtf8(text, p);
-            columns += c == '\t' ? 4 - columns % 4 : std::max(1, cellWidth(c));
-        }
-        d.maxColumns = std::max(d.maxColumns, columns);
-    }
+    updateDiffColumns(d);
 }
 
 void orderDiffFiles(DiffDocument& document, const std::vector<std::string>& paths) {
@@ -306,6 +313,39 @@ void hideDiffFiles(DiffDocument& document, const std::vector<std::string>& paths
     patch.append(document.patch.text, begin, document.patch.text.size() - begin);
     document.patch.text = std::move(patch);
     indexDiff(document, true);
+}
+
+void limitDiffContext(DiffDocument& document, size_t context) {
+    std::vector<bool> keep(document.rows.size());
+    size_t remaining = 0;
+    for (size_t i = 0; i < document.rows.size(); ++i) {
+        const auto& row = document.rows[i];
+        keep[i] = row.heading || row.changed;
+        if (row.heading) remaining = 0;
+        else if (row.changed) remaining = context;
+        else if (remaining) { keep[i] = true; --remaining; }
+    }
+    remaining = 0;
+    for (size_t i = document.rows.size(); i > 0; --i) {
+        const auto& row = document.rows[i - 1];
+        if (row.heading) remaining = 0;
+        else if (row.changed) remaining = context;
+        else if (remaining) { keep[i - 1] = true; --remaining; }
+    }
+    const auto omitted = std::numeric_limits<uint32_t>::max();
+    std::vector<uint32_t> positions(document.rows.size(), omitted);
+    size_t count = 0;
+    for (size_t i = 0; i < document.rows.size(); ++i) if (keep[i]) {
+        positions[i] = static_cast<uint32_t>(count);
+        document.rows[count++] = document.rows[i];
+    }
+    document.rows.resize(count);
+    count = 0;
+    for (const auto entry : document.inlineOrder) if (positions[entry / 2] != omitted)
+        document.inlineOrder[count++] = positions[entry / 2] * 2 + entry % 2;
+    document.inlineOrder.resize(count);
+    for (auto& file : document.files) file.row = positions[file.row];
+    updateDiffColumns(document);
 }
 
 std::optional<size_t> DiffDocument::workingOffset(size_t offset) const {

@@ -2640,6 +2640,7 @@ void ProjectRuntime::Impl::loadTab(bool preserve, int group) {
                 }
                 orderDiffFiles(*doc, order);
                 hideDiffFiles(*doc, hidden);
+                limitDiffContext(*doc);
             }
         }
         std::shared_ptr<Document> revisionDocument;

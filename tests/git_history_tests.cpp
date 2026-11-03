@@ -944,21 +944,26 @@ void repositoryRevisions() {
         complete.patch.text = repo.git(gitDiffArguments(GitDiffKind::Commit, revision,
             allChanges ? "" : renamed, allChanges ? "" : original));
         indexDiff(complete, allChanges, true);
+        if (allChanges) limitDiffContext(complete);
         for (const bool inlineView : {false, true}) {
             size_t beforeLine = 0, afterLine = 0;
             for (size_t i = 0; i < complete.rowCount(inlineView); ++i) {
                 const auto row = complete.displayRow(i, inlineView);
                 if (row.before.number) {
-                    check(row.before.number == ++beforeLine && complete.line(row.before) == beforeDocument.line(beforeLine - 1),
-                        "Historical diffs skipped or changed a before-side line");
+                    ++beforeLine;
+                    check(complete.line(row.before) == beforeDocument.line(row.before.number - 1) && (allChanges ?
+                        (row.before.number >= 18 && row.before.number <= 24) || (row.before.number >= 28 && row.before.number <= 34) :
+                        row.before.number == beforeLine), "Historical diffs lost before-side context or original source numbers");
                 }
                 if (row.after.number) {
-                    check(row.after.number == ++afterLine && complete.line(row.after) == afterDocument.line(afterLine - 1),
-                        "Historical diffs skipped or changed an after-side line");
+                    ++afterLine;
+                    check(complete.line(row.after) == afterDocument.line(row.after.number - 1) && (allChanges ?
+                        (row.after.number >= 18 && row.after.number <= 25) || (row.after.number >= 29 && row.after.number <= 34) :
+                        row.after.number == afterLine), "Historical diffs lost after-side context or original source numbers");
                 }
             }
-            check(beforeLine == 40 && afterLine == 40,
-                "Individual and All Changes historical diffs must include the full file in Inline and Split");
+            check(beforeLine == (allChanges ? 14u : 40u) && afterLine == beforeLine,
+                "Historical diffs must show the full individual file and three context lines in All Changes");
         }
     }
     repo.git({"rm", "-f", renamed}); repo.git({"commit", "-qm", "delete"});

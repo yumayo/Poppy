@@ -44,6 +44,10 @@ void indexDiff(DiffDocument& document, bool fileHeadings = false, bool fileDetai
 void orderDiffFiles(DiffDocument& document, const std::vector<std::string>& paths);
 // Remove complete file patches, including headings and metadata, then reindex.
 void hideDiffFiles(DiffDocument& document, const std::vector<std::string>& paths);
+// Limit a read-only comparison to changes and nearby unchanged source lines.
+// Apply after ordering/hiding files. Keep the full patch and its lexer states
+// so omitted lines do not change highlighting, source numbers or byte offsets.
+void limitDiffContext(DiffDocument& document, size_t context = 3);
 DiffDocument workingDiff(const Document& before, const Document& after);
 // One flag per working line, using the same alignment as the editable diff.
 // Deleted lines have no working row; unchanged EOF caret rows stay unmarked.

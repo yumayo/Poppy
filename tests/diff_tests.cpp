@@ -390,6 +390,114 @@ void multilineSyntax() {
     check(styleAt(hunks, hunks.rows[1].before, 0) == Style::Keyword && styleAt(hunks, hunks.rows[1].after, 0) == Style::Keyword,
         "Lexer state must not leak across omitted source ranges");
 }
+void surroundingContext() {
+    DiffDocument full;
+    full.patch.text = "diff --git a/many.cpp b/many.cpp\n--- a/many.cpp\n+++ b/many.cpp\n@@ -1,40 +1,40 @@\n";
+    for (int line = 1; line <= 40; ++line) {
+        if (line == 10) full.patch.text += "-old comment\n+new comment\n";
+        else if (line == 16) full.patch.text += "-*/ int old = 1;\n+still a comment\n";
+        else if (line == 30) full.patch.text += "-int old = 30;\n+*/ int fresh = 30;\n";
+        else full.patch.text += " " + (line == 1 ? std::string("/* hidden opener") :
+            line == 40 ? std::string(400, 'x') : "int context = " + std::to_string(line) + ";") + "\n";
+    }
+    indexDiff(full, true);
+    auto diff = full;
+    limitDiffContext(diff);
+    check(full.rows.size() == 41 && diff.rows.size() == 21 && diff.rowCount(true) == 24,
+        "Default context must merge nearby changes and omit distant unchanged lines");
+    check(diff.patch.text == full.patch.text && diff.maxColumns < full.maxColumns,
+        "Context filtering changed source offsets or kept the width of an omitted line");
+    const auto visible = [](DiffRow row) {
+        const auto number = row.before.number ? row.before.number : row.after.number;
+        return row.heading || (number >= 7 && number <= 19) || (number >= 27 && number <= 33);
+    };
+    for (const bool inlineView : {false, true}) {
+        size_t next = 0;
+        std::string copied;
+        for (size_t i = 0; i < full.rowCount(inlineView); ++i) {
+            const auto expected = full.displayRow(i, inlineView);
+            if (!visible(expected)) continue;
+            check(next < diff.rowCount(inlineView), "Context filtering lost a visible source row");
+            const auto row = diff.displayRow(next, inlineView);
+            check(row.before.number == expected.before.number && row.after.number == expected.after.number &&
+                row.before.row == expected.before.row && row.after.row == expected.after.row && row.heading == expected.heading,
+                "Context filtering changed line numbers, source offsets or Inline replacement order");
+            const auto file = diff.fileForRow(next, inlineView);
+            check(file && file->path == "many.cpp", "Context filtering lost the sticky filename");
+            for (const bool after : {false, true}) {
+                const auto source = after ? row.after : row.before;
+                if (!source.number) continue;
+                check(diff.rowForLine(source, after, inlineView) == next,
+                    "Filtered source positions failed to round-trip");
+                check(diff.inlineRowForText(diff.offset(source), diff.offset(source) + diff.line(source).size()).has_value(),
+                    "Search cannot find visible context or changes");
+            }
+            const auto source = inlineView && !row.after.number ? row.before : row.after;
+            if (source.number) copied += std::string(diff.line(source)) + "\n";
+            ++next;
+        }
+        check(next == diff.rowCount(inlineView) && diff.selectedText(true, 0, diff.patch.text.size(), inlineView) == copied,
+            "Filtered selection copied omitted lines or lost visible text");
+        DiffLayout layout;
+        for (const int columns : {4, 80}) {
+            layout.build(diff, inlineView, columns);
+            for (size_t i = 0; i < layout.rows(); ++i)
+                check(visible(diff.displayRow(layout.row(i).row, inlineView)), "Wrapping restored an omitted line");
+        }
+    }
+    const auto hidden = full.rows[1].before;
+    check(!diff.inlineRowForText(full.offset(hidden), full.offset(hidden) + full.line(hidden).size()),
+        "Search found an omitted source line");
+    for (const auto& row : diff.rows) {
+        if (row.before.number == 16) check(styleAt(diff, row.before, 3) == Style::Keyword &&
+            styleAt(diff, row.after, 0) == Style::Comment, "Omitting a comment opener changed independent lexer states");
+        if (row.before.number == 17) check(styleAt(diff, row.before, 0) == Style::Keyword &&
+            styleAt(diff, row.after, 0) == Style::Comment, "Context lines lost their independent lexer states");
+        if (row.before.number == 30) check(styleAt(diff, row.before, 0) == Style::Keyword &&
+            styleAt(diff, row.after, 3) == Style::Keyword, "A gap between visible changes reset lexer states");
+    }
+    const auto count = diff.rows.size();
+    limitDiffContext(diff);
+    check(diff.rows.size() == count, "Repeating context filtering removed visible lines");
+    auto changesOnly = full;
+    limitDiffContext(changesOnly, 0);
+    check(changesOnly.rows.size() == 4 && changesOnly.rowCount(true) == 7,
+        "Zero context lost changes or retained unchanged rows");
+    limitDiffContext(full, 40);
+    check(full.rows.size() == 41, "A context window larger than the file lost source rows");
+
+    DiffDocument files;
+    files.patch.text = "diff --git a/end.txt b/end.txt\n@@ -1,6 +1,6 @@\n 1\n 2\n 3\n 4\n 5\n-old\n+new\n"
+        "diff --git a/start.txt b/start.txt\n@@ -1,6 +1,6 @@\n-old\n+new\n 2\n 3\n 4\n 5\n 6\n"
+        "diff --git a/old.txt b/renamed.txt\nsimilarity index 100%\nrename from old.txt\nrename to renamed.txt\n"
+        "diff --git a/deleted.txt b/deleted.txt\n--- a/deleted.txt\n+++ /dev/null\n@@ -1,5 +0,0 @@\n-1\n-2\n-3\n-4\n-5\n" +
+        untrackedPatch("added.txt", "1\n2\n3\n4\n5\n") + untrackedPatch("empty.txt", "") +
+        "diff --git a/binary.png b/binary.png\nBinary files a/binary.png and b/binary.png differ\n";
+    indexDiff(files, true);
+    orderDiffFiles(files, {"binary.png", "start.txt", "end.txt", "renamed.txt", "deleted.txt", "added.txt", "empty.txt"});
+    hideDiffFiles(files, {"empty.txt"});
+    limitDiffContext(files);
+    check(files.files.size() == 6, "Context filtering lost metadata-only or added/deleted files");
+    for (const bool inlineView : {false, true}) {
+        size_t start = 0, end = 0, added = 0, deleted = 0;
+        for (size_t i = 0; i < files.rowCount(inlineView); ++i) {
+            const auto file = files.fileForRow(i, inlineView);
+            check(file && files.rows[file->row].heading, "A compacted file boundary no longer points at its heading");
+            const auto row = files.displayRow(i, inlineView);
+            const auto source = row.after.number ? row.after : row.before;
+            if (!source.number) continue;
+            if (file->path == "start.txt") { ++start; check(source.number <= 4, "Context leaked into the end of the next file"); }
+            if (file->path == "end.txt") { ++end; check(source.number >= 3, "Context leaked into the start of the previous file"); }
+            if (file->path == "added.txt") ++added;
+            if (file->path == "deleted.txt") ++deleted;
+        }
+        check(start == (inlineView ? 5u : 4u) && end == start && added == 5 && deleted == 5,
+            "File boundaries, additions or deletions were truncated by context filtering");
+    }
+    DiffDocument empty;
+    indexDiff(empty, true); limitDiffContext(empty);
+    check(empty.rows.empty() && empty.inlineOrder.empty() && empty.files.empty(), "An empty comparison gained context rows");
+}
 void syntaxLanguages() {
     const std::vector<std::pair<std::string, Language>> files{
         {"src/日本語.CPP", Language::CLike}, {"src/with spaces.py\t", Language::Python},
@@ -727,6 +835,6 @@ void wrapping() {
 }
 }
 int main() {
-    try { revisionHighlights(); editorLineChanges(); editorChangeMarks(); expandedChangeMarks(); changeMarkCenterVisibility(); diffChangeMarks(); editableComparisons(); syntaxHighlighting(); multilineSyntax(); syntaxLanguages(); fileHeadings(); alignment(); additionsAndDeletions(); inlineLayout(); edgeCases(); viewPositions(); wrapping(); std::cout << "Diff tests passed.\n"; return EXIT_SUCCESS; }
+    try { revisionHighlights(); editorLineChanges(); editorChangeMarks(); expandedChangeMarks(); changeMarkCenterVisibility(); diffChangeMarks(); editableComparisons(); syntaxHighlighting(); multilineSyntax(); surroundingContext(); syntaxLanguages(); fileHeadings(); alignment(); additionsAndDeletions(); inlineLayout(); edgeCases(); viewPositions(); wrapping(); std::cout << "Diff tests passed.\n"; return EXIT_SUCCESS; }
     catch (const std::exception& error) { std::cerr << error.what() << '\n'; return EXIT_FAILURE; }
 }
