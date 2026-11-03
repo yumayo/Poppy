@@ -17,7 +17,7 @@
 namespace fs = std::filesystem;
 using namespace poppy;
 namespace {
-constexpr int projectRowHeight = 128; // Project heading plus four message lines and padding.
+constexpr int projectRowHeight = 118; // Project heading plus three message lines, padding and card spacing.
 void check(bool condition, const char* message) {
     if (!condition) throw std::runtime_error(message);
 }

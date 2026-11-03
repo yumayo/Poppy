@@ -23,8 +23,11 @@ constexpr UINT wmStartup = WM_APP + 22;
 constexpr UINT_PTR aiAnimationTimerId = 2;
 constexpr int projectHeadingHeight = 48;
 constexpr int projectMessageLineHeight = 18;
-constexpr int projectMessageLines = 4;
-constexpr int projectRowHeight = projectHeadingHeight + projectMessageLineHeight * projectMessageLines + 8;
+constexpr int projectMessageLines = 3;
+constexpr int projectCardMargin = 8;
+constexpr int projectCardGap = 8;
+constexpr int projectCardHeight = projectHeadingHeight + projectMessageLineHeight * projectMessageLines + 8;
+constexpr int projectRowHeight = projectCardHeight + projectCardGap;
 fs::path stateDirectory() {
     const DWORD length = GetEnvironmentVariableW(L"APPDATA", nullptr, 0);
     if (length) { std::wstring path(length, 0); const auto count = GetEnvironmentVariableW(L"APPDATA", path.data(), length); if (!count || count >= length) throw std::runtime_error("Cannot read APPDATA"); path.resize(count); return fs::path(path) / L"yumayo" / L"Poppy"; }
@@ -465,7 +468,7 @@ void Workspace::animateAiStatus() {
         for (size_t i = 0; i < projects_.size(); ++i) {
             const auto item = row(i);
             if (item.top < px(44) || item.top >= client.bottom || projects_[i].runtime->summary().state != AiState::Running) continue;
-            const RECT icon{px(4), item.top, px(30), item.top + px(projectHeadingHeight)};
+            const RECT icon{item.left + px(4), item.top, item.left + px(30), item.top + px(projectHeadingHeight)};
             InvalidateRect(window_, &icon, FALSE); running = true;
         }
         if (!projects_.empty()) running = projects_[active_].runtime->animateAiStatus() || running;
@@ -476,8 +479,17 @@ void Workspace::animateAiStatus() {
     else if (!running && aiAnimationTimer_) { KillTimer(window_, aiAnimationTimer_); aiAnimationTimer_ = 0; }
 }
 RECT Workspace::addButtonBounds() const {return {px(session_.projectListWidth)-px(34),0,px(session_.projectListWidth),px(44)};}
-RECT Workspace::row(size_t index) const {const int top=px(44)+(static_cast<int>(index)-scroll_)*px(projectRowHeight);return {0,top,px(session_.projectListWidth),top+px(projectRowHeight)};}
-size_t Workspace::hit(POINT point) const {RECT r{};GetClientRect(window_,&r);if(point.x<0||point.x>=px(session_.projectListWidth)||point.y<px(44)||point.y>=r.bottom)return projects_.size();const auto index=scroll_+(point.y-px(44))/px(projectRowHeight);return index>=0?static_cast<size_t>(index):projects_.size();}
+RECT Workspace::row(size_t index) const {
+    const int top=px(44)+(static_cast<int>(index)-scroll_)*px(projectRowHeight)+px(projectCardGap/2);
+    return {px(projectCardMargin),top,px(session_.projectListWidth)-px(projectCardMargin),top+px(projectCardHeight)};
+}
+size_t Workspace::hit(POINT point) const {
+    RECT client{};GetClientRect(window_,&client);
+    if(point.x<0||point.x>=px(session_.projectListWidth)||point.y<px(44)||point.y>=client.bottom)return projects_.size();
+    const auto index=static_cast<size_t>(scroll_+(point.y-px(44))/px(projectRowHeight));
+    if(index<projects_.size()){const auto card=row(index);if(PtInRect(&card,point))return index;}
+    return projects_.size();
+}
 void Workspace::updateProjectDrag(POINT point) {
     if (!projectDrag_) return;
     auto& drag = *projectDrag_; drag.point = point;
@@ -567,20 +579,22 @@ void Workspace::paint(){
     renderer_.label({px(12),0,addButton.left,px(44)},L"PROJECTS",foreground);
     renderer_.fill(addButton,panel);renderer_.label(addButton,L"+",accent,DT_CENTER|DT_VCENTER|DT_SINGLELINE);
     for(size_t i=0;i<projects_.size();++i){auto rect=row(i);if(rect.bottom<=px(44)||rect.top>=client.bottom)continue;
-        const auto& project=projects_[i];const auto summary=project.runtime->summary();renderer_.fill(rect,i==active_?panel:background);if(i==active_)renderer_.fill({0,rect.top,px(3),rect.bottom},accent);
+        const auto& project=projects_[i];const auto summary=project.runtime->summary();
+        renderer_.fillRounded(rect,i==active_?accent:border,px(6));
+        auto inside=rect;InflateRect(&inside,-px(1),-px(1));renderer_.fillRounded(inside,panel,px(5));
         const int headingBottom=rect.top+px(projectHeadingHeight);
-        drawAiStatus(renderer_,{px(4),rect.top,px(30),headingBottom},summary.state,dpi_);
+        drawAiStatus(renderer_,{rect.left+px(4),rect.top,rect.left+px(30),headingBottom},summary.state,dpi_);
         const auto secondary=subtitle(i);const auto title=project.path.filename().empty()?project.path.native():project.path.filename().native();
-        renderer_.label({px(32),rect.top,width-px(22),rect.top+(secondary.empty()?px(projectHeadingHeight):px(27))},title,project.missing?muted:foreground);
-        if(!secondary.empty())renderer_.label({px(32),rect.top+px(24),width-px(8),headingBottom},secondary,muted);
-        renderer_.label({px(32),headingBottom,width-px(8),headingBottom+px(projectMessageLineHeight)*projectMessageLines},
+        renderer_.label({rect.left+px(32),rect.top,rect.right-px(22),rect.top+(secondary.empty()?px(projectHeadingHeight):px(27))},title,project.missing?muted:foreground);
+        if(!secondary.empty())renderer_.label({rect.left+px(32),rect.top+px(24),rect.right-px(8),headingBottom},secondary,muted);
+        renderer_.label({rect.left+px(32),headingBottom,rect.right-px(8),headingBottom+px(projectMessageLineHeight)*projectMessageLines},
             wide(summary.activity),muted,DT_LEFT|DT_TOP|DT_WORDBREAK|DT_END_ELLIPSIS,false,px(projectMessageLineHeight));
-        if(summary.unread)renderer_.fill({width-px(12),rect.top+px(10),width-px(7),rect.top+px(15)},accent);
-        const auto running=summary.counts[static_cast<size_t>(AiState::Running)];if(running&&summary.state!=AiState::Running)renderer_.label({width-px(24),rect.top+px(22),width-px(3),headingBottom},std::to_wstring(running),accent);
+        if(summary.unread)renderer_.fill({rect.right-px(12),rect.top+px(10),rect.right-px(7),rect.top+px(15)},accent);
+        const auto running=summary.counts[static_cast<size_t>(AiState::Running)];if(running&&summary.state!=AiState::Running)renderer_.label({rect.right-px(24),rect.top+px(22),rect.right-px(3),headingBottom},std::to_wstring(running),accent);
     }
     if(projectDrag_&&projectDrag_->active&&projectDrag_->position){
-        const int y=std::clamp(static_cast<int>(row(*projectDrag_->position).top),px(44),static_cast<int>(client.bottom)-px(2));
-        renderer_.fill({px(4),y,width-px(4),y+px(2)},accent);
+        const int y=std::clamp(static_cast<int>(row(*projectDrag_->position).top)-px(projectCardGap/2)-px(1),px(44),static_cast<int>(client.bottom)-px(2));
+        renderer_.fill({px(projectCardMargin),y,width-px(projectCardMargin),y+px(2)},accent);
     }
     if(projects_.empty())renderer_.label({width+px(30),px(40),client.right-px(30),client.bottom},restoring_?L"Restoring projects…":L"Open a folder with Ctrl+O.",muted,DT_LEFT|DT_TOP|DT_WORDBREAK);
 }
@@ -601,7 +615,7 @@ case WM_SETFOCUS:if(closing_)return 0;if(!projects_.empty())projects_[active_].r
 case WM_XBUTTONDOWN:case WM_XBUTTONDBLCLK:navigate(GET_XBUTTON_WPARAM(a)==XBUTTON2);return TRUE;
 case WM_XBUTTONUP:return TRUE;
 case WM_APPCOMMAND:{const auto command=GET_APPCOMMAND_LPARAM(b);if(command==APPCOMMAND_BROWSER_BACKWARD||command==APPCOMMAND_BROWSER_FORWARD){navigate(command==APPCOMMAND_BROWSER_FORWARD);return TRUE;}break;}
-case WM_LBUTTONDOWN:{recent_.close();endProjectDrag();const POINT point{GET_X_LPARAM(b),GET_Y_LPARAM(b)};const auto addButton=addButtonBounds();const int width=px(session_.projectListWidth);if(point.x>=width&&point.x<width+px(5)){dragging_=true;SetCapture(window_);}else if(PtInRect(&addButton,point))choose();else if(const auto index=hit(point);index<projects_.size()){select(index,point.x<px(30));projectDrag_=ProjectDrag{projects_[index].id,point,point,false,std::nullopt};SetCapture(window_);}return 0;}
+case WM_LBUTTONDOWN:{recent_.close();endProjectDrag();const POINT point{GET_X_LPARAM(b),GET_Y_LPARAM(b)};const auto addButton=addButtonBounds();const int width=px(session_.projectListWidth);if(point.x>=width&&point.x<width+px(5)){dragging_=true;SetCapture(window_);}else if(PtInRect(&addButton,point))choose();else if(const auto index=hit(point);index<projects_.size()){select(index,point.x<row(index).left+px(30));projectDrag_=ProjectDrag{projects_[index].id,point,point,false,std::nullopt};SetCapture(window_);}return 0;}
 case WM_MOUSEMOVE:if(projectDrag_){updateProjectDrag({GET_X_LPARAM(b),GET_Y_LPARAM(b)});return 0;}if(dragging_){session_.projectListWidth=std::clamp(MulDiv(GET_X_LPARAM(b),96,dpi_),100,600);appDirty_=true;appChanged_=GetTickCount64();layout();}return 0;
 case WM_LBUTTONUP:if(projectDrag_&&projectDrag_->active)updateProjectDrag({GET_X_LPARAM(b),GET_Y_LPARAM(b)});endProjectDrag(true);dragging_=false;if(GetCapture()==window_)ReleaseCapture();return 0;
 case WM_CANCELMODE:endProjectDrag();dragging_=false;if(GetCapture()==window_)ReleaseCapture();return 0;
