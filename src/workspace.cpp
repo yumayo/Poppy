@@ -7,6 +7,7 @@
 #include "quick_open.h"
 #include "single_instance.h"
 #include "error_popup.h"
+#include "resource_ids.h"
 #include <commctrl.h>
 #include <dwmapi.h>
 #include <shlobj.h>
@@ -129,7 +130,11 @@ int Workspace::run(HINSTANCE instance,int show,const StartupOptions& options,Sin
     initializeRendering();instance_=instance;initialShow_=show;singleInstance_=&singleInstance;
     for(const auto& project:options.projects)pendingProjects_.emplace_back(project);
     INITCOMMONCONTROLSEX common{sizeof(common),ICC_WIN95_CLASSES};InitCommonControlsEx(&common);
-    WNDCLASSW cls{};cls.lpfnWndProc=procedure;cls.hInstance=instance;cls.lpszClassName=L"PoppyMain";cls.hCursor=LoadCursorW(nullptr,IDC_ARROW);cls.hIcon=LoadIconW(nullptr,IDI_APPLICATION);RegisterClassW(&cls);
+    WNDCLASSEXW cls{};
+    cls.cbSize=sizeof(cls);cls.lpfnWndProc=procedure;cls.hInstance=instance;cls.lpszClassName=L"PoppyMain";cls.hCursor=LoadCursorW(nullptr,IDC_ARROW);
+    cls.hIcon=LoadIconW(instance,MAKEINTRESOURCEW(IDI_POPPY));
+    cls.hIconSm=static_cast<HICON>(LoadImageW(instance,MAKEINTRESOURCEW(IDI_POPPY),IMAGE_ICON,GetSystemMetrics(SM_CXSMICON),GetSystemMetrics(SM_CYSMICON),LR_SHARED));
+    RegisterClassExW(&cls);
     window_=CreateWindowExW(0,cls.lpszClassName,L"Poppy",WS_OVERLAPPEDWINDOW|WS_CLIPCHILDREN,CW_USEDEFAULT,CW_USEDEFAULT,1380,820,nullptr,nullptr,instance,this);
     if(!window_)return 1;
     try { singleInstance.publish(window_); } catch (...) { DestroyWindow(window_); throw; }

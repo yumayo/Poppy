@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="12 12 232 232">
+  <title>Poppy</title>
+  <rect x="12" y="12" width="232" height="232" rx="54" fill="#1c2027"/>
+  <path d="M126 160C140 182 140 199 126 218" fill="none" stroke="#97c379" stroke-width="12" stroke-linecap="round"/>
+  <path d="M135 203C143 181 163 177 184 179C177 200 160 211 135 203Z" fill="#97c379"/>
+  <path d="M128 117C157 101 193 107 203 131C214 158 199 183 174 185C146 189 126 156 128 117Z" fill="#da3c4b"/>
+  <path d="M128 117C135 148 122 180 95 184C67 188 47 168 49 142C52 117 91 106 128 117Z" fill="#f05b59"/>
+  <path d="M128 123C96 132 63 112 58 84C52 55 67 34 91 34C119 34 134 65 128 123Z" fill="#ff7766"/>
+  <path d="M128 123C119 89 127 52 154 42C180 32 204 48 207 74C211 101 177 125 128 123Z" fill="#f45a55"/>
+  <circle cx="128" cy="119" r="26" fill="#1c2027"/>
+  <circle cx="128" cy="119" r="9" fill="#f5d596"/>
+</svg>

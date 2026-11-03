@@ -101,6 +101,9 @@ if(WIN32)
       COMMAND ${CMAKE_COMMAND} -E copy_if_different "${POPPY_WEBVIEW2_SDK}/NOTICE.txt" "$<TARGET_FILE_DIR:${target}>/WebView2-NOTICE.txt")
   endfunction()
   add_executable(Poppy WIN32 src/workspace.cpp src/app.cpp src/status_bar.cpp src/project_provider.cpp src/wsl_client.cpp src/wsl_dialog.cpp src/ai_status_win.cpp src/hook_pipe.cpp src/terminal_pane.cpp src/viewer.cpp src/find_bar.cpp src/search_pane.cpp src/terminal.cpp src/win.cpp src/render.cpp src/tree.cpp src/activity_button.cpp src/scrollbars.cpp src/quick_open.cpp src/Poppy.rc)
+  set_property(SOURCE src/Poppy.rc APPEND PROPERTY OBJECT_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/Poppy.ico"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/resource_ids.h")
   poppy_add_webview2(Poppy)
   set(POPPY_WSL_HELPER "" CACHE FILEPATH "Linux x86_64 helper to bundle beside Poppy.exe")
   if(POPPY_WSL_HELPER)

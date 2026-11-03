@@ -1,4 +1,7 @@
 #include <winver.h>
+#include "resource_ids.h"
+
+IDI_POPPY ICON "Poppy.ico"
 
 1 24 "Poppy.manifest"
 
