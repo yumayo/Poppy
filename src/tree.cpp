@@ -353,7 +353,7 @@ void Tree::paint() {
             }
         }
         RECT action{};
-        for (const unsigned slot : {0u, 1u, 2u, 3u}) {
+        for (const unsigned slot : {0u, 1u, 2u, 3u}) if (actionVisible(row.item, slot)) {
             const auto bounds = actionBounds(row.item, slot);
             if (bounds.right) action = bounds;
         }
