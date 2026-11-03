@@ -1545,14 +1545,15 @@ bool ProjectRuntime::Impl::canCreateItem(TreeItem item) const {
     return n && n->directory && canPasteImage(item);
 }
 void ProjectRuntime::Impl::newFile() {
-    auto parent = explorer_.selection();
+    const auto selected = explorer_.selection();
+    auto parent = selected;
     if (const auto n = node(parent)) {
         if (!n->directory) parent = explorer_.item(parent)->parent;
     } else parent = rootItem_;
     if (!canCreateItem(parent)) return;
     quickOpen_.close(); selectSidebar(Sidebar::Explorer);
     pendingExplorerFile_.clear();
-    explorer_.createItem(parent, false);
+    explorer_.createItem(parent, false, node(selected) ? selected : parent);
 }
 void ProjectRuntime::Impl::createItem(TreeItem parent, const std::wstring& name, bool directory) {
     if (!canCreateItem(parent)) return;

@@ -45,7 +45,8 @@ public:
     bool multipleSelection = false;
     bool dragging() const { return drag_.has_value(); }
     void rename(TreeItem item, const std::wstring& name);
-    void createItem(TreeItem parent, bool directory);
+    // Place the input after this child, or directly inside parent when omitted.
+    void createItem(TreeItem parent, bool directory, TreeItem after = 0);
     // Resolve a context-menu item to the folder that will contain new items.
     std::function<TreeItem(TreeItem)> creationParent;
     std::function<bool(TreeItem)> canCreate;
@@ -91,7 +92,7 @@ public:
     std::function<bool(TreeItem)> dimmed;
 private:
     static LRESULT CALLBACK procedure(HWND, UINT, WPARAM, LPARAM);
-    void beginInput(TreeItem item, const std::wstring& name, bool creating, bool directory = false);
+    void beginInput(TreeItem item, const std::wstring& name, bool creating, bool directory = false, TreeItem after = 0);
     void finishRename(bool commit);
     void updateDrag(POINT point);
     void tickDrag();
@@ -129,6 +130,7 @@ private:
     MessagePopup messagePopup_;
     TreeItem messageItem_ = 0;
     TreeItem renaming_ = 0;
+    TreeItem creationAnchor_ = 0;
     bool creating_ = false, creatingDirectory_ = false;
     Renderer renderer_;
     ImeComposition ime_;

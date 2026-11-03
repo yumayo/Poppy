@@ -1109,10 +1109,10 @@ void createItemTests(const fs::path& executable) {
         HWND edit = nullptr;
         waitFor([&] { edit = FindWindowExW(tree, nullptr, treeInputClassName, nullptr); return edit != nullptr; }, "Creation did not show the name input");
         const auto inputBounds = bounds(tree, edit);
-        const auto height = send(tree, treeGetRowHeight), parentRow = send(tree, treeGetRow, parent);
+        const auto height = send(tree, treeGetRowHeight), targetRow = send(tree, treeGetRow, target);
         SCROLLINFO scroll{sizeof(scroll), SIF_POS, 0, 0, 0, 0, 0}; check(GetScrollInfo(tree, SB_VERT, &scroll), "Cannot inspect creation scroll position");
-        check(expanded(tree, parent) && inputBounds.top == (parentRow + 1 - scroll.nPos) * height,
-              "Creation input did not appear on the next row inside the expanded folder");
+        check(expanded(tree, parent) && inputBounds.top == (targetRow + 1 - scroll.nPos) * height,
+              "Creation input did not appear on the row immediately after the context item");
         int depth = 0;
         for (auto ancestor = parent; ancestor; ancestor = nextItem(tree, TreeRelation::Parent, ancestor)) ++depth;
         const auto dpi = GetDpiForWindow(tree);
@@ -1182,6 +1182,8 @@ void newFileShortcutTests(const fs::path& executable) {
     waitFor([&] { return send(tree, treeGetCount) == 2; }, "Shortcut fixture did not load");
     const auto root = nextItem(tree, TreeRelation::Root), folder = nextItem(tree, TreeRelation::Child, root);
     const auto start = [&](HWND target, const std::wstring& name) {
+        const auto selected = static_cast<TreeItem>(send(tree, treeGetSelection));
+        const auto anchor = selected ? selected : root;
         struct Input {
             DWORD thread; BYTE previous[256]{};
             explicit Input(DWORD target) : thread(target) {
@@ -1195,6 +1197,16 @@ void newFileShortcutTests(const fs::path& executable) {
         check(SetKeyboardState(keys) && PostMessageW(target, WM_KEYDOWN, 'N', 0), "Cannot post Ctrl+N");
         HWND edit = nullptr;
         waitFor([&] { edit = FindWindowExW(tree, nullptr, treeInputClassName, nullptr); return edit != nullptr; }, "Ctrl+N did not show the path input");
+        const auto value = bounds(tree, edit);
+        const auto height = send(tree, treeGetRowHeight), anchorRow = send(tree, treeGetRow, anchor);
+        const auto scroll = scrollInfo(tree);
+        check(value.top == (anchorRow + 1 - scroll.nPos) * height && value.bottom == value.top + height,
+              "Ctrl+N did not insert its input immediately below the selected item");
+        int depth = 0;
+        for (auto ancestor = anchor; ancestor; ancestor = nextItem(tree, TreeRelation::Parent, ancestor)) ++depth;
+        if (!expanded(tree, anchor)) --depth;
+        const auto dpi = GetDpiForWindow(tree);
+        check(value.left == (depth + 1) * MulDiv(18, dpi, 96) + MulDiv(5, dpi, 96), "Ctrl+N input used the wrong indentation");
         check(IsWindowVisible(tree) && SetWindowTextW(edit, name.c_str()), "Ctrl+N did not reveal Explorer or accept the path");
         return edit;
     };

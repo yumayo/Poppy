@@ -41,7 +41,7 @@ void Tree::release(const std::vector<std::pair<TreeItem, uintptr_t>>& items) {
     rowsDirty_ = true;
     for (const auto& pair : items) {
         if (drag_ && (pair.first == drag_->source || pair.first == drag_->target)) endDrag();
-        if (pair.first == renaming_) finishRename(false);
+        if (pair.first == renaming_ || pair.first == creationAnchor_) finishRename(false);
         if (pair.first == hotItem_) hover({-1, -1});
         widths_.erase(pair.first); if (removed) removed(pair.second);
     }
@@ -84,10 +84,12 @@ const std::vector<TreeModel::Row>& Tree::rows() const {
     if (!creating_) return model_.visible();
     if (rowsDirty_) {
         creationRows_ = model_.visible();
-        const auto parent = std::find_if(creationRows_.begin(), creationRows_.end(), [this](const TreeModel::Row& row) { return row.item == renaming_; });
-        if (parent != creationRows_.end() && item(renaming_)->expanded) {
-            const auto depth = parent->depth + 1;
-            creationRows_.insert(parent + 1, {0, depth});
+        const auto anchor = std::find_if(creationRows_.begin(), creationRows_.end(), [this](const TreeModel::Row& row) { return row.item == creationAnchor_; });
+        const auto parent = item(renaming_);
+        if (anchor != creationRows_.end() && parent && parent->expanded &&
+            (creationAnchor_ == renaming_ || model_.parent(creationAnchor_) == renaming_)) {
+            const auto depth = anchor->depth + (creationAnchor_ == renaming_ ? 1 : 0);
+            creationRows_.insert(anchor + 1, {0, depth});
         }
         rowsDirty_ = false;
     }
@@ -106,7 +108,7 @@ TreeItem Tree::hit(int y) const {
 }
 int Tree::page() const { const auto r = Scrollbars::contentRect(window_); return std::max(1, static_cast<int>(r.bottom) / rowHeight_); }
 void Tree::ensureVisible(bool centered) {
-    const int index = row(creating_ && selection() == renaming_ ? 0 : selection());
+    const int index = row(creating_ && selection() == creationAnchor_ ? 0 : selection());
     if (index < 0) return;
     if (centered) top_ = index - page() / 2;
     else if (index < top_) top_ = index;
@@ -147,14 +149,16 @@ void Tree::layout() {
 void Tree::rename(TreeItem id, const std::wstring& name) {
     beginInput(id, name, false);
 }
-void Tree::beginInput(TreeItem id, const std::wstring& name, bool creating, bool directory) {
+void Tree::beginInput(TreeItem id, const std::wstring& name, bool creating, bool directory, TreeItem after) {
     ime_.cancel(window_); endDrag();
     finishRename(false); if (!item(id)) return;
     if (creating) { expand(id, true); if (!item(id) || !item(id)->expanded) return; }
+    if (creating && after && after != id && model_.parent(after) != id) return;
     renaming_ = id; creating_ = creating; creatingDirectory_ = directory; rowsDirty_ = true;
-    select(id, false);
+    creationAnchor_ = creating ? (after ? after : id) : 0;
+    select(creating ? creationAnchor_ : id, false);
     const int index = row(creating ? 0 : id);
-    if (index < 0) { renaming_ = 0; creating_ = false; changed(); return; }
+    if (index < 0) { renaming_ = creationAnchor_ = 0; creating_ = false; changed(); return; }
     const auto& value = rows()[static_cast<size_t>(index)];
     const int textLeft = static_cast<int>(value.depth + 1) * indent_ + MulDiv(5, dpi_, 96);
     const auto content = Scrollbars::contentRect(window_);
@@ -163,16 +167,16 @@ void Tree::beginInput(TreeItem id, const std::wstring& name, bool creating, bool
     }
     renameInput_.finished = [this](bool commit) { finishRename(commit); };
     rename_ = renameInput_.create(window_, reinterpret_cast<HINSTANCE>(GetWindowLongPtrW(window_, GWLP_HINSTANCE)), name, creating ? foreground : textColor(id));
-    if (!rename_) { renaming_ = 0; creating_ = false; changed(); return; }
+    if (!rename_) { renaming_ = creationAnchor_ = 0; creating_ = false; changed(); return; }
     SendMessageW(rename_, EM_SETLIMITTEXT, creating ? maxCreationPathLength : 255, 0);
     if (creating) SendMessageW(rename_, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(directory ? L"New folder path" : L"New file path (folder/ for a folder)"));
     layoutRename(); if (!rename_) return;
     const auto extension = item(id)->expandable ? std::wstring::npos : name.find_last_of(L'.');
     SendMessageW(rename_, EM_SETSEL, 0, extension == std::wstring::npos || extension == 0 ? -1 : static_cast<LPARAM>(extension)); SetFocus(rename_);
 }
-void Tree::createItem(TreeItem parent, bool directory) {
+void Tree::createItem(TreeItem parent, bool directory, TreeItem after) {
     if (!createCommitted || !canCreate || !canCreate(parent)) return;
-    beginInput(parent, L"", true, directory);
+    beginInput(parent, L"", true, directory, after);
 }
 void Tree::layoutRename() {
     if (!rename_) return;
@@ -184,7 +188,7 @@ void Tree::layoutRename() {
 }
 void Tree::finishRename(bool commit) {
     if (!rename_) return;
-    const auto id = renaming_; const auto edit = std::exchange(rename_, nullptr); renaming_ = 0;
+    const auto id = renaming_; const auto edit = std::exchange(rename_, nullptr); renaming_ = creationAnchor_ = 0;
     const bool creating = std::exchange(creating_, false), directory = creatingDirectory_;
     const auto name = renameInput_.text();
     const bool focus = GetFocus() == edit; DestroyWindow(edit); if (focus) SetFocus(window_);
@@ -360,7 +364,7 @@ void Tree::paint() {
     for (int index = top_; index < static_cast<int>(rows.size()) && (index - top_) * rowHeight_ < r.bottom; ++index) {
         const auto& row = rows[index]; const auto node = item(row.item);
         const int y = (index - top_) * rowHeight_, x = static_cast<int>(row.depth) * indent_ - left_;
-        const bool selected = !row.item || (model_.selected(row.item) && (!creating_ || row.item != renaming_));
+        const bool selected = !row.item || (model_.selected(row.item) && (!creating_ || row.item != creationAnchor_));
         if (selected) {
             renderer_.fill({0, y, r.right, y + rowHeight_}, focus ? RGB(50, 70, 94) : RGB(40, 47, 58));
             if (focus) renderer_.fill({0, y, MulDiv(2, dpi_, 96), y + rowHeight_}, accent);
@@ -499,7 +503,7 @@ LRESULT Tree::handle(UINT m, WPARAM a, LPARAM b) {
         if (command == 3 && pasteImageRequested && (!canPasteImage || canPasteImage(id))) { pasteImageRequested(id); return 0; }
         if (command == 12 && pasteFilesRequested && canPasteFiles && canPasteFiles(id)) { pasteFilesRequested(id); return 0; }
         if (!item(id)) return 0;
-        if (command == 4 || command == 5) createItem(parent, command == 5);
+        if (command == 4 || command == 5) createItem(parent, command == 5, id);
         else if (command == 6 && revealInFileExplorerRequested && (!canRevealInFileExplorer || canRevealInFileExplorer(id))) revealInFileExplorerRequested(id);
         else if (command == 2 && openWithDefaultAppRequested && (!canOpenWithDefaultApp || canOpenWithDefaultApp(id))) openWithDefaultAppRequested(id);
         else if (command == 1 && renameRequested && (!canRename || canRename(id))) renameRequested(id);

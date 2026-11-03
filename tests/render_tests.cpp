@@ -469,7 +469,7 @@ void inlineTreeCreation() {
         const auto value = bounds();
         const auto height = SendMessageW(tree.window(), treeGetRowHeight, 0, 0);
         check(value.top == (row(target) + 1 - tree.top()) * height && value.bottom == value.top + height,
-              "Creation input did not occupy the row below its parent");
+              "Creation input did not occupy the row below its anchor");
         check(value.left == (depth + 1) * MulDiv(18, dpi, 96) + MulDiv(5, dpi, 96), "Creation input did not use child indentation");
     };
     for (const auto dpi : {96u, 144u, 192u}) {
@@ -515,6 +515,44 @@ void inlineTreeCreation() {
         SendMessageW(editor(), WM_KEYDOWN, VK_ESCAPE, 0);
         SetWindowPos(tree.window(), nullptr, 0, 0, 640, 480, SWP_NOZORDER);
     }
+    // A file near the end of a large directory must keep the input beside it.
+    std::vector<TreeItem> files;
+    {
+        Tree::Batch batch(tree);
+        for (uintptr_t i = 0; i < 120; ++i) files.push_back(tree.insert(folder, L"file" + std::to_wstring(i) + L".txt", false, i));
+    }
+    for (const auto dpi : {96u, 144u, 192u}) {
+        tree.setDpi(dpi);
+        for (const auto anchor : {files.front(), files[60], files.back(), sibling}) {
+            const auto parent = tree.item(anchor)->parent;
+            const auto label = tree.item(anchor)->text;
+            const auto following = tree.next(anchor);
+            const auto count = SendMessageW(tree.window(), treeGetCount, 0, 0);
+            tree.select(anchor, false); activated = 0;
+            tree.createItem(parent, false, anchor);
+            checkPlacement(dpi, anchor, parent == folder ? 2 : 1);
+            check(tree.selection() == anchor && !activated && tree.item(anchor)->text == label, "Creation changed or activated its selected anchor");
+            if (following) check(row(following) == row(anchor) + 2, "Creation input overlapped the following sibling");
+            check(SendMessageW(tree.window(), treeGetCount, 0, 0) == count, "Anchored creation became a resource node");
+            SetWindowTextW(editor(), L"隣のファイル.txt");
+            tree.sort(parent, [](uintptr_t a, uintptr_t b) { return a < b; });
+            checkPlacement(dpi, anchor, parent == folder ? 2 : 1);
+            SendMessageW(editor(), WM_KEYDOWN, VK_RETURN, 0);
+            check(!editor() && destination == parent && !directory && name == L"隣のファイル.txt", "Anchored creation used the anchor file as its destination");
+            if (following) check(row(following) == row(anchor) + 1, "Anchored creation left a row after committing");
+            tree.createItem(parent, true, anchor);
+            checkPlacement(dpi, anchor, parent == folder ? 2 : 1);
+            SetWindowTextW(editor(), L"隣のフォルダー"); SendMessageW(editor(), WM_KEYDOWN, VK_RETURN, 0);
+            check(destination == parent && directory && name == L"隣のフォルダー", "Folder creation beside a file used the wrong destination or kind");
+        }
+    }
+    const auto committed = commits;
+    tree.createItem(folder, false, files[60]); tree.erase(files[60]);
+    check(!editor() && commits == committed, "Removing the anchor left its input active or committed it");
+    tree.createItem(folder, false, files.front()); tree.expand(folder, false);
+    check(!editor() && commits == committed, "Collapsing an anchored input's parent retained or committed the input");
+    tree.createItem(folder, false, files.front()); tree.clearChildren(folder);
+    check(!editor() && commits == committed, "Refreshing away the anchor left its input active or committed it");
     tree.setDpi(96); tree.restoreScroll(0, 0);
     const auto height = SendMessageW(tree.window(), treeGetRowHeight, 0, 0);
     SetWindowPos(tree.window(), nullptr, 0, 0, 640, 2 * static_cast<int>(height), SWP_NOZORDER);
