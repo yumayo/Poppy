@@ -14,7 +14,8 @@ namespace poppy {
 class Viewer {
 public:
     using State = ViewState;
-    void create(HWND parent, HINSTANCE instance);
+    // Text-only popups omit line numbers and display complete wrapped lines.
+    void create(HWND parent, HINSTANCE instance, bool textOnly = false);
     void setDpi(UINT dpi);
     void show(std::shared_ptr<const Document> document, const ResourceId& path, bool preserve = false, bool allowHtml = true);
     void showRevision(std::shared_ptr<const Document> document, const DiffDocument& changes, const ResourceId& path, bool preserve = false);
@@ -101,6 +102,7 @@ private:
     bool selecting_ = false, after_ = false, inlineView_ = true;
     POINT selectionPoint_{};
     bool wordWrap_ = true, layoutDirty_ = true, caretTrailing_ = false;
+    bool textOnly_ = false;
     TextLayout textLayout_;
     DiffLayout diffLayout_;
     static constexpr UINT_PTR caretTimer = 0x5056;

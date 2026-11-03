@@ -40,8 +40,13 @@ void records() {
     auto output = nul({"refs/heads/main", "main", "abc"}) + "*\n" + nul({"refs/remotes/origin/topic", "origin/topic", "def"}) + " \n";
     const auto branches = parseGitBranches(output);
     check(branches.size() == 2 && branches[0].current && !branches[1].current && branches[1].ref == "refs/remotes/origin/topic", "Branch refs or current marker were lost");
-    const auto commits = parseGitCommits(nul({"abc", "a", "日本語 subject\twith spaces", "Author", "2026-10-26T12:00:00+00:00", "def", "d", "another", "Other", "2026-10-25T12:00:00+00:00"}));
+    const std::string message = "日本語 subject\twith spaces\n\n本文と絵文字 🌸\n  indentation\tand a blank line\n\nlast line\n";
+    const auto commits = parseGitCommits(nul({"abc", "a", "日本語 subject\twith spaces", "Author", "2026-10-26T12:00:00+00:00", message,
+        "def", "d", "another", "Other", "2026-10-25T12:00:00+00:00", "another\n"}));
     check(commits.size() == 2 && commits[0].subject == "日本語 subject\twith spaces" && commits[1].hash == "def", "NUL-delimited commit records lost metadata");
+    check(commits[0].message == message && commits[1].message == "another\n", "Full commit messages lost body text, whitespace, or record boundaries");
+    check(parseGitCommits(nul({"abc", "a", "subject", "Author", "date"}) + "truncated body").empty(), "An incomplete full message became a commit record");
+    check(parseGitCommits(nul({"abc", "a", "", "Author", "date", ""})).size() == 1, "An empty commit message shifted record fields");
     const auto files = parseGitCommitFiles(nul({"A", "src/new.txt", "D", "old.txt", "M", "path\nwith newline.txt"}));
     check(files.size() == 3 && files[1].state == 'D' && files[2].path == "path\nwith newline.txt", "Commit files lost states or unusual paths");
     const auto renamed = parseGitCommitFiles(nul({"R100", "old/日本語.txt", "new/name\nwith tab\t.txt", "M", "next.txt",
@@ -967,7 +972,8 @@ void repositoryHistory() {
     repo.git({"config", "user.name", "Poppy Test"}); repo.git({"config", "user.email", "poppy@example.invalid"});
     repo.git({"config", "core.autocrlf", "false"}); repo.git({"config", "commit.gpgsign", "false"});
     repo.write("src/日本語.txt", "initial\n"); repo.write("delete.txt", "gone\n");
-    repo.git({"add", "."}); repo.git({"commit", "-qm", "root 日本語"});
+    const std::string rootMessage = "root 日本語\n\n本文 🌸\n\n  indentation\tand symbols ` $() %\n";
+    repo.git({"add", "."}); repo.git({"commit", "--cleanup=verbatim", "-qm", rootMessage});
     const auto root = repo.hash();
     const auto rootFiles = parseGitCommitFiles(repo.git(gitCommitFilesArguments(root)));
     check(rootFiles.size() == 2 && rootFiles[0].state == 'A', "The root commit did not expose added files");
@@ -978,6 +984,8 @@ void repositoryHistory() {
     const auto last = parseGitCommits(repo.git(gitLogArguments(tip, 100)));
     check(first.size() == 51 && second.size() == 51 && last.size() == 2 && first[0].subject == "commit 101" && last.back().hash == root,
         "Commit pagination did not retrieve 50 entries plus a lookahead");
+    check(first[0].message == "commit 101\n" && last.back().message == rootMessage && last.back().subject == "root 日本語",
+        "Real Git history lost a complete multiline message or changed the row subject");
     check(first[50].hash == second[0].hash && second[50].hash == last[0].hash, "Pagination skipped or repeated a displayed commit");
     std::set<std::string> hashes;
     for (size_t i = 0; i < 50; ++i) { hashes.insert(first[i].hash); hashes.insert(second[i].hash); }

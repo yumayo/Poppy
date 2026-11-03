@@ -10,7 +10,7 @@ namespace poppy {
 inline constexpr size_t gitCommitPageSize = 50;
 enum class GitDiffKind { Automatic, Changes, Staged, Commit };
 struct GitBranch { std::string ref, name, tip; bool current = false; };
-struct GitCommit { std::string hash, shortHash, subject, author, date; };
+struct GitCommit { std::string hash, shortHash, subject, author, date, message; };
 struct GitStatusEntry {
     std::string path, previousPath;
     char index = ' ', worktree = ' ';

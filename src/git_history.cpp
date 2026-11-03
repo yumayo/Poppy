@@ -28,7 +28,7 @@ std::vector<GitCommit> parseGitCommits(std::string_view output) {
     while (!output.empty()) {
         GitCommit commit;
         if (!field(output, commit.hash) || !field(output, commit.shortHash) || !field(output, commit.subject) ||
-            !field(output, commit.author) || !field(output, commit.date)) break;
+            !field(output, commit.author) || !field(output, commit.date) || !field(output, commit.message)) break;
         commits.push_back(std::move(commit));
     }
     return commits;
@@ -77,7 +77,7 @@ std::optional<std::string> gitEditorBase(const GitStatusEntry& entry, const GitB
 }
 std::vector<std::string> gitLogArguments(const std::string& tip, size_t skip) {
     return {"git.exe", "--no-optional-locks", "log", "--no-decorate", "--encoding=UTF-8", "-z",
-        "--format=%H%x00%h%x00%s%x00%an%x00%aI", "-n" + std::to_string(gitCommitPageSize + 1),
+        "--format=%H%x00%h%x00%s%x00%an%x00%aI%x00%B", "-n" + std::to_string(gitCommitPageSize + 1),
         "--skip=" + std::to_string(skip), tip, "--"};
 }
 std::vector<std::string> gitCommitFilesArguments(const std::string& hash) {

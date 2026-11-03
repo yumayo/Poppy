@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cstdlib>
 #include <iostream>
+#include <limits>
 using namespace poppy;
 void check(bool value) { if (!value) { std::cerr << "Editor check failed\n"; std::exit(1); } }
 void compositionLayout() {
@@ -267,6 +268,22 @@ void wrapping() {
     check(layout.rows() == maxLineColumns);
     check(layout.row(buffer.document, layout.rows() - 1).end == maxLineColumns);
     check(layout.rowForOffset(buffer.document, buffer.document.text.size()) == layout.rows() - 1);
+    // A commit message popup displays complete lines, including text past the
+    // editor's usual column limit. Offset mapping must still preserve Unicode.
+    buffer = load(std::string(maxLineColumns + 100, 'x') + u8"\t日本語😀");
+    const int fullLine = std::numeric_limits<int>::max();
+    layout.build(buffer.document, 79, fullLine);
+    check(layout.row(buffer.document, layout.rows() - 1).end == buffer.document.text.size());
+    check(layout.rowForOffset(buffer.document, buffer.document.text.size()) == layout.rows() - 1);
+    size_t end = 0;
+    for (size_t i = 0; i < layout.rows(); ++i) {
+        const auto full = layout.row(buffer.document, i);
+        check(full.begin == end && full.end > full.begin);
+        check(layout.rowForOffset(buffer.document, full.begin) == i);
+        check(layout.rowForOffset(buffer.document, full.end, true) == i);
+        end = full.end;
+    }
+    check(end == buffer.document.text.size());
 }
 void selectionScrolling() {
     for (const int height : {20, 30, 40}) {

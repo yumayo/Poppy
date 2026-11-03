@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <limits>
 #include <imm.h>
 
 namespace poppy {
@@ -11,7 +12,8 @@ namespace {
 constexpr std::array<Color, 6> styles{foreground, rgb(191,151,220), rgb(151,195,121), rgb(107,129,145), rgb(224,192,128), rgb(231,112,118)};
 constexpr Color removedBackground = rgb(62, 39, 45), addedBackground = rgb(36, 57, 44);
 }
-void Viewer::create(HWND parent, HINSTANCE instance) {
+void Viewer::create(HWND parent, HINSTANCE instance, bool textOnly) {
+    textOnly_ = textOnly;
     WNDCLASSW cls{}; cls.lpfnWndProc = procedure; cls.hInstance = instance; cls.lpszClassName = L"PoppyViewer"; cls.hCursor = LoadCursorW(nullptr, IDC_IBEAM);
     cls.style = CS_DBLCLKS;
     RegisterClassW(&cls);
@@ -32,7 +34,7 @@ void Viewer::setDpi(UINT dpi) {
     dpi_ = dpi;
     renderer_.setDpi(dpi);
     cellWidth_ = renderer_.cellWidth(); cellHeight_ = renderer_.textHeight() + MulDiv(3, dpi, 96);
-    header_ = MulDiv(34, dpi, 96); gutter_ = MulDiv(70, dpi, 96);
+    header_ = MulDiv(34, dpi, 96); gutter_ = MulDiv(textOnly_ ? 12 : 70, dpi, 96);
     findBar_.setDpi(dpi);
     scrollbars(); findLayout(); htmlLayout(); caretPosition(); InvalidateRect(window_, nullptr, FALSE);
 }
@@ -268,7 +270,7 @@ void Viewer::scrollbars() {
             if (layoutDirty_ || (diff_ ? diffLayout_.columns() : textLayout_.columns()) != columns) {
                 if (!layoutDirty_ && !reflow && rowCount()) reflow = state();
                 if (diff_) diffLayout_.build(*diff_, inlineView_, columns);
-                else textLayout_.build(*document_, columns);
+                else textLayout_.build(*document_, columns, textOnly_ ? std::numeric_limits<int>::max() : static_cast<int>(maxLineColumns));
                 layoutDirty_ = false;
                 if (reflow) restoreTop(*reflow);
             }
@@ -700,13 +702,13 @@ void Viewer::paint() {
                 if (diff_ && inlineView_) {
                     if (firstRow && change.before.number) dc.label({0, y, std::min(paneRight, gutter_ - 14), y + cellHeight_}, std::to_wstring(change.before.number), muted, DT_RIGHT | DT_SINGLELINE);
                     if (firstRow && change.after.number) dc.label({gutter_, y, std::min(paneRight, textLeft - 14), y + cellHeight_}, std::to_wstring(change.after.number), muted, DT_RIGHT | DT_SINGLELINE);
-                } else if (firstRow) {
+                } else if (firstRow && !textOnly_) {
                     RECT number{paneLeft, y, std::min(paneRight, textLeft - 14), y + cellHeight_};
                     dc.label(number, std::to_wstring(diff_ ? source.number : logicalRow + 1), muted, DT_RIGHT | DT_SINGLELINE);
                 }
                 auto line = diff_ ? diff_->line(source) : document_->line(logicalRow);
                 const size_t lineOffset = diff_ ? diff_->offset(source) : document_->lines[logicalRow];
-                line = line.substr(0, std::min(line.size(), maxLineColumns * 4));
+                if (!textOnly_) line = line.substr(0, std::min(line.size(), maxLineColumns * 4));
                 tokens.clear();
                 LexState state = diff_ ? source.state : document_->states[logicalRow];
                 lexLine(line, diff_ ? source.language : document_->language, state, &tokens);
@@ -717,7 +719,8 @@ void Viewer::paint() {
                 TextSearchCursor highlightCursor;
                 std::optional<TextMatch> highlight;
                 if (findBar_.visible()) highlight = search_.pattern().next(line, highlightCursor, line.size());
-                for (size_t p = wrapping() ? wrapped.begin : 0; p < end && col < firstColumn + columns && col < static_cast<int>(maxLineColumns);) {
+                const int columnLimit = textOnly_ ? std::numeric_limits<int>::max() : static_cast<int>(maxLineColumns);
+                for (size_t p = wrapping() ? wrapped.begin : 0; p < end && col < firstColumn + columns && col < columnLimit;) {
                     const size_t begin = p; char32_t c = decodeUtf8(line, p);
                     const int width = c == '\t' ? 4 - col % 4 : std::max(1, cellWidth(c));
                     while (token < tokens.size() && tokens[token].end <= begin) ++token;

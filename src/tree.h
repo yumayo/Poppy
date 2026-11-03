@@ -2,6 +2,7 @@
 #include "scrollbars.h"
 #include "tree_messages.h"
 #include "tree_input.h"
+#include "message_popup.h"
 #include <optional>
 
 namespace poppy {
@@ -84,6 +85,7 @@ public:
     std::function<Renderer::Icon(TreeItem)> quaternaryActionIcon;
     std::function<void(TreeItem)> quaternaryActionClicked;
     bool hoverActionsOnly = false;
+    std::function<std::wstring(TreeItem)> hoverMessage;
     std::function<bool(TreeItem)> dimmed;
 private:
     static LRESULT CALLBACK procedure(HWND, UINT, WPARAM, LPARAM);
@@ -109,6 +111,8 @@ private:
     COLORREF textColor(TreeItem id) const;
     const std::function<std::wstring(TreeItem)>& actionLabelFor(unsigned slot) const;
     void hover(POINT point);
+    void cancelMessage();
+    void showMessage();
     void scroll(int vertical, int horizontal = 0);
     void release(const std::vector<std::pair<TreeItem, uintptr_t>>& items);
     int page() const;
@@ -120,6 +124,8 @@ private:
     int hotAction_ = -1;
     bool trackingMouse_ = false;
     std::wstring actionTip_;
+    MessagePopup messagePopup_;
+    TreeItem messageItem_ = 0;
     TreeItem renaming_ = 0;
     bool creating_ = false, creatingDirectory_ = false;
     Renderer renderer_;

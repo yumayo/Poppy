@@ -120,6 +120,7 @@ struct HistoryNode {
     bool current = false;
     SourceNode source = {};
     std::vector<GitCommitFile> files = {};
+    std::wstring message = {};
 };
 std::vector<std::wstring> gitArguments(const std::vector<std::string>& args) {
     std::vector<std::wstring> result; result.reserve(args.size());
@@ -504,6 +505,10 @@ void ProjectRuntime::Impl::create() {
     changes_.removed = [](uintptr_t data) { delete reinterpret_cast<HistoryNode*>(data); };
     changes_.activated = [this](TreeItem item) { if (sourceNode(item)) openGitFile(item); else openHistory(item); };
     changes_.hoverActionsOnly = true;
+    changes_.hoverMessage = [this](TreeItem item) {
+        const auto n = historyNode(item);
+        return n && n->kind == HistoryKind::Commit ? n->message : std::wstring{};
+    };
     changes_.actionLabel = [this](TreeItem item) {
         const auto source = sourceNode(item);
         if (!source) {
@@ -1385,7 +1390,9 @@ void ProjectRuntime::Impl::requestHistory(TreeItem item, bool more) {
                 for (size_t i = 0; i < length; ++i) {
                     const auto& commit = commits[i];
                     const auto text = wide(commit.shortHash + "  " + commit.subject + "  ·  " + commit.author + "  ·  " + commit.date.substr(0, 10));
-                    insertHistory(item, text, {HistoryKind::Commit, {}, commit.hash, {}}, true);
+                    HistoryNode node{HistoryKind::Commit, {}, commit.hash, {}};
+                    node.message = wide(commit.message);
+                    insertHistory(item, text, std::move(node), true);
                 }
                 n->count = count + length;
                 if (commits.size() > gitCommitPageSize) insertHistory(item, L"Load 50 more commits…", {HistoryKind::More, {}, revision, {}}, false, accent);

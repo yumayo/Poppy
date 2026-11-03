@@ -4,7 +4,7 @@
 #include <commctrl.h>
 
 namespace poppy {
-namespace { constexpr UINT_PTR dragTimer = 2; }
+namespace { constexpr UINT_PTR dragTimer = 2, messageTimer = 3; }
 void Tree::create(HWND parent, HINSTANCE instance, const wchar_t* title, int id) {
     WNDCLASSW cls{}; cls.lpfnWndProc = procedure; cls.hInstance = instance; cls.lpszClassName = treeClassName;
     cls.hCursor = LoadCursorW(nullptr, IDC_ARROW); cls.style = CS_DBLCLKS;
@@ -114,6 +114,7 @@ void Tree::ensureVisible() {
 void Tree::changed() { rowsDirty_ = true; if (!batch_) layout(); }
 void Tree::layout() {
     if (!window_ || layingOut_) return;
+    cancelMessage();
     layingOut_ = true;
     const auto& rows = this->rows();
     int extent = 0;
@@ -276,6 +277,7 @@ COLORREF Tree::textColor(TreeItem id) const {
 void Tree::hover(POINT point) {
     const auto content = Scrollbars::contentRect(window_);
     const auto id = IsWindowVisible(window_) && PtInRect(&content, point) ? hit(point.y) : 0;
+    const bool entering = hotItem_ != id;
     int action = -1;
     for (const unsigned slot : {0u, 1u, 2u, 3u}) {
         const auto bounds = actionBounds(id, slot);
@@ -291,6 +293,32 @@ void Tree::hover(POINT point) {
         tip.rect = actionVisible(id, slot) ? actionBounds(id, slot) : RECT{};
         SendMessageW(actionTips_, TTM_NEWTOOLRECTW, 0, reinterpret_cast<LPARAM>(&tip));
     }
+    if (!id) {
+        KillTimer(window_, messageTimer);
+        // Leaving the source row for the popup must not close it. Its own
+        // timer checks both rectangles and allows time to cross the boundary.
+        if (!messagePopup_.visible()) messageItem_ = 0;
+    } else if (action >= 0 || drag_ || rename_ || !hoverMessage) cancelMessage();
+    else if (messageItem_ != id || (entering && !messagePopup_.visible())) {
+        cancelMessage(); messageItem_ = id;
+        SetTimer(window_, messageTimer, 500, nullptr);
+    }
+}
+void Tree::cancelMessage() {
+    KillTimer(window_, messageTimer); messageItem_ = 0;
+    if (messagePopup_.visible()) messagePopup_.hide();
+}
+void Tree::showMessage() {
+    KillTimer(window_, messageTimer);
+    if (!messageItem_ || messageItem_ != hotItem_ || hotAction_ >= 0 || drag_ || rename_ || !hoverMessage || !IsWindowVisible(window_)) return;
+    const auto text = hoverMessage(messageItem_); if (text.empty()) return;
+    const auto content = Scrollbars::contentRect(window_);
+    const int y = (row(messageItem_) - top_) * rowHeight_;
+    RECT anchor{0, std::max(0, y), content.right, std::min<LONG>(content.bottom, y + rowHeight_)};
+    if (anchor.top >= anchor.bottom) return;
+    MapWindowPoints(window_, nullptr, reinterpret_cast<POINT*>(&anchor), 2);
+    SendMessageW(actionTips_, TTM_POP, 0, 0);
+    messagePopup_.show(window_, text, anchor, dpi_);
 }
 void Tree::imePosition() {
     if (!window_ || GetFocus() != window_) return;
@@ -396,7 +424,10 @@ LRESULT Tree::handle(UINT m, WPARAM a, LPARAM b) {
     LRESULT result = 0;
     if (scrollbars_.handle(window_, m, a, b, result)) return result;
     switch (m) {
-    case WM_TIMER: if (a == dragTimer) tickDrag(); return 0;
+    case WM_TIMER:
+        if (a == dragTimer) tickDrag();
+        else if (a == messageTimer) showMessage();
+        return 0;
     case WM_PAINT: paint(); return 0;
     case WM_ERASEBKGND: return 1;
     case WM_SETCURSOR:
@@ -411,7 +442,7 @@ LRESULT Tree::handle(UINT m, WPARAM a, LPARAM b) {
         return DefWindowProcW(window_, m, a, b);
     case WM_SIZE: changed(); return 0;
     case WM_SHOWWINDOW:
-        if (!a) { ime_.cancel(window_); endDrag(); finishRename(false); trackingMouse_ = false; hover({-1, -1}); }
+        if (!a) { cancelMessage(); ime_.cancel(window_); endDrag(); finishRename(false); trackingMouse_ = false; hover({-1, -1}); }
         return DefWindowProcW(window_, m, a, b);
     case WM_NOTIFY: {
         const auto header = reinterpret_cast<NMHDR*>(b);
@@ -424,8 +455,9 @@ LRESULT Tree::handle(UINT m, WPARAM a, LPARAM b) {
         }
         return 0;
     }
-    case WM_DESTROY: ime_.clear(); if (GetFocus() == window_) DestroyCaret(); endDrag(); finishRename(false); renderer_.discard(); return 0;
+    case WM_DESTROY: cancelMessage(); messagePopup_.destroy(); ime_.clear(); if (GetFocus() == window_) DestroyCaret(); endDrag(); finishRename(false); renderer_.discard(); return 0;
     case WM_CONTEXTMENU: {
+        cancelMessage();
         if (!renameRequested && !deleteRequested && !copyRequested && !pasteFilesRequested && !openWithDefaultAppRequested && !revealInFileExplorerRequested && !pasteImageRequested && !createCommitted) return 0;
         POINT screen{GET_X_LPARAM(b), GET_Y_LPARAM(b)}; auto id = selection();
         if (!model_.selected(id) && !selections().empty()) id = selections().front();
@@ -478,6 +510,7 @@ LRESULT Tree::handle(UINT m, WPARAM a, LPARAM b) {
     case WM_KILLFOCUS: ime_.cancel(window_); DestroyCaret(); InvalidateRect(window_, nullptr, FALSE); return 0;
     // Windows sends DBLCLK instead of the second DOWN during rapid clicks.
     case WM_LBUTTONDOWN: case WM_LBUTTONDBLCLK: {
+        cancelMessage();
         // Cancelling creation removes its visual row. Keep the item that was
         // under the pointer before focus loss changes the row positions.
         const auto id = hit(GET_Y_LPARAM(b));
@@ -534,6 +567,7 @@ LRESULT Tree::handle(UINT m, WPARAM a, LPARAM b) {
         changed(); return 0;
     }
     case WM_KEYDOWN: {
+        cancelMessage();
         if (ime_.active()) return DefWindowProcW(window_, m, a, b);
         if ((GetKeyState(VK_CONTROL) & 0x8000) && !(GetKeyState(VK_MENU) & 0x8000)) {
             const bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;

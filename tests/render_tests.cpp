@@ -203,6 +203,107 @@ void treeMultipleSelection() {
     SendMessageW(tree.window(), WM_LBUTTONUP, 0, MAKELPARAM(100, 300));
     check(tree.selections().empty(), "Clicking empty space did not clear multiple selection");
 }
+void commitMessagePopup() {
+    INITCOMMONCONTROLSEX controls{sizeof(controls), ICC_WIN95_CLASSES}; InitCommonControlsEx(&controls);
+    const auto instance = GetModuleHandleW(nullptr);
+    const auto parent = CreateWindowExW(0, L"STATIC", L"Commit hover test", WS_POPUP | WS_CLIPCHILDREN,
+        20, 20, 900, 650, nullptr, nullptr, instance, nullptr);
+    check(parent != nullptr, "Cannot create the commit hover test window");
+    Tree tree;
+    struct Owner { HWND value; ~Owner() { DestroyWindow(value); } } owner{parent};
+    POINT originalCursor{}; GetCursorPos(&originalCursor);
+    struct Cursor { POINT value; ~Cursor() { SetCursorPos(value.x, value.y); } } cursor{originalCursor};
+    tree.create(parent, instance, L"SOURCE CONTROL", 1);
+    const auto branch = tree.insert(0, L"main", true, 0);
+    const auto commit = tree.insert(branch, L"abc123  subject", true, 0);
+    tree.expand(branch, true); tree.select(branch, false);
+    const std::wstring message = L"日本語の件名 🌸\n\n  body with tabs\tand symbols ` $() %\n\n" + std::wstring(maxLineColumns + 100, L'x') + L"🌸\nend\n";
+    unsigned activations = 0;
+    tree.activated = [&](TreeItem) { ++activations; };
+    tree.hoverMessage = [&](TreeItem id) { return id == commit ? message : std::wstring{}; };
+    tree.hoverActionsOnly = true;
+    tree.actionLabel = [&](TreeItem id) { return id == commit ? L"Open All Changes" : L""; };
+    const auto popup = [] {
+        HWND result = nullptr;
+        EnumThreadWindows(GetCurrentThreadId(), [](HWND window, LPARAM data) -> BOOL {
+            wchar_t name[64]{}; GetClassNameW(window, name, 64);
+            if (std::wstring(name) == L"PoppyMessagePopup") { *reinterpret_cast<HWND*>(data) = window; return FALSE; }
+            return TRUE;
+        }, reinterpret_cast<LPARAM>(&result));
+        return result;
+    };
+    ShowWindow(parent, SW_SHOW);
+    for (const auto dpi : {96u, 144u, 192u}) {
+        tree.setDpi(dpi);
+        const auto px = [dpi](int value) { return MulDiv(value, dpi, 96); };
+        SetWindowPos(tree.window(), nullptr, 0, 0, px(245), px(240), SWP_NOZORDER | SWP_SHOWWINDOW);
+        SetFocus(tree.window());
+        const int y = static_cast<int>(SendMessageW(tree.window(), treeGetRow, commit, 0) * SendMessageW(tree.window(), treeGetRowHeight, 0, 0) + px(5));
+        const auto hover = [&](int x, int rowY) {
+            POINT point{x, rowY}; ClientToScreen(tree.window(), &point); SetCursorPos(point.x, point.y);
+            SendMessageW(tree.window(), WM_MOUSEMOVE, 0, MAKELPARAM(x, rowY));
+        };
+        hover(px(60), y);
+        check(!IsWindowVisible(popup()), "Commit popup opened before the hover delay");
+        SendMessageW(tree.window(), WM_TIMER, 3, 0);
+        const auto tip = popup();
+        check(tip && IsWindowVisible(tip) && GetFocus() == tree.window(), "Hover failed to show full commit text without taking focus");
+        check(tree.selection() == branch && !activations, "Hover changed the selected commit or opened its files");
+        RECT bounds{}; GetWindowRect(tip, &bounds);
+        MONITORINFO monitor{sizeof(monitor), {}, {}, 0}; GetMonitorInfoW(MonitorFromWindow(tip, MONITOR_DEFAULTTONEAREST), &monitor);
+        check(bounds.left >= monitor.rcWork.left && bounds.top >= monitor.rcWork.top && bounds.right <= monitor.rcWork.right && bounds.bottom <= monitor.rcWork.bottom,
+            "Commit popup escaped the monitor work area");
+        const auto body = FindWindowExW(tip, nullptr, L"PoppyViewer", nullptr);
+        check(body != nullptr, "Commit popup has no selectable text body");
+        POINT inside{px(40), px(15)}; ClientToScreen(body, &inside); SetCursorPos(inside.x, inside.y);
+        SendMessageW(tree.window(), WM_MOUSELEAVE, 0, 0);
+        SendMessageW(tip, WM_TIMER, 1, 0); Sleep(320); SendMessageW(tip, WM_TIMER, 1, 0);
+        check(IsWindowVisible(tip), "Moving into the popup dismissed the commit message");
+        SendMessageW(body, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(px(12), px(5)));
+        SendMessageW(body, WM_MOUSEMOVE, MK_LBUTTON, MAKELPARAM(px(60), px(5)));
+        SendMessageW(body, WM_LBUTTONUP, 0, MAKELPARAM(px(60), px(5)));
+        BYTE previous[256]{}, keys[256]{}; GetKeyboardState(previous); keys[VK_CONTROL] = keys[VK_LCONTROL] = 0x80;
+        SetKeyboardState(keys); SendMessageW(body, WM_KEYDOWN, 'C', 0); SetKeyboardState(previous);
+        const auto selected = clipboardText(body);
+        check(!selected.empty() && selected != message && message.find(selected) != message.npos, "Commit text could not be selected and copied");
+        SetKeyboardState(keys); SendMessageW(body, WM_KEYDOWN, 'A', 0); SendMessageW(body, WM_KEYDOWN, 'C', 0); SetKeyboardState(previous);
+        check(clipboardText(body) == message, "Select all / copy lost full commit text or whitespace");
+        SendMessageW(body, WM_KEYDOWN, VK_END, 0);
+        check(GetScrollPos(body, SB_VERT) > 0, "Long commit text could not be scrolled");
+        check(copyText(tip, L"sentinel"), "Cannot prepare the full-message copy test");
+        RECT client{}; GetClientRect(tip, &client);
+        const auto copyPoint = MAKELPARAM(client.right - px(50), px(16));
+        SendMessageW(tip, WM_LBUTTONDOWN, MK_LBUTTON, copyPoint); SendMessageW(tip, WM_LBUTTONUP, 0, copyPoint);
+        check(clipboardText(tip) == message && IsWindowVisible(tip), "Copy all changed the message or dismissed the popup");
+        SendMessageW(body, WM_KEYDOWN, VK_ESCAPE, 0);
+        check(!IsWindowVisible(tip) && GetFocus() == tree.window(), "Escape did not close the commit popup and restore focus");
+        hover(px(60), y); SendMessageW(tree.window(), WM_TIMER, 3, 0);
+        check(IsWindowVisible(tip), "Returning to the same commit after Escape did not reopen its message");
+        if (dpi == 96) {
+            POINT outside{5, 5}; ClientToScreen(tree.window(), &outside); SetCursorPos(outside.x, outside.y);
+            SendMessageW(tip, WM_TIMER, 1, 0); Sleep(320); SendMessageW(tip, WM_TIMER, 1, 0);
+            check(!IsWindowVisible(tip), "Leaving both hover regions did not dismiss the commit message");
+        }
+        hover(px(60), 5); SendMessageW(tree.window(), WM_TIMER, 3, 0);
+        check(!IsWindowVisible(tip), "A branch row showed a commit message");
+        hover(px(230), y); SendMessageW(tree.window(), WM_TIMER, 3, 0);
+        check(!IsWindowVisible(tip), "Commit text obscured the existing action tooltip");
+        hover(px(60), y); SendMessageW(tree.window(), WM_TIMER, 3, 0);
+        check(IsWindowVisible(tip), "Returning to a commit did not reopen its message");
+        tree.restoreScroll(0, 1);
+        check(!IsWindowVisible(tip), "Scrolling the tree retained an obsolete commit popup");
+    }
+    ShowWindow(tree.window(), SW_HIDE);
+    SendMessageW(tree.window(), WM_TIMER, 3, 0);
+    check(!IsWindowVisible(popup()), "A hidden source-control pane opened a pending popup");
+    ShowWindow(tree.window(), SW_SHOW);
+    const int commitY = static_cast<int>(SendMessageW(tree.window(), treeGetRow, commit, 0) * SendMessageW(tree.window(), treeGetRowHeight, 0, 0) + 5);
+    SendMessageW(tree.window(), WM_MOUSEMOVE, 0, MAKELPARAM(60, commitY));
+    SendMessageW(tree.window(), WM_TIMER, 3, 0);
+    check(IsWindowVisible(popup()), "Cannot reopen the commit popup before a history update");
+    tree.erase(commit);
+    check(!IsWindowVisible(popup()), "Removing a commit retained its popup");
+}
 void inlineTreeInput() {
     INITCOMMONCONTROLSEX controls{sizeof(controls), ICC_WIN95_CLASSES}; InitCommonControlsEx(&controls);
     const auto instance = GetModuleHandleW(nullptr);
@@ -2411,7 +2512,7 @@ int main(int argc, char** argv) {
             shutdownProgress();
             htmlPreviewSwitching();
             terminalAsyncStartup(); terminalProcessShutdown();
-            statusBarLimits(); treeMultipleSelection(); inlineTreeInput(); inlineTreeCreation(); gitCommitInput(); cellPositions(); colorsAndClipping(); imagePreviews(); smoothIcons(); windowTargets(); editableDiff(); editorCaret(); delayedLoadingMessages(); imeCellRendering(); imeTerminalInsertion(); imeUiRendering(); imePositions(); editorWordSelection(); editorWordMovement(); editorLineShortcuts(); editorWrapping(); diffWrapping(); documentFind(); horizontalWheelScrolling(); continuousViewerScrolling(); selectionAutoScrolling(); terminalGitBashSocketEnvironment(); terminalSelectionAutoScrolling(); themedScrollbars(); quickOpenStability();
+            statusBarLimits(); treeMultipleSelection(); commitMessagePopup(); inlineTreeInput(); inlineTreeCreation(); gitCommitInput(); cellPositions(); colorsAndClipping(); imagePreviews(); smoothIcons(); windowTargets(); editableDiff(); editorCaret(); delayedLoadingMessages(); imeCellRendering(); imeTerminalInsertion(); imeUiRendering(); imePositions(); editorWordSelection(); editorWordMovement(); editorLineShortcuts(); editorWrapping(); diffWrapping(); documentFind(); horizontalWheelScrolling(); continuousViewerScrolling(); selectionAutoScrolling(); terminalGitBashSocketEnvironment(); terminalSelectionAutoScrolling(); themedScrollbars(); quickOpenStability();
             std::cout << "Direct2D rendering tests passed\n";
         }
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; result = 1; }

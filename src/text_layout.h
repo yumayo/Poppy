@@ -9,12 +9,12 @@ struct WrappedRow {
     int column = 0, endColumn = 0;
 };
 // Shared cell/UTF-8 wrapping for document lines and diff source lines.
-size_t wrappedLineRows(std::string_view line, int columns);
-WrappedRow wrappedLineRow(std::string_view line, int columns, size_t continuation);
-size_t wrappedLineRowForOffset(std::string_view line, int columns, size_t byte, bool trailing = false);
+size_t wrappedLineRows(std::string_view line, int columns, int columnLimit = maxLineColumns);
+WrappedRow wrappedLineRow(std::string_view line, int columns, size_t continuation, int columnLimit = maxLineColumns);
+size_t wrappedLineRowForOffset(std::string_view line, int columns, size_t byte, bool trailing = false, int columnLimit = maxLineColumns);
 class TextLayout {
 public:
-    void build(const Document& document, int columns);
+    void build(const Document& document, int columns, int columnLimit = maxLineColumns);
     int columns() const { return columns_; }
     size_t rows() const { return starts_.empty() ? 0 : starts_.back(); }
     // Accept the end boundary as well as source lines (for overview ranges).
@@ -26,5 +26,6 @@ private:
     // One cumulative count per logical line, rather than per wrapped row.
     std::vector<uint32_t> starts_;
     int columns_ = 0;
+    int columnLimit_ = maxLineColumns;
 };
 }
