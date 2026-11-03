@@ -1839,16 +1839,19 @@ void explorerActiveFileTests(const fs::path& executable) {
     fs::create_directories(fixture.root / L"z nested" / L"inner");
     writeLines(fixture.root / L"a nested" / L"inner" / L"日本語.txt", 101);
     writeLines(fixture.root / L"z nested" / L"inner" / L"second.txt", 201);
+    for (int i = 0; i < 20; ++i) fs::create_directory(fixture.root / (L"b filler-" + std::to_wstring(i)));
     for (int i = 0; i < 40; ++i) writeFile(fixture.root / (L"filler-" + std::to_wstring(i) + L".txt"));
+    writeLines(fixture.root / L"filler-9.txt", 301);
     Application app(executable, fixture.root); const auto tree = app.tree();
     const auto viewer = FindWindowExW(app.window, nullptr, L"PoppyViewer", nullptr);
     const auto palette = FindWindowExW(app.window, nullptr, L"PoppyQuickOpen", nullptr);
     const auto gitButton = FindWindowExW(app.window, nullptr, activityButtonClassName, L"Source Control");
     const auto explorerButton = FindWindowExW(app.window, nullptr, activityButtonClassName, L"Explorer");
     check(viewer && palette && gitButton && explorerButton, "Explorer selection panes are missing");
-    waitFor([&] { return send(tree, treeGetCount) == 43; }, "Explorer selection fixture did not load");
+    waitFor([&] { return send(tree, treeGetCount) == 63; }, "Explorer selection fixture did not load");
     const auto root = nextItem(tree, TreeRelation::Root), firstFolder = nextItem(tree, TreeRelation::Child, root);
-    const auto secondFolder = nextItem(tree, TreeRelation::Next, firstFolder);
+    auto secondFolder = nextItem(tree, TreeRelation::Next, firstFolder);
+    for (int i = 0; i < 20; ++i) secondFolder = nextItem(tree, TreeRelation::Next, secondFolder);
     const auto open = [&](const wchar_t* name, int lines) {
         controlShortcut(app, viewer, 'P', [&] { return IsWindowVisible(palette); }, "Cannot open file search for Explorer selection");
         for (const auto ch : std::wstring(name)) send(palette, WM_CHAR, ch);
@@ -1856,6 +1859,17 @@ void explorerActiveFileTests(const fs::path& executable) {
         waitLines(viewer, lines);
     };
     const auto selection = [&] { return static_cast<TreeItem>(send(tree, treeGetSelection)); };
+    const auto checkPosition = [&] {
+        const int row = static_cast<int>(send(tree, treeGetRow, selection()));
+        const auto scroll = scrollInfo(tree);
+        const int page = static_cast<int>(scroll.nPage);
+        check(row >= scroll.nPos && row < scroll.nPos + page, "Active file selection is outside the visible rows");
+        const int offset = row - scroll.nPos;
+        const bool centered = offset == page / 2;
+        const bool atStart = scroll.nPos == scroll.nMin && offset < page / 2;
+        const bool atEnd = scroll.nPos + page > scroll.nMax && offset > page / 2;
+        check(centered || atStart || atEnd, "Active file selection was not centered within the scroll range");
+    };
     const auto checkSelected = [&](TreeItem folder) {
         waitFor([&] {
             const auto inner = nextItem(tree, TreeRelation::Child, folder);
@@ -1863,9 +1877,7 @@ void explorerActiveFileTests(const fs::path& executable) {
             return expanded(tree, root) && expanded(tree, folder) && expanded(tree, inner) && file && selection() == file;
         }, "Explorer did not expand and select the active file");
         check(send(tree, treeGetSelectionCount) == 1, "Active file reveal left multiple rows selected");
-        const auto row = send(tree, treeGetRow, selection());
-        const auto scroll = scrollInfo(tree);
-        check(row >= scroll.nPos && row < scroll.nPos + scroll.nPage, "Active file selection is outside the visible rows");
+        checkPosition();
     };
     send(tree, WM_VSCROLL, SB_BOTTOM);
     open(L"日本語", 101); checkSelected(firstFolder); keepTab(app, 0);
@@ -1874,6 +1886,9 @@ void explorerActiveFileTests(const fs::path& executable) {
     open(L"second", 201); checkSelected(secondFolder);
     check(!IsWindowVisible(tree), "Opening a file unexpectedly switched the sidebar");
     send(explorerButton, BM_CLICK); checkSelected(secondFolder);
+    // Recenter an already selected row even when it remains visible.
+    send(tree, WM_VSCROLL, SB_LINEDOWN);
+    clickTab(app, 1); checkSelected(secondFolder);
     // Cached descendants must also be revealed through a collapsed root.
     expand(tree, root, false);
     clickTab(app, 0); waitLines(viewer, 101); checkSelected(firstFolder);
@@ -1889,6 +1904,9 @@ void explorerActiveFileTests(const fs::path& executable) {
     expand(tree, secondFolder, false);
     send(viewer, WM_SETFOCUS);
     check(selection() == secondFolder, "Refocusing the same editor overwrote manual tree navigation");
+    // The final file stops at the end of the list instead of overscrolling.
+    open(L"filler-9", 301); checkPosition();
+    check(send(tree, treeGetRow, selection()) == scrollInfo(tree).nMax, "Bottom-edge fixture did not select the final row");
 }
 void fullSearchTests(const fs::path& executable) {
     Fixture fixture; fs::create_directory(fixture.root / L"ignored");

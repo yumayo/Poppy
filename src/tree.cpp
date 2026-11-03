@@ -105,10 +105,11 @@ TreeItem Tree::hit(int y) const {
     return y >= 0 && y < client.bottom && index >= 0 && index < static_cast<int>(rows.size()) ? rows[index].item : 0;
 }
 int Tree::page() const { const auto r = Scrollbars::contentRect(window_); return std::max(1, static_cast<int>(r.bottom) / rowHeight_); }
-void Tree::ensureVisible() {
+void Tree::ensureVisible(bool centered) {
     const int index = row(creating_ && selection() == renaming_ ? 0 : selection());
     if (index < 0) return;
-    if (index < top_) top_ = index;
+    if (centered) top_ = index - page() / 2;
+    else if (index < top_) top_ = index;
     else if (index >= top_ + page()) top_ = index - page() + 1;
 }
 void Tree::changed() { rowsDirty_ = true; if (!batch_) layout(); }

@@ -33,7 +33,7 @@ public:
     void collapseAll();
     void select(TreeItem id, bool activate = true);
     void addSelection(TreeItem id) { if (!model_.selected(id) && model_.select(id, true, false)) changed(); }
-    void showSelection() { ensureVisible(); changed(); }
+    void showSelection(bool centered = false) { ensureVisible(centered); changed(); }
     std::function<void()> selectionChanged;
     TreeItem child(TreeItem parent = 0) const { return model_.child(parent); }
     TreeItem next(TreeItem id) const { return model_.next(id); }
@@ -102,7 +102,7 @@ private:
     void paint();
     void layout();
     void changed();
-    void ensureVisible();
+    void ensureVisible(bool centered = false);
     const std::vector<TreeModel::Row>& rows() const;
     int row(TreeItem id) const;
     TreeItem hit(int y) const;

@@ -2141,7 +2141,10 @@ void ProjectRuntime::Impl::revealPendingFile() {
     auto item = rootItem_;
     while (const auto n = node(item)) {
         if (pathKey(n->path) == pathKey(pendingExplorerFile_)) {
-            if (!n->directory && !n->unsupported) explorer_.select(item, false);
+            if (!n->directory && !n->unsupported) {
+                explorer_.select(item, false);
+                explorer_.showSelection(true);
+            }
             pendingExplorerFile_.clear(); return;
         }
         if (!n->directory || n->reparse || n->unsupported || !n->path.contains(pendingExplorerFile_)) break;
