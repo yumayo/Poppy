@@ -630,11 +630,18 @@ void Viewer::paintGitMarks() {
     const auto r = Scrollbars::contentRect(window_);
     const int left = contentRect().right;
     renderer_.fill({left, 0, r.right, r.bottom}, background);
-    auto track = Scrollbars::trackRect(window_, SB_VERT);
+    auto track = Scrollbars::markerTrackRect(window_, SB_VERT);
     if (!(GetWindowLongPtrW(window_, GWL_STYLE) & WS_VSCROLL)) track = {left, contentTop(), r.right, r.bottom};
     const size_t rows = std::max(rowCount(), static_cast<size_t>(visibleRows()));
+    const auto thumb = Scrollbars::thumbRect(window_, SB_VERT);
+    // Exclude the row covered by a sticky filename; include a partial bottom
+    // row because its change background is still visible in the editor.
+    const size_t first = static_cast<size_t>(top_ + (stickyFile() ? 1 : 0));
+    const size_t last = static_cast<size_t>(top_ + std::max(0, (static_cast<int>(r.bottom) - contentTop() + cellHeight_ - 1) / cellHeight_));
+    ChangeMarkVisibility visibility{first, last, thumb.top, thumb.bottom};
     const int minimum = std::max(1, MulDiv(3, dpi_, 96));
     const auto paintMark = [&](size_t begin, size_t end, bool removed) {
+        visibility.include(begin, end);
         const auto mark = changeMark(begin, end, rows, track.top, track.bottom, minimum);
         renderer_.fill({left, mark.top, r.right, mark.bottom}, removed ? rgb(231,112,118) : rgb(151,195,121));
     };
@@ -644,13 +651,13 @@ void Viewer::paintGitMarks() {
             const size_t end = wrapping() ? diffLayout_.rowStart(change.end) : change.end;
             paintMark(begin, end, change.removed);
         }
-        return;
-    }
-    for (const auto& change : gitChangeRanges_) {
+    } else for (const auto& change : gitChangeRanges_) {
         const size_t begin = wrapping() ? textLayout_.lineStart(change.begin) : change.begin;
         const size_t end = wrapping() ? textLayout_.lineStart(change.end) : change.end;
         paintMark(begin, end, change.begin == change.end);
     }
+    const auto mask = visibility.mask();
+    renderer_.fill({left, mask.top, r.right, mask.bottom}, background);
 }
 void Viewer::paint() {
     Renderer::Paint paint(renderer_, window_); if (!paint) return;

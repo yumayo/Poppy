@@ -2519,6 +2519,13 @@ void themedScrollbars() {
             }
         }
         check(first >= 0 && last > first, "A scrollbar thumb is missing its theme color");
+        const auto thumb = Scrollbars::thumbRect(pane.window, bar);
+        check((bar == SB_VERT ? thumb.top : thumb.left) == first && (bar == SB_VERT ? thumb.bottom : thumb.right) == last + 1,
+            "The marker mask uses different thumb boundaries from the painted scrollbar");
+        const auto markers = Scrollbars::markerTrackRect(pane.window, bar);
+        check((bar == SB_VERT ? markers.top : markers.left) > first &&
+            (bar == SB_VERT ? markers.top : markers.left) < last + 1,
+            "The marker track does not start inside the minimum-sized thumb");
         const int along = (first + last) / 2;
         const POINT point = bar == SB_VERT ? POINT{cross, along} : POINT{along, cross};
         const LPARAM location = MAKELPARAM(point.x, point.y);
@@ -2530,6 +2537,8 @@ void themedScrollbars() {
         const POINT end = bar == SB_VERT ? POINT{cross, client.bottom + 100} : POINT{client.right + 100, cross};
         SendMessageW(pane.window, WM_MOUSEMOVE, MK_LBUTTON, MAKELPARAM(end.x, end.y));
         check(ScrollbarWindow::info(pane.window, bar).nPos == 999900, "Dragging truncated a scroll position above 65535 or did not reach the end");
+        const auto scrolledMarkers = Scrollbars::markerTrackRect(pane.window, bar);
+        check(EqualRect(&markers, &scrolledMarkers), "Scrolling moved the marker track");
         SendMessageW(pane.window, WM_LBUTTONUP, 0, MAKELPARAM(end.x, end.y));
         check(GetCapture() != pane.window, "Releasing the thumb left the pointer captured");
         checkMouseTarget(bar == SB_VERT ? POINT{cross, 2} : POINT{2, cross});

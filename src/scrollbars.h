@@ -7,8 +7,11 @@ namespace poppy {
 class Scrollbars {
 public:
     static RECT contentRect(HWND window);
-    // Button-free track in client coordinates; empty when the bar is hidden.
-    static RECT trackRect(HWND window, int bar);
+    // Button-free marker track, inset for an enlarged thumb independently of
+    // the scroll position; empty when the bar is hidden.
+    static RECT markerTrackRect(HWND window, int bar);
+    // Includes the minimum thumb size used by painting and mouse input.
+    static RECT thumbRect(HWND window, int bar);
     void paint(HWND window, Renderer& renderer, COLORREF surface);
     bool handle(HWND window, UINT message, WPARAM a, LPARAM b, LRESULT& result);
     int trackPosition(int bar, int fallback) const;

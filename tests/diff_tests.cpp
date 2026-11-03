@@ -101,8 +101,7 @@ void editorChangeMarks() {
     verify(changeMark(999, 999, 3, 0, 2, 6), 0, 2);
     verify(changeMark(0, 1, 0, 34, 234, 3), 34, 34);
     verify(changeMark(0, 1, 10, 34, 34, 3), 34, 34);
-    // Long documents keep a proportional overview even when the scrollbar
-    // thumb is enlarged to its minimum size.
+    // The projection stays proportional within the supplied marker track.
     verify(changeMark(5000, 5044, 20000, 17, 850, 3), 225, 228);
     verify(changeMark(5200, 5201, 20000, 17, 850, 3), 233, 236);
     verify(changeMark(5000, 10000, 20000, 17, 850, 3), 225, 434);
@@ -137,6 +136,70 @@ void editorChangeMarks() {
     check(ranges.size() == 1, "Redo lost its deletion mark");
     changedWorkingLines(buffer.document, buffer.document, &ranges);
     check(ranges.empty(), "Updating HEAD retained old overview marks");
+}
+void minimumThumbChangeMarks() {
+    check(changeMarkInset(833, 20, 20000, 44) == 9, "A long document did not reserve half the excess thumb height");
+    check(changeMarkInset(833, 20, 2000, 44) == 1, "A nearly proportional thumb reserved too much marker space");
+    check(changeMarkInset(833, 20, 1833, 44) == 0, "The minimum-thumb threshold shifted marks by a full half-thumb");
+    check(changeMarkInset(833, 41, 20000, 1000) == 0, "A proportional thumb changed the marker track");
+    check(changeMarkInset(200, 200, 10, 10) == 0 && changeMarkInset(200, 200, 0, 10) == 0,
+        "A full viewport or empty document acquired marker margins");
+    check(changeMarkInset(0, 0, 20000, 44) == 0 && changeMarkInset(1, 1, 20000, 44) == 0,
+        "An empty or one-pixel track acquired invalid margins");
+    for (const int track : {2, 3, 20, 21, 23}) {
+        const int inset = changeMarkInset(track, std::min(20, track), 20000, 44);
+        const auto eof = changeMark(20000, 20000, 20000, 17 + inset, 17 + track - inset, 6);
+        check(eof.top >= 17 + inset && eof.bottom == 17 + track - inset && eof.bottom > eof.top,
+            "An EOF deletion disappeared from a short inset track");
+    }
+    // Compare to actual thumb travel, including a nearly proportional thumb
+    // where simply reserving H/2 would leave visible rows outside the thumb.
+    for (const size_t rows : {size_t{1833}, size_t{2000}, size_t{20000}, size_t{1000000}}) {
+        for (const int scale : {1, 2, 3}) {
+            const int top = 17 * scale, track = 833 * scale, thumb = 20 * scale;
+            const size_t page = 44, span = rows - page;
+            const int inset = changeMarkInset(track, thumb, rows, page);
+            for (const size_t position : {size_t{0}, size_t{1}, span / 4, span / 2, span - 1, span}) {
+                const int thumbTop = top + static_cast<int>((track - thumb) * position / span);
+                const auto visible = changeMark(position, position + page, rows, top + inset, top + track - inset, 1);
+                check(std::abs((visible.top + visible.bottom) - (2 * thumbTop + thumb)) <= 3,
+                    "The visible row center and thumb center disagree by more than pixel rounding");
+                check(visible.top >= thumbTop - 1 && visible.bottom <= thumbTop + thumb + 1,
+                    "Visible rows project outside the enlarged thumb");
+            }
+            const auto first = changeMark(0, 1, rows, top + inset, top + track - inset, 3 * scale);
+            const auto eof = changeMark(rows, rows, rows, top + inset, top + track - inset, 3 * scale);
+            check(first.top == top + inset && eof.bottom == top + track - inset,
+                "First-row or EOF marks escaped the inset track");
+        }
+    }
+}
+void changeMarkCenterVisibility() {
+    // A 3px mark above the viewport still covers the center of this 20px
+    // thumb after correcting the track. The mask must remove this false hit.
+    const int inset = changeMarkInset(833, 20, 20000, 44);
+    const auto offscreen = changeMark(4990, 4991, 20000, 17 + inset, 850 - inset, 3);
+    check(offscreen.top <= 230 && offscreen.bottom > 230, "The minimum-height false-hit fixture no longer covers the thumb center");
+    ChangeMarkVisibility viewport{5000, 5044, 220, 240};
+    viewport.include(4990, 4991);
+    const auto mask = viewport.mask();
+    check(mask.top == 225 && mask.bottom == 235 && mask.top <= offscreen.top && mask.bottom >= offscreen.bottom,
+        "An offscreen minimum-height marker remained in the center of the thumb");
+    viewport.include(5010, 5011);
+    check(viewport.mask().top == viewport.mask().bottom, "A visible highlighted change lost its center markers");
+    viewport.include(5100, 5101);
+    check(viewport.mask().top == viewport.mask().bottom, "An offscreen range hid a previously included visible change");
+    for (const auto range : {LineChange{4999, 5000}, LineChange{5044, 5100}, LineChange{5022, 5022}}) {
+        ChangeMarkVisibility outside{5000, 5044, 220, 240};
+        outside.include(range.begin, range.end);
+        check(outside.mask().top < outside.mask().bottom, "An adjacent or deletion-only range incorrectly counted as highlighted text");
+    }
+    ChangeMarkVisibility sticky{5001, 5044, 220, 240};
+    sticky.include(5000, 5001);
+    check(sticky.mask().top < sticky.mask().bottom, "A row hidden by the sticky filename unmasked center markers");
+    sticky.include(5043, 5045);
+    check(sticky.mask().top == sticky.mask().bottom, "A partially visible bottom change kept center markers masked");
+    check(ChangeMarkVisibility{0, 44, 0, 0}.mask().bottom == 0, "A hidden scrollbar acquired a center mask");
 }
 void editableComparisons() {
     const auto verify = [](const Document& before, const Document& after) {
@@ -654,6 +717,6 @@ void wrapping() {
 }
 }
 int main() {
-    try { revisionHighlights(); editorLineChanges(); editorChangeMarks(); diffChangeMarks(); editableComparisons(); syntaxHighlighting(); multilineSyntax(); syntaxLanguages(); fileHeadings(); alignment(); additionsAndDeletions(); inlineLayout(); edgeCases(); viewPositions(); wrapping(); std::cout << "Diff tests passed.\n"; return EXIT_SUCCESS; }
+    try { revisionHighlights(); editorLineChanges(); editorChangeMarks(); minimumThumbChangeMarks(); changeMarkCenterVisibility(); diffChangeMarks(); editableComparisons(); syntaxHighlighting(); multilineSyntax(); syntaxLanguages(); fileHeadings(); alignment(); additionsAndDeletions(); inlineLayout(); edgeCases(); viewPositions(); wrapping(); std::cout << "Diff tests passed.\n"; return EXIT_SUCCESS; }
     catch (const std::exception& error) { std::cerr << error.what() << '\n'; return EXIT_FAILURE; }
 }
