@@ -109,12 +109,10 @@ void Viewer::editDiff(std::shared_ptr<EditBuffer> buffer, std::shared_ptr<const 
 }
 void Viewer::refreshBuffer(bool externalUpdate) {
     if (!edit_) return;
-    // The shared document has already changed, but the scroll range still
-    // describes the old layout. Sample it before rebuilding wrapped rows.
-    SCROLLINFO viewport{sizeof(viewport), SIF_RANGE | SIF_PAGE | SIF_POS, 0, 0, 0, 0, 0};
+    // The shared document has already changed; use the previous layout's
+    // range, including padding, before rebuilding wrapped rows.
     const bool followTail = externalUpdate && !diff_ && !html_.active() &&
-        GetScrollInfo(window_, SB_VERT, &viewport) &&
-        viewport.nPos >= std::max(0, viewport.nMax - static_cast<int>(viewport.nPage) + 1);
+        scrollRange_.atTail(top_);
     if (diff_) {
         const auto previous = state();
         const auto anchor = diff_->workingOffset(anchor_), caret = diff_->workingOffset(caret_);
@@ -281,11 +279,15 @@ void Viewer::scrollbars(bool followTail) {
                 if (reflow) restoreTop(*reflow);
             }
         }
-        const int rows = document_ ? std::max(1, static_cast<int>(rowCount())) : 1;
-        top_ = followTail ? std::max(0, rows - pageRows) : std::clamp(top_, 0, std::max(0, rows - pageRows));
+        const int rows = document_ ? static_cast<int>(rowCount()) : 0;
+        // All Changes keeps a filename above the last source row. Text-only
+        // message popups retain their compact scroll range.
+        const int pinned = diff_ && rows && diff_->fileForRow(diffRow(rows - 1), inlineView_) ? 1 : 0;
+        scrollRange_ = {rows, pageRows, document_ && !textOnly_, pinned};
+        top_ = followTail ? scrollRange_.maximumTop() : std::clamp(top_, 0, scrollRange_.maximumTop());
         left_ = std::clamp(left_, 0, std::max(0, cols - pageCols));
         if (wrapping()) left_ = 0;
-        SCROLLINFO vertical{sizeof(vertical), SIF_RANGE | SIF_PAGE | SIF_POS, 0, rows - 1, static_cast<UINT>(pageRows), top_, 0}; SetScrollInfo(window_, SB_VERT, &vertical, FALSE);
+        SCROLLINFO vertical{sizeof(vertical), SIF_RANGE | SIF_PAGE | SIF_POS, 0, scrollRange_.totalRows() - 1, static_cast<UINT>(pageRows), top_, 0}; SetScrollInfo(window_, SB_VERT, &vertical, FALSE);
         SCROLLINFO horizontal{sizeof(horizontal), SIF_RANGE | SIF_PAGE | SIF_POS, 0, wrapping() ? 0 : cols - 1, static_cast<UINT>(pageCols), left_, 0}; SetScrollInfo(window_, SB_HORZ, &horizontal, FALSE);
     }
 }
@@ -632,7 +634,7 @@ void Viewer::paintGitMarks() {
     renderer_.fill({left, 0, r.right, r.bottom}, background);
     auto track = Scrollbars::trackRect(window_, SB_VERT);
     if (!(GetWindowLongPtrW(window_, GWL_STYLE) & WS_VSCROLL)) track = {left, contentTop(), r.right, r.bottom};
-    const size_t rows = std::max(rowCount(), static_cast<size_t>(visibleRows()));
+    const size_t rows = static_cast<size_t>(std::max(scrollRange_.totalRows(), visibleRows()));
     const auto thumb = Scrollbars::thumbRect(window_, SB_VERT);
     // Exclude the row covered by a sticky filename; include a partial bottom
     // row because its change background is still visible in the editor.

@@ -1,6 +1,8 @@
 #include "edit_buffer.h"
 #include "text_layout.h"
 #include "selection_scroll.h"
+#include "editor_scroll.h"
+#include "change_marks.h"
 #include "composition.h"
 #include "terminal_model.h"
 #include <algorithm>
@@ -285,6 +287,38 @@ void wrapping() {
     }
     check(end == buffer.document.text.size());
 }
+void scrollPastLastLine() {
+    for (const int page : {1, 2, 10, 30}) for (const int columns : {1, 20, 80}) {
+        for (const auto& text : {std::string(), std::string("short\nlast"), std::string(400, 'x'), std::string(400, 'x') + "\n"}) {
+            auto buffer = load(text);
+            TextLayout layout; layout.build(buffer.document, columns);
+            const int rows = static_cast<int>(layout.rows());
+            const EditorScrollRange range{rows, page, true};
+            // Even a short file can place its final visual row at the top.
+            check(range.maximumTop() == rows - 1);
+            const auto last = layout.row(buffer.document, range.maximumTop());
+            check(last.line == buffer.document.lines.size() - 1);
+            check(last.end == buffer.document.line(last.line).size());
+            check(range.atTail(range.maximumTop()));
+            if (rows > page && rows > 1) check(!range.atTail(range.maximumTop() - 1));
+            // The final-row marker lies inside the viewport's scrollbar thumb
+            // when the same padded extent is used for both projections.
+            const double track = 1000, thumb = track * page / range.totalRows();
+            const double top = track * range.maximumTop() / range.totalRows();
+            const auto mark = changeMark(rows - 1, rows, range.totalRows(), 0, 1000, 1);
+            check(mark.top + 0.0001 >= top && mark.bottom <= top + thumb + 0.0001);
+            check(buffer.document.text == text && !buffer.dirty());
+        }
+        const EditorScrollRange popup{40, page, false};
+        check(popup.totalRows() == 40 && popup.maximumTop() == std::max(0, 40 - page));
+        const EditorScrollRange emptyDiff{0, page, true};
+        check(emptyDiff.totalRows() == 1 && emptyDiff.maximumTop() == 0);
+        const EditorScrollRange stickyDiff{40, page, true, 1};
+        check(stickyDiff.maximumTop() == 39 - (page > 1 ? 1 : 0));
+    }
+    check((EditorScrollRange{3, 20, true}.atTail(0)));
+    check((!EditorScrollRange{100, 20, true}.atTail(0)));
+}
 void selectionScrolling() {
     for (const int height : {20, 30, 40}) {
         // Headers, search bars and DPI change the text viewport, not direction.
@@ -308,6 +342,7 @@ int main() {
     lineCutting();
     lineMovement();
     selectionScrolling();
+    scrollPastLastLine();
     wordMovement();
     wordSelection();
     wrapping();

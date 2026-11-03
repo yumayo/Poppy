@@ -2049,6 +2049,68 @@ void horizontalWheelScrolling() {
         && ScrollbarWindow::info(pane.window, SB_VERT).nPos == 0,
         "A pane without horizontal overflow did not consume horizontal input");
 }
+void editorBottomPadding() {
+    const auto instance = GetModuleHandleW(nullptr);
+    const auto parent = CreateWindowExW(0, L"STATIC", L"Editor bottom padding", WS_POPUP | WS_CLIPCHILDREN,
+        0, 0, 640, 360, nullptr, nullptr, instance, nullptr);
+    check(parent != nullptr, "Cannot create bottom padding test window");
+    struct WindowOwner { HWND value; ~WindowOwner() { DestroyWindow(value); } } owner{parent};
+    Viewer viewer, popup;
+    viewer.create(parent, instance); popup.create(parent, instance, true);
+    const auto window = viewer.window();
+    const auto info = [&] { return ScrollbarWindow::info(window, SB_VERT); };
+    Renderer metrics;
+    for (const bool wrap : {false, true}) for (const UINT dpi : {96u, 144u, 192u}) {
+        viewer.setWordWrap(wrap); viewer.setDpi(dpi); metrics.setDpi(dpi);
+        for (const int height : {180, 360}) {
+            MoveWindow(window, 0, 0, 640, height, FALSE);
+            for (const auto& text : {std::string(), std::string("one\nlast"), std::string(2000, 'x'), std::string(2000, 'x') + "\nlast\n"}) {
+                auto document = std::make_shared<Document>(); document->text = text; indexDocument(*document);
+                viewer.show(document, L"padding.txt");
+                const auto checkBottom = [&] {
+                    TextLayout layout;
+                    const int columns = std::max(1, (static_cast<int>(Scrollbars::contentRect(window).right) - MulDiv(4, dpi, 96) - MulDiv(70, dpi, 96) - 2) / metrics.cellWidth());
+                    layout.build(*document, columns);
+                    const int rows = static_cast<int>(wrap ? layout.rows() : document->lines.size());
+                    SendMessageW(window, WM_VSCROLL, SB_BOTTOM, 0);
+                    check(info().nPos == rows - 1, "Final visual row cannot reach the editor top");
+                    const auto saved = viewer.state();
+                    check(saved.top == static_cast<int>(document->lines.size()) - 1, "Bottom padding became a source row");
+                    SendMessageW(window, WM_MOUSEWHEEL, MAKEWPARAM(0, static_cast<WORD>(-WHEEL_DELTA)), 0);
+                    check(info().nPos == rows - 1, "Wheel scrolled beyond the final source row");
+                    viewer.restore({}); viewer.restore(saved);
+                    check(info().nPos == rows - 1, "Restoring a view lost the final row at the top");
+                    SendMessageW(window, WM_PAINT, 0, 0);
+                    check(document->text == text, "Scroll padding modified the document");
+                };
+                checkBottom();
+                viewer.find(); checkBottom();
+                SendMessageW(window, WM_KEYDOWN, VK_ESCAPE, 0);
+            }
+        }
+        MoveWindow(popup.window(), 0, 0, 640, 360, FALSE); popup.setDpi(dpi);
+        auto shortMessage = std::make_shared<Document>(); shortMessage->text = "one\ntwo"; indexDocument(*shortMessage);
+        popup.show(shortMessage, {}, false, false);
+        check(!(GetWindowLongPtrW(popup.window(), GWL_STYLE) & WS_VSCROLL), "A short message popup acquired editor padding");
+        for (const bool inlineView : {false, true}) for (const bool headings : {false, true}) {
+            auto diff = std::make_shared<DiffDocument>();
+            diff->patch.text = "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-before\n+after\n";
+            indexDocument(diff->patch); indexDiff(*diff, headings);
+            viewer.setDiffLayout(inlineView); viewer.showDiff(diff, L"changes.diff");
+            DiffLayout layout;
+            const int width = (Scrollbars::contentRect(window).right - MulDiv(4, dpi, 96) - (inlineView ? 0 : 1)) / (inlineView ? 1 : 2);
+            layout.build(*diff, inlineView, std::max(1, (width - MulDiv(inlineView ? 140 : 70, dpi, 96) - 2) / metrics.cellWidth()));
+            const int rows = static_cast<int>(wrap ? layout.rows() : diff->rowCount(inlineView));
+            SendMessageW(window, WM_VSCROLL, SB_BOTTOM, 0);
+            check(info().nPos == rows - 1 - (headings ? 1 : 0), "Diff padding hid the last row behind the sticky filename");
+            SendMessageW(window, WM_PAINT, 0, 0);
+        }
+        viewer.showDiff(std::make_shared<DiffDocument>(), L"empty.diff");
+        check(info().nMax == 0, "An empty comparison acquired scroll padding");
+        viewer.message(L"No file");
+        check(info().nMax == 0, "A status message retained editor padding");
+    }
+}
 void editorTailFollowing() {
     const auto instance = GetModuleHandleW(nullptr);
     const auto parent = CreateWindowExW(0, L"STATIC", L"Tail following test", WS_POPUP | WS_CLIPCHILDREN,
@@ -2100,7 +2162,7 @@ void editorTailFollowing() {
         check(scrollInfo(viewer.window()).nPos == localTop && !atBottom(viewer.window()), "A local buffer refresh unexpectedly enabled tail following");
         SendMessageW(viewer.window(), WM_VSCROLL, SB_BOTTOM, 0);
         reload("short\r\n");
-        check(atBottom(viewer.window()) && scrollInfo(viewer.window()).nPos == 0, "Truncating a tailed file left an invalid viewport");
+        check(atBottom(viewer.window()) && scrollInfo(viewer.window()).nPos == 1, "Truncating a tailed file left an invalid viewport");
         reload(lines(100));
         check(atBottom(viewer.window()), "A file growing beyond its first page did not follow the tail");
         reload(std::string(1000, 'x'));
@@ -2665,7 +2727,7 @@ int main(int argc, char** argv) {
         } else {
             shutdownProgress();
             persistentErrorPopup();
-            editorTailFollowing();
+            editorBottomPadding(); editorTailFollowing();
             htmlPreviewSwitching();
             terminalAsyncStartup(); terminalProcessShutdown();
             statusBarLimits(); treeMultipleSelection(); commitMessagePopup(); inlineTreeInput(); inlineTreeCreation(); gitCommitInput(); cellPositions(); colorsAndClipping(); imagePreviews(); fractionalMarkers(); smoothIcons(); windowTargets(); editableDiff(); editorCaret(); delayedLoadingMessages(); imeCellRendering(); imeTerminalInsertion(); imeUiRendering(); imePositions(); editorWordSelection(); editorWordMovement(); editorLineShortcuts(); editorWrapping(); diffWrapping(); documentFind(); horizontalWheelScrolling(); continuousViewerScrolling(); selectionAutoScrolling(); terminalGitBashSocketEnvironment(); terminalSelectionAutoScrolling(); themedScrollbars(); quickOpenStability();

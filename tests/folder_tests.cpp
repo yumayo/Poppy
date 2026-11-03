@@ -184,8 +184,17 @@ SCROLLINFO scrollInfo(HWND window, int bar = SB_VERT) {
     check(GetScrollInfo(window, bar, &info) != FALSE, "Could not read the viewer's scroll position");
     return info;
 }
-void waitLines(HWND viewer, int lines) {
-    waitFor([&] { return scrollInfo(viewer).nMax == lines; }, "The selected tab did not load the expected document");
+int lastTextRow(HWND viewer) {
+    const auto info = scrollInfo(viewer);
+    // Normal editor ranges include one page minus one row of bottom padding.
+    return std::max(0, info.nMax - static_cast<int>(info.nPage) + 1);
+}
+void waitLines(HWND viewer, int lines, bool fixedFilename = false) {
+    waitFor([&] {
+        const auto info = scrollInfo(viewer);
+        const int pinned = fixedFilename && info.nMax > 0 ? 1 : 0;
+        return lastTextRow(viewer) + pinned == lines;
+    }, "The selected tab did not load the expected document");
 }
 void click(HWND window, int x, int y, bool middle = false) {
     send(window, middle ? WM_MBUTTONDOWN : WM_LBUTTONDOWN, middle ? MK_MBUTTON : MK_LBUTTON, MAKELPARAM(x, y));
@@ -379,7 +388,7 @@ void editorTailTests(const fs::path& executable) {
     append(); waitLines(viewer, 500);
     check(atBottom(), "File watcher tail following did not resume at the bottom");
     writeLines(path, 10); waitLines(viewer, 10);
-    check(atBottom() && scrollInfo(viewer).nPos == 0, "File truncation left tail following outside the file");
+    check(atBottom() && scrollInfo(viewer).nPos == 10, "File truncation left tail following outside the file");
     append(); waitLines(viewer, 110);
     check(atBottom(), "Growing a short file did not keep following the tail");
     send(viewer, WM_CHAR, '!');
@@ -387,7 +396,7 @@ void editorTailTests(const fs::path& executable) {
     // Confirm completion of F5 independently of the dirty editor's row count.
     writeFile(fixture.root / L"refresh-marker.txt");
     waitFor([&] { return send(tree, treeGetCount) == 3; }, "The dirty tail fixture did not refresh");
-    check(scrollInfo(viewer).nMax == 110, "Tail following replaced unsaved text with an external append");
+    check(lastTextRow(viewer) == 110, "Tail following replaced unsaved text with an external append");
     // Let the application close without saving over the external append.
     check(PostMessageW(app.host, WM_CLOSE, 0, 0) != FALSE, "Could not close the tail test");
     answerTabSave(app, L"output.log", IDNO);
@@ -451,7 +460,7 @@ void previewTabSplitTests(const fs::path& executable) {
     waitLines(left, 200); waitLines(right, 300);
     clickTab(app, 0);
     send(tree, treeSelect, c); waitLines(left, 400);
-    check(visibleTabCount(app) == 3 && scrollInfo(right).nMax == 300, "Opening a left preview replaced the right preview");
+    check(visibleTabCount(app) == 3 && lastTextRow(right) == 300, "Opening a left preview replaced the right preview");
     body = bounds(app.window, right);
     dragTab(app, 2, {body.left + (body.right - body.left) * 3 / 4, body.top + 60});
     waitLines(left, 200); waitLines(right, 400);
@@ -476,7 +485,7 @@ void htmlTabToolsTests(const fs::path& executable) {
     const auto waitSource = [&](HWND viewer, int lines) {
         // Opening HTML now starts in Preview; wait for the document before
         // selecting Source, including when the asynchronous load is pending.
-        waitFor([&] { selectMode(viewer, false); return scrollInfo(viewer).nMax == lines; },
+        waitFor([&] { selectMode(viewer, false); return lastTextRow(viewer) == lines; },
             "The HTML tab did not switch to Source");
     };
     auto item = nextItem(tree, TreeRelation::Child, nextItem(tree, TreeRelation::Root));
@@ -511,14 +520,14 @@ void htmlTabToolsTests(const fs::path& executable) {
     // Ordinary files do not retain the HTML buttons from the previous tab.
     auto body = bounds(app.window, left);
     click(app.window, body.right - MulDiv(20, dpi, 96), MulDiv(17, dpi, 96));
-    check(scrollInfo(left).nMax == 400 && visibleTabCount(app) == 3, "An ordinary file retained HTML tools");
+    check(lastTextRow(left) == 400 && visibleTabCount(app) == 3, "An ordinary file retained HTML tools");
     clickTab(app, 0); waitSource(left, 200);
     dragTab(app, 1, {body.left + (body.right - body.left) * 3 / 4, body.top + 60});
     waitSource(left, 200); waitSource(right, 300);
     SetWindowPos(app.host, nullptr, 0, 0, MulDiv(1000, dpi, 96), MulDiv(700, dpi, 96), SWP_NOMOVE | SWP_NOZORDER);
     send(app.window, WM_NULL);
     // Each pane owns its mode even while focus is in the other pane.
-    switchMode(right, true); check(scrollInfo(right).nMax == 0 && scrollInfo(left).nMax == 200, "Right Preview changed the left pane");
+    switchMode(right, true); check(scrollInfo(right).nMax == 0 && lastTextRow(left) == 200, "Right Preview changed the left pane");
     switchMode(left, true); check(scrollInfo(left).nMax == 0 && scrollInfo(right).nMax == 0, "Left Preview changed the right pane");
     switchMode(right, false); waitLines(right, 300); check(scrollInfo(left).nMax == 0, "Right Source closed the left preview");
     switchMode(left, false); waitLines(left, 200);
@@ -581,7 +590,7 @@ void bulkTabSaveTests(const fs::path& executable) {
     tabMenuCommand(app, 3, TabMenuCommand::CloseOthers, false);
     answerTabSave(app, L"b.txt", IDNO); answerTabSave(app, L"c.txt", IDCANCEL);
     send(app.window, WM_NULL);
-    check(visibleTabCount(app) == 4 && scrollInfo(viewer).nMax == 500,
+    check(visibleTabCount(app) == 4 && lastTextRow(viewer) == 500,
           "Cancel after a discard decision partially closed the tabs");
     check(readText(fixture.root / L"b.txt").front() != '!', "Discard or Cancel unexpectedly saved edits");
 
@@ -676,7 +685,7 @@ void tabTests(const fs::path& executable) {
     check(scrollInfo(viewer).nPos == firstTop, "Reloading a hidden tab lost its position");
     // Closing an inactive tab must keep the active document and position.
     clickTab(app, 1, false, true);
-    check(scrollInfo(viewer).nMax == 220 && scrollInfo(viewer).nPos == firstTop, "Closing an inactive tab changed the active document");
+    check(lastTextRow(viewer) == 220 && scrollInfo(viewer).nPos == firstTop, "Closing an inactive tab changed the active document");
     click(app.window, pane.left + px(30), tabY, true);
     check(bounds(app.window, viewer).top == empty.top && scrollInfo(viewer).nMax == 0, "Closing the last tab left a duplicate tab or document");
     // Reopen, then close a newly loading tab and its neighbor. Older results
@@ -714,7 +723,7 @@ void rapidTabMiddleClickTests(const fs::path& executable) {
         check(visibleTabCount(app) == --remaining, "A rapid middle-click did not close exactly one tab");
         send(app.window, WM_MBUTTONUP, 0, point);
         check(visibleTabCount(app) == remaining, "Releasing a middle-click closed another tab");
-        if (remaining) check(scrollInfo(viewer).nMax == 500 && scrollInfo(viewer).nPos == top,
+        if (remaining) check(lastTextRow(viewer) == 500 && scrollInfo(viewer).nPos == top,
                              "Closing inactive tabs rapidly changed the active preview or its scroll position");
     }
     check(scrollInfo(viewer).nMax == 0, "Rapid middle-clicks left the last preview open");
@@ -733,7 +742,7 @@ void pinnedTabTests(const fs::path& executable) {
         }
         const auto singleRow = bounds(app.window, viewer);
         toggleTabPin(app, 1);
-        check(scrollInfo(viewer).nMax == 400, "Pinning an inactive tab changed the active file");
+        check(lastTextRow(viewer) == 400, "Pinning an inactive tab changed the active file");
         const auto pinned = tabBounds(app, 0), regular = tabBounds(app, 1);
         check(pinned.bottom == regular.top && pinned.left == regular.left,
               "Pinned and regular tabs did not start on separate rows");
@@ -741,20 +750,20 @@ void pinnedTabTests(const fs::path& executable) {
               "The viewer did not reserve a dedicated pinned tab row");
         clickTab(app, 0); waitLines(viewer, 300);
         clickTab(app, 0, true);
-        check(visibleTabCount(app) == 3 && scrollInfo(viewer).nMax == 300, "Middle-click closed a pinned tab");
+        check(visibleTabCount(app) == 3 && lastTextRow(viewer) == 300, "Middle-click closed a pinned tab");
         const auto middlePoint = MAKELPARAM(pinned.left + MulDiv(16, GetDpiForWindow(app.window), 96), (pinned.top + pinned.bottom) / 2);
         send(app.window, WM_MBUTTONDBLCLK, MK_MBUTTON, middlePoint);
         send(app.window, WM_MBUTTONUP, 0, middlePoint);
-        check(visibleTabCount(app) == 3 && scrollInfo(viewer).nMax == 300, "Rapid middle-clicking closed a pinned tab");
+        check(visibleTabCount(app) == 3 && lastTextRow(viewer) == 300, "Rapid middle-clicking closed a pinned tab");
         clickTab(app, 0, false, true);
-        check(visibleTabCount(app) == 3 && scrollInfo(viewer).nMax == 300, "A pinned tab retained a close button");
+        check(visibleTabCount(app) == 3 && lastTextRow(viewer) == 300, "A pinned tab retained a close button");
         toggleTabPin(app, 0);
         check(bounds(app.window, viewer).top == singleRow.top && tabBounds(app, 0).top == tabBounds(app, 1).top,
               "Unpinning the last pinned tab left an empty row");
         clickTab(app, 0, false, true); waitLines(viewer, 200);
         check(visibleTabCount(app) == 2, "An unpinned tab could not be closed");
         toggleTabPin(app, 1);
-        check(scrollInfo(viewer).nMax == 200, "Moving a pinned tab lost the active file");
+        check(lastTextRow(viewer) == 200, "Moving a pinned tab lost the active file");
         toggleTabPin(app, 1);
         check(tabBounds(app, 0).top == tabBounds(app, 1).top && bounds(app.window, viewer).top == singleRow.top,
               "Pinning the final regular tab left an empty regular row");
@@ -775,11 +784,11 @@ void pinnedTabTests(const fs::path& executable) {
         clickTab(app, 0); waitLines(viewer, 400);
         clickTab(app, 1); waitLines(viewer, 200);
         toggleTabPin(app, 0);
-        check(scrollInfo(viewer).nMax == 200, "Unpinning an inactive tab changed the active file");
+        check(lastTextRow(viewer) == 200, "Unpinning an inactive tab changed the active file");
         check(tabBounds(app, 0).bottom == tabBounds(app, 1).top,
               "Unpinning a tab did not move it below the pinned row");
         clickTab(app, 1, true);
-        check(visibleTabCount(app) == 1 && scrollInfo(viewer).nMax == 200, "Closing an unpinned neighbor changed the pinned file");
+        check(visibleTabCount(app) == 1 && lastTextRow(viewer) == 200, "Closing an unpinned neighbor changed the pinned file");
         check(bounds(app.window, viewer).top == tabBounds(app, 0).bottom,
               "Closing the final regular tab left an empty row");
         toggleTabPin(app, 0); clickTab(app, 0, true);
@@ -950,10 +959,10 @@ void wrappingTabTests(const fs::path& executable) {
     for (int i = 0; i < 8; ++i) { clickTab(app, i); waitLines(viewer, 100 + i); }
     const auto wrapped = bounds(app.window, viewer);
     click(app.window, wrapped.right - px(3), empty.top + px(17));
-    check(scrollInfo(viewer).nMax == 107, "Clicking the empty part of a tab row changed the active file");
+    check(lastTextRow(viewer) == 107, "Clicking the empty part of a tab row changed the active file");
     // Close an inactive tab in the third row, then the active last-row tab.
     clickTab(app, 5, true);
-    check(scrollInfo(viewer).nMax == 107, "Closing a wrapped inactive tab changed the document");
+    check(lastTextRow(viewer) == 107, "Closing a wrapped inactive tab changed the document");
     clickTab(app, 6); waitLines(viewer, 107);
     clickTab(app, 6, false, true); waitLines(viewer, 106);
     checkRows(6);
@@ -970,7 +979,7 @@ void wrappingTabTests(const fs::path& executable) {
     const auto pane = bounds(app.window, viewer); const int tabY = pane.top - px(17);
     check(pane.top == empty.top + rowHeight && pane.bottom > pane.top, "Many tabs hid the document in a short window");
     for (int i = 0; i < 8; ++i) click(app.window, pane.right - px(42), tabY);
-    check(scrollInfo(viewer).nMax == 106, "Scrolling the tab rows changed the active file");
+    check(lastTextRow(viewer) == 106, "Scrolling the tab rows changed the active file");
     clickTab(app, 0); waitLines(viewer, 100);
     for (int i = 0; i < 8; ++i) click(app.window, pane.right - px(14), tabY);
     clickTab(app, visibleTabCount(app) - 1); waitLines(viewer, 106);
@@ -1276,7 +1285,7 @@ void explorerMultipleSelectionTests(const fs::path& executable) {
     };
     send(tree, treeSelect, itemAt(2)); waitLines(viewer, 120);
     rowClick(itemAt(4), MK_SHIFT);
-    check(send(tree, treeGetSelectionCount) == 3 && send(tree, treeIsSelected, itemAt(3)) && scrollInfo(viewer).nMax == 120,
+    check(send(tree, treeGetSelectionCount) == 3 && send(tree, treeIsSelected, itemAt(3)) && lastTextRow(viewer) == 120,
         "Shift click did not select the range or opened its last file");
     rowClick(itemAt(3), MK_CONTROL);
     check(send(tree, treeGetSelectionCount) == 2 && !send(tree, treeIsSelected, itemAt(3)), "Ctrl click did not remove a row");
@@ -1810,7 +1819,7 @@ void quickOpenTests(const fs::path& executable) {
     open(); type(L"missing-file"); send(palette, WM_KEYDOWN, VK_RETURN);
     check(IsWindowVisible(palette), "Enter opened a stale result while a new query was pending");
     send(palette, WM_KEYDOWN, VK_ESCAPE);
-    check(!IsWindowVisible(palette) && scrollInfo(viewer).nMax == 301, "Escape changed the current document");
+    check(!IsWindowVisible(palette) && lastTextRow(viewer) == 301, "Escape changed the current document");
     open(); type(L"日本語"); accept(101);
     // Opening the same path again should switch to its tab instead of duplicating it.
     open(); type(L"日本語"); accept(101);
@@ -1983,12 +1992,12 @@ void gitSidebarTests(const fs::path& executable) {
         auto group = gitGroup(changes, false);
         auto docs = nextItem(changes, TreeRelation::Child, group), src = nextItem(changes, TreeRelation::Next, docs);
         check(expanded(changes, docs) && expanded(changes, src), "Git folders did not start expanded");
-        send(changes, treeSelect, group); send(changes, WM_KEYDOWN, VK_F4); waitLines(viewer, 905);
-        expand(changes, src, false); waitLines(viewer, 603);
-        expand(changes, src); waitLines(viewer, 905);
+        send(changes, treeSelect, group); send(changes, WM_KEYDOWN, VK_F4); waitLines(viewer, 905, true);
+        expand(changes, src, false); waitLines(viewer, 603, true);
+        expand(changes, src); waitLines(viewer, 905, true);
         const auto visibilityNested = nextItem(changes, TreeRelation::Child, src);
-        expand(changes, visibilityNested, false); waitLines(viewer, 603);
-        expand(changes, visibilityNested); waitLines(viewer, 905);
+        expand(changes, visibilityNested, false); waitLines(viewer, 603, true);
+        expand(changes, visibilityNested); waitLines(viewer, 905, true);
         const auto rootFile = nextItem(changes, TreeRelation::Next, src);
         const auto toggleEye = [&] {
             RECT rect{}; GetClientRect(changes, &rect);
@@ -1999,25 +2008,25 @@ void gitSidebarTests(const fs::path& executable) {
             send(changes, WM_MOUSELEAVE);
             click(changes, rect.right - px(102), y);
         };
-        toggleEye(); waitLines(viewer, 503);
+        toggleEye(); waitLines(viewer, 503, true);
         check(visibleTabCount(app) == 1, "Toggling visibility opened a file tab");
-        expand(changes, src, false); waitLines(viewer, 201);
-        view(false); waitLines(viewer, 503);
-        view(true); waitLines(viewer, 201);
+        expand(changes, src, false); waitLines(viewer, 201, true);
+        view(false); waitLines(viewer, 503, true);
+        view(true); waitLines(viewer, 201, true);
         // Layout changes rebuild item IDs but keep each file's visibility.
         group = gitGroup(changes, false);
         docs = nextItem(changes, TreeRelation::Child, group); src = nextItem(changes, TreeRelation::Next, docs);
         const auto restoredRootFile = nextItem(changes, TreeRelation::Next, src);
         send(changes, treeSelect, restoredRootFile); waitLines(viewer, 400);
-        send(changes, treeSelect, group); send(changes, WM_KEYDOWN, VK_F4); waitLines(viewer, 201);
+        send(changes, treeSelect, group); send(changes, WM_KEYDOWN, VK_F4); waitLines(viewer, 201, true);
         expand(changes, docs, false); waitLines(viewer, 0);
-        expand(changes, docs); waitLines(viewer, 201);
+        expand(changes, docs); waitLines(viewer, 201, true);
         // Show the root file again using its newly allocated row.
         RECT visibilityRect{}; GetClientRect(changes, &visibilityRect);
         const int visibilityHeight = static_cast<int>(send(changes, treeGetRowHeight));
         const int visibilityY = (static_cast<int>(send(changes, treeGetRow, restoredRootFile)) - scrollInfo(changes).nPos) * visibilityHeight + visibilityHeight / 2;
-        click(changes, visibilityRect.right - px(102), visibilityY); waitLines(viewer, 603);
-        expand(changes, src); waitLines(viewer, 905);
+        click(changes, visibilityRect.right - px(102), visibilityY); waitLines(viewer, 603, true);
+        expand(changes, src); waitLines(viewer, 905, true);
         clickTab(app, 0, false, true);
         send(changes, treeSelect, docs);
         check(scrollInfo(viewer).nMax == 0, "Selecting a Git folder opened a file");
@@ -2344,7 +2353,7 @@ void branchSidebarTests(const fs::path& executable) {
         const auto checkEditable = [&] {
             // A diff can briefly have the same row count while the file loads.
             waitFor([&] {
-                if (scrollInfo(viewer).nMax == 2) return true;
+                if (lastTextRow(viewer) == 2) return true;
                 send(viewer, WM_CHAR, '\r'); return false;
             }, "Open File did not open an editable working file");
             send(viewer, WM_KEYDOWN, VK_BACK); waitLines(viewer, 1);
@@ -2380,12 +2389,12 @@ void branchSidebarTests(const fs::path& executable) {
         write(L"src/file.txt", "working\n");
         waitFor([&] { return children(changes, gitGroup(changes, false)) == 2; }, "Single-file discard fixture did not refresh");
         const auto refreshedStaged = gitGroup(changes, true), refreshedWorking = gitGroup(changes, false);
-        send(changes, treeSelect, refreshedStaged); send(changes, WM_KEYDOWN, VK_F4); waitLines(viewer, 1);
+        send(changes, treeSelect, refreshedStaged); send(changes, WM_KEYDOWN, VK_F4); waitLines(viewer, 1, true);
         const auto rect = bounds(app.window, changes);
         const int height = static_cast<int>(send(changes, treeGetRowHeight));
         const int row = static_cast<int>(send(changes, treeGetRow, refreshedWorking));
         click(changes, rect.right - rect.left - MulDiv(18, GetDpiForWindow(app.window), 96), (row - scrollInfo(changes).nPos) * height + height / 2);
-        waitLines(viewer, 4);
+        waitLines(viewer, 4, true);
         // The group keeps its diff action and adds Stage All Changes beside it,
         // including when its file list is collapsed.
         expand(changes, refreshedWorking, false);
@@ -2404,7 +2413,7 @@ void branchSidebarTests(const fs::path& executable) {
         const int stagedY = (stagedRow - scrollInfo(changes).nPos) * height + height / 2;
         // Open All Changes remains the rightmost action on Staged Changes.
         click(changes, rect.right - rect.left - MulDiv(18, GetDpiForWindow(app.window), 96), stagedY);
-        waitLines(viewer, 4);
+        waitLines(viewer, 4, true);
         expand(changes, stagedAll, false);
         send(changes, WM_MOUSEMOVE, 0, MAKELPARAM(stageX, stagedY));
         click(changes, stageX, stagedY); send(changes, WM_MOUSELEAVE);
@@ -2424,11 +2433,11 @@ void branchSidebarTests(const fs::path& executable) {
             return children(changes, first) == 1 && children(changes, second) == 2;
         }, "Discard fixture did not show partially staged and untracked changes");
         auto discardWorking = gitGroup(changes, false);
-        send(changes, treeSelect, discardWorking); send(changes, WM_KEYDOWN, VK_F4); waitLines(viewer, 4);
+        send(changes, treeSelect, discardWorking); send(changes, WM_KEYDOWN, VK_F4); waitLines(viewer, 4, true);
         discardGroup(app, changes, discardWorking, IDCANCEL);
         check(fs::exists(fixture.root / L"untracked.txt") && fs::file_size(fixture.root / L"src/file.txt") == 13,
               "Cancelling discard changed working files");
-        waitLines(viewer, 4);
+        waitLines(viewer, 4, true);
         discardWorking = gitGroup(changes, false);
         discardGroup(app, changes, discardWorking, IDOK);
         waitFor([&] {
@@ -2447,7 +2456,7 @@ void branchSidebarTests(const fs::path& executable) {
             return children(changes, first) == 1 && children(changes, second) == 2;
         }, "Stash fixture did not show partially staged and untracked changes");
         const auto stashWorking = gitGroup(changes, false);
-        send(changes, treeSelect, stashWorking); send(changes, WM_KEYDOWN, VK_F4); waitLines(viewer, 4);
+        send(changes, treeSelect, stashWorking); send(changes, WM_KEYDOWN, VK_F4); waitLines(viewer, 4, true);
         expand(changes, stashWorking, false);
         // Stash is the fourth action, to the left of discard, stage and diff.
         const int stashX = rect.right - rect.left - MulDiv(102, GetDpiForWindow(app.window), 96);
@@ -2472,7 +2481,7 @@ void branchSidebarTests(const fs::path& executable) {
         // Diff and Unstage All Changes retain their positions beside stash.
         click(changes, rect.right - rect.left - MulDiv(18, GetDpiForWindow(app.window), 96),
               (static_cast<int>(send(changes, treeGetRow, stashStaged)) - scrollInfo(changes).nPos) * height + height / 2);
-        waitLines(viewer, 1);
+        waitLines(viewer, 1, true);
         expand(changes, stashStaged, false);
         const int stagedStashX = rect.right - rect.left - MulDiv(74, GetDpiForWindow(app.window), 96);
         const int stagedStashY = (static_cast<int>(send(changes, treeGetRow, stashStaged)) - scrollInfo(changes).nPos) * height + height / 2;
@@ -2513,9 +2522,9 @@ void branchSidebarTests(const fs::path& executable) {
         send(branches, WM_KEYDOWN, VK_F4); checkEditable();
         click(app.window, pane.left + (pane.right - pane.left) / 4, pane.top - MulDiv(14, GetDpiForWindow(app.window), 96));
         check(children(branches, nextItem(branches, TreeRelation::Child, latest)) == 1, "Tree did not restore loaded commit folders");
-        send(branches, treeSelect, latest); send(branches, WM_KEYDOWN, VK_F4); waitLines(viewer, 4);
+        send(branches, treeSelect, latest); send(branches, WM_KEYDOWN, VK_F4); waitLines(viewer, 4, true);
         const auto previews = visibleTabCount(app);
-        send(branches, treeSelect, rootCommit); send(branches, WM_KEYDOWN, VK_F4); waitLines(viewer, 5);
+        send(branches, treeSelect, rootCommit); send(branches, WM_KEYDOWN, VK_F4); waitLines(viewer, 5, true);
         check(visibleTabCount(app) == previews, "Browsing All Changes for different commits accumulated tabs");
         waitFor([&] { return children(branches, rootCommit) == 2; }, "The oldest commit did not load its files");
         const auto oldFile = nextItem(branches, TreeRelation::Child, nextItem(branches, TreeRelation::Child, rootCommit));
@@ -2535,7 +2544,7 @@ void branchSidebarTests(const fs::path& executable) {
         check(readText(fixture.root / L"src/file.txt") == "committed\n", "History Open File saved edits without Ctrl+S");
         viewerKey('Z', true);
         waitFor([&] { return viewerText() == L"committed\n"; }, "History Open File lost the working file's Undo history");
-        send(branches, treeSelect, rootCommit); send(branches, WM_KEYDOWN, VK_F4); waitLines(viewer, 5);
+        send(branches, treeSelect, rootCommit); send(branches, WM_KEYDOWN, VK_F4); waitLines(viewer, 5, true);
         const auto oldWorking = gitGroup(branches, false);
         keepTab(app, visibleTabCount(app) - 1);
         PostMessageW(app.window, WM_KEYDOWN, VK_F5, 0);
@@ -2558,7 +2567,7 @@ void branchSidebarTests(const fs::path& executable) {
         Application app(executable, fixture.root); app.tree();
         const auto branches = GetDlgItem(app.window, 4), viewer = FindWindowExW(app.window, nullptr, L"PoppyViewer", nullptr);
         waitFor([&] { return IsWindowVisible(branches); }, "Restart did not restore Source Control");
-        waitLines(viewer, 5);
+        waitLines(viewer, 5, true);
     }
 }
 void multiRepositoryTests(const fs::path& executable) {
@@ -2706,7 +2715,7 @@ void multiProjectTests(const fs::path& executable) {
     send(treeB, treeSelect, nextItem(treeB, TreeRelation::Child, nextItem(treeB, TreeRelation::Root))); waitLines(viewerB, 300); keepTab(app, 0);
     open(c.root); check(app.window!=surfaceA && app.window!=surfaceB,"Projects reused a surface");
     select(0); check(app.window==surfaceA && nextItem(treeA,TreeRelation::Root)==rootA,"Switching rebuilt the explorer");
-    check(scrollInfo(viewerA).nMax==200 && scrollInfo(viewerA).nPos==top,"A-B-A lost the document or its view position");
+    check(lastTextRow(viewerA)==200 && scrollInfo(viewerA).nPos==top,"A-B-A lost the document or its view position");
     const auto terminals = FindWindowExW(surfaceA,nullptr,L"PoppyTerminalPane",nullptr);check(terminals!=nullptr,"Project has no terminal pane");
     HWND shell = FindWindowExW(terminals,nullptr,L"PoppyTerminal",nullptr);check(shell!=nullptr,"Project has no shell");
     const auto before = childProcesses(app.process.dwProcessId);
@@ -2720,7 +2729,7 @@ void multiProjectTests(const fs::path& executable) {
     select(1);
     writeFile(a.root / L"background.txt");
     waitFor([&] { return send(treeA, treeGetCount) == 3; }, "An inactive project's directory changes were not applied");
-    check(scrollInfo(viewerB).nMax == 300 && app.window == surfaceB, "An inactive result changed the visible project");
+    check(lastTextRow(viewerB) == 300 && app.window == surfaceB, "An inactive result changed the visible project");
     select(0);check(IsWindow(shell) && WaitForSingleObject(shellProcess, 0) == WAIT_TIMEOUT,"Switching destroyed a running terminal");
     LARGE_INTEGER frequency{}; QueryPerformanceFrequency(&frequency); double maximum = 0;
     for (int i = 0; i < 6; ++i) { LARGE_INTEGER start{}, end{}; QueryPerformanceCounter(&start); select(i % 2); QueryPerformanceCounter(&end); maximum = std::max(maximum, (end.QuadPart-start.QuadPart)*1000.0/frequency.QuadPart); }

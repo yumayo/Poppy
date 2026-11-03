@@ -7,6 +7,7 @@
 #include "find_bar.h"
 #include "text_search.h"
 #include "text_layout.h"
+#include "editor_scroll.h"
 #include "html_preview.h"
 #include <memory>
 
@@ -99,6 +100,7 @@ private:
     UINT dpi_ = 96;
     int cellWidth_ = 8, cellHeight_ = 20, header_ = 34, gutter_ = 66;
     int top_ = 0, left_ = 0;
+    EditorScrollRange scrollRange_;
     size_t anchor_ = 0, caret_ = 0;
     bool selecting_ = false, after_ = false, inlineView_ = true;
     POINT selectionPoint_{};
