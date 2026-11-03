@@ -397,6 +397,7 @@ private:
     bool gitTreeView_ = true;
     uint64_t branchRequest_ = 0;
     bool branchesLoading_ = false, branchesLoaded_ = false, branchRepositories_ = false;
+    ResourceId branchRoot_;
     std::wstring branchError_;
     std::set<std::wstring> collapsedGitPaths_;
     std::set<std::wstring> hiddenGitFiles_;
@@ -461,6 +462,7 @@ void ProjectRuntime::Impl::create() {
     changes_.create(window_, instance_, L"Source Control", 4); gitTree_ = changes_.window();
     gitCommit_.create(window_, instance_);
     gitCommit_.requested = [this](const ResourceId& root, const std::wstring& message, bool amend) { commitGitChanges(root, message, amend); };
+    gitCommit_.repositorySelected = [this] { refreshBranches(); };
     explorer_.multipleSelection = true;
     explorer_.selectionChanged = [this] { pendingTreeSelection_.clear(); pendingTreeSelections_.clear(); pendingExplorerFile_.clear(); };
     explorer_.activated = [this](TreeItem item) {
@@ -1267,13 +1269,25 @@ TreeItem ProjectRuntime::Impl::insertHistory(TreeItem parent, std::wstring text,
     return item;
 }
 void ProjectRuntime::Impl::refreshBranches() {
-    if (!git_ || git_->repositories.empty() || (root_.wsl() && !connected_)) return;
+    if (!git_ || (root_.wsl() && !connected_)) return;
+    const auto selected = gitCommit_.selectedRepository();
+    const bool multiple = git_->repositories.size() > 1;
+    if (selected != branchRoot_ || multiple != branchRepositories_) {
+        if (!branchRoot_.empty() && selected != branchRoot_) {
+            pendingGitSelection_.clear(); restoreGitTop_ = restoreGitLeft_ = 0;
+        }
+        changes_.clear(); branchesLoaded_ = false;
+        branchRoot_ = selected; branchRepositories_ = multiple;
+    }
     const auto workspace = git_; const auto generation = generation_, request = ++branchRequest_;
-    branchesLoading_ = true;
-    gitWorker_->submit(L"branches", [this, workspace, generation, request] {
+    branchError_.clear(); branchesLoading_ = !selected.empty();
+    layout(false);
+    if (selected.empty()) return;
+    gitWorker_->submit(L"branches", [this, workspace, selected, multiple, generation, request] {
         struct Listing { ResourceId root; std::wstring branch, error; std::vector<GitBranch> refs; };
         std::vector<Listing> listings;
         for (const auto& repo : workspace->repositories) {
+            if (repo->root != selected) continue;
             if (*gitWorker_->cancellation()) return;
             Listing listing{repo->root, repo->branch, repo->error, {}};
             if (listing.error.empty()) {
@@ -1293,13 +1307,11 @@ void ProjectRuntime::Impl::refreshBranches() {
             }
             listings.push_back(std::move(listing));
         }
-        gitWorker_->complete([this, generation, request, listings = std::move(listings)] {
+        gitWorker_->complete([this, multiple, generation, request, listings = std::move(listings)] {
             if (generation != generation_ || request != branchRequest_) return;
             branchesLoading_ = false; branchError_.clear();
-            const bool multiple = listings.size() > 1;
-            bool sourceChanged = !branchesLoaded_ || multiple != branchRepositories_;
+            bool sourceChanged = !branchesLoaded_;
             Tree::Batch batch(changes_);
-            if (multiple != branchRepositories_) { changes_.clear(); branchesLoaded_ = false; branchRepositories_ = multiple; }
             std::map<std::string, TreeItem> repositories;
             if (multiple) for (auto item = changes_.child(); item; item = changes_.next(item)) if (const auto n = historyNode(item)) repositories[n->root.key()] = item;
             for (const auto& listing : listings) {

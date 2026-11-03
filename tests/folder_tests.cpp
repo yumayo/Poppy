@@ -2912,65 +2912,89 @@ void multiRepositoryTests(const fs::path& executable) {
         const auto changes = GetDlgItem(app.window, 4), branches = changes;
         const auto viewer = FindWindowExW(app.window, nullptr, L"PoppyViewer", nullptr);
         send(GetDlgItem(app.window, 3), BM_CLICK);
-        const auto roots = [&](HWND tree) { return children(tree, 0) == 2; };
-        waitFor([&] { return IsWindowVisible(changes) && roots(changes); }, "Source Control did not discover sibling repositories");
+        const auto roots = [&](HWND tree) { return children(tree, 0) == 1; };
+        const auto group = [&](bool staged) { return gitGroup(changes, staged, nextItem(changes, TreeRelation::Root)); };
+        waitFor([&] { return IsWindowVisible(changes) && roots(changes) && group(false); }, "Source Control did not show only the initially selected repository");
         wchar_t title[128]{}; GetWindowTextW(GetDlgItem(app.window, 3), title, 128);
         check(std::wstring(title) == L"Source Control (4)", "The badge counted changes outside the opened folder");
-        const auto group = [&](TreeItem repo, bool staged) { return gitGroup(changes, staged, repo); };
-        auto clientRepo = nextItem(changes, TreeRelation::Root), serverRepo = nextItem(changes, TreeRelation::Next, clientRepo);
-        waitFor([&] { return group(clientRepo, false) && group(serverRepo, false); }, "Repositories did not get independent change groups inside their current branches");
-        for (const auto repo : {clientRepo, serverRepo}) {
-            const auto tracked = nextItem(changes, TreeRelation::Child, group(repo, false));
+        const auto commitPane = FindWindowExW(app.window, nullptr, L"PoppyGitCommitPane", nullptr);
+        check(commitPane != nullptr, "Multi-repository selector is missing");
+        bool clientSelected = true;
+        const auto selectRepository = [&](bool selectClient) {
+            if (clientSelected == selectClient) return;
+            const auto oldRoot = nextItem(changes, TreeRelation::Root);
+            const auto point = MAKELPARAM(MulDiv(10, GetDpiForWindow(app.window), 96), MulDiv(13, GetDpiForWindow(app.window), 96));
+            PostMessageW(commitPane, WM_LBUTTONDOWN, MK_LBUTTON, point);
+            PostMessageW(commitPane, WM_LBUTTONUP, 0, point);
+            const auto menuOpen = [&] { GUITHREADINFO info{}; info.cbSize = sizeof(info); return GetGUIThreadInfo(app.process.dwThreadId, &info) && (info.flags & GUI_INMENUMODE); };
+            waitFor(menuOpen, "Repository selector did not open");
+            PostMessageW(commitPane, WM_KEYDOWN, selectClient ? VK_HOME : VK_END, 0);
+            PostMessageW(commitPane, WM_KEYDOWN, VK_RETURN, 0);
+            waitFor([&] { return !menuOpen(); }, "Repository selector did not close");
+            waitFor([&] { return roots(changes) && nextItem(changes, TreeRelation::Root) != oldRoot && group(false); }, "Repository selection did not replace the displayed tree");
+            clientSelected = selectClient;
+        };
+        for (const bool selectClient : {true, false}) {
+            selectRepository(selectClient);
+            const auto tracked = nextItem(changes, TreeRelation::Child, group(false));
             send(changes, treeSelect, nextItem(changes, TreeRelation::Next, tracked));
-            waitLines(viewer, repo == clientRepo ? 111 : 222);
+            waitLines(viewer, selectClient ? 111 : 222);
         }
-        send(changes, treeSelect, nextItem(changes, TreeRelation::Child, group(clientRepo, false)));
+        selectRepository(true);
+        send(changes, treeSelect, nextItem(changes, TreeRelation::Child, group(false)));
         send(changes, WM_KEYDOWN, VK_F4);
-        waitFor([&] { clientRepo = nextItem(changes, TreeRelation::Root); return children(changes, group(clientRepo, true)) == 1; }, "Staging did not update the owning repository");
+        waitFor([&] { return roots(changes) && children(changes, group(true)) == 1; }, "Staging did not update the owning repository");
         runGit(client, L"diff --cached --quiet", 1); runGit(server, L"diff --cached --quiet");
-        send(changes, treeSelect, nextItem(changes, TreeRelation::Child, group(clientRepo, true)));
+        send(changes, treeSelect, nextItem(changes, TreeRelation::Child, group(true)));
         send(changes, WM_KEYDOWN, VK_F4);
-        waitFor([&] { clientRepo = nextItem(changes, TreeRelation::Root); return children(changes, group(clientRepo, true)) == 0; }, "Unstaging did not update the owning repository");
+        waitFor([&] { return roots(changes) && children(changes, group(true)) == 0; }, "Unstaging did not update the owning repository");
         runGit(client, L"diff --cached --quiet");
         RECT changesRect{}; GetClientRect(changes, &changesRect);
         const int height = static_cast<int>(send(changes, treeGetRowHeight));
-        const int row = static_cast<int>(send(changes, treeGetRow, group(clientRepo, false)));
+        const int row = static_cast<int>(send(changes, treeGetRow, group(false)));
         const int x = changesRect.right - MulDiv(46, GetDpiForWindow(app.window), 96), y = (row - scrollInfo(changes).nPos) * height + height / 2;
         send(changes, WM_MOUSEMOVE, 0, MAKELPARAM(x, y)); click(changes, x, y); send(changes, WM_MOUSELEAVE);
         waitFor([&] {
-            clientRepo = nextItem(changes, TreeRelation::Root); serverRepo = nextItem(changes, TreeRelation::Next, clientRepo);
-            return children(changes, group(clientRepo, true)) == 2 && children(changes, group(clientRepo, false)) == 0 &&
-                children(changes, group(serverRepo, true)) == 0 && children(changes, group(serverRepo, false)) == 2;
+            return roots(changes) && children(changes, group(true)) == 2 && children(changes, group(false)) == 0;
         }, "Stage All Changes affected a sibling repository or missed a file in the selected repository");
         runGit(client, L"diff --cached --quiet", 1); runGit(server, L"diff --cached --quiet");
-        send(changes, treeSelect, nextItem(changes, TreeRelation::Child, group(serverRepo, false)));
+        selectRepository(false);
+        check(children(changes, group(true)) == 0 && children(changes, group(false)) == 2, "Staging changed the hidden sibling repository");
+        send(changes, treeSelect, nextItem(changes, TreeRelation::Child, group(false)));
         send(changes, WM_KEYDOWN, VK_F4);
         waitFor([&] {
-            clientRepo = nextItem(changes, TreeRelation::Root); serverRepo = nextItem(changes, TreeRelation::Next, clientRepo);
-            return children(changes, group(serverRepo, true)) == 1;
+            return roots(changes) && children(changes, group(true)) == 1;
         }, "Could not stage the sibling repository before testing Unstage All Changes");
-        const auto stagedClient = group(clientRepo, true);
+        selectRepository(true);
+        const auto stagedClient = group(true);
         expand(changes, stagedClient, false);
         const int unstageRow = static_cast<int>(send(changes, treeGetRow, stagedClient));
         const int unstageY = (unstageRow - scrollInfo(changes).nPos) * height + height / 2;
         send(changes, WM_MOUSEMOVE, 0, MAKELPARAM(x, unstageY)); click(changes, x, unstageY); send(changes, WM_MOUSELEAVE);
         waitFor([&] {
-            clientRepo = nextItem(changes, TreeRelation::Root); serverRepo = nextItem(changes, TreeRelation::Next, clientRepo);
-            return children(changes, group(clientRepo, true)) == 0 && children(changes, group(clientRepo, false)) == 2 &&
-                children(changes, group(serverRepo, true)) == 1 && children(changes, group(serverRepo, false)) == 1;
+            return roots(changes) && children(changes, group(true)) == 0 && children(changes, group(false)) == 2;
         }, "Unstage All Changes affected a sibling repository or left a file staged in the selected repository");
         runGit(client, L"diff --cached --quiet"); runGit(server, L"diff --cached --quiet", 1);
         runGit(fixture.root, L"diff --cached --quiet");
-        discardGroup(app, changes, group(clientRepo, false), IDOK);
+        discardGroup(app, changes, group(false), IDOK);
         waitFor([&] {
-            clientRepo = nextItem(changes, TreeRelation::Root); serverRepo = nextItem(changes, TreeRelation::Next, clientRepo);
-            return children(changes, group(clientRepo, false)) == 0 && children(changes, group(serverRepo, true)) == 1 &&
-                children(changes, group(serverRepo, false)) == 1;
+            return roots(changes) && children(changes, group(false)) == 0;
         }, "Discard All Changes affected a sibling repository or retained Changes");
         runGit(client, L"diff --quiet"); runGit(server, L"diff --cached --quiet", 1);
-        waitFor([&] { return IsWindowVisible(branches) && roots(branches); }, "Branch did not discover sibling repositories");
-        const auto clientBranchRepo = nextItem(branches, TreeRelation::Root), serverBranchRepo = nextItem(branches, TreeRelation::Next, clientBranchRepo);
-        for (const auto repo : {clientBranchRepo, serverBranchRepo}) {
+        selectRepository(false);
+        check(children(changes, group(true)) == 1 && children(changes, group(false)) == 1, "Unstaging or discarding changed the hidden sibling repository");
+        // F5 and Tree/List must keep the selected server rather than show all repositories.
+        writeLines(server / L"refresh.txt", 5);
+        send(app.window, WM_KEYDOWN, VK_F5);
+        waitFor([&] { return roots(changes) && children(changes, group(true)) == 1 && children(changes, group(false)) == 2; }, "Refreshing lost the repository selection");
+        for (const bool tree : {false, true}) {
+            const auto rect = bounds(app.window, changes);
+            click(app.window, rect.left + (rect.right - rect.left) * (tree ? 1 : 3) / 4, rect.top - MulDiv(14, GetDpiForWindow(app.window), 96));
+            check(roots(changes) && children(changes, group(true)) == 1, "Tree/List changed the displayed repository");
+        }
+        for (const bool selectClient : {true, false}) {
+            selectRepository(selectClient);
+            const auto repo = nextItem(branches, TreeRelation::Root);
             const auto branch = nextItem(branches, TreeRelation::Child, repo);
             waitFor([&] { return children(branches, branch) == 4; }, "A repository's main branch did not load its history");
             const auto latest = nextItem(branches, TreeRelation::Next, gitGroup(branches, false, repo)), commit = nextItem(branches, TreeRelation::Next, latest);
@@ -2978,7 +3002,7 @@ void multiRepositoryTests(const fs::path& executable) {
             waitFor([&] { return children(branches, commit) == 2; }, "A repository's commit did not load its files");
             const auto extra = nextItem(branches, TreeRelation::Child, commit);
             send(branches, treeSelect, nextItem(branches, TreeRelation::Next, extra));
-            waitLines(viewer, repo == clientBranchRepo ? 1 : 3);
+            waitLines(viewer, selectClient ? 1 : 3);
         }
     }
     {

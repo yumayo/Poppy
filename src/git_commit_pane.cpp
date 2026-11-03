@@ -97,7 +97,10 @@ void GitCommitPane::activate(int part) {
     if (!part && command <= repositories.size()) {
         const auto selected = repositories[command - 1].root;
         const auto found = std::find_if(repositories_.begin(), repositories_.end(), [&](const auto& repo) { return repo.root == selected; });
-        if (found != repositories_.end()) select(static_cast<size_t>(found - repositories_.begin()));
+        if (found != repositories_.end() && selected != root_) {
+            select(static_cast<size_t>(found - repositories_.begin()));
+            if (repositorySelected) repositorySelected();
+        }
     } else if (part == 2 && command == 1 && root == root_) submit(true);
 }
 bool GitCommitPane::key(const MSG& message) {
