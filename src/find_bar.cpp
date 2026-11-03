@@ -21,6 +21,11 @@ void FindBar::show(const std::optional<std::wstring>& seed, bool focus) {
     anchor_ = 0; caret_ = query_.size();
     ShowWindow(window_, SW_SHOW); if (focus) SetFocus(window_); caretChanged();
 }
+void FindBar::restore(std::wstring query, bool matchCase) {
+    ime_.cancel(window_); highSurrogate_ = 0;
+    query_ = std::move(query); matchCase_ = matchCase;
+    anchor_ = 0; caret_ = query_.size(); line_.reset(); caretChanged();
+}
 void FindBar::close(bool restoreFocus) {
     if (!visible_) return;
     visible_ = false;

@@ -1,5 +1,6 @@
 #include "storage.h"
 #include "resource.h"
+#include "content_search_protocol.h"
 #include <sqlite3.h>
 #include <algorithm>
 #include <cstdint>
@@ -38,7 +39,22 @@ constexpr const char* appLocations =
 constexpr const char* terminalShells =
     "CREATE TABLE IF NOT EXISTS terminal_settings (id INTEGER PRIMARY KEY CHECK(id=1), default_shell INTEGER NOT NULL);"
     "CREATE TABLE IF NOT EXISTS terminal_shells (terminal_id TEXT PRIMARY KEY, shell INTEGER NOT NULL);";
+constexpr const char* contentSearchState =
+    "CREATE TABLE IF NOT EXISTS search_state (id INTEGER PRIMARY KEY CHECK(id=1), query TEXT NOT NULL, match_case INTEGER NOT NULL, respect_ignore INTEGER NOT NULL, status TEXT NOT NULL, selected INTEGER NOT NULL, top INTEGER NOT NULL, visible INTEGER NOT NULL);"
+    "CREATE TABLE IF NOT EXISTS search_results (position INTEGER PRIMARY KEY, relative TEXT NOT NULL, snippet TEXT NOT NULL, line INTEGER NOT NULL, column INTEGER NOT NULL, begin_offset INTEGER NOT NULL, end_offset INTEGER NOT NULL);";
 TerminalShell readShell(sqlite3_int64 value) { return value == static_cast<int>(TerminalShell::GitBash) ? TerminalShell::GitBash : TerminalShell::PowerShell; }
+void validateSearch(const SavedSearch& state) {
+    if ((!state.query.empty() && !validContentQuery(state.query)) || (state.query.empty() && !state.matches.empty()) ||
+        state.status.size() > 65536 || state.matches.size() > contentResultLimit) throw std::runtime_error("Invalid saved project search");
+    size_t bytes = 0;
+    for (const auto& match : state.matches) {
+        const auto size = contentMatchBytes(match);
+        if (!wsl::validSearchRelative(match.relative) || match.snippet.size() > 512 || !match.line || match.line > 1000000 ||
+            !match.column || match.column > 16 * 1024 * 1024 || match.begin >= match.end || match.end > 16 * 1024 * 1024 || size > contentResultBytes - bytes)
+            throw std::runtime_error("Invalid saved project search result");
+        bytes += size;
+    }
+}
 
 class Database {
 public:
@@ -139,7 +155,7 @@ void projectSchema(Database& db) {
         "CREATE TABLE IF NOT EXISTS tabs (position INTEGER PRIMARY KEY, path TEXT NOT NULL, diff INTEGER NOT NULL,"
         " file_top INTEGER NOT NULL, file_left INTEGER NOT NULL, file_anchor INTEGER NOT NULL, file_caret INTEGER NOT NULL, file_after INTEGER NOT NULL,"
         " diff_top INTEGER NOT NULL, diff_left INTEGER NOT NULL, diff_anchor INTEGER NOT NULL, diff_caret INTEGER NOT NULL, diff_after INTEGER NOT NULL, pinned INTEGER NOT NULL);"
-        "CREATE TABLE IF NOT EXISTS expanded (path TEXT PRIMARY KEY);") + projectViews + splitViews + projectConnection + gitComparisons + wrappedViews + wrappedDiffViews + comparisonRepositories + terminalShells).c_str(), {
+        "CREATE TABLE IF NOT EXISTS expanded (path TEXT PRIMARY KEY);") + projectViews + splitViews + projectConnection + gitComparisons + wrappedViews + wrappedDiffViews + comparisonRepositories + terminalShells + contentSearchState).c_str(), {
         "ALTER TABLE session ADD COLUMN diff_inline INTEGER NOT NULL DEFAULT 0;"
         "UPDATE session SET diff_inline=COALESCE((SELECT diff_inline FROM tabs WHERE diff<>0"
         " ORDER BY (position=(SELECT active_tab FROM session WHERE id=1)) DESC,position LIMIT 1),0);"
@@ -148,7 +164,7 @@ void projectSchema(Database& db) {
         "ALTER TABLE tabs DROP COLUMN file_inline;"
         "ALTER TABLE tabs DROP COLUMN diff_inline;",
         "ALTER TABLE session ADD COLUMN git_tree INTEGER NOT NULL DEFAULT 0;",
-        "ALTER TABLE tabs ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0;", projectViews, splitViews, projectConnection, gitComparisons, wrappedViews, wrappedDiffViews, comparisonRepositories, terminalShells});
+        "ALTER TABLE tabs ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0;", projectViews, splitViews, projectConnection, gitComparisons, wrappedViews, wrappedDiffViews, comparisonRepositories, terminalShells, contentSearchState});
 }
 }
 struct Storage::Impl {
@@ -293,11 +309,27 @@ std::optional<ProjectSession> Storage::loadProject(const std::string& key, const
     }
     Statement terminalGroups(db, "SELECT terminal_id,pane,displayed FROM terminal_groups");
     while (terminalGroups.row()) for (auto& terminal : state.terminals) if (terminal.id == terminalGroups.text(0)) { terminal.group = bounded(terminalGroups.number(1), 0, 1); terminal.displayed = terminalGroups.number(2) != 0; break; }
+    Statement search(db, "SELECT query,match_case,respect_ignore,status,selected,top,visible FROM search_state WHERE id=1");
+    if (search.row()) {
+        state.search.query = search.text(0); state.search.matchCase = search.number(1) != 0; state.search.respectIgnore = search.number(2) != 0;
+        state.search.status = search.text(3); state.search.selected = static_cast<size_t>(bounded(search.number(4), 0, static_cast<int>(contentResultLimit - 1)));
+        state.search.top = bounded(search.number(5), 0, static_cast<int>(contentResultLimit - 1)); state.searchSidebar = search.number(6) != 0;
+    }
+    Statement results(db, "SELECT relative,snippet,line,column,begin_offset,end_offset FROM search_results ORDER BY position LIMIT 2001");
+    size_t resultBytes = 0;
+    while (results.row()) {
+        ContentMatch match{results.text(0), results.text(1), static_cast<uint32_t>(results.number(2)), static_cast<uint32_t>(results.number(3)), position(results.number(4)), position(results.number(5))};
+        const auto bytes = contentMatchBytes(match);
+        if (state.search.matches.size() >= contentResultLimit || bytes > contentResultBytes - resultBytes) throw std::runtime_error("Saved project search exceeds result limits");
+        resultBytes += bytes; state.search.matches.push_back(std::move(match));
+    }
+    validateSearch(state.search);
     snapshot.commit();
     return state;
 }
 void Storage::saveProject(const std::string& key, const std::string& path, const ProjectSession& state) {
     if (state.tabs.size() > maxSavedTabs || state.expanded.size() > maxSavedDirectories || state.collapsedGit.size() > maxSavedDirectories || state.terminals.size() > 100) throw std::runtime_error("Too many items to save the project session");
+    validateSearch(state.search);
     Database db(projectDirectory(key, path) / "storage.sql"); projectSchema(db);
     Transaction transaction(db);
     const auto resource = ResourceId::parse(path);
@@ -348,6 +380,16 @@ void Storage::saveProject(const std::string& key, const std::string& path, const
     }
     Statement terminalGroups(db, "INSERT INTO terminal_groups VALUES(?,?,?)");
     for (const auto& terminal : state.terminals) { terminalGroups.text(1, terminal.id); terminalGroups.number(2, terminal.group); terminalGroups.number(3, terminal.displayed); terminalGroups.run(); terminalGroups.reset(); }
+    Statement search(db, "INSERT OR REPLACE INTO search_state VALUES(1,?,?,?,?,?,?,?)");
+    search.text(1, state.search.query); search.number(2, state.search.matchCase); search.number(3, state.search.respectIgnore); search.text(4, state.search.status);
+    search.number(5, static_cast<sqlite3_int64>(state.search.selected)); search.number(6, state.search.top); search.number(7, state.searchSidebar); search.run();
+    db.exec("DELETE FROM search_results");
+    Statement result(db, "INSERT INTO search_results VALUES(?,?,?,?,?,?,?)");
+    for (size_t i = 0; i < state.search.matches.size(); ++i) {
+        const auto& match = state.search.matches[i];
+        result.number(1, static_cast<sqlite3_int64>(i)); result.text(2, match.relative); result.text(3, match.snippet); result.number(4, match.line); result.number(5, match.column);
+        result.number(6, static_cast<sqlite3_int64>(match.begin)); result.number(7, static_cast<sqlite3_int64>(match.end)); result.run(); result.reset();
+    }
     transaction.commit();
 }
 }

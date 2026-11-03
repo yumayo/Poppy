@@ -10,6 +10,7 @@ public:
     void layout(int top, int width, int height);
     void show(const std::optional<std::wstring>& seed = {}, bool focus = true);
     void projectSearch() { compact_ = true; }
+    void restore(std::wstring query, bool matchCase);
     void close(bool restoreFocus = true);
     bool visible() const { return visible_; }
     HWND window() const { return window_; }

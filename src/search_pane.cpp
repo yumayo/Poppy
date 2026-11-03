@@ -48,21 +48,38 @@ void SearchPane::create(HWND parent, HINSTANCE instance) {
 }
 void SearchPane::setDpi(UINT dpi) { dpi_ = dpi; renderer_.setDpi(dpi); input_.setDpi(dpi); layout(); }
 void SearchPane::setContext(const ResourceId& root, std::shared_ptr<ProjectProvider> provider) {
-    cancel(); root_ = root; provider_ = std::move(provider); matches_.clear(); selected_ = 0; top_ = 0;
-    if (active_) refresh(); else status(L"Type to search this project.");
+    // WSL reconnects may resolve the root again. Results use relative paths
+    // and remain a snapshot until the user requests another search.
+    cancel(); root_ = root; provider_ = std::move(provider);
 }
 void SearchPane::active(bool visible) {
     if (active_ == visible) return;
     active_ = visible;
-    if (visible) refresh(); else cancel();
+    if (!visible) cancel();
 }
-void SearchPane::status(std::wstring text) { status_ = std::move(text); SetWindowTextW(window_, (L"Search project: " + status_).c_str()); InvalidateRect(window_, nullptr, FALSE); }
+void SearchPane::status(std::wstring text) {
+    const bool updated = status_ != text;
+    status_ = std::move(text); SetWindowTextW(window_, (L"Search project: " + status_).c_str()); InvalidateRect(window_, nullptr, FALSE);
+    if (updated && changed) changed();
+}
+std::wstring SearchPane::stoppedStatus() const { return std::to_wstring(matches_.size()) + L" matches · Search stopped. Press F5 to refresh."; }
+SavedSearch SearchPane::snapshot() {
+    drain();
+    return {utf8(input_.query()), utf8(searching_ ? stoppedStatus() : status_), input_.matchCase(), respectIgnore_, selected_, top_, matches_};
+}
+void SearchPane::restore(const SavedSearch& state) {
+    cancel(); input_.restore(wide(state.query), state.matchCase); respectIgnore_ = state.respectIgnore;
+    options_ = {}; options_.query = state.query; options_.matchCase = state.matchCase; options_.respectIgnore = state.respectIgnore;
+    matches_ = state.matches; selected_ = std::min(state.selected, matches_.empty() ? size_t{0} : matches_.size() - 1);
+    top_ = state.top; status(wide(state.status)); layout();
+}
 void SearchPane::cancel() {
     KillTimer(window_, debounce); KillTimer(window_, overlayTimer);
     if (job_) { std::lock_guard<std::mutex> lock(job_->mutex); job_->cancelled = true; }
+    drain();
     job_.reset(); overlays_.clear(); overlayScanner_.reset(); overlayDone_ = true;
     if (worker_) worker_->cancelPending();
-    if (!input_.query().empty()) status(L"Search stopped. Press F5 to refresh.");
+    if (searching_) { searching_ = false; status(stoppedStatus()); }
 }
 void SearchPane::stop(ShutdownDialog* progress) {
     cancel();
@@ -70,15 +87,17 @@ void SearchPane::stop(ShutdownDialog* progress) {
 }
 void SearchPane::refresh() {
     cancel(); matches_.clear(); selected_ = 0; top_ = 0; layout();
+    options_ = {}; options_.query = utf8(input_.query()); options_.matchCase = input_.matchCase(); options_.respectIgnore = respectIgnore_;
+    if (changed) changed();
     if (!active_ || input_.query().empty()) { status(L"Type to search this project."); return; }
+    searching_ = true;
     status(L"Searching…"); SetTimer(window_, debounce, 150, nullptr);
 }
 void SearchPane::start() {
     KillTimer(window_, debounce);
-    if (!active_ || !provider_ || root_.empty()) { status(L"Open a project to search."); return; }
-    if (provider_->state() != ConnectionState::Ready) { status(L"Project unavailable. Reconnect and press F5."); return; }
-    options_ = {}; options_.query = utf8(input_.query()); options_.matchCase = input_.matchCase(); options_.respectIgnore = respectIgnore_;
-    if (!validContentQuery(options_.query)) { status(L"Enter a single-line search string."); return; }
+    if (!active_ || !provider_ || root_.empty()) { searching_ = false; status(L"Open a project to search."); return; }
+    if (provider_->state() != ConnectionState::Ready) { searching_ = false; status(L"Project unavailable. Reconnect and press F5."); return; }
+    if (!validContentQuery(options_.query)) { searching_ = false; status(L"Enter a single-line search string."); return; }
     overlays_ = overlays ? overlays() : std::vector<SearchOverlay>{};
     for (const auto& overlay : overlays_) options_.excluded.push_back(overlay.relative);
     overlayIndex_ = overlayOffset_ = 0; overlaySummary_ = {}; overlayDone_ = overlays_.empty();
@@ -102,7 +121,7 @@ void SearchPane::scanOverlay() {
         if (overlayIndex_ >= overlays_.size()) { overlayDone_ = true; overlays_.clear(); KillTimer(window_, overlayTimer); drain(); return; }
         auto& overlay = overlays_[overlayIndex_]; const auto& buffer = *overlay.buffer;
         if (!overlayScanner_) { overlayRevision_ = buffer.revision; overlayOffset_ = 0; overlayScanner_ = std::make_unique<ContentScanner>(overlay.relative, options_, true); }
-        if (buffer.revision != overlayRevision_) { refresh(); return; }
+        if (buffer.revision != overlayRevision_) { cancel(); return; }
         const auto bytes = std::string_view(buffer.document.text).substr(overlayOffset_, 8192);
         const bool final = bytes.empty(); overlayOffset_ += bytes.size();
         if (!overlayScanner_->feed(bytes, final) || final) {
@@ -136,6 +155,7 @@ void SearchPane::drain() {
     if (!done || !overlayDone_) text += L" · Searching…";
     else text += L" · " + std::to_wstring(summary.files + overlaySummary_.files) + L" files";
     if (summary.binary || summary.large) text += L" · Skipped: " + std::to_wstring(summary.binary) + L" binary, " + std::to_wstring(summary.large) + L" large";
+    searching_ = !done || !overlayDone_;
     status(std::move(text));
 }
 int SearchPane::page() const { const auto r = Scrollbars::contentRect(window_); return std::max(1, (static_cast<int>(r.bottom) - body()) / px(48)); }
@@ -152,6 +172,7 @@ void SearchPane::move(int delta) {
     if (static_cast<int>(selected_) < top_) top_ = static_cast<int>(selected_);
     if (static_cast<int>(selected_) >= top_ + page()) top_ = static_cast<int>(selected_) - page() + 1;
     layout();
+    if (changed) changed();
 }
 void SearchPane::accept() { if (selected_ < matches_.size() && opened) opened(matches_[selected_], options_.query, options_.matchCase); }
 void SearchPane::paint() {
@@ -193,15 +214,15 @@ LRESULT SearchPane::handle(UINT message, WPARAM a, LPARAM b) {
     case WM_LBUTTONDOWN: {
         const int y = GET_Y_LPARAM(b);
         if (y >= px(64) && y < px(88)) { if (GET_X_LPARAM(b) < px(130)) respectIgnore_ = !respectIgnore_; refresh(); return 0; }
-        if (y >= body()) { SetFocus(window_); const size_t index = static_cast<size_t>(top_ + (y - body()) / px(48)); if (index < matches_.size()) { selected_ = index; accept(); } }
+        if (y >= body()) { SetFocus(window_); const size_t index = static_cast<size_t>(top_ + (y - body()) / px(48)); if (index < matches_.size()) { selected_ = index; if (changed) changed(); accept(); } }
         return 0;
     }
-    case WM_MOUSEWHEEL: top_ -= GET_WHEEL_DELTA_WPARAM(a) / WHEEL_DELTA * 3; layout(); return 0;
+    case WM_MOUSEWHEEL: top_ -= GET_WHEEL_DELTA_WPARAM(a) / WHEEL_DELTA * 3; layout(); if (changed) changed(); return 0;
     case WM_VSCROLL: {
         SCROLLINFO info{sizeof(info), SIF_ALL, 0, 0, 0, 0, 0}; GetScrollInfo(window_, SB_VERT, &info);
         switch (LOWORD(a)) { case SB_LINEUP: --top_; break; case SB_LINEDOWN: ++top_; break; case SB_PAGEUP: top_ -= page(); break; case SB_PAGEDOWN: top_ += page(); break;
         case SB_THUMBTRACK: case SB_THUMBPOSITION: top_ = scrollbars_.trackPosition(SB_VERT, info.nTrackPos); break; case SB_TOP: top_ = 0; break; case SB_BOTTOM: top_ = static_cast<int>(matches_.size()); break; default: return 0; }
-        layout(); return 0;
+        layout(); if (changed) changed(); return 0;
     }
     case WM_DESTROY: stop(); return 0;
     default: break;

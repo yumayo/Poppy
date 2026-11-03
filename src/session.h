@@ -1,5 +1,6 @@
 #pragma once
 #include "git_history.h"
+#include "content_search.h"
 #include "terminal_profile.h"
 #include <cstddef>
 #include <string>
@@ -32,6 +33,13 @@ struct SavedTerminal {
     bool displayed = false;
     TerminalShell shell = TerminalShell::PowerShell;
 };
+struct SavedSearch {
+    std::string query, status = "Type to search this project.";
+    bool matchCase = false, respectIgnore = true;
+    size_t selected = 0;
+    int top = 0;
+    std::vector<ContentMatch> matches;
+};
 struct ProjectSession {
     std::string wslUid;
     int sidebar = 245, terminalHeight = 260;
@@ -49,6 +57,8 @@ struct ProjectSession {
     std::vector<std::string> collapsedGit;
     std::vector<SavedTerminal> terminals = {SavedTerminal{}};
     TerminalShell defaultShell = TerminalShell::PowerShell;
+    bool searchSidebar = false;
+    SavedSearch search;
 };
 struct AppSession {
     std::string lastProject;

@@ -653,7 +653,7 @@ void ProjectRuntime::Impl::create() {
         view.changed = [this, group] {
             saveTab();
             if (viewers_[1 - group].buffer() && viewers_[1 - group].buffer() == viewers_[group].buffer()) viewers_[1 - group].refreshBuffer();
-            updateTabs(false); if (activeSidebar_ == Sidebar::Search) searchPane_.refresh(); if (owner_ && owner_->changed) owner_->changed();
+            updateTabs(false); if (owner_ && owner_->changed) owner_->changed();
         };
         view.save = [this, group] { saveFile(groupTab(group)); };
         view.diffLayoutChanged = [this, group] {
@@ -684,6 +684,7 @@ void ProjectRuntime::Impl::create() {
     searchPane_.create(window_, instance_);
     searchPane_.opened = [this](const ContentMatch& match, const std::string& query, bool matchCase) { openContentResult(match, query, matchCase); };
     searchPane_.exit = [this] { SetFocus(viewer().window()); };
+    searchPane_.changed = [this] { if (owner_ && owner_->changed) owner_->changed(); };
     searchPane_.overlays = [this] {
         std::vector<SearchOverlay> result; std::set<std::string> seen;
         for (const auto& tab : tabs_) if (tab.buffer && tab.buffer->dirty() && root_.contains(tab.path) && seen.insert(tab.path.key()).second)
@@ -894,6 +895,7 @@ void ProjectRuntime::Impl::selectSidebar(Sidebar sidebar) {
     activeSidebar_ = sidebar; layout();
     explorerActivity_.select(sidebar == Sidebar::Explorer); gitActivity_.select(sidebar == Sidebar::Git);
     searchActivity_.select(sidebar == Sidebar::Search); searchPane_.active(sidebar == Sidebar::Search && active_);
+    if (owner_ && owner_->changed) owner_->changed();
     if (sidebar == Sidebar::Search) { searchPane_.focus(); return; }
     if (sidebar == Sidebar::Git) refreshGit();
     if (sidebar == Sidebar::Explorer) explorer_.showSelection();
@@ -1175,7 +1177,6 @@ void ProjectRuntime::Impl::discardGitChanges(TreeItem item, bool all) {
             if (generation != generation_) return;
             filesDirty_ = fileDirty_ = true;
             refresh(false);
-            if (activeSidebar_ == Sidebar::Search) searchPane_.refresh();
             status(code ? L"Discard failed: " + error : L"Discard completed in " + name);
         });
     });
@@ -1214,7 +1215,6 @@ void ProjectRuntime::Impl::stashGitChanges(TreeItem item) {
             if (generation != generation_) return;
             filesDirty_ = fileDirty_ = true;
             refresh(false);
-            if (activeSidebar_ == Sidebar::Search) searchPane_.refresh();
             status(code ? L"Stash failed: " + error : L"Stash: " + trimmed(output));
         });
     });
@@ -2026,6 +2026,7 @@ ProjectSession ProjectRuntime::Impl::saveSession() {
     state.wslUid = wslUid_;
     state.sidebar = sidebar_; state.terminalHeight = terminalHeight_; state.terminalVisible = terminalVisible_;
     state.gitSidebar = activeSidebar_ == Sidebar::Git;
+    state.searchSidebar = activeSidebar_ == Sidebar::Search; state.search = searchPane_.snapshot();
     state.diffInline = viewer().diffInline(); state.gitTree = gitTreeView_; state.firstTabRow = editorGroups_[0].firstRow; state.rightTabRow = editorGroups_[1].firstRow; state.editorRatio = editorRatio_;
     saveEditorTabs(state, tabs_, activeTab_);
     for (const auto& entry : expandedPaths_) state.expanded.push_back(entry.second.u8string());
@@ -2057,8 +2058,9 @@ void ProjectRuntime::Impl::restoreProject(const ProjectSession& state) {
     for (auto& view : viewers_) view.setDiffLayout(state.diffInline);
     gitTreeView_ = state.gitTree;
     sidebar_ = state.sidebar; terminalHeight_ = state.terminalHeight; terminalVisible_ = state.terminalVisible;
-    activeSidebar_ = (state.branchSidebar || state.gitSidebar) ? Sidebar::Git : Sidebar::Explorer;
-    searchActivity_.select(false); searchPane_.active(false);
+    activeSidebar_ = state.searchSidebar ? Sidebar::Search : (state.branchSidebar || state.gitSidebar) ? Sidebar::Git : Sidebar::Explorer;
+    searchPane_.restore(state.search);
+    searchActivity_.select(activeSidebar_ == Sidebar::Search); searchPane_.active(active_ && activeSidebar_ == Sidebar::Search);
     explorerActivity_.select(activeSidebar_ == Sidebar::Explorer); gitActivity_.select(activeSidebar_ == Sidebar::Git);
     for (const auto& path : state.expanded) {
         auto directory = root_.at(path).lexically_normal().make_preferred();
@@ -2373,7 +2375,7 @@ bool ProjectRuntime::Impl::saveFile(size_t index, bool wait) {
         const auto error = result.error;
         worker_->complete([this, path, buffer, bytes, text, error, version = result.version] {
             buffer->saving = false;
-            if (error.empty()) { buffer->saved(bytes, text); buffer->fileVersion = version; status(L"Saved " + path.filename().native()); refreshGit(); if (activeSidebar_ == Sidebar::Search) searchPane_.refresh(); }
+            if (error.empty()) { buffer->saved(bytes, text); buffer->fileVersion = version; status(L"Saved " + path.filename().native()); refreshGit(); }
             else { status(L"Save failed: " + path.filename().native()); MessageBoxW(window_, (path.native() + L"\n\n" + error).c_str(), L"Poppy — Save", MB_OK | MB_ICONWARNING); }
             updateTabs(false); for (auto& view : viewers_) InvalidateRect(view.window(), nullptr, FALSE);
         });
@@ -2476,7 +2478,6 @@ void ProjectRuntime::Impl::closeTabs(const std::vector<size_t>& indices) {
             if (tabKey(entry->tab) == key) entry->closed = true;
         tabs_.erase(tabs_.begin() + static_cast<std::ptrdiff_t>(i));
     }
-    if (activeSidebar_ == Sidebar::Search) searchPane_.refresh();
     layout();
     if (active) {
         pendingExplorerFile_.clear();
@@ -2835,7 +2836,6 @@ void ProjectRuntime::Impl::refreshGit(bool rescan) {
     });
 }
 void ProjectRuntime::Impl::refresh(bool force) {
-    if (force && activeSidebar_ == Sidebar::Search) searchPane_.refresh();
     if (root_.empty()) return;
     if (root_.wsl() && (!connected_ || provider_->state() != ConnectionState::Ready)) { if (force) connectRemote(); return; }
     const bool files = force || filesDirty_;
@@ -3087,7 +3087,7 @@ bool ProjectRuntime::Impl::key(const MSG& message) {
         if (key && ctrl && message.wParam == VK_OEM_3) { toggleTerminal(); return true; }
         if (key && ctrl && message.wParam == VK_TAB && !tabs_.empty()) { selectTab((activeTab_ + (shift ? tabs_.size() - 1 : 1)) % tabs_.size()); SetFocus(viewer().window()); return true; }
         if (key && ctrl && message.wParam == 'W' && GetFocus() != terminal_.window()) { closeTab(activeTab_); return true; }
-        if (key && message.wParam == VK_F5 && GetFocus() != terminal_.window()) { refresh(); return true; }
+        if (key && message.wParam == VK_F5 && GetFocus() != terminal_.window()) { refresh(); if (activeSidebar_ == Sidebar::Search) searchPane_.refresh(); return true; }
         if (key && message.wParam == VK_F6 && GetFocus() != terminal_.window()) { showDiff(); return true; }
         if (key && message.wParam == VK_F7 && GetFocus() != terminal_.window()) { const bool inlineView = !viewer().diffInline(); for (auto& view : viewers_) view.setDiffLayout(inlineView); return true; }
         if (key && message.wParam == VK_TAB && GetFocus() != terminal_.window() && GetFocus() != viewers_[0].window() && GetFocus() != viewers_[1].window()) {

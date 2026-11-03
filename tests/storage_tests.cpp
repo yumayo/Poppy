@@ -32,8 +32,17 @@ void execute(const fs::path& path, const char* sql) {
 bool same(const poppy::ViewState& a, const poppy::ViewState& b) {
     return a.top == b.top && a.left == b.left && a.anchor == b.anchor && a.caret == b.caret && a.after == b.after && a.wrapOffset == b.wrapOffset;
 }
+bool same(const poppy::SavedSearch& a, const poppy::SavedSearch& b) {
+    if (a.query != b.query || a.status != b.status || a.matchCase != b.matchCase || a.respectIgnore != b.respectIgnore ||
+        a.selected != b.selected || a.top != b.top || a.matches.size() != b.matches.size()) return false;
+    for (size_t i = 0; i < a.matches.size(); ++i) {
+        const auto& x = a.matches[i]; const auto& y = b.matches[i];
+        if (x.relative != y.relative || x.snippet != y.snippet || x.line != y.line || x.column != y.column || x.begin != y.begin || x.end != y.end) return false;
+    }
+    return true;
+}
 bool same(const poppy::ProjectSession& a, const poppy::ProjectSession& b) {
-    if (a.wslUid != b.wslUid || a.defaultShell != b.defaultShell) return false;
+    if (a.wslUid != b.wslUid || a.defaultShell != b.defaultShell || a.searchSidebar != b.searchSidebar || !same(a.search, b.search)) return false;
     if (a.sidebar != b.sidebar || a.terminalHeight != b.terminalHeight || a.terminalVisible != b.terminalVisible ||
         a.gitSidebar != b.gitSidebar || a.branchSidebar != b.branchSidebar || a.diffInline != b.diffInline || a.gitTree != b.gitTree || a.activeTab != b.activeTab || a.expanded != b.expanded || a.selected != b.selected || a.tabs.size() != b.tabs.size() || a.explorerTop != b.explorerTop || a.explorerLeft != b.explorerLeft ||
         a.gitTop != b.gitTop || a.gitLeft != b.gitLeft || a.firstTabRow != b.firstTabRow || a.rightTabRow != b.rightTabRow || a.editorRatio != b.editorRatio || a.terminalRatio != b.terminalRatio || a.gitSelected != b.gitSelected ||
@@ -309,7 +318,7 @@ void schemaAndRegistry() {
     {
         poppy::Storage storage(fixture.directory);
         const auto projectDb = storage.projectDirectory("c:\\future", "c:\\future") / "storage.sql";
-        execute(projectDb, "PRAGMA user_version=12");
+        execute(projectDb, "PRAGMA user_version=14");
         rejects([&] { storage.loadProject("c:\\future", "c:\\future"); }, "A newer project schema was overwritten");
         storage.projectDirectory("c:\\invalid", "c:\\invalid");
         execute(appDb, R"(UPDATE projects SET directory='../../escape' WHERE path_key='c:\invalid')");
@@ -317,6 +326,49 @@ void schemaAndRegistry() {
     }
     execute(appDb, "PRAGMA user_version=4");
     rejects([&] { poppy::Storage storage(fixture.directory); }, "A newer app schema was overwritten");
+}
+void searchRoundTripAndMigration() {
+    Fixture fixture;
+    const std::string windows = "c:/search";
+    const auto linux = poppy::ResourceId::wsl("Ubuntu", "/home/user/search", "user");
+    poppy::ProjectSession state;
+    state.searchSidebar = true; state.search.query = "一致😀"; state.search.matchCase = true; state.search.respectIgnore = false;
+    state.search.status = "3 matches · Results limited · 1 errors"; state.search.selected = 2; state.search.top = 1;
+    state.search.matches = {{"src/日本語's file.cpp", "先頭 一致😀", 221, 8, 4096, 4106},
+                            {"other.txt", "一致😀", 1, 1, 0, 10}, {"other.txt", "二度目 一致😀", 5, 5, 100, 110}};
+    fs::path db;
+    {
+        poppy::Storage storage(fixture.directory);
+        storage.saveProject(windows, windows, state);
+        auto remote = state; remote.search.matches[0].relative = "src/改行\nバックスラッシュ\\.cpp";
+        storage.saveProject(linux.key(), linux.serialized(), remote);
+        db = storage.projectDirectory(windows, windows) / "storage.sql";
+    }
+    poppy::Storage reopened(fixture.directory);
+    check(same(*reopened.loadProject(windows, windows), state), "Search query, settings, ordered results or view did not survive restart");
+    auto remote = state; remote.search.matches[0].relative = "src/改行\nバックスラッシュ\\.cpp";
+    check(same(*reopened.loadProject(linux.key(), linux.serialized()), remote), "WSL search paths or project isolation was lost");
+    execute(db, "CREATE TRIGGER reject_result BEFORE INSERT ON search_results WHEN NEW.relative='reject' BEGIN SELECT RAISE(ABORT,'search write failure'); END;");
+    auto changed = state; changed.sidebar = 555; changed.search.query = "new query"; changed.search.matches[1].relative = "reject";
+    rejects([&] { reopened.saveProject(windows, windows, changed); }, "Failed search write was accepted");
+    check(same(*reopened.loadProject(windows, windows), state), "Failed search write overwrote previous results or session");
+    changed = state; changed.search.matches.resize(poppy::contentResultLimit + 1, state.search.matches[0]);
+    rejects([&] { reopened.saveProject(windows, windows, changed); }, "Search count limit was not enforced");
+    changed.search.matches.assign(600, state.search.matches[0]);
+    for (auto& match : changed.search.matches) match.relative.assign(4000, 'a');
+    rejects([&] { reopened.saveProject(windows, windows, changed); }, "Search memory budget was not enforced");
+    check(same(*reopened.loadProject(windows, windows), state), "Oversized search overwrote previous results");
+    // A real version 12 database has no search tables. Existing sessions must
+    // gain empty search state without changing their tabs or terminal settings.
+    execute(db, "DROP TABLE search_state; DROP TABLE search_results; PRAGMA user_version=12;");
+    state.searchSidebar = false; state.search = {};
+    check(same(*reopened.loadProject(windows, windows), state), "Search migration changed existing session state");
+    state.search.query = "absent"; state.search.status = "0 matches · 2 files";
+    reopened.saveProject(windows, windows, state);
+    check(same(*reopened.loadProject(windows, windows), state), "An empty search result was not retained");
+    state.search = {};
+    reopened.saveProject(linux.key(), linux.serialized(), state);
+    check(same(*reopened.loadProject(linux.key(), linux.serialized()), state), "A new empty search retained old rows");
 }
 void gitComparisonRoundTrip() {
     Fixture fixture; poppy::Storage storage(fixture.directory);
@@ -374,7 +426,7 @@ void wslRoundTripAndMigration() {
 }
 int main() {
     try {
-        roundTripAndIsolation(); atomicSave(); projectHistory(); migrateProjectLayout(); migrateGitLayout(); migratePinnedTabs(); migrateWorkspaceAndTerminals(); migrateSplitLayout(); migrateWrapping(); terminalShellMigration(); schemaAndRegistry(); gitComparisonRoundTrip(); wslRoundTripAndMigration();
+        roundTripAndIsolation(); atomicSave(); projectHistory(); migrateProjectLayout(); migrateGitLayout(); migratePinnedTabs(); migrateWorkspaceAndTerminals(); migrateSplitLayout(); migrateWrapping(); terminalShellMigration(); schemaAndRegistry(); searchRoundTripAndMigration(); gitComparisonRoundTrip(); wslRoundTripAndMigration();
         std::cout << "Storage tests passed\n";
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
 }

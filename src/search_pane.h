@@ -3,6 +3,7 @@
 #include "project_provider.h"
 #include "edit_buffer.h"
 #include "scrollbars.h"
+#include "session.h"
 
 namespace poppy {
 class ShutdownDialog;
@@ -18,10 +19,13 @@ public:
     void refresh();
     void cancel();
     void stop(ShutdownDialog* progress = nullptr);
+    SavedSearch snapshot();
+    void restore(const SavedSearch& state);
     HWND window() const { return window_; }
     std::function<std::vector<SearchOverlay>()> overlays;
     std::function<void(const ContentMatch&, const std::string&, bool)> opened;
     std::function<void()> exit;
+    std::function<void()> changed;
 private:
     struct Job;
     static bool deliver(const std::shared_ptr<Job>& job, std::vector<ContentMatch> batch);
@@ -39,6 +43,7 @@ private:
     int page() const;
     int body() const { return px(132); }
     void status(std::wstring text);
+    std::wstring stoppedStatus() const;
     HWND window_ = nullptr;
     Renderer renderer_;
     Scrollbars scrollbars_;
@@ -55,6 +60,7 @@ private:
     uint64_t overlayRevision_ = 0;
     int top_ = 0;
     bool active_ = false, respectIgnore_ = true, overlayDone_ = true;
+    bool searching_ = false;
     ContentSearchOptions options_;
     ContentSearchSummary overlaySummary_;
     std::wstring status_ = L"Type to search this project.";

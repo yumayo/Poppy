@@ -2085,14 +2085,81 @@ void fullSearchTests(const fs::path& executable) {
     type(L"unique-needle"); finished(1);
     send(input, WM_KEYDOWN, VK_RETURN); waitLines(viewer, 300);
     check(scrollInfo(viewer).nPos > 150, "Search result did not reveal the matching line");
-    // Replacing the selected match in the live buffer must exclude the old
-    // disk contents, without saving the file or allocating a text snapshot.
-    send(viewer, WM_CHAR, '!'); finished(0);
+    // Editing and saving keep the old results; only an explicit search uses
+    // the current contents. Dirty buffers must still override disk contents.
+    send(viewer, WM_CHAR, '!'); finished(1);
+    controlShortcut(app, viewer, 'S', [&] { return readText(fixture.root / L"file.txt").find('!') != std::string::npos; }, "Could not save an edited search result");
+    finished(1);
+    check(PostMessageW(input, WM_KEYDOWN, VK_F5, 0) != FALSE, "Could not refresh edited project search"); finished(0);
     send(button, BM_CLICK); type(L"!"); finished(1);
     send(input, WM_KEYDOWN, VK_RETURN); waitLines(viewer, 300);
-    send(viewer, WM_CHAR, '\r'); waitLines(viewer, 301); finished(0);
+    send(viewer, WM_CHAR, '\r'); waitLines(viewer, 301); finished(1);
     check(PostMessageW(input, WM_KEYDOWN, VK_F5, 0) != FALSE, "Could not refresh project search");
     finished(0);
+    controlShortcut(app, viewer, 'S', [&] { return readText(fixture.root / L"file.txt").find('!') == std::string::npos; }, "Could not save the final search fixture");
+}
+void searchRetentionTests(const fs::path& executable) {
+    Fixture first, second;
+    {
+        std::ofstream file(first.root / L"matches.txt");
+        for (int i = 0; i < 80; ++i) file << "needle " << i << '\n';
+        std::ofstream other(second.root / L"other.txt"); other << "second needle\n";
+    }
+    const auto title = [](HWND pane) { wchar_t text[1024]{}; GetWindowTextW(pane, text, 1024); return std::wstring(text); };
+    const auto finished = [&](HWND pane, size_t count) {
+        waitFor([&] { const auto text = title(pane); return text.find(L"Search project: " + std::to_wstring(count) + L" matches") == 0 && text.find(L"Searching") == text.npos; },
+            "Retained search did not publish its expected results");
+    };
+    const auto type = [](HWND input, const std::wstring& query) { for (const auto ch : query) send(input, WM_CHAR, ch); };
+    int top = 0;
+    std::wstring savedTitle;
+    {
+        Application app(executable, first.root); app.tree();
+        const auto surface = app.window;
+        const auto button = FindWindowExW(surface, nullptr, activityButtonClassName, L"Search");
+        const auto pane = FindWindowExW(surface, nullptr, L"PoppySearchPane", nullptr);
+        const auto input = FindWindowExW(pane, nullptr, L"PoppyFindBar", nullptr);
+        const auto viewer = FindWindowExW(surface, nullptr, L"PoppyViewer", nullptr);
+        send(button, BM_CLICK); type(input, L"needle"); finished(pane, 80);
+        send(pane, WM_KEYDOWN, VK_END); top = scrollInfo(pane).nPos;
+        check(top > 0, "Search retention fixture did not scroll");
+        send(pane, WM_KEYDOWN, VK_RETURN); waitLines(viewer, 80);
+        savedTitle = title(pane);
+        // Wait for the normal file watch to refresh the open document. The
+        // search must keep its original rows, status, selection and scroll.
+        writeLines(first.root / L"matches.txt", 300); waitLines(viewer, 300);
+        check(title(pane) == savedTitle && scrollInfo(pane).nPos == top, "A file event changed search results");
+        clickTab(app, 0, true);
+        check(title(pane) == savedTitle && scrollInfo(pane).nPos == top, "Closing a tab changed search results");
+        const auto path = second.root.native();
+        COPYDATASTRUCT data{0x50505901, static_cast<DWORD>((path.size()+1)*sizeof(wchar_t)), const_cast<wchar_t*>(path.c_str())};
+        check(send(app.host, WM_COPYDATA, 0, reinterpret_cast<LPARAM>(&data)), "Cannot open a second search project");
+        app.tree(); check(app.window != surface, "Search test did not switch projects");
+        const auto otherPane = FindWindowExW(app.window, nullptr, L"PoppySearchPane", nullptr);
+        send(FindWindowExW(app.window, nullptr, activityButtonClassName, L"Search"), BM_CLICK);
+        type(FindWindowExW(otherPane, nullptr, L"PoppyFindBar", nullptr), L"second"); finished(otherPane, 1);
+        const auto px = [dpi = GetDpiForWindow(app.host)](int value) { return MulDiv(value, dpi, 96); };
+        click(app.host, px(60), px(68)); app.tree();
+        check(app.window == surface && title(pane) == savedTitle && scrollInfo(pane).nPos == top, "Switching projects reset search results");
+        send(FindWindowExW(surface, nullptr, activityButtonClassName, L"Explorer"), BM_CLICK); send(button, BM_CLICK);
+        check(title(pane) == savedTitle && scrollInfo(pane).nPos == top, "Switching sidebars reset search results");
+        send(input, WM_KEYDOWN, VK_ESCAPE); send(button, BM_CLICK);
+        check(title(pane) == savedTitle, "Esc replaced a completed search status");
+    }
+    {
+        Application app(executable, first.root); app.tree();
+        const auto pane = FindWindowExW(app.window, nullptr, L"PoppySearchPane", nullptr);
+        check(IsWindowVisible(pane) && title(pane) == savedTitle && scrollInfo(pane).nPos == top, "Restart did not restore the retained search and view");
+        // Moving down at the end must retain the restored selection and top.
+        send(pane, WM_KEYDOWN, VK_DOWN);
+        check(scrollInfo(pane).nPos == top, "Restart lost the selected search result");
+        const auto input = FindWindowExW(pane, nullptr, L"PoppyFindBar", nullptr);
+        check(PostMessageW(input, WM_KEYDOWN, VK_F5, 0) != FALSE, "Cannot rerun a restored query"); finished(pane, 0);
+        const auto px = [dpi = GetDpiForWindow(app.host)](int value) { return MulDiv(value, dpi, 96); };
+        click(app.host, px(60), px(44 + projectRowHeight + 24)); app.tree();
+        const auto otherPane = FindWindowExW(app.window, nullptr, L"PoppySearchPane", nullptr);
+        check(IsWindowVisible(otherPane), "Restart lost the other project's search sidebar"); finished(otherPane, 1);
+    }
 }
 void gitSidebarTests(const fs::path& executable) {
     wchar_t git[MAX_PATH]{};
@@ -3356,7 +3423,7 @@ int wmain(int argc, wchar_t** argv) {
         SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         for (const auto test : {folderTests, explorerSortTests, sidebarTests, treeInteractionTests, collapseAllSidebarTests, navigationHistoryTests, previewTabTests, explorerPreviewTabTests, previewTabSplitTests, tabTests, rapidTabMiddleClickTests, pinnedTabTests,
                 bulkTabCloseTests, bulkTabSaveTests, bulkTabSplitTests, explorerActiveFileTests, htmlTabToolsTests, editorTailTests,
-                tabDragTests, wrappingTabDragTests, wrappingTabTests, renameTests, explorerMoveTests, explorerDeleteTests, explorerMultipleSelectionTests, crossProjectFolderCopyTests, createItemTests, newFileShortcutTests, pasteImageTests, splitPaneTests, quickOpenTests, fullSearchTests, gitSidebarTests, gitIgnoredExplorerTests, gitAutoRefreshTests, editableGitDiffTests, branchSidebarTests, multiRepositoryTests, sessionTests, multiProjectTests, recentProjectTests, projectDragTests, scrollingProjectDragTests, terminalTitleTests, terminalShellTests, terminalShortcutTests, terminalBackspaceTests}) {
+                tabDragTests, wrappingTabDragTests, wrappingTabTests, renameTests, explorerMoveTests, explorerDeleteTests, explorerMultipleSelectionTests, crossProjectFolderCopyTests, createItemTests, newFileShortcutTests, pasteImageTests, splitPaneTests, quickOpenTests, fullSearchTests, searchRetentionTests, gitSidebarTests, gitIgnoredExplorerTests, gitAutoRefreshTests, editableGitDiffTests, branchSidebarTests, multiRepositoryTests, sessionTests, multiProjectTests, recentProjectTests, projectDragTests, scrollingProjectDragTests, terminalTitleTests, terminalShellTests, terminalShortcutTests, terminalBackspaceTests}) {
             Fixture appData; AppDataEnvironment environment(appData.root);
             test(fs::absolute(argv[1]));
         }
