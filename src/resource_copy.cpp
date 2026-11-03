@@ -17,6 +17,26 @@
 
 namespace poppy {
 namespace fs = std::filesystem;
+namespace {
+void copyLastWriteTime(const fs::path& source, const fs::path& destination) {
+#ifdef _WIN32
+    // MinGW's filesystem setter uses _wutime, which cannot open directories.
+    // Native attribute access supports both folders and files without rounding.
+    WIN32_FILE_ATTRIBUTE_DATA attributes{};
+    if (!GetFileAttributesExW(source.c_str(), GetFileExInfoStandard, &attributes))
+        throw std::system_error(GetLastError(), std::system_category(), "Cannot read copy source timestamps");
+    const auto handle = CreateFileW(destination.c_str(), FILE_WRITE_ATTRIBUTES,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+    if (handle == INVALID_HANDLE_VALUE)
+        throw std::system_error(GetLastError(), std::system_category(), "Cannot open copy destination to set timestamps");
+    const auto error = SetFileTime(handle, nullptr, nullptr, &attributes.ftLastWriteTime) ? ERROR_SUCCESS : GetLastError();
+    CloseHandle(handle);
+    if (error) throw std::system_error(error, std::system_category(), "Cannot preserve copied timestamps");
+#else
+    fs::last_write_time(destination, fs::last_write_time(source));
+#endif
+}
+}
 void copyResourcePath(const fs::path& source, const fs::path& destination) {
     if (!source.is_absolute() || !destination.is_absolute() || destination.filename().empty())
         throw std::runtime_error("Copy requires absolute file or folder paths.");
@@ -75,11 +95,11 @@ void copyResourcePath(const fs::path& source, const fs::path& destination) {
             for (const auto& entry : fs::directory_iterator(item.source)) pending.push_back({entry.path(), item.target / entry.path().filename()});
         } else if (fs::is_regular_file(status)) {
             fs::copy_file(item.source, item.target);
-            fs::last_write_time(item.target, fs::last_write_time(item.source));
+            copyLastWriteTime(item.source, item.target);
         } else throw std::runtime_error("Only regular files, folders and symbolic links can be copied.");
     }
     for (auto it = directories.rbegin(); it != directories.rend(); ++it) {
-        fs::last_write_time(it->target, fs::last_write_time(it->source));
+        copyLastWriteTime(it->source, it->target);
         fs::permissions(it->target, fs::status(it->source).permissions());
     }
 #ifdef _WIN32

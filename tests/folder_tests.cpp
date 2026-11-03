@@ -1419,6 +1419,44 @@ void explorerMultipleSelectionTests(const fs::path& executable) {
     shortcut('A');
     check(!send(tree, treeIsSelected, root) && send(tree, treeGetSelectionCount) >= 5, "Select all included the protected project root");
 }
+void crossProjectFolderCopyTests(const fs::path& executable) {
+    Fixture a, b;
+    const auto source = a.root / L"folder 日本語", destination = b.root / source.filename();
+    fs::create_directories(source / L"nested" / L"empty");
+    writeLines(source / L"nested" / L"data.txt", 3);
+    Application app(executable, a.root); const auto treeA = app.tree();
+    waitFor([&] { return send(treeA, treeGetCount) == 2; }, "Folder copy source project did not load");
+    send(treeA, treeSelect, nextItem(treeA, TreeRelation::Child, nextItem(treeA, TreeRelation::Root)));
+    const auto sequence = GetClipboardSequenceNumber();
+    controlShortcut(app, treeA, 'C', [&] { return GetClipboardSequenceNumber() != sequence; }, "Could not copy a project folder");
+    check(IsClipboardFormatAvailable(CF_HDROP), "Folder copy did not publish file clipboard data");
+    const auto text = b.root.native();
+    COPYDATASTRUCT data{0x50505901, static_cast<DWORD>((text.size() + 1) * sizeof(wchar_t)), const_cast<wchar_t*>(text.c_str())};
+    check(send(app.host, WM_COPYDATA, 0, reinterpret_cast<LPARAM>(&data)), "Could not open the folder copy destination project");
+    const auto treeB = app.tree();
+    check(treeA != treeB, "Folder copy did not switch projects");
+    const auto rootB = nextItem(treeB, TreeRelation::Root);
+    send(treeB, treeSelect, rootB);
+    controlShortcut(app, treeB, 'V', [&] {
+        return fs::exists(destination / L"nested" / L"data.txt") && send(treeB, treeCanUndo) != 0;
+    }, "Cross-project folder paste did not finish");
+    const auto checkContents = [&] {
+        check(readText(destination / L"nested" / L"data.txt") == readText(source / L"nested" / L"data.txt") &&
+            fs::is_empty(destination / L"nested" / L"empty"), "Cross-project folder copy lost contents or an empty directory");
+    };
+    checkContents();
+    waitFor([&] {
+        const auto selection = static_cast<TreeItem>(send(treeB, treeGetSelection));
+        return selection && selection != rootB;
+    }, "Copied folder was not selected");
+    check(send(treeA, treeCanUndo) == 0, "Copy changed the source project's history");
+    controlKey(app, treeB, 'Z');
+    waitFor([&] { return !fs::exists(destination); }, "Undo did not remove the copied folder");
+    check(fs::exists(source / L"nested" / L"data.txt"), "Undo of a folder copy changed its source project");
+    controlKey(app, treeB, 'Y');
+    waitFor([&] { return fs::exists(destination / L"nested" / L"data.txt"); }, "Redo did not restore the copied folder");
+    checkContents();
+}
 void explorerMoveTests(const fs::path& executable) {
     Fixture fixture;
     const auto source = fixture.root / L"a source", target = fixture.root / L"b target 日本語";
@@ -3306,7 +3344,7 @@ int wmain(int argc, wchar_t** argv) {
         SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         for (const auto test : {folderTests, explorerSortTests, sidebarTests, treeInteractionTests, collapseAllSidebarTests, navigationHistoryTests, previewTabTests, explorerPreviewTabTests, previewTabSplitTests, tabTests, rapidTabMiddleClickTests, pinnedTabTests,
                 bulkTabCloseTests, bulkTabSaveTests, bulkTabSplitTests, explorerActiveFileTests, htmlTabToolsTests, editorTailTests,
-                tabDragTests, wrappingTabDragTests, wrappingTabTests, renameTests, explorerMoveTests, explorerDeleteTests, explorerMultipleSelectionTests, createItemTests, newFileShortcutTests, pasteImageTests, splitPaneTests, quickOpenTests, fullSearchTests, gitSidebarTests, gitIgnoredExplorerTests, gitAutoRefreshTests, editableGitDiffTests, branchSidebarTests, multiRepositoryTests, sessionTests, multiProjectTests, recentProjectTests, projectDragTests, scrollingProjectDragTests, terminalTitleTests, terminalShellTests, terminalShortcutTests, terminalBackspaceTests}) {
+                tabDragTests, wrappingTabDragTests, wrappingTabTests, renameTests, explorerMoveTests, explorerDeleteTests, explorerMultipleSelectionTests, crossProjectFolderCopyTests, createItemTests, newFileShortcutTests, pasteImageTests, splitPaneTests, quickOpenTests, fullSearchTests, gitSidebarTests, gitIgnoredExplorerTests, gitAutoRefreshTests, editableGitDiffTests, branchSidebarTests, multiRepositoryTests, sessionTests, multiProjectTests, recentProjectTests, projectDragTests, scrollingProjectDragTests, terminalTitleTests, terminalShellTests, terminalShortcutTests, terminalBackspaceTests}) {
             Fixture appData; AppDataEnvironment environment(appData.root);
             test(fs::absolute(argv[1]));
         }

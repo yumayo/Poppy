@@ -3,7 +3,12 @@
 #include <fstream>
 #include <iostream>
 #include <stdexcept>
-#ifndef _WIN32
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#else
 #include <sys/stat.h>
 #endif
 
@@ -66,8 +71,48 @@ void copying() {
     for (const auto& directory : {fixture.root, source, source / "nested", target})
         for (const auto& entry : fs::directory_iterator(directory)) check(entry.path().filename().string().rfind(".poppy-copy-", 0) != 0, "Copy leaked staging data");
 }
+#ifdef _WIN32
+void windowsFolderTimestamps() {
+    Fixture fixture;
+    const auto source = fixture.root / fs::u8path("project A 日本語") / "folder", target = fixture.root / "project B";
+    fs::create_directories(source / "nested" / "empty"); fs::create_directory(target);
+    write(source / "nested" / "data.bin", "folder contents");
+    // Use native timestamps with subsecond precision. Setting a directory's
+    // timestamp through MinGW's filesystem API would fail in the fixture too.
+    for (const auto& path : {source / "nested" / "data.bin", source / "nested" / "empty", source / "nested", source}) {
+        const auto handle = CreateFileW(path.c_str(), FILE_WRITE_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+        check(handle != INVALID_HANDLE_VALUE, "Cannot open timestamp fixture");
+        const FILETIME timestamp{123456789, 31000000};
+        const auto success = SetFileTime(handle, nullptr, nullptr, &timestamp);
+        CloseHandle(handle);
+        check(success != FALSE, "Cannot set timestamp fixture");
+    }
+    const auto destination = target / source.filename();
+    copyResourcePath(source, destination);
+    for (const auto& relative : {fs::path{}, fs::path("nested"), fs::path("nested/empty"), fs::path("nested/data.bin")}) {
+        const auto from = relative.empty() ? source : source / relative;
+        const auto to = relative.empty() ? destination : destination / relative;
+        WIN32_FILE_ATTRIBUTE_DATA before{}, after{};
+        check(GetFileAttributesExW(from.c_str(), GetFileExInfoStandard, &before) &&
+            GetFileAttributesExW(to.c_str(), GetFileExInfoStandard, &after), "Cannot read copied timestamps");
+        check(CompareFileTime(&before.ftLastWriteTime, &after.ftLastWriteTime) == 0,
+            "Cross-project folder copy lost a file or directory timestamp");
+    }
+    check(read(destination / "nested" / "data.bin") == "folder contents" && fs::is_empty(destination / "nested" / "empty") &&
+        read(source / "nested" / "data.bin") == "folder contents", "Cross-project folder copy changed contents or its source");
+    for (const auto& entry : fs::directory_iterator(target))
+        check(entry.path() == destination, "Cross-project folder copy leaked staging data");
+}
+#endif
 }
 int main() {
-    try { copying(); std::cout << "Resource copy tests passed\n"; return 0; }
+    try {
+        copying();
+#ifdef _WIN32
+        windowsFolderTimestamps();
+#endif
+        std::cout << "Resource copy tests passed\n"; return 0;
+    }
     catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
 }
