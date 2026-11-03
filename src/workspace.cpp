@@ -26,6 +26,7 @@ constexpr int projectMessageLineHeight = 18;
 constexpr int projectMessageLines = 3;
 constexpr int projectCardMargin = 8;
 constexpr int projectCardGap = 8;
+constexpr int projectBorderWidth = 5;
 constexpr int projectCardHeight = projectHeadingHeight + projectMessageLineHeight * projectMessageLines + 8;
 constexpr int projectRowHeight = projectCardHeight + projectCardGap;
 fs::path stateDirectory() {
@@ -554,7 +555,7 @@ std::wstring Workspace::subtitle(size_t index) const {
 }
 void Workspace::layout(){
     if(!window_)return;
-    RECT r{};GetClientRect(window_,&r);const int left=px(session_.projectListWidth)+px(5);
+    RECT r{};GetClientRect(window_,&r);const int left=px(session_.projectListWidth)+px(projectBorderWidth);
     const int page=std::max(1,(static_cast<int>(r.bottom)-px(44))/px(projectRowHeight));scroll_=std::clamp(scroll_,0,std::max(0,static_cast<int>(projects_.size())-page));
     // Do not copy old Direct2D pixels while moving the project and its panes.
     // Repaint the complete layout after the new positions have been applied.
@@ -574,14 +575,14 @@ void Workspace::updateTools(){
 }
 void Workspace::paint(){
     Renderer::Paint paint(renderer_,window_);if(!paint)return;RECT client{};GetClientRect(window_,&client);renderer_.fill(client,background);
-    const int width=px(session_.projectListWidth);renderer_.fill({width,0,width+px(5),client.bottom},border);
+    const int width=px(session_.projectListWidth),borderWidth=px(projectBorderWidth);renderer_.fill({width,0,width+borderWidth,client.bottom},border);
     const auto addButton=addButtonBounds();
     renderer_.label({px(12),0,addButton.left,px(44)},L"PROJECTS",foreground);
     renderer_.fill(addButton,panel);renderer_.label(addButton,L"+",accent,DT_CENTER|DT_VCENTER|DT_SINGLELINE);
     for(size_t i=0;i<projects_.size();++i){auto rect=row(i);if(rect.bottom<=px(44)||rect.top>=client.bottom)continue;
         const auto& project=projects_[i];const auto summary=project.runtime->summary();
         renderer_.fillRounded(rect,i==active_?accent:border,px(6));
-        auto inside=rect;InflateRect(&inside,-px(1),-px(1));renderer_.fillRounded(inside,panel,px(5));
+        auto inside=rect;InflateRect(&inside,-borderWidth,-borderWidth);renderer_.fillRounded(inside,panel,px(6)-borderWidth);
         const int headingBottom=rect.top+px(projectHeadingHeight);
         drawAiStatus(renderer_,{rect.left+px(4),rect.top,rect.left+px(30),headingBottom},summary.state,dpi_);
         const auto secondary=subtitle(i);const auto title=project.path.filename().empty()?project.path.native():project.path.filename().native();
@@ -615,7 +616,7 @@ case WM_SETFOCUS:if(closing_)return 0;if(!projects_.empty())projects_[active_].r
 case WM_XBUTTONDOWN:case WM_XBUTTONDBLCLK:navigate(GET_XBUTTON_WPARAM(a)==XBUTTON2);return TRUE;
 case WM_XBUTTONUP:return TRUE;
 case WM_APPCOMMAND:{const auto command=GET_APPCOMMAND_LPARAM(b);if(command==APPCOMMAND_BROWSER_BACKWARD||command==APPCOMMAND_BROWSER_FORWARD){navigate(command==APPCOMMAND_BROWSER_FORWARD);return TRUE;}break;}
-case WM_LBUTTONDOWN:{recent_.close();endProjectDrag();const POINT point{GET_X_LPARAM(b),GET_Y_LPARAM(b)};const auto addButton=addButtonBounds();const int width=px(session_.projectListWidth);if(point.x>=width&&point.x<width+px(5)){dragging_=true;SetCapture(window_);}else if(PtInRect(&addButton,point))choose();else if(const auto index=hit(point);index<projects_.size()){select(index,point.x<row(index).left+px(30));projectDrag_=ProjectDrag{projects_[index].id,point,point,false,std::nullopt};SetCapture(window_);}return 0;}
+case WM_LBUTTONDOWN:{recent_.close();endProjectDrag();const POINT point{GET_X_LPARAM(b),GET_Y_LPARAM(b)};const auto addButton=addButtonBounds();const int width=px(session_.projectListWidth);if(point.x>=width&&point.x<width+px(projectBorderWidth)){dragging_=true;SetCapture(window_);}else if(PtInRect(&addButton,point))choose();else if(const auto index=hit(point);index<projects_.size()){select(index,point.x<row(index).left+px(30));projectDrag_=ProjectDrag{projects_[index].id,point,point,false,std::nullopt};SetCapture(window_);}return 0;}
 case WM_MOUSEMOVE:if(projectDrag_){updateProjectDrag({GET_X_LPARAM(b),GET_Y_LPARAM(b)});return 0;}if(dragging_){session_.projectListWidth=std::clamp(MulDiv(GET_X_LPARAM(b),96,dpi_),100,600);appDirty_=true;appChanged_=GetTickCount64();layout();}return 0;
 case WM_LBUTTONUP:if(projectDrag_&&projectDrag_->active)updateProjectDrag({GET_X_LPARAM(b),GET_Y_LPARAM(b)});endProjectDrag(true);dragging_=false;if(GetCapture()==window_)ReleaseCapture();return 0;
 case WM_CANCELMODE:endProjectDrag();dragging_=false;if(GetCapture()==window_)ReleaseCapture();return 0;
