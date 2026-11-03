@@ -897,7 +897,7 @@ LRESULT Viewer::handle(UINT m, WPARAM a, LPARAM b) {
                 size_t anchor = 0, caret = 0;
                 if (!editSelection(anchor, caret)) return 0;
                 if (anchor == caret) {
-                    if (a == VK_BACK) anchor = edit_->previous(caret); else caret = edit_->next(caret);
+                    if (a == VK_BACK) anchor = ctrl ? edit_->previousWord(caret) : edit_->previous(caret); else caret = edit_->next(caret);
                     anchor_ = diff_ ? diff_->patchOffset(anchor) : anchor; caret_ = diff_ ? diff_->patchOffset(caret) : caret;
                 }
                 replace(""); return 0;
@@ -916,7 +916,7 @@ LRESULT Viewer::handle(UINT m, WPARAM a, LPARAM b) {
     case WM_CHAR:
         if (html_.active()) return 0;
         if (ime_.active()) return 0;
-        if (edit_ && !(GetKeyState(VK_CONTROL) & 0x8000) && (a >= 32 || a == '\r')) {
+        if (edit_ && a != 0x7f && !(GetKeyState(VK_CONTROL) & 0x8000) && (a >= 32 || a == '\r')) {
             const wchar_t c = static_cast<wchar_t>(a);
             if (c >= 0xd800 && c <= 0xdbff) { highSurrogate_ = c; return 0; }
             std::wstring text; if (highSurrogate_) { text += highSurrogate_; highSurrogate_ = 0; } text += c;

@@ -517,10 +517,11 @@ LRESULT Terminal::handle(UINT m, WPARAM a, LPARAM b) {
         // clearing the selection. A plain click is not a selection.
         if (a == 3 && !(GetKeyState(VK_MENU) & 0x8000) && hasSelection()) { copy(); return 0; }
         // Windows emits BS for Backspace and DEL for Ctrl+Backspace;
-        // ConPTY expects DEL for Backspace and BS for Ctrl+Backspace.
+        // Send DEL for one character and Ctrl+W for a word, which is understood
+        // by both PSReadLine and Readline (Git Bash / WSL).
         wchar_t c = static_cast<wchar_t>(a);
         if (c == L'\b') c = L'\x7f';
-        else if (c == L'\x7f') c = L'\b';
+        else if (c == L'\x7f') c = L'\x17';
         if (c >= 0xd800 && c <= 0xdbff) { highSurrogate_ = c; return 0; }
         std::wstring text; if (highSurrogate_) { text += highSurrogate_; highSurrogate_ = 0; } text += c;
         send((m == WM_SYSCHAR ? "\x1b" : "") + utf8(text)); return 0;

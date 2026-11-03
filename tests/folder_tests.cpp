@@ -3237,6 +3237,10 @@ void terminalShellTests(const fs::path& executable) {
             click(tabs[1], 10, 10);
             for (const auto ch : std::wstring(L"printf ready > bash-ready.txt\r")) send(tabs[1], WM_CHAR, ch);
             waitFor([&] { std::ifstream file(fixture.root/L"bash-ready.txt"); std::string text; return file && std::getline(file,text) && text=="ready"; }, "Git Bash did not run in the Unicode project directory");
+            for (const auto ch : std::wstring(L"printf '%s' 'hello world\x7f' > bash-word.txt\r")) send(tabs[1], WM_CHAR, ch);
+            waitFor([&] { std::ifstream file(fixture.root/L"bash-word.txt"); std::string text; return file && std::getline(file,text,'\0') && text=="hello "; }, "Ctrl+Backspace did not delete a word in Git Bash");
+            for (const auto ch : std::wstring(L"printf '%s' 'hello world\b' > bash-character.txt\r")) send(tabs[1], WM_CHAR, ch);
+            waitFor([&] { std::ifstream file(fixture.root/L"bash-character.txt"); std::string text; return file && std::getline(file,text,'\0') && text=="hello worl"; }, "Backspace did not delete one character in Git Bash");
         }
         choose(app, pane, {VK_END, VK_RIGHT, VK_END, VK_RETURN});
         check(sessions(pane).size() == 2, "Changing the default added a terminal");
@@ -3346,6 +3350,8 @@ void terminalBackspaceTests(const fs::path& executable) {
     waitText(fixture.root / L"repeated.txt", "hell", "Repeated Backspace did not delete one character at a time across a word boundary");
     type(L"'hello world\x7f' | Set-Content -NoNewline -Encoding Ascii word.txt\r");
     waitText(fixture.root / L"word.txt", "hello ", "Ctrl+Backspace did not delete the preceding word");
+    type(L"'hello brave world\x7f\x7f' | Set-Content -NoNewline -Encoding Ascii words.txt\r");
+    waitText(fixture.root / L"words.txt", "hello ", "Repeated Ctrl+Backspace did not delete words one at a time");
 }
 void sessionTests(const fs::path& executable) {
     Fixture fixture;

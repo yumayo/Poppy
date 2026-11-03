@@ -930,6 +930,10 @@ void editableDiff() {
         check(buffer->document.text == "head\r\nxtail", "Delete in a diff did not join source lines");
         key('Z', true); select(9, 9); key(VK_BACK);
         check(buffer->document.text == "head\r\nxtail", "Backspace in a diff split CRLF or targeted a patch prefix");
+        key('Z', true); select(7, 7); key(VK_BACK, true);
+        check(buffer->document.text == "head\r\n\r\ntail", "Ctrl+Backspace in a diff did not delete the source word");
+        key('Z', true); select(6, 6); key(VK_BACK, true);
+        check(buffer->document.text == "x\r\ntail", "Ctrl+Backspace across a diff line split CRLF or deleted patch metadata");
         key('Z', true); select(6, 6); key('X', true);
         check(buffer->document.text == "head\r\ntail" && clipboardText(viewer.window()) == L"x\r\n", "Cut in a diff did not use the working source line");
         key('Z', true); select(6, 6); key(VK_DOWN, false, true, true);
@@ -941,7 +945,7 @@ void editableDiff() {
             viewer.restore({0, 0, diff.offset(row.before), diff.offset(row.before), false}); break;
         }
         const auto text = buffer->document.text;
-        SendMessageW(viewer.window(), WM_CHAR, '!', 0); key(VK_DELETE); key('Z', true);
+        SendMessageW(viewer.window(), WM_CHAR, '!', 0); key(VK_DELETE); key(VK_BACK, true); key('Z', true);
         check(buffer->document.text == text, "The Before side of a working diff accepted an edit");
         select(6, 7);
         auto changedBase = std::make_shared<Document>(*before); changedBase->text = "different\r\nhead\r\nold\r\ntail"; indexDocument(*changedBase);
@@ -1623,6 +1627,55 @@ void editorWordMovement() {
         "A word jump across wrapped rows did not reveal the caret");
     key(VK_LEFT, true, true); selection(0, 0);
     check(!buffer->dirty(), "Word selection modified the document");
+}
+void editorWordDeletion() {
+    Viewer viewer;
+    const auto parent = CreateWindowExW(0, L"STATIC", L"Editor word deletion test", WS_POPUP | WS_CLIPCHILDREN,
+        0, 0, 640, 360, nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
+    check(parent != nullptr, "Could not create the word deletion test window");
+    struct WindowOwner { HWND value; ~WindowOwner() { DestroyWindow(value); } } owner{parent};
+    viewer.create(parent, GetModuleHandleW(nullptr));
+    const auto window = viewer.window(); MoveWindow(window, 0, 0, 640, 360, FALSE);
+    BYTE original[256]{}; GetKeyboardState(original);
+    struct KeyboardOwner { BYTE* value; ~KeyboardOwner() { SetKeyboardState(value); } } keyboard{original};
+    const auto key = [&](WPARAM code, bool ctrl = true) {
+        BYTE keys[256]{}; keys[VK_CONTROL] = ctrl ? 0x80 : 0;
+        SetKeyboardState(keys); SendMessageW(window, WM_KEYDOWN, code, 0);
+        // TranslateMessage can leave this queued after Ctrl has been released.
+        SetKeyboardState(original);
+        if (code == VK_BACK) SendMessageW(window, WM_CHAR, ctrl ? 0x7f : '\b', 0);
+    };
+    struct Case { std::string left, removed, right; };
+    const std::vector<Case> cases{
+        {"hello ", "world", ""}, {"hello ", "wor", "ld"},
+        {"", "foo_bar42", ".tail"}, {"foo", "+=", "bar"},
+        {"one ", "two \t", "tail"}, {"", "one\r\n  ", "two"},
+        {"", "one\n\n  ", "two"}, {"", " \t\r\n", ""},
+        {u8"日本語　", u8"café_42", u8"、😀"}, {u8"日本語", u8"、😀", " tail"},
+        {"", u8"日本語", " tail"}, {"", "", "tail"}, {"", "", ""},
+        {"", std::string(2000, 'x'), " tail"}
+    };
+    for (const bool wrap : {false, true}) for (const auto& test : cases) {
+        auto buffer = std::make_shared<EditBuffer>();
+        const auto text = test.left + test.removed + test.right;
+        buffer->document.text = text; indexDocument(buffer->document); buffer->initialize(text);
+        viewer.setWordWrap(wrap); viewer.edit(buffer, L"words.txt"); SetFocus(window);
+        const size_t offset = test.left.size() + test.removed.size();
+        viewer.restore({0, 0, offset, offset}); key(VK_BACK);
+        check(buffer->document.text == test.left + test.right, "Ctrl+Backspace deleted the wrong word or inserted DEL");
+        check(viewer.state().anchor == test.left.size() && viewer.state().caret == test.left.size(), "Word deletion left the wrong caret");
+        if (test.removed.empty()) { check(!buffer->dirty() && buffer->revision == 0, "Word deletion at the start modified the document"); continue; }
+        key('Z'); check(!buffer->dirty() && buffer->document.text == text, "Undo did not restore the whole deleted word");
+        key('Y'); check(buffer->document.text == test.left + test.right, "Redo did not repeat word deletion");
+    }
+    for (const bool reversed : {false, true}) {
+        auto buffer = std::make_shared<EditBuffer>(); buffer->document.text = "hello world";
+        indexDocument(buffer->document); buffer->initialize(buffer->document.text); viewer.edit(buffer, L"selection.txt");
+        viewer.restore({0, 0, reversed ? 9u : 7u, reversed ? 7u : 9u}); key(VK_BACK);
+        check(buffer->document.text == "hello wld", "Ctrl+Backspace extended a selection to the word boundary");
+        key('Z'); viewer.restore({0, 0, 11, 11}); key(VK_BACK, false);
+        check(buffer->document.text == "hello worl", "Plain Backspace stopped deleting one character");
+    }
 }
 void editorLineShortcuts() {
     Viewer viewer;
@@ -2730,7 +2783,7 @@ int main(int argc, char** argv) {
             editorBottomPadding(); editorTailFollowing();
             htmlPreviewSwitching();
             terminalAsyncStartup(); terminalProcessShutdown();
-            statusBarLimits(); treeMultipleSelection(); commitMessagePopup(); inlineTreeInput(); inlineTreeCreation(); gitCommitInput(); cellPositions(); colorsAndClipping(); imagePreviews(); fractionalMarkers(); smoothIcons(); windowTargets(); editableDiff(); editorCaret(); delayedLoadingMessages(); imeCellRendering(); imeTerminalInsertion(); imeUiRendering(); imePositions(); editorWordSelection(); editorWordMovement(); editorLineShortcuts(); editorWrapping(); diffWrapping(); documentFind(); horizontalWheelScrolling(); continuousViewerScrolling(); selectionAutoScrolling(); terminalGitBashSocketEnvironment(); terminalSelectionAutoScrolling(); themedScrollbars(); quickOpenStability();
+            statusBarLimits(); treeMultipleSelection(); commitMessagePopup(); inlineTreeInput(); inlineTreeCreation(); gitCommitInput(); cellPositions(); colorsAndClipping(); imagePreviews(); fractionalMarkers(); smoothIcons(); windowTargets(); editableDiff(); editorCaret(); delayedLoadingMessages(); imeCellRendering(); imeTerminalInsertion(); imeUiRendering(); imePositions(); editorWordSelection(); editorWordMovement(); editorWordDeletion(); editorLineShortcuts(); editorWrapping(); diffWrapping(); documentFind(); horizontalWheelScrolling(); continuousViewerScrolling(); selectionAutoScrolling(); terminalGitBashSocketEnvironment(); terminalSelectionAutoScrolling(); themedScrollbars(); quickOpenStability();
             std::cout << "Direct2D rendering tests passed\n";
         }
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; result = 1; }
