@@ -40,11 +40,12 @@ LRESULT send(HWND window, UINT message, WPARAM a = 0, LPARAM b = 0) {
 TreeItem nextItem(HWND tree, TreeRelation relation, TreeItem item = 0) {
     return static_cast<TreeItem>(send(tree, treeGetNext, static_cast<WPARAM>(relation), static_cast<LPARAM>(item)));
 }
-// The current branch is first, with staged/working groups before its commits.
+// The current branch is first, with Compare then staged/working groups.
 TreeItem gitGroup(HWND tree, bool staged, TreeItem repository = 0) {
     const auto branch = repository ? nextItem(tree, TreeRelation::Child, repository) : nextItem(tree, TreeRelation::Root);
     if (!branch) return 0;
-    const auto first = nextItem(tree, TreeRelation::Child, branch);
+    const auto compare = nextItem(tree, TreeRelation::Child, branch);
+    const auto first = nextItem(tree, TreeRelation::Next, compare);
     return staged ? first : nextItem(tree, TreeRelation::Next, first);
 }
 size_t subtreeCount(HWND tree, TreeItem item) {
@@ -2812,7 +2813,7 @@ void branchSidebarTests(const fs::path& executable) {
               fs::exists(fixture.root / L"ignored.txt"), "Staged stash did not restore HEAD content or lost untracked/ignored files");
         GetWindowTextW(GetDlgItem(app.window, 3), badge, 128);
         check(std::wstring(badge) == L"Source Control (1)", "Staged stash did not update the badge");
-        waitFor([&] { return IsWindowVisible(branches) && children(branches, nextItem(branches, TreeRelation::Root)) == 53; }, "Branch did not load 50 commits and a load-more row");
+        waitFor([&] { return IsWindowVisible(branches) && children(branches, nextItem(branches, TreeRelation::Root)) == 54; }, "Branch did not load Compare, 50 commits and a load-more row");
         check(IsWindowVisible(changes), "Source Control hid its combined branch and change list");
         check(children(branches, 0) == 3, "Source Control did not list local and remote branches");
         const auto branch = nextItem(branches, TreeRelation::Root), latest = nextItem(branches, TreeRelation::Next, gitGroup(branches, false));
@@ -2821,7 +2822,7 @@ void branchSidebarTests(const fs::path& executable) {
         for (int i = 0; i < 50; ++i) more = nextItem(branches, TreeRelation::Next, more);
         check(more != 0, "The 51st row is missing");
         send(branches, treeSelect, more);
-        waitFor([&] { return children(branches, branch) == 54; }, "Clicking the 51st row did not append the remaining commits");
+        waitFor([&] { return children(branches, branch) == 55; }, "Clicking the 51st row did not append the remaining commits");
         auto rootCommit = latest;
         while (const auto next = nextItem(branches, TreeRelation::Next, rootCommit)) rootCommit = next;
         click(app.window, pane.left + (pane.right - pane.left) / 4, pane.top - MulDiv(14, GetDpiForWindow(app.window), 96));
@@ -2864,11 +2865,11 @@ void branchSidebarTests(const fs::path& executable) {
         keepTab(app, visibleTabCount(app) - 1);
         PostMessageW(app.window, WM_KEYDOWN, VK_F5, 0);
         waitFor([&] { return gitGroup(branches, false) != oldWorking; }, "Source Control did not refresh working changes");
-        check(children(branches, branch) == 54 && children(branches, latest) == 2, "Refreshing working changes discarded loaded history");
+        check(children(branches, branch) == 55 && children(branches, latest) == 2, "Refreshing working changes discarded loaded history");
         runGit(L"switch --quiet alternate");
         waitFor([&] {
             const auto current = nextItem(branches, TreeRelation::Root);
-            return current != branch && gitGroup(branches, false) && children(branches, branch) == 52;
+            return current != branch && gitGroup(branches, false) && children(branches, branch) == 53;
         }, "Switching branches did not move both working groups off the previous branch");
         const auto alternate = nextItem(branches, TreeRelation::Root);
         runGit(L"checkout --detach --quiet");
@@ -2884,6 +2885,69 @@ void branchSidebarTests(const fs::path& executable) {
         waitFor([&] { return IsWindowVisible(branches); }, "Restart did not restore Source Control");
         waitLines(viewer, 5, true);
     }
+}
+void comparisonSidebarTests(const fs::path& executable) {
+    wchar_t git[MAX_PATH]{};
+    const auto length = SearchPathW(nullptr, L"git.exe", nullptr, MAX_PATH, git, nullptr);
+    if (!length || length >= MAX_PATH) { std::cout << "Comparison GUI tests skipped: Git for Windows is not on PATH.\n"; return; }
+    Fixture fixture;
+    const auto runGit = [&](const std::wstring& args) {
+        std::wstring command = L"\"" + std::wstring(git) + L"\" " + args;
+        STARTUPINFOW startup{}; startup.cb = sizeof(startup); PROCESS_INFORMATION process{};
+        check(CreateProcessW(git, command.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, fixture.root.c_str(), &startup, &process) != FALSE, "Cannot start comparison fixture Git");
+        CloseHandle(process.hThread); const auto wait = WaitForSingleObject(process.hProcess, 5000);
+        if (wait != WAIT_OBJECT_0) { TerminateProcess(process.hProcess, 1); WaitForSingleObject(process.hProcess, 1000); }
+        DWORD code = 1; GetExitCodeProcess(process.hProcess, &code); CloseHandle(process.hProcess);
+        check(wait == WAIT_OBJECT_0 && code == 0, "Comparison fixture Git failed");
+    };
+    runGit(L"init --quiet --template= --initial-branch=main");
+    runGit(L"config user.name PoppyTest"); runGit(L"config user.email poppy@example.invalid");
+    runGit(L"config commit.gpgsign false"); runGit(L"config tag.gpgsign false"); runGit(L"config core.autocrlf false");
+    writeLines(fixture.root / L"base.txt", 1); runGit(L"add ."); runGit(L"commit -qm base"); runGit(L"tag -a v1.0 -m release");
+    runGit(L"switch -qc topic"); writeLines(fixture.root / L"topic.txt", 300); runGit(L"add ."); runGit(L"commit -qm topic");
+    runGit(L"switch -q main"); writeLines(fixture.root / L"main.txt", 100); runGit(L"add ."); runGit(L"commit -qm main");
+    auto commitId = readText(fixture.root / L".git" / L"refs" / L"heads" / L"main"); commitId.resize(12);
+    Application app(executable, fixture.root); app.tree();
+    const auto changes = GetDlgItem(app.window, 4), viewer = FindWindowExW(app.window, nullptr, L"PoppyViewer", nullptr);
+    send(GetDlgItem(app.window, 3), BM_CLICK);
+    waitFor([&] { return gitGroup(changes, true) != 0; }, "Comparison fixture branches did not load");
+    const auto current = nextItem(changes, TreeRelation::Root), topic = nextItem(changes, TreeRelation::Next, current);
+    const auto currentCompare = nextItem(changes, TreeRelation::Child, current);
+    check(currentCompare && nextItem(changes, TreeRelation::Next, currentCompare) == gitGroup(changes, true), "Compare is not above Staged Changes");
+    check(topic != 0, "The noncurrent branch is missing"); expand(changes, topic);
+    const auto compare = nextItem(changes, TreeRelation::Child, topic);
+    const auto choose = [&](const std::wstring& query) {
+        // Exercise the label click, independently of the expand/collapse arrow.
+        const int height = static_cast<int>(send(changes, treeGetRowHeight));
+        const int y = (static_cast<int>(send(changes, treeGetRow, compare)) - scrollInfo(changes).nPos) * height + height / 2;
+        click(changes, MulDiv(70, GetDpiForWindow(app.window), 96), y);
+        const auto picker = FindWindowExW(app.window, nullptr, L"PoppyQuickPick", L"Compare");
+        check(picker && IsWindowVisible(picker), "Clicking Compare did not open the search palette");
+        for (const auto ch : query) send(picker, WM_CHAR, ch);
+        waitFor([&] { send(picker, WM_KEYDOWN, VK_RETURN); return !IsWindowVisible(picker); }, "The comparison reference could not be selected");
+    };
+    choose(L"main"); waitLines(viewer, 301, true);
+    check(!fs::exists(fixture.root / L"topic.txt"), "Comparing a noncurrent branch checked it out");
+    const auto swap = nextItem(changes, TreeRelation::Child, compare);
+    send(changes, treeSelect, swap); waitLines(viewer, 101, true);
+    auto mode = nextItem(changes, TreeRelation::Next, nextItem(changes, TreeRelation::Child, compare));
+    send(changes, treeSelect, mode); waitLines(viewer, 402, true);
+    // The newly allocated swap row reverses literal before/after revisions.
+    send(changes, treeSelect, nextItem(changes, TreeRelation::Child, compare)); waitLines(viewer, 402, true);
+    choose(L"v1.0"); waitLines(viewer, 301, true);
+    choose(std::wstring(commitId.begin(), commitId.end())); waitLines(viewer, 402, true);
+    // Individual comparison files use committed contents and remain read-only.
+    mode = nextItem(changes, TreeRelation::Next, nextItem(changes, TreeRelation::Child, compare));
+    const auto file = nextItem(changes, TreeRelation::Next, mode);
+    send(changes, treeSelect, file); waitLines(viewer, 100);
+    send(viewer, WM_CHAR, '!');
+    check(readText(fixture.root / L"main.txt").find('!') == std::string::npos, "A comparison edited a working file");
+    runGit(L"diff --quiet"); runGit(L"diff --cached --quiet");
+    // Escape cancels a new selection without replacing the existing review.
+    send(changes, treeSelect, compare);
+    const auto picker = FindWindowExW(app.window, nullptr, L"PoppyQuickPick", L"Compare");
+    check(IsWindowVisible(picker), "Compare could not be reopened"); send(picker, WM_KEYDOWN, VK_ESCAPE);
+    check(!IsWindowVisible(picker), "Escape did not close the comparison picker"); waitLines(viewer, 100);
 }
 void multiRepositoryTests(const fs::path& executable) {
     wchar_t git[MAX_PATH]{};
@@ -2986,7 +3050,7 @@ void multiRepositoryTests(const fs::path& executable) {
         const auto clientBranchRepo = nextItem(branches, TreeRelation::Root), serverBranchRepo = nextItem(branches, TreeRelation::Next, clientBranchRepo);
         for (const auto repo : {clientBranchRepo, serverBranchRepo}) {
             const auto branch = nextItem(branches, TreeRelation::Child, repo);
-            waitFor([&] { return children(branches, branch) == 4; }, "A repository's main branch did not load its history");
+            waitFor([&] { return children(branches, branch) == 5; }, "A repository's main branch did not load Compare and its history");
             const auto latest = nextItem(branches, TreeRelation::Next, gitGroup(branches, false, repo)), commit = nextItem(branches, TreeRelation::Next, latest);
             expand(branches, commit);
             waitFor([&] { return children(branches, commit) == 2; }, "A repository's commit did not load its files");
@@ -3539,7 +3603,7 @@ int wmain(int argc, wchar_t** argv) {
         SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         for (const auto test : {folderTests, explorerSortTests, sidebarTests, treeInteractionTests, collapseAllSidebarTests, navigationHistoryTests, previewTabTests, explorerPreviewTabTests, previewTabSplitTests, tabTests, rapidTabMiddleClickTests, pinnedTabTests,
                 bulkTabCloseTests, bulkTabSaveTests, bulkTabSplitTests, explorerActiveFileTests, htmlTabToolsTests, editorTailTests,
-                tabDragTests, wrappingTabDragTests, wrappingTabTests, renameTests, explorerMoveTests, explorerDeleteTests, explorerDeleteConfirmationTests, explorerMultipleSelectionTests, crossProjectFolderCopyTests, createItemTests, newFileShortcutTests, pasteImageTests, splitPaneTests, quickOpenTests, fullSearchTests, searchRetentionTests, gitSidebarTests, gitIgnoredExplorerTests, gitAutoRefreshTests, editableGitDiffTests, branchSidebarTests, multiRepositoryTests, sessionTests, multiProjectTests, recentProjectTests, projectDragTests, scrollingProjectDragTests, terminalTitleTests, terminalShellTests, terminalShortcutTests, terminalBackspaceTests}) {
+                tabDragTests, wrappingTabDragTests, wrappingTabTests, renameTests, explorerMoveTests, explorerDeleteTests, explorerDeleteConfirmationTests, explorerMultipleSelectionTests, crossProjectFolderCopyTests, createItemTests, newFileShortcutTests, pasteImageTests, splitPaneTests, quickOpenTests, fullSearchTests, searchRetentionTests, gitSidebarTests, gitIgnoredExplorerTests, gitAutoRefreshTests, editableGitDiffTests, branchSidebarTests, comparisonSidebarTests, multiRepositoryTests, sessionTests, multiProjectTests, recentProjectTests, projectDragTests, scrollingProjectDragTests, terminalTitleTests, terminalShellTests, terminalShortcutTests, terminalBackspaceTests}) {
             Fixture appData; AppDataEnvironment environment(appData.root);
             test(fs::absolute(argv[1]));
         }

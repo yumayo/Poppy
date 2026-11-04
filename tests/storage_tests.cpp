@@ -376,9 +376,10 @@ void gitComparisonRoundTrip() {
     poppy::ProjectSession state; state.branchSidebar = true; state.focusedPane = "branch";
     // The same path may be open as a file, staged diff, worktree diff and two
     // historical comparisons, independently of its editor group.
-    for (const auto kind : {poppy::GitDiffKind::Automatic, poppy::GitDiffKind::Changes, poppy::GitDiffKind::Staged, poppy::GitDiffKind::Commit, poppy::GitDiffKind::Commit}) {
+    for (const auto kind : {poppy::GitDiffKind::Automatic, poppy::GitDiffKind::Changes, poppy::GitDiffKind::Staged, poppy::GitDiffKind::Commit, poppy::GitDiffKind::Commit, poppy::GitDiffKind::Compare, poppy::GitDiffKind::Compare}) {
         poppy::SavedTab tab; tab.path = key + "/file.txt"; tab.diff = kind != poppy::GitDiffKind::Automatic; tab.diffKind = kind;
         tab.revision = kind == poppy::GitDiffKind::Commit ? (state.tabs.size() == 3 ? "first" : "second") : "";
+        if (kind == poppy::GitDiffKind::Compare) tab.revision = std::string(40, 'a') + (state.tabs.size() == 5 ? "..." : "..") + std::string(40, 'b');
         tab.gitRoot = state.tabs.size() % 2 ? key + "/app-client" : key + "/app-server";
         tab.group = state.tabs.size() % 2; tab.displayed = state.tabs.size() == 3 || state.tabs.size() == 4;
         state.tabs.push_back(tab);

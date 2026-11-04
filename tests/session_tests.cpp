@@ -22,7 +22,7 @@ void editorTabTests() {
           "Opening another file accumulated preview tabs");
     check(tabs[0].fileView.top == 0 && tabs[0].diffView.caret == 0 && !tabs[0].searchTarget && tabs[0].searchQuery.empty(),
           "A replacement inherited the previous file's view or search target");
-    for (const auto kind : {GitDiffKind::Changes, GitDiffKind::Staged, GitDiffKind::Commit}) {
+    for (const auto kind : {GitDiffKind::Changes, GitDiffKind::Staged, GitDiffKind::Commit, GitDiffKind::Compare}) {
         auto diff = target("diff.cpp", 0, kind); diff.revision = kind == GitDiffKind::Commit ? "abc123" : "";
         openEditorPreview(tabs, diff);
         check(tabs.size() == 1 && tabs[0].preview && tabs[0].diffKind == kind,

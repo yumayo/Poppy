@@ -72,6 +72,8 @@ public:
     std::function<bool()> canUndo, canRedo;
     std::function<void()> undoRequested, redoRequested;
     std::function<void(TreeItem)> activated;
+    // Such rows open on their label/Enter; their arrow still expands children.
+    std::function<bool(TreeItem)> activateOnClick;
     std::function<void(TreeItem)> doubleClicked;
     std::function<void(TreeItem, bool)> expanded;
     std::function<void(uintptr_t)> removed;

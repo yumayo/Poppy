@@ -82,7 +82,11 @@ std::wstring tabKey(const Tab& tab) {
 }
 std::wstring tabTitle(const Tab& tab) {
     auto title = tab.allChanges ? L"All Changes · " + tab.path.filename().native() : tab.path.filename().native();
-    if (tab.diffKind == GitDiffKind::Commit) title += L" · " + wide(tab.revision.substr(0, 8));
+    if (tab.diffKind == GitDiffKind::Compare) {
+        const auto start = tab.revision.find(".."), end = tab.revision.find_first_not_of('.', start);
+        title += (end != std::string::npos && end - start == 3 ? L" · Merge changes " : L" · Compare ") +
+            wide(tab.revision.substr(0, 8)) + L" → " + wide(end == std::string::npos ? "?" : tab.revision.substr(end, 8));
+    } else if (tab.diffKind == GitDiffKind::Commit) title += L" · " + wide(tab.revision.substr(0, 8));
     else if (tab.diffKind == GitDiffKind::Staged) title += L" · Staged";
     else if (tab.diffKind != GitDiffKind::Automatic) title += L" · Changes";
     return title + (tab.diff ? L" (diff)" : L"");
@@ -112,7 +116,12 @@ struct GitWorkspace {
     }
 };
 struct SourceNode { std::wstring path; size_t entry = noGitChange; bool directory = false, staged = false, group = false; size_t repository = 0; };
-enum class HistoryKind { Branch, Commit, Directory, File, More, Message, Repository, Source };
+enum class HistoryKind { Branch, Commit, Directory, File, More, Message, Repository, Source, Compare, CompareSwap, CompareMode };
+struct GitComparison {
+    std::string baseRef, headRef, baseName, headName;
+    bool mergeBase = true;
+    uint64_t request = 0;
+};
 struct HistoryNode {
     HistoryKind kind; std::string ref, revision; ResourceId path;
     bool loaded = false, loading = false; size_t count = 0;
@@ -122,6 +131,8 @@ struct HistoryNode {
     SourceNode source = {};
     std::vector<GitCommitFile> files = {};
     std::wstring message = {};
+    GitDiffKind diffKind = GitDiffKind::Commit;
+    std::shared_ptr<GitComparison> comparison = {};
 };
 std::vector<std::wstring> gitArguments(const std::vector<std::string>& args) {
     std::vector<std::wstring> result; result.reserve(args.size());
@@ -290,6 +301,8 @@ private:
     void openGitDiff(const ResourceId& path, GitDiffKind kind, std::string revision = {}, bool allChanges = false, ResourceId root = {}, bool fullContext = false);
     std::wstring repositoryLabel(const ResourceId& root) const;
     void refreshBranches();
+    void chooseComparison(TreeItem item);
+    void requestComparison(TreeItem item, bool open = true);
     void requestHistory(TreeItem item, bool more = false);
     void openHistory(TreeItem item);
     HistoryNode* historyNode(TreeItem item) const;
@@ -413,6 +426,7 @@ private:
     DropPreview dropPreview_;
     TerminalPane terminal_;
     QuickOpen quickOpen_;
+    QuickOpen comparePicker_;
     SearchPane searchPane_;
     std::unique_ptr<Worker> worker_, gitWorker_;
     ProjectRuntime* owner_ = nullptr;
@@ -517,6 +531,7 @@ void ProjectRuntime::Impl::create() {
     explorer_.redoRequested = [this] { replayExplorer(true); };
     changes_.removed = [](uintptr_t data) { delete reinterpret_cast<HistoryNode*>(data); };
     changes_.activated = [this](TreeItem item) { if (sourceNode(item)) openGitFile(item); else openHistory(item); };
+    changes_.activateOnClick = [this](TreeItem item) { const auto node = historyNode(item); return node && node->kind == HistoryKind::Compare; };
     changes_.hoverActionsOnly = true;
     changes_.hoverMessage = [this](TreeItem item) {
         const auto n = historyNode(item);
@@ -526,7 +541,7 @@ void ProjectRuntime::Impl::create() {
         const auto source = sourceNode(item);
         if (!source) {
             const auto n = historyNode(item);
-            return !n ? L"" : n->kind == HistoryKind::Commit ? L"Open All Changes" : n->kind == HistoryKind::File ? L"Open File" : L"";
+            return !n ? L"" : n->kind == HistoryKind::Commit || (n->kind == HistoryKind::Compare && n->loaded) ? L"Open All Changes" : n->kind == HistoryKind::File ? L"Open File" : L"";
         }
         const auto& node = *source;
         if (node.group) return changes_.child(item) ? L"Open All Changes" : L"";
@@ -543,6 +558,7 @@ void ProjectRuntime::Impl::create() {
         if (!source) {
             const auto n = historyNode(item);
             if (n && n->kind == HistoryKind::Commit) openGitDiff(n->root, GitDiffKind::Commit, n->revision, true, n->root);
+            else if (n && n->kind == HistoryKind::Compare && n->loaded) openGitDiff(n->root, GitDiffKind::Compare, n->revision, true, n->root);
             else if (n && n->kind == HistoryKind::File) openWorkingFile(n->path);
             return;
         }
@@ -552,7 +568,7 @@ void ProjectRuntime::Impl::create() {
     };
     changes_.secondaryActionLabel = [this](TreeItem item) {
         const auto source = sourceNode(item);
-        if (!source) { const auto n = historyNode(item); return n && n->kind == HistoryKind::File ? L"Open Revision" : L""; }
+        if (!source) { const auto n = historyNode(item); return n && n->kind == HistoryKind::File && n->diffKind == GitDiffKind::Commit ? L"Open Revision" : L""; }
         const auto& node = *source;
         if (node.group) return changes_.child(item) ? node.staged ? L"Unstage All Changes" : L"Stage All Changes" : L"";
         return node.directory ? L"" : node.staged ? L"Open File" : L"Discard Changes";
@@ -623,7 +639,7 @@ void ProjectRuntime::Impl::create() {
                 else if (collapsedGitPaths_.size() < maxTreeNodes) collapsedGitPaths_.insert(path);
             }
             if (n && n->kind == HistoryKind::Directory) {
-                const auto path = gitVisibilityPrefix(n->root, GitDiffKind::Commit, n->revision) + n->path.lexically_relative(n->root).generic_wstring();
+                const auto path = gitVisibilityPrefix(n->root, n->diffKind, n->revision) + n->path.lexically_relative(n->root).generic_wstring();
                 const bool changed = value ? collapsedGitPaths_.erase(path) != 0 : collapsedGitPaths_.insert(path).second;
                 if (changed) refreshAllChanges();
             }
@@ -684,6 +700,7 @@ void ProjectRuntime::Impl::create() {
         if (owner_ && owner_->error) owner_->error(key, title, root_.native() + L"\n\n" + message);
     };
     quickOpen_.create(window_, instance_);
+    comparePicker_.create(window_, instance_, QuickOpenMode::Picker);
     quickOpen_.updated = [this] { statusDirty_ = true; };
     quickOpen_.opened = [this](const ResourceId& path) { openFile(path); SetFocus(viewer().window()); };
     searchPane_.create(window_, instance_);
@@ -710,7 +727,7 @@ void ProjectRuntime::Impl::dpi(UINT value) {
     activityWidth_ = MulDiv(48, dpi_, 96); sidebarHeader_ = MulDiv(34, dpi_, 96); gitHeader_ = MulDiv(180, dpi_, 96);
     gitCommit_.setDpi(dpi_);
     for (auto& view : viewers_) view.setDpi(dpi_);
-    terminal_.setDpi(dpi_); quickOpen_.setDpi(dpi_); statusBar_.setDpi(dpi_); layout();
+    terminal_.setDpi(dpi_); quickOpen_.setDpi(dpi_); comparePicker_.setDpi(dpi_); statusBar_.setDpi(dpi_); layout();
 }
 void ProjectRuntime::Impl::layout(bool revealTab) {
     if (!tree_) return;
@@ -818,6 +835,7 @@ void ProjectRuntime::Impl::layout(bool revealTab) {
     // and all visible panes now, including the area the old splitters occupied.
     terminal_.acknowledge();
     quickOpen_.layout();
+    comparePicker_.layout();
     RedrawWindow(window_, nullptr, nullptr, RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_UPDATENOW);
 }
 void ProjectRuntime::Impl::paint() {
@@ -954,7 +972,7 @@ void ProjectRuntime::Impl::setGitView(bool tree) {
         for (auto item = changes_.child(); item; item = changes_.next(item)) pending.push_back(item);
         while (!pending.empty()) {
             const auto item = pending.back(); pending.pop_back(); const auto n = historyNode(item);
-            if (n->kind == HistoryKind::Commit) { if (n->loaded) commits.push_back(item); }
+            if (n->kind == HistoryKind::Commit || n->kind == HistoryKind::Compare) { if (n->loaded) commits.push_back(item); }
             else if (n->kind == HistoryKind::Branch || n->kind == HistoryKind::Repository)
                 for (auto child = changes_.child(item); child; child = changes_.next(child)) pending.push_back(child);
         }
@@ -977,6 +995,7 @@ SourceNode* ProjectRuntime::Impl::sourceNode(TreeItem item) const {
     const auto n = historyNode(item); return n && n->kind == HistoryKind::Source ? &n->source : nullptr;
 }
 std::wstring ProjectRuntime::Impl::gitVisibilityPrefix(const ResourceId& root, GitDiffKind kind, const std::string& revision) const {
+    if (kind == GitDiffKind::Compare) return L"compare:" + pathKey(root) + L"\n" + wide(revision) + L"\n";
     if (kind == GitDiffKind::Commit) return L"commit:" + pathKey(root) + L"\n" + wide(revision) + L"\n";
     return (git_ && git_->repositories.size() > 1 ? L"repository:" + pathKey(root) + L"\n" : std::wstring{}) +
         (kind == GitDiffKind::Staged ? L"staged:" : L"changes:");
@@ -984,7 +1003,7 @@ std::wstring ProjectRuntime::Impl::gitVisibilityPrefix(const ResourceId& root, G
 std::wstring ProjectRuntime::Impl::gitVisibilityPath(TreeItem item) const {
     if (const auto source = sourceNode(item)) return source->directory || source->group ? std::wstring{} : source->path;
     const auto n = historyNode(item);
-    return n && n->kind == HistoryKind::File ? gitVisibilityPrefix(n->root, GitDiffKind::Commit, n->revision) + n->path.lexically_relative(n->root).generic_wstring() : std::wstring{};
+    return n && n->kind == HistoryKind::File ? gitVisibilityPrefix(n->root, n->diffKind, n->revision) + n->path.lexically_relative(n->root).generic_wstring() : std::wstring{};
 }
 void ProjectRuntime::Impl::refreshAllChanges() {
     if (collapsingSidebar_) return;
@@ -999,13 +1018,13 @@ void ProjectRuntime::Impl::clearHistoryChildren(TreeItem item) {
     // Working changes belong to the branch, independently of history loading.
     for (auto child = changes_.child(item); child;) {
         const auto next = changes_.next(child);
-        if (!sourceNode(child)) changes_.erase(child);
+        if (!sourceNode(child) && historyNode(child)->kind != HistoryKind::Compare) changes_.erase(child);
         child = next;
     }
 }
 void ProjectRuntime::Impl::sortHistory(TreeItem item) {
     changes_.sort(item, [](uintptr_t a, uintptr_t b) {
-        const auto rank = [](const HistoryNode* node) { return node->kind == HistoryKind::Source ? (node->source.staged ? 0 : 1) : 2; };
+        const auto rank = [](const HistoryNode* node) { return node->kind == HistoryKind::Compare ? 0 : node->kind == HistoryKind::Source ? (node->source.staged ? 1 : 2) : 3; };
         return rank(reinterpret_cast<HistoryNode*>(a)) < rank(reinterpret_cast<HistoryNode*>(b));
     });
 }
@@ -1357,6 +1376,18 @@ void ProjectRuntime::Impl::refreshBranches() {
                         }
                     }
                     for (const auto& stale : existing) changes_.erase(stale.second);
+                    for (auto branch = changes_.child(parent); branch; branch = changes_.next(branch)) {
+                        const auto node = historyNode(branch); if (!node || node->kind != HistoryKind::Branch) continue;
+                        bool hasCompare = false;
+                        for (auto child = changes_.child(branch); child; child = changes_.next(child))
+                            if (historyNode(child)->kind == HistoryKind::Compare) hasCompare = true;
+                        if (!hasCompare) {
+                            HistoryNode compare{HistoryKind::Compare, node->ref, {}, {}};
+                            compare.diffKind = GitDiffKind::Compare;
+                            insertHistory(branch, L"Compare…", std::move(compare), true, accent);
+                        }
+                        sortHistory(branch);
+                    }
                     if (multiple && listing.refs.empty()) insertHistory(parent, L"No branches or commits yet.", {HistoryKind::Message, {}, {}, {}}, false, muted);
                     changes_.sort(parent, [](uintptr_t a, uintptr_t b) {
                         const auto x = reinterpret_cast<HistoryNode*>(a), y = reinterpret_cast<HistoryNode*>(b);
@@ -1368,6 +1399,73 @@ void ProjectRuntime::Impl::refreshBranches() {
             for (const auto& stale : repositories) changes_.erase(stale.second);
             branchesLoaded_ = true;
             if (sourceChanged) updateGitFiles(); else layout(false);
+        });
+    });
+}
+void ProjectRuntime::Impl::chooseComparison(TreeItem item) {
+    const auto node = historyNode(item);
+    if (!node || node->kind != HistoryKind::Compare || !provider_ || (root_.wsl() && !connected_)) return;
+    const auto branch = historyNode(changes_.item(item)->parent); if (!branch || branch->revision.empty()) { status(L"Create a commit before comparing this branch."); return; }
+    const auto root = node->root; const auto generation = generation_; const auto ref = node->ref;
+    const auto branchName = branch->ref == "HEAD" ? std::string("HEAD (detached)") :
+        branch->ref.substr(branch->ref.compare(0, 11, "refs/heads/") == 0 ? 11 : branch->ref.compare(0, 13, "refs/remotes/") == 0 ? 13 : 0);
+    const auto provider = provider_;
+    quickOpen_.close();
+    comparePicker_.setPicker(L"Compare " + wide(branchName) + L" with…", [provider, root](const std::string& query, const std::atomic<bool>* cancelled) {
+        const auto revisions = gitSearchRevisions(query, [&](const auto& args) -> std::optional<std::string> {
+            const auto result = provider->git(gitArguments(args), root, cancelled);
+            return result.code ? std::nullopt : std::optional<std::string>(result.output);
+        });
+        std::vector<QuickOpenItem> items;
+        for (const auto& revision : revisions) items.push_back({revision.ref, wide(revision.label), wide(revision.description)});
+        return items;
+    });
+    comparePicker_.picked = [this, item, generation, ref, branchName](const QuickOpenItem& choice) {
+        const auto node = historyNode(item);
+        if (generation != generation_ || !node || node->kind != HistoryKind::Compare || node->ref != ref) return;
+        const bool mergeBase = !node->comparison || node->comparison->mergeBase;
+        node->comparison = std::make_shared<GitComparison>(GitComparison{choice.id, ref, utf8(choice.label), branchName, mergeBase, 0});
+        requestComparison(item);
+    };
+    comparePicker_.show();
+}
+void ProjectRuntime::Impl::requestComparison(TreeItem item, bool open) {
+    const auto node = historyNode(item); if (!node || !node->comparison) return;
+    const auto comparison = node->comparison; const auto request = ++comparison->request;
+    const auto settings = *comparison; const auto root = node->root; const auto generation = generation_; const auto provider = provider_;
+    node->loading = true; node->loaded = false; node->files.clear(); node->revision.clear();
+    changes_.label(item, L"Compare · " + wide(settings.baseName) + L" → " + wide(settings.headName), accent);
+    updateCommitFiles(item); changes_.expand(item, true);
+    gitWorker_->submit(L"compare:" + std::to_wstring(item), [this, item, comparison, request, settings, root, generation, provider, open] {
+        std::string base, head, range; std::vector<GitCommitFile> files; std::wstring error;
+        try {
+            const GitBaseRun run = [&](const auto& args) -> std::optional<std::string> {
+                const auto result = provider->git(gitArguments(args), root, gitWorker_->cancellation());
+                return result.code ? std::nullopt : std::optional<std::string>(result.output);
+            };
+            const auto resolvedBase = gitResolveRevision(settings.baseRef, run), resolvedHead = gitResolveRevision(settings.headRef, run);
+            if (!resolvedBase || !resolvedHead) error = L"The selected branch, tag or commit is unavailable. Click Compare to select again.";
+            else {
+                base = *resolvedBase; head = *resolvedHead; range = gitCompareRange(base, head, settings.mergeBase);
+                const auto result = provider->git(gitArguments(gitCompareFilesArguments(range)), root, gitWorker_->cancellation());
+                if (result.code) error = result.error.empty() ? L"Cannot compare these revisions. Try Two revisions mode if they have no common ancestor." : result.error;
+                else files = parseGitCommitFiles(result.output);
+            }
+        } catch (const std::exception& failure) { error = wide(failure.what()); }
+        gitWorker_->complete([this, item, comparison, request, root, generation, base, head, range, files = std::move(files), error, open] {
+            if (generation != generation_) return;
+            const auto node = historyNode(item);
+            if (!node || node->comparison != comparison || comparison->request != request || pathKey(node->root) != pathKey(root)) return;
+            node->loading = false; node->loaded = error.empty(); node->revision = range;
+            if (error.empty()) { comparison->baseRef = base; comparison->headRef = head; }
+            for (auto& file : files) {
+                if (root.wsl() && (!validUtf8(file.path) || !validUtf8(file.previousPath))) { status(L"Some comparison filenames are not UTF-8 and cannot be opened."); continue; }
+                if (node->files.size() >= maxTreeNodes) { status(L"Comparison limited to 50,000 files."); break; }
+                node->files.push_back(std::move(file));
+            }
+            updateCommitFiles(item);
+            if (!error.empty()) { insertHistory(item, error, {HistoryKind::Message, {}, {}, {}}, false, muted); status(L"Git comparison failed: " + error); return; }
+            if (open) { openGitDiff(root, GitDiffKind::Compare, range, true, root); SetFocus(viewer().window()); }
         });
     });
 }
@@ -1437,13 +1535,19 @@ void ProjectRuntime::Impl::requestHistory(TreeItem item, bool more) {
     });
 }
 void ProjectRuntime::Impl::updateCommitFiles(TreeItem item) {
-    const auto n = historyNode(item); if (!n || n->kind != HistoryKind::Commit) return;
+    const auto n = historyNode(item); if (!n || (n->kind != HistoryKind::Commit && n->kind != HistoryKind::Compare)) return;
     // Keep the selected file when switching between its folder and path layouts.
     const auto selected = historyNode(changes_.selection());
     auto ancestor = changes_.selection();
     while (ancestor && ancestor != item) ancestor = changes_.item(ancestor)->parent;
     const auto selectedPath = ancestor == item && selected && selected->kind == HistoryKind::File ? selected->path : ResourceId{};
     Tree::Batch batch(changes_); changes_.clearChildren(item);
+    if (n->kind == HistoryKind::Compare && n->comparison) {
+        insertHistory(item, L"Swap source and target", {HistoryKind::CompareSwap, {}, {}, {}}, false, accent);
+        insertHistory(item, n->comparison->mergeBase ? L"Mode: Merge changes · click to switch" : L"Mode: Two revisions · click to switch", {HistoryKind::CompareMode, {}, {}, {}}, false, accent);
+        if (n->loading) { insertHistory(item, L"Loading comparison…", {HistoryKind::Message, {}, {}, {}}, false, muted); return; }
+        if (!n->loaded) return;
+    }
     std::vector<std::wstring> paths;
     for (const auto& file : n->files) paths.push_back(wide(file.path));
     const auto nodes = buildGitChanges(paths, gitTreeView_); std::vector<TreeItem> items;
@@ -1451,18 +1555,28 @@ void ProjectRuntime::Impl::updateCommitFiles(TreeItem item) {
         const auto parent = value.parent == noGitChange ? item : items[value.parent];
         const auto offset = value.parent == noGitChange ? 0 : nodes[value.parent].path.size() + 1;
         const auto path = n->root / std::string_view(utf8(value.path));
-        const auto child = insertHistory(parent, value.path.substr(offset),
-            {value.directory() ? HistoryKind::Directory : HistoryKind::File, {}, n->revision, path}, value.directory(),
+        HistoryNode node{value.directory() ? HistoryKind::Directory : HistoryKind::File, {}, n->revision, path}; node.diffKind = n->diffKind;
+        const auto child = insertHistory(parent, value.path.substr(offset), std::move(node), value.directory(),
             value.directory() ? foreground : stateColor(static_cast<wchar_t>(n->files[value.entry].state)));
         items.push_back(child);
-        if (value.directory()) changes_.expand(child, !collapsedGitPaths_.count(gitVisibilityPrefix(n->root, GitDiffKind::Commit, n->revision) + value.path));
+        if (value.directory()) changes_.expand(child, !collapsedGitPaths_.count(gitVisibilityPrefix(n->root, n->diffKind, n->revision) + value.path));
         if (!selectedPath.empty() && path == selectedPath) changes_.select(child, false);
     }
     if (paths.empty()) insertHistory(item, L"No changed files.", {HistoryKind::Message, {}, {}, {}}, false, muted);
 }
 void ProjectRuntime::Impl::openHistory(TreeItem item) {
     const auto n = historyNode(item); if (!n) return;
-    if (n->kind == HistoryKind::File) openGitDiff(n->path, GitDiffKind::Commit, n->revision, false, n->root);
+    if (n->kind == HistoryKind::File) openGitDiff(n->path, n->diffKind, n->revision, false, n->root);
+    else if (n->kind == HistoryKind::Compare) chooseComparison(item);
+    else if (n->kind == HistoryKind::CompareSwap || n->kind == HistoryKind::CompareMode) {
+        const auto parent = changes_.item(item)->parent; const auto compare = historyNode(parent);
+        if (!compare || !compare->comparison) return;
+        if (n->kind == HistoryKind::CompareSwap) {
+            std::swap(compare->comparison->baseRef, compare->comparison->headRef);
+            std::swap(compare->comparison->baseName, compare->comparison->headName);
+        } else compare->comparison->mergeBase = !compare->comparison->mergeBase;
+        requestComparison(parent);
+    }
     else if (n->kind == HistoryKind::More) {
         const auto value = changes_.item(item); if (value) requestHistory(value->parent, true);
     } else if (n->kind == HistoryKind::Branch || n->kind == HistoryKind::Commit) {
@@ -1930,7 +2044,7 @@ void ProjectRuntime::Impl::applyRelocation(const ResourceId& source, const Resou
         const auto gitRoot = relocateResource(tab.gitRoot, source, destination);
         const bool repositoryMoved = pathKey(gitRoot) != pathKey(tab.gitRoot);
         tab.gitRoot = gitRoot;
-        if (tab.diffKind == GitDiffKind::Commit && !repositoryMoved) continue;
+        if ((tab.diffKind == GitDiffKind::Commit || tab.diffKind == GitDiffKind::Compare) && !repositoryMoved) continue;
         const auto path = relocateResource(tab.path, source, destination);
         if (path == tab.path) continue;
         tab.path = path;
@@ -1941,7 +2055,7 @@ void ProjectRuntime::Impl::applyRelocation(const ResourceId& source, const Resou
         const auto gitRoot = relocateResource(tab.gitRoot, source, destination);
         const bool repositoryMoved = pathKey(gitRoot) != pathKey(tab.gitRoot);
         tab.gitRoot = gitRoot;
-        if (tab.diffKind != GitDiffKind::Commit || repositoryMoved) tab.path = relocateResource(tab.path, source, destination);
+        if ((tab.diffKind != GitDiffKind::Commit && tab.diffKind != GitDiffKind::Compare) || repositoryMoved) tab.path = relocateResource(tab.path, source, destination);
     }
     terminal_.relocate(source, destination);
     if (refreshView) { layout(); refresh(); }
@@ -2026,7 +2140,7 @@ TreeItem ProjectRuntime::Impl::insert(TreeItem parent, const Entry& entry) {
 }
 void ProjectRuntime::Impl::openFolder(ResourceId path) {
     restoringProject_ = true;
-    quickOpen_.close();
+    quickOpen_.close(); comparePicker_.close();
     endTabDrag();
     root_ = std::move(path); provider_ = createProjectProvider(root_); connected_ = !root_.wsl();
     terminal_.setProvider(provider_); quickOpen_.setProvider(provider_);
@@ -2586,7 +2700,7 @@ void ProjectRuntime::Impl::tabMenu(POINT screen) {
     HMENU menu = CreatePopupMenu();
     if (!menu) return;
     AppendMenuW(menu, MF_STRING, 1, pinned ? L"Unpin tab" : L"Pin tab");
-    if (!tabs_[index].allChanges && tabs_[index].diffKind != GitDiffKind::Commit) {
+    if (!tabs_[index].allChanges && tabs_[index].diffKind != GitDiffKind::Commit && tabs_[index].diffKind != GitDiffKind::Compare) {
         AppendMenuW(menu, MF_STRING, 4, L"Reveal in File Explorer");
         AppendMenuW(menu, MF_STRING, 3, L"Open with Default Application");
     }
@@ -2634,7 +2748,7 @@ void ProjectRuntime::Impl::loadTab(bool preserve, int group) {
     // Retain only tab metadata and view positions; reload the active document.
     if (!preserve) viewers_[group].loading(tab.diff ? L"Loading Git diff…" : L"Loading…", path);
     status((tab.diff ? L"Git diff: " : L"") + path.filename().native());
-    if (!tab.diff && tab.diffKind != GitDiffKind::Commit) {
+    if (!tab.diff && tab.diffKind != GitDiffKind::Commit && tab.diffKind != GitDiffKind::Compare) {
         worker_->submit(L"file:" + std::to_wstring(group), [this, group, path, serial, generation, preserve, state] {
             auto result = readDocument(*provider_, path);
             worker_->complete([this, group, result, path, serial, generation, preserve, state] {
@@ -2660,6 +2774,10 @@ void ProjectRuntime::Impl::loadTab(bool preserve, int group) {
     if (!repo || !repo->error.empty() || (!tab.gitRoot.empty() && pathKey(repo->root) != pathKey(tab.gitRoot))) { viewers_[group].message(L"Git repository unavailable for this file. Press F5 to refresh.", path); return; }
     const auto root = tab.gitRoot.empty() ? repo->root : tab.gitRoot;
     const auto kind = tab.diffKind; const auto revision = tab.revision; const auto allChanges = tab.allChanges;
+    if (kind == GitDiffKind::Compare) {
+        try { gitCompareFilesArguments(revision); }
+        catch (const std::exception& error) { viewers_[group].message(wide(error.what()), path); return; }
+    }
     const bool fullContext = kind == GitDiffKind::Commit && !tab.diff;
     const bool unsaved = tab.buffer && (tab.buffer->dirty() || tab.buffer->saving);
     const auto roots = git_->roots; const bool treeView = gitTreeView_;
@@ -2676,8 +2794,8 @@ void ProjectRuntime::Impl::loadTab(bool preserve, int group) {
         const auto relative = allChanges ? std::string{} : path.lexically_relative(root).generic_u8string();
         auto readDiff = [&](GitDiffKind scope) {
             std::string previousPath;
-            if (!relative.empty() && scope == GitDiffKind::Commit) {
-                auto files = provider_->git(gitArguments(gitCommitFilesArguments(revision)), root, gitWorker_->cancellation());
+            if (!relative.empty() && (scope == GitDiffKind::Commit || scope == GitDiffKind::Compare)) {
+                auto files = provider_->git(gitArguments(scope == GitDiffKind::Compare ? gitCompareFilesArguments(revision) : gitCommitFilesArguments(revision)), root, gitWorker_->cancellation());
                 if (files.code) return files;
                 for (const auto& file : parseGitCommitFiles(files.output)) if (file.path == relative) {
                     if (fullContext && file.state == 'D') return ProcessResult{1, {}, L"This file was deleted in the selected commit and has no revision to display."};
@@ -2706,9 +2824,9 @@ void ProjectRuntime::Impl::loadTab(bool preserve, int group) {
         if (!result.code && allChanges) {
             // Use the sidebar's input order, including rename destinations and
             // untracked files, before applying its Tree/List layout.
-            auto files = provider_->git(gitArguments(scope == GitDiffKind::Commit ? gitCommitFilesArguments(revision) : gitStatusArguments()), root, gitWorker_->cancellation());
+            auto files = provider_->git(gitArguments(scope == GitDiffKind::Compare ? gitCompareFilesArguments(revision) : scope == GitDiffKind::Commit ? gitCommitFilesArguments(revision) : gitStatusArguments()), root, gitWorker_->cancellation());
             if (files.code) { result.code = files.code; result.error = files.error; }
-            else if (scope == GitDiffKind::Commit) {
+            else if (scope == GitDiffKind::Commit || scope == GitDiffKind::Compare) {
                 for (const auto& file : parseGitCommitFiles(files.output)) {
                     if (root.wsl() && (!validUtf8(file.path) || !validUtf8(file.previousPath))) continue;
                     paths.push_back(wide(file.path));
@@ -2789,7 +2907,7 @@ void ProjectRuntime::Impl::loadTab(bool preserve, int group) {
             else if (doc->patch.text.empty()) viewers_[group].message(L"No changes to display.", path);
             else if (doc->rows.empty()) viewers_[group].message(L"No text changes to display.", path);
             else { viewers_[group].showDiff(doc, path, preserve); if (!preserve) viewers_[group].restore(state); }
-            status((scope == GitDiffKind::Commit ? L"Commit diff" : scope == GitDiffKind::Staged ? L"Staged diff" : L"Working tree diff") +
+            status((scope == GitDiffKind::Compare ? L"Compare diff · READ ONLY" : scope == GitDiffKind::Commit ? L"Commit diff" : scope == GitDiffKind::Staged ? L"Staged diff" : L"Working tree diff") +
                 std::wstring(allChanges ? L" · All changes" : L"") + L" · F7: split / inline");
         });
     });
@@ -2833,7 +2951,7 @@ void ProjectRuntime::Impl::showDiff() {
     if (tabs_.empty()) { status(L"Select a file to view its Git diff."); return; }
     auto& tab = tabs_[activeTab_];
     if (tab.diffKind != GitDiffKind::Automatic) {
-        if (!tab.allChanges && tab.diffKind != GitDiffKind::Commit) { const auto path = tab.path; openFile(path); }
+        if (!tab.allChanges && tab.diffKind != GitDiffKind::Commit && tab.diffKind != GitDiffKind::Compare) { const auto path = tab.path; openFile(path); }
         else status(L"This Git comparison is read only. F7: split / inline.");
         return;
     }
@@ -2911,7 +3029,7 @@ void ProjectRuntime::Impl::refresh(bool force) {
         }
     }
     refreshGit(files);
-    const bool showingGitChanges = std::any_of(tabs_.begin(), tabs_.end(), [](const Tab& tab) { return tab.displayed && tab.diff && tab.diffKind != GitDiffKind::Commit; });
+    const bool showingGitChanges = std::any_of(tabs_.begin(), tabs_.end(), [](const Tab& tab) { return tab.displayed && tab.diff && tab.diffKind != GitDiffKind::Commit && tab.diffKind != GitDiffKind::Compare; });
     if (!tabs_.empty() && (force || fileDirty_ || showingGitChanges)) {
         if (!IsWindowVisible(window_) && !viewer().hasDocument()) { fileDirty_ = true; return; }
         saveTab(); loadTab(true, 0); loadTab(true, 1);
@@ -3010,7 +3128,7 @@ LRESULT ProjectRuntime::Impl::handle(UINT m, WPARAM a, LPARAM b) {
         }
         return 0;
     case WM_LBUTTONDOWN: {
-        quickOpen_.close();
+        quickOpen_.close(); comparePicker_.close();
         const POINT point{GET_X_LPARAM(b), GET_Y_LPARAM(b)};
         const auto collapse = collapseButton();
         if (PtInRect(&collapse, point)) { collapseSidebar(); return 0; }
@@ -3112,7 +3230,7 @@ LRESULT ProjectRuntime::Impl::handle(UINT m, WPARAM a, LPARAM b) {
     }
     case WM_CLOSE: return 0;
     case WM_DESTROY:
-        KillTimer(window_, timerId); stopWatch(); quickOpen_.stop(); searchPane_.stop(); if (gitWorker_) gitWorker_->stop(); stopExplorerHistory(); if (worker_) worker_->stop(); terminal_.stop(); explorer_.clear(); changes_.clear();
+        KillTimer(window_, timerId); stopWatch(); quickOpen_.stop(); comparePicker_.stop(); searchPane_.stop(); if (gitWorker_) gitWorker_->stop(); stopExplorerHistory(); if (worker_) worker_->stop(); terminal_.stop(); explorer_.clear(); changes_.clear();
         return 0;
     default: break;
     }
@@ -3133,9 +3251,9 @@ bool ProjectRuntime::Impl::key(const MSG& message) {
         if (key && ctrl && !shift && !(GetKeyState(VK_MENU) & 0x8000) && message.wParam == 'N') { newFile(); return true; }
         if (key && ctrl && !shift && !(GetKeyState(VK_MENU) & 0x8000) && message.wParam == 'J') { quickOpen_.close(); toggleTerminal(); return true; }
         if (key && ctrl && shift && !(GetKeyState(VK_MENU) & 0x8000) && message.wParam == 'F') { quickOpen_.close(); selectSidebar(Sidebar::Search); return true; }
-        if (key && ctrl && !shift && !(GetKeyState(VK_MENU) & 0x8000) && message.wParam == 'P') { quickOpen_.show(); return true; }
+        if (key && ctrl && !shift && !(GetKeyState(VK_MENU) & 0x8000) && message.wParam == 'P') { comparePicker_.close(); quickOpen_.show(); return true; }
         if (key && ctrl && message.wParam == 'O') { quickOpen_.close(); chooseFolder(); return true; }
-        if (quickOpen_.visible() && key) return false;
+        if ((quickOpen_.visible() || comparePicker_.visible()) && key) return false;
         const bool searchFocus = message.hwnd == searchPane_.window() || IsChild(searchPane_.window(), message.hwnd);
         if (searchFocus && key && !ctrl && message.wParam == VK_F5) {
             if (root_.wsl() && (!connected_ || provider_->state() != ConnectionState::Ready)) connectRemote(); else searchPane_.refresh();
@@ -3174,7 +3292,7 @@ void ProjectRuntime::create(HWND parent, HINSTANCE instance, AiEventQueue* hooks
 }
 void ProjectRuntime::shutdown(ShutdownDialog* progress) {
     if (progress) progress->detail(L"Stopping file watchers and search tasks…");
-    impl_->stopWatch(progress); impl_->quickOpen_.stop(progress); impl_->searchPane_.stop(progress);
+    impl_->stopWatch(progress); impl_->quickOpen_.stop(progress); impl_->comparePicker_.stop(progress); impl_->searchPane_.stop(progress);
     if (progress) progress->detail(L"Stopping Git tasks…");
     if (impl_->gitWorker_) {
         if (progress) progress->wait([this] { impl_->gitWorker_->stop(); }); else impl_->gitWorker_->stop();
@@ -3210,7 +3328,7 @@ void ProjectRuntime::activate(bool active) {
         else if (impl_->lastFocus_ == impl_->tree_) impl_->focusedPane_ = "explorer";
         else if (impl_->lastFocus_ == impl_->gitTree_) impl_->focusedPane_ = "git";
         else if (impl_->lastFocus_ == impl_->viewer().window() || IsChild(impl_->viewer().window(), impl_->lastFocus_)) impl_->focusedPane_ = "viewer";
-        impl_->quickOpen_.close(false); impl_->endTabDrag(); ShowWindow(window(), SW_HIDE);
+        impl_->quickOpen_.close(false); impl_->comparePicker_.close(false); impl_->endTabDrag(); ShowWindow(window(), SW_HIDE);
     }
     else {
         ShowWindow(window(), SW_SHOWNA); impl_->layout(false);

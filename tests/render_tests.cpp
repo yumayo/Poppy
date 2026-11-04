@@ -1309,7 +1309,7 @@ void imePositions() {
     check(parent != nullptr, "Cannot create the IME test window");
     struct WindowOwner { HWND value; ~WindowOwner() { DestroyWindow(value); } } owner{parent};
     viewer.create(parent, instance); terminal.create(parent, instance); backgroundTerminal.create(parent, instance);
-    quickOpen.create(parent, instance, true);
+    quickOpen.create(parent, instance, QuickOpenMode::Projects);
     projectFind.create(parent, instance); projectFind.projectSearch(); projectFind.setDpi(96);
     projectFind.layout(0, 600, 64); projectFind.show(L"iW日本語", false);
     rename.setDpi(96); const auto renameWindow = rename.create(parent, instance, L"iW日本語.txt", foreground);

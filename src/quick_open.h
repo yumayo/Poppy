@@ -6,14 +6,17 @@
 
 namespace poppy {
 class ShutdownDialog;
+struct QuickOpenItem { std::string id; std::wstring label, description; };
+enum class QuickOpenMode { Files, Projects, Picker };
 class QuickOpen {
 public:
     ~QuickOpen() { stop(); }
-    void create(HWND parent, HINSTANCE instance, bool projects = false);
+    void create(HWND parent, HINSTANCE instance, QuickOpenMode mode = QuickOpenMode::Files);
     void setDpi(UINT dpi);
     void setProvider(std::shared_ptr<ProjectProvider> provider) { provider_ = std::move(provider); }
     void setRoot(const ResourceId& root);
     void setProjects(std::vector<ResourceId> projects);
+    void setPicker(std::wstring title, std::function<std::vector<QuickOpenItem>(const std::string&, const std::atomic<bool>*)> search);
     void show();
     void close(bool restoreFocus = true);
     void layout();
@@ -24,6 +27,7 @@ public:
     const FileIndex* index() const { return index_.get(); }
     bool indexing() const { return indexing_; }
     std::function<void(const ResourceId&)> opened;
+    std::function<void(const QuickOpenItem&)> picked;
     std::function<void()> updated;
 private:
     static LRESULT CALLBACK procedure(HWND, UINT, WPARAM, LPARAM);
@@ -50,6 +54,10 @@ private:
     UINT dpi_ = 96;
     ResourceId root_;
     bool projectMode_ = false;
+    bool pickerMode_ = false;
+    std::wstring pickerTitle_;
+    std::vector<QuickOpenItem> pickerItems_;
+    std::function<std::vector<QuickOpenItem>(const std::string&, const std::atomic<bool>*)> pickerSearch_;
     std::vector<ResourceId> projects_;
     std::shared_ptr<ProjectProvider> provider_;
     std::shared_ptr<const FileIndex> index_;

@@ -58,6 +58,23 @@ void records() {
     check(parseGitCommitFiles(nul({"R100", "source.txt"})).empty() && parseGitCommitFiles(nul({"R100", "source.txt", ""})).empty(),
         "An incomplete rename became a commit file");
 }
+void comparisonValidation() {
+    const std::string base(40, 'a'), head(40, 'b');
+    check(gitCompareRange(base, head, true) == base + "..." + head && gitCompareRange(base, head, false) == base + ".." + head,
+        "Comparison mode lost its merge-base or two-revision semantics");
+    check(!gitCompareFilesArguments(gitCompareRange(std::string(64, 'a'), std::string(64, 'b'), false)).empty(), "SHA-256 revisions were rejected");
+    for (const auto& range : std::vector<std::string>{"--output=unexpected", base + "...." + head, "main..topic", base + "...", base + ".." + head + "\n"}) {
+        bool rejected = false;
+        try { gitDiffArguments(GitDiffKind::Compare, range, {}); } catch (const std::invalid_argument&) { rejected = true; }
+        check(rejected, "An invalid comparison became a Git option or revision expression");
+    }
+    const auto resolved = gitResolveRevision("--output=unexpected", [&](const auto& args) -> std::optional<std::string> {
+        check(args[4] == "--end-of-options" && args[5] == "--output=unexpected^{commit}", "Revision input was interpreted as a Git option");
+        return base + "\r\n";
+    });
+    check(resolved == base, "Resolved commit IDs retained a line ending");
+    check(!gitResolveRevision("tag", [](const auto&) -> std::optional<std::string> { return "not a commit\n"; }), "Invalid revision output became a commit ID");
+}
 void repositoryOwnership() {
     const auto app = ResourceId::wsl("Ubuntu", "/home/user/app");
     const auto client = app / std::string_view("app-client"), server = app / std::string_view("app-server");
@@ -971,6 +988,60 @@ void repositoryRevisions() {
         "Deleting the working file made its earlier revisions unavailable");
     check(repo.git({"status", "--porcelain"}).empty(), "Opening historical files modified the index or working tree");
 }
+void repositoryComparisons() {
+    Repository repo;
+    repo.git({"init", "--quiet", "--template=", "--initial-branch=main"});
+    repo.git({"config", "user.name", "Poppy Test"}); repo.git({"config", "user.email", "poppy@example.invalid"});
+    repo.git({"config", "core.autocrlf", "false"}); repo.git({"config", "commit.gpgsign", "false"}); repo.git({"config", "tag.gpgsign", "false"});
+    repo.write("old/日本語.txt", "original\n"); repo.write("deleted.txt", "deleted\n"); repo.write("literal[1].txt", "before\n"); repo.write("literal1.txt", "other\n");
+    repo.git({"add", "."}); repo.git({"commit", "-qm", "release base"});
+    const auto common = repo.hash();
+    repo.git({"tag", "release"}); repo.git({"tag", "-a", "v1.0", "-m", "annotated release"});
+    repo.git({"checkout", "-qb", "topic"});
+    repo.git({"mv", "old/日本語.txt", "renamed.txt"}); repo.git({"rm", "deleted.txt"});
+    repo.write("topic.txt", "topic contribution\n"); repo.write("literal[1].txt", "after\n"); repo.write("literal1.txt", "unrelated modification\n");
+    repo.git({"add", "."}); repo.git({"commit", "-qm", "hotfix 日本語"});
+    const auto topic = repo.hash();
+    repo.git({"checkout", "-q", "main"}); repo.write("main.txt", "main contribution\n"); repo.git({"add", "."}); repo.git({"commit", "-qm", "main advanced"});
+    const auto main = repo.hash();
+    repo.git({"update-ref", "refs/remotes/origin/main", main});
+    repo.write("literal[1].txt", "staged\n"); repo.git({"add", "."}); repo.write("literal[1].txt", "working\n"); repo.write("untracked.txt", "untracked\n");
+    const auto status = repo.git(gitStatusArguments());
+    const GitBaseRun run = [&](const auto& args) -> std::optional<std::string> {
+        try { return repo.git(args); } catch (const std::runtime_error&) { return std::nullopt; }
+    };
+    for (const auto& ref : std::vector<std::string>{"release", "v1.0", common.substr(0, 12)})
+        check(gitResolveRevision(ref, run) == common, "A tag or abbreviated commit ID did not resolve to its commit");
+    check(!gitResolveRevision("missing-reference", run) && !gitResolveRevision("--help", run), "An invalid reference resolved as a commit");
+    const auto all = gitSearchRevisions({}, run);
+    for (const auto* ref : {"refs/heads/main", "refs/heads/topic", "refs/remotes/origin/main", "refs/tags/release", "refs/tags/v1.0"})
+        check(std::any_of(all.begin(), all.end(), [&](const GitRevision& item) { return item.ref == ref; }), "The picker omitted a branch, remote branch or tag");
+    const auto byId = gitSearchRevisions(common.substr(0, 12), run);
+    check(!byId.empty() && byId.front().ref == common, "Searching a commit ID did not prioritize the resolved commit");
+    const auto byMessage = gitSearchRevisions("日本語", run);
+    check(std::any_of(byMessage.begin(), byMessage.end(), [&](const GitRevision& item) { return item.ref == topic; }), "Searching a Unicode commit message failed");
+    const auto byTag = gitSearchRevisions("v1.0", run);
+    check(std::any_of(byTag.begin(), byTag.end(), [](const GitRevision& item) { return item.ref == "refs/tags/v1.0" && item.description.find("Tag") == 0; }), "Annotated tag search lost its tag label");
+    check(gitSearchRevisions("no-such-result-7912", run).empty(), "An unmatched query returned unrelated revisions");
+    const auto mergeRange = gitCompareRange(main, topic, true), directRange = gitCompareRange(main, topic, false);
+    const auto mergeFiles = parseGitCommitFiles(repo.git(gitCompareFilesArguments(mergeRange)));
+    const auto directFiles = parseGitCommitFiles(repo.git(gitCompareFilesArguments(directRange)));
+    check(std::none_of(mergeFiles.begin(), mergeFiles.end(), [](const GitCommitFile& file) { return file.path == "main.txt"; }) &&
+          std::any_of(directFiles.begin(), directFiles.end(), [](const GitCommitFile& file) { return file.path == "main.txt" && file.state == 'D'; }),
+        "Merge review included destination-only changes or two-revision comparison omitted them");
+    check(std::any_of(mergeFiles.begin(), mergeFiles.end(), [](const GitCommitFile& file) { return file.path == "renamed.txt" && file.previousPath == "old/日本語.txt" && file.state == 'R'; }) &&
+          std::any_of(mergeFiles.begin(), mergeFiles.end(), [](const GitCommitFile& file) { return file.path == "deleted.txt" && file.state == 'D'; }), "Comparison lost a rename or deletion");
+    const auto swapped = parseGitCommitFiles(repo.git(gitCompareFilesArguments(gitCompareRange(topic, main, true))));
+    check(swapped.size() == 1 && swapped[0].path == "main.txt" && swapped[0].state == 'A', "Swapping a merge comparison did not review the other branch");
+    const auto forward = repo.git(gitDiffArguments(GitDiffKind::Compare, directRange, "literal[1].txt"));
+    const auto backward = repo.git(gitDiffArguments(GitDiffKind::Compare, gitCompareRange(topic, main, false), "literal[1].txt"));
+    check(forward.find("-before") != forward.npos && forward.find("+after") != forward.npos && forward.find("unrelated modification") == forward.npos &&
+          backward.find("-after") != backward.npos && backward.find("+before") != backward.npos, "Two-revision direction or literal path filtering is incorrect");
+    const auto rename = repo.git(gitDiffArguments(GitDiffKind::Compare, mergeRange, "renamed.txt", "old/日本語.txt"));
+    check(rename.find("rename from old/日本語.txt") != rename.npos && rename.find("rename to renamed.txt") != rename.npos, "A comparison file lost rename context");
+    check(repo.git(gitCompareFilesArguments(gitCompareRange(topic, topic, true))).empty(), "Comparing identical commits produced changes");
+    check(repo.git(gitStatusArguments()) == status && repo.hash() == main && repo.readFile("literal[1].txt") == "working\n", "Reviewing revisions changed the index, working files or checked-out branch");
+}
 void repositoryHistory() {
     Repository repo;
     repo.git({"init", "--quiet", "--template=", "--initial-branch=main"});
@@ -1029,9 +1100,9 @@ void repositoryHistory() {
 }
 int main() {
     try {
-        statusGroups(); records(); patchLists(); repositoryOwnership(); ignoredNameBatches(); editorBaseFailures(); commitValidation();
+        statusGroups(); records(); comparisonValidation(); patchLists(); repositoryOwnership(); ignoredNameBatches(); editorBaseFailures(); commitValidation();
 #ifndef _WIN32
-        repositoryEditorBase(); repositoryCommits(); repositoryIgnores(); repositoryStaging(); repositoryStageAll(); repositoryUnstageAll(); repositoryDiscardAll(); repositoryDiscardFile(); repositoryStashUnstaged(); repositoryStashStaged(); repositorySyntax(); repositoryRenames(); repositoryDiffOrdering(); repositoryRevisions(); repositoryHistory(); multipleRepositories();
+        repositoryEditorBase(); repositoryCommits(); repositoryIgnores(); repositoryStaging(); repositoryStageAll(); repositoryUnstageAll(); repositoryDiscardAll(); repositoryDiscardFile(); repositoryStashUnstaged(); repositoryStashStaged(); repositorySyntax(); repositoryRenames(); repositoryDiffOrdering(); repositoryRevisions(); repositoryComparisons(); repositoryHistory(); multipleRepositories();
 #endif
         std::cout << "Git history tests passed.\n"; return 0;
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }

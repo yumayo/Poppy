@@ -168,7 +168,7 @@ int Workspace::run(HINSTANCE instance,int show,const StartupOptions& options,Sin
 }
 void Workspace::create(){
     dpi_=GetDpiForWindow(window_);renderer_.setDpi(dpi_);
-    recent_.create(window_,instance_,true);recent_.setDpi(dpi_);
+    recent_.create(window_,instance_,QuickOpenMode::Projects);recent_.setDpi(dpi_);
     recent_.opened=[this](const ResourceId& path){open(path);};
     const BOOL dark=TRUE;DwmSetWindowAttribute(window_,20,&dark,sizeof(dark));
     tooltips_=CreateWindowExW(WS_EX_TOPMOST,TOOLTIPS_CLASSW,nullptr,WS_POPUP|TTS_ALWAYSTIP|TTS_NOPREFIX,CW_USEDEFAULT,CW_USEDEFAULT,CW_USEDEFAULT,CW_USEDEFAULT,window_,nullptr,instance_,nullptr);

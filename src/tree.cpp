@@ -542,6 +542,13 @@ LRESULT Tree::handle(UINT m, WPARAM a, LPARAM b) {
             model_.select(id, (a & MK_CONTROL) != 0, (a & MK_SHIFT) != 0);
             ensureVisible(); changed(); return 0;
         }
+        if (activateOnClick && activateOnClick(id)) {
+            const auto index = row(id);
+            if (index >= 0 && GET_X_LPARAM(b) >= (static_cast<int>(rows()[index].depth) + 1) * indent_ - left_) {
+                if (m != WM_LBUTTONDBLCLK) select(id);
+                return 0;
+            }
+        }
         // The entire folder row, including its arrow, has one click target.
         // Commit on release so a drag or cancellation does not toggle it.
         if (item(id)->expandable || (canDrag && canDrag(id))) {
@@ -609,7 +616,8 @@ LRESULT Tree::handle(UINT m, WPARAM a, LPARAM b) {
         case VK_F4: if (id && actionClicked && actionLabel && !actionLabel(id).empty()) actionClicked(id); return 0;
         case VK_LEFT: if (node && node->expanded) expand(id, false); else if (node && node->parent) select(node->parent); return 0;
         case VK_RIGHT: if (node && node->expandable) { if (!node->expanded) expand(id, true); else if (child(id)) select(child(id)); } return 0;
-        case VK_RETURN: case VK_SPACE: if (node && node->expandable) expand(id, !node->expanded); else select(id); return 0;
+        case VK_RETURN: if (node && activateOnClick && activateOnClick(id)) { select(id); return 0; } [[fallthrough]];
+        case VK_SPACE: if (node && node->expandable) expand(id, !node->expanded); else select(id); return 0;
         case VK_UP: --index; break; case VK_DOWN: if (id) ++index; break;
         case VK_PRIOR: index -= page(); break; case VK_NEXT: index += page(); break;
         case VK_HOME: index = 0; break; case VK_END: index = static_cast<int>(rows.size()) - 1; break;

@@ -303,7 +303,7 @@ std::optional<ProjectSession> Storage::loadProject(const std::string& key, const
         const auto index = comparisons.number(0);
         if (index < 0 || static_cast<size_t>(index) >= state.tabs.size()) continue;
         auto& tab = state.tabs[static_cast<size_t>(index)];
-        tab.diffKind = static_cast<GitDiffKind>(bounded(comparisons.number(1), 0, static_cast<int>(GitDiffKind::Commit)));
+        tab.diffKind = static_cast<GitDiffKind>(bounded(comparisons.number(1), 0, static_cast<int>(GitDiffKind::Compare)));
         tab.revision = comparisons.text(2); tab.allChanges = comparisons.number(3) != 0; tab.gitRoot = comparisons.text(6);
         tab.group = bounded(comparisons.number(4), 0, 1); tab.displayed = comparisons.number(5) != 0;
     }

@@ -8,7 +8,7 @@
 
 namespace poppy {
 inline constexpr size_t gitCommitPageSize = 50;
-enum class GitDiffKind { Automatic, Changes, Staged, Commit };
+enum class GitDiffKind { Automatic, Changes, Staged, Commit, Compare };
 struct GitBranch { std::string ref, name, tip; bool current = false; };
 struct GitCommit { std::string hash, shortHash, subject, author, date, message; };
 struct GitStatusEntry {
@@ -26,6 +26,14 @@ std::vector<GitCommitFile> parseGitCommitFiles(std::string_view output);
 std::vector<std::string> gitStatusArguments();
 // Read-only commands run in the owning repository; failures return nullopt.
 using GitBaseRun = std::function<std::optional<std::string>(const std::vector<std::string>&)>;
+struct GitRevision { std::string ref, label, description; };
+// Branches, remote branches, tags, matching commit messages and a directly
+// entered revision. Results are bounded; Git never changes the worktree.
+std::vector<GitRevision> gitSearchRevisions(const std::string& query, const GitBaseRun& run);
+std::optional<std::string> gitResolveRevision(const std::string& ref, const GitBaseRun& run);
+// Immutable commit IDs keep an open review stable while branches move.
+std::string gitCompareRange(const std::string& base, const std::string& head, bool mergeBase);
+std::vector<std::string> gitCompareFilesArguments(const std::string& range);
 // HEAD content for normal editor line backgrounds, including staged changes.
 // Added/untracked files use an empty base; ignored/missing/nonregular files and
 // Git failures return nullopt. A rename compares with its original HEAD path.

@@ -1,4 +1,5 @@
 #include "git_history.h"
+#include "file_search.h"
 #include <algorithm>
 #include <stdexcept>
 
@@ -9,6 +10,63 @@ bool field(std::string_view& input, std::string& value, char delimiter = '\0') {
     if (end == input.npos) return false;
     value.assign(input.substr(0, end)); input.remove_prefix(end + 1); return true;
 }
+bool objectId(std::string_view value) {
+    return (value.size() == 40 || value.size() == 64) && value.find_first_not_of("0123456789abcdef") == value.npos;
+}
+void validateCompareRange(const std::string& range) {
+    const auto separator = range.find("..");
+    const auto end = separator == range.npos ? range.npos : range.find_first_not_of('.', separator);
+    if (separator == range.npos || end == range.npos || (end - separator != 2 && end - separator != 3) ||
+        !objectId(std::string_view(range).substr(0, separator)) || !objectId(std::string_view(range).substr(end)))
+        throw std::invalid_argument("Invalid comparison revisions. Select the comparison again.");
+}
+}
+std::optional<std::string> gitResolveRevision(const std::string& ref, const GitBaseRun& run) {
+    if (ref.empty() || ref.find('\0') != ref.npos) return {};
+    auto result = run({"git.exe", "--no-optional-locks", "rev-parse", "--verify", "--end-of-options", ref + "^{commit}"});
+    if (!result) return {};
+    while (!result->empty() && (result->back() == '\r' || result->back() == '\n')) result->pop_back();
+    return objectId(*result) ? result : std::nullopt;
+}
+std::vector<GitRevision> gitSearchRevisions(const std::string& query, const GitBaseRun& run) {
+    struct Match { GitRevision revision; int score; };
+    std::vector<Match> matches;
+    if (!query.empty()) if (const auto hash = gitResolveRevision(query, run))
+        matches.push_back({{*hash, query, "Commit · " + *hash}, -1});
+    const auto refs = run({"git.exe", "--no-optional-locks", "for-each-ref", "--sort=refname",
+        "--format=%(refname)%00%(refname:short)%00%(objectname)%00%(HEAD)", "refs/heads", "refs/remotes", "refs/tags"});
+    if (!refs) throw std::runtime_error("Cannot load Git references. Press F5 to retry.");
+    for (const auto& ref : parseGitBranches(*refs)) {
+        const auto score = fileSearchScore(ref.name, query);
+        if (score < 0) continue;
+        const auto kind = ref.ref.compare(0, 10, "refs/tags/") == 0 ? "Tag" : ref.ref.compare(0, 13, "refs/remotes/") == 0 ? "Remote branch" : "Branch";
+        matches.push_back({{ref.ref, ref.name, std::string(kind) + " · " + ref.tip.substr(0, 8)}, score});
+    }
+    std::stable_sort(matches.begin(), matches.end(), [](const Match& a, const Match& b) { return a.score < b.score; });
+    std::vector<std::string> args{"git.exe", "--no-optional-locks", "log", "--all", "--no-decorate", "--encoding=UTF-8", "-z",
+        "--format=%H%x00%h%x00%s%x00%an%x00%aI%x00%B", "-n100"};
+    if (!query.empty()) args.insert(args.end(), {"--regexp-ignore-case", "--fixed-strings", "--grep=" + query});
+    args.push_back("--");
+    const auto log = run(args);
+    if (!log) throw std::runtime_error("Cannot search Git commits. Press F5 to retry.");
+    for (const auto& commit : parseGitCommits(*log))
+        matches.push_back({{commit.hash, commit.shortHash + "  " + commit.subject, "Commit · " + commit.author + " · " + commit.date.substr(0, 10)}, 0});
+    std::vector<GitRevision> result;
+    for (auto& match : matches) {
+        if (result.size() >= 100) break;
+        if (std::none_of(result.begin(), result.end(), [&](const GitRevision& revision) { return revision.ref == match.revision.ref; }))
+            result.push_back(std::move(match.revision));
+    }
+    return result;
+}
+std::string gitCompareRange(const std::string& base, const std::string& head, bool mergeBase) {
+    const auto range = base + (mergeBase ? "..." : "..") + head;
+    validateCompareRange(range); return range;
+}
+std::vector<std::string> gitCompareFilesArguments(const std::string& range) {
+    validateCompareRange(range);
+    return {"git.exe", "--literal-pathspecs", "--no-optional-locks", "diff", "--no-ext-diff", "--no-textconv",
+        "--name-status", "--find-renames", "-z", range, "--"};
 }
 bool GitStatusEntry::conflicted() const {
     return index == 'U' || worktree == 'U' || (index == 'A' && worktree == 'A') || (index == 'D' && worktree == 'D');
@@ -93,6 +151,7 @@ std::vector<std::string> gitDiffArguments(GitDiffKind kind, const std::string& h
         "-c", "core.quotePath=false", kind == GitDiffKind::Commit ? "show" : "diff", "--patch", "--unified=1000000", "--no-ext-diff", "--no-textconv",
         "--find-renames", "--color=never", "--output-indicator-old=-", "--output-indicator-new=+", "--output-indicator-context= "};
     if (kind == GitDiffKind::Commit) args.insert(args.end(), {"--format=", "--first-parent", "--diff-merges=first-parent", hash});
+    else if (kind == GitDiffKind::Compare) { validateCompareRange(hash); args.push_back(hash); }
     else if (kind == GitDiffKind::Staged) args.push_back("--cached");
     else args.push_back("--ours");
     args.push_back("--");
