@@ -12,13 +12,11 @@ public:
     HWND window() const { return window_; }
     void setDpi(UINT dpi);
     void repositories(std::vector<Repository> repositories);
-    const ResourceId& selectedRepository() const { return root_; }
     void busy(bool value);
     void committed(const ResourceId& root, const std::wstring& message);
     bool contains(HWND window) const { return window == window_ || IsChild(window_, window); }
     bool key(const MSG& message);
     std::function<void(const ResourceId&, const std::wstring&, bool)> requested;
-    std::function<void()> repositorySelected;
 private:
     static LRESULT CALLBACK procedure(HWND, UINT, WPARAM, LPARAM);
     LRESULT handle(UINT, WPARAM, LPARAM);

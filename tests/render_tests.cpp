@@ -581,7 +581,6 @@ void gitCommitInput() {
         size_t requests = 0; ResourceId requestedRoot; std::wstring requestedMessage; bool amended = false;
         pane.requested = [&](const ResourceId& root, const std::wstring& message, bool amend) { ++requests; requestedRoot = root; requestedMessage = message; amended = amend; };
         pane.repositories({{first, L"first"}, {second, L"second"}});
-        check(pane.selectedRepository() == first, "The initial repository selection is unavailable to Source Control");
         SetWindowTextW(input, L"日本語 \"message\"");
         SendMessageW(input, WM_IME_STARTCOMPOSITION, 0, 0); SendMessageW(input, WM_KEYDOWN, VK_RETURN, 0);
         check(!requests, "IME confirmation submitted a commit");
@@ -593,25 +592,7 @@ void gitCommitInput() {
         SendMessageW(pane.window(), WM_LBUTTONUP, 0, MAKELPARAM(px(50), px(76)));
         check(requests == 1 && !IsWindowEnabled(input), "A pending commit allowed another submission");
         pane.busy(false);
-        size_t selections = 0; ResourceId selectedRoot;
-        pane.repositorySelected = [&] { ++selections; selectedRoot = pane.selectedRepository(); };
-        const auto selectRepository = [&](bool last) {
-            check(SetTimer(pane.window(), last ? 97 : 98, 10, [](HWND window, UINT, UINT_PTR id, DWORD) {
-                KillTimer(window, id); PostMessageW(window, WM_KEYDOWN, id == 97 ? VK_END : VK_HOME, 0); PostMessageW(window, WM_KEYDOWN, VK_RETURN, 0);
-            }) != 0, "Cannot schedule repository selection");
-            SendMessageW(pane.window(), WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(px(10), px(13)));
-            SendMessageW(pane.window(), WM_LBUTTONUP, 0, MAKELPARAM(px(10), px(13)));
-        };
-        selectRepository(true);
-        check(selections == 1 && selectedRoot == second, "The repository selector did not notify Source Control after switching");
-        pane.repositories({{first, L"first"}, {second, L"second"}});
-        check(pane.selectedRepository() == second && selections == 1, "Refreshing repositories changed the current selection");
-        selectRepository(false);
-        check(selections == 2 && selectedRoot == first, "Switching back did not notify Source Control");
-        selectRepository(false);
-        check(selections == 2, "Selecting the current repository unnecessarily reset Source Control");
         pane.repositories({{second, L"second"}}); SetWindowTextW(input, L"second draft");
-        check(pane.selectedRepository() == second, "Removing the selected repository did not choose a remaining repository");
         pane.repositories({{first, L"first"}});
         wchar_t text[128]{}; GetWindowTextW(input, text, 128);
         check(std::wstring(text) == requestedMessage, "A refresh, failed commit, or repository switch lost the first draft");
@@ -634,8 +615,6 @@ void gitCommitInput() {
         SendMessageW(pane.window(), WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(px(226), px(76)));
         SendMessageW(pane.window(), WM_LBUTTONUP, 0, MAKELPARAM(px(226), px(76)));
         check(requests == 3 && amended && requestedRoot == second && requestedMessage == L"second draft", "The dropdown did not submit Commit (Amend)");
-        pane.repositories({});
-        check(pane.selectedRepository().empty() && !IsWindowEnabled(input), "Removing all repositories kept a stale selection");
         DestroyWindow(pane.window());
     }
     DestroyWindow(parent);
