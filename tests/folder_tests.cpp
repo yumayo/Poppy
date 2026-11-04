@@ -40,12 +40,15 @@ LRESULT send(HWND window, UINT message, WPARAM a = 0, LPARAM b = 0) {
 TreeItem nextItem(HWND tree, TreeRelation relation, TreeItem item = 0) {
     return static_cast<TreeItem>(send(tree, treeGetNext, static_cast<WPARAM>(relation), static_cast<LPARAM>(item)));
 }
-// The current branch is first, with Compare then staged/working groups.
+// Each repository starts with Compare, followed by the current branch.
+TreeItem gitBranch(HWND tree, TreeItem repository = 0) {
+    const auto compare = repository ? nextItem(tree, TreeRelation::Child, repository) : nextItem(tree, TreeRelation::Root);
+    return nextItem(tree, TreeRelation::Next, compare);
+}
 TreeItem gitGroup(HWND tree, bool staged, TreeItem repository = 0) {
-    const auto branch = repository ? nextItem(tree, TreeRelation::Child, repository) : nextItem(tree, TreeRelation::Root);
+    const auto branch = gitBranch(tree, repository);
     if (!branch) return 0;
-    const auto compare = nextItem(tree, TreeRelation::Child, branch);
-    const auto first = nextItem(tree, TreeRelation::Next, compare);
+    const auto first = nextItem(tree, TreeRelation::Child, branch);
     return staged ? first : nextItem(tree, TreeRelation::Next, first);
 }
 size_t subtreeCount(HWND tree, TreeItem item) {
@@ -2382,7 +2385,7 @@ void gitSidebarTests(const fs::path& executable) {
         view(true);
         group = gitGroup(changes, false);
         docs = nextItem(changes, TreeRelation::Child, group); src = nextItem(changes, TreeRelation::Next, docs);
-        const auto branch = nextItem(changes, TreeRelation::Root);
+        const auto branch = gitBranch(changes);
         const auto inner = nextItem(changes, TreeRelation::Child, src);
         const auto rect = bounds(app.window, changes);
         click(app.window, rect.right - px(23), px(17));
@@ -2405,7 +2408,7 @@ void gitSidebarTests(const fs::path& executable) {
         Application app(executable, fixture.root); app.tree();
         const auto changes = GetDlgItem(app.window, 4);
         waitFor([&] { return IsWindowVisible(changes) && gitChangeCount(changes) == 8; }, "Restart lost the Git Tree layout");
-        check(!expanded(changes, nextItem(changes, TreeRelation::Root)) && !expanded(changes, gitGroup(changes, false)),
+        check(!expanded(changes, gitBranch(changes)) && !expanded(changes, gitGroup(changes, false)),
             "Restart forgot Collapse All in Source Control");
         const auto rect = bounds(app.window, changes);
         click(app.window, rect.left + (rect.right - rect.left) * 3 / 4, rect.top - MulDiv(14, GetDpiForWindow(app.window), 96));
@@ -2813,16 +2816,16 @@ void branchSidebarTests(const fs::path& executable) {
               fs::exists(fixture.root / L"ignored.txt"), "Staged stash did not restore HEAD content or lost untracked/ignored files");
         GetWindowTextW(GetDlgItem(app.window, 3), badge, 128);
         check(std::wstring(badge) == L"Source Control (1)", "Staged stash did not update the badge");
-        waitFor([&] { return IsWindowVisible(branches) && children(branches, nextItem(branches, TreeRelation::Root)) == 54; }, "Branch did not load Compare, 50 commits and a load-more row");
+        waitFor([&] { return IsWindowVisible(branches) && children(branches, gitBranch(branches)) == 53; }, "Branch did not load 50 commits and a load-more row");
         check(IsWindowVisible(changes), "Source Control hid its combined branch and change list");
-        check(children(branches, 0) == 3, "Source Control did not list local and remote branches");
-        const auto branch = nextItem(branches, TreeRelation::Root), latest = nextItem(branches, TreeRelation::Next, gitGroup(branches, false));
+        check(children(branches, 0) == 4, "Source Control did not list local and remote branches");
+        const auto branch = gitBranch(branches), latest = nextItem(branches, TreeRelation::Next, gitGroup(branches, false));
         check(nextItem(branches, TreeRelation::Parent, gitGroup(branches, true)) == branch, "Working changes are not inside the current branch");
         auto more = latest;
         for (int i = 0; i < 50; ++i) more = nextItem(branches, TreeRelation::Next, more);
         check(more != 0, "The 51st row is missing");
         send(branches, treeSelect, more);
-        waitFor([&] { return children(branches, branch) == 55; }, "Clicking the 51st row did not append the remaining commits");
+        waitFor([&] { return children(branches, branch) == 54; }, "Clicking the 51st row did not append the remaining commits");
         auto rootCommit = latest;
         while (const auto next = nextItem(branches, TreeRelation::Next, rootCommit)) rootCommit = next;
         click(app.window, pane.left + (pane.right - pane.left) / 4, pane.top - MulDiv(14, GetDpiForWindow(app.window), 96));
@@ -2865,17 +2868,17 @@ void branchSidebarTests(const fs::path& executable) {
         keepTab(app, visibleTabCount(app) - 1);
         PostMessageW(app.window, WM_KEYDOWN, VK_F5, 0);
         waitFor([&] { return gitGroup(branches, false) != oldWorking; }, "Source Control did not refresh working changes");
-        check(children(branches, branch) == 55 && children(branches, latest) == 2, "Refreshing working changes discarded loaded history");
+        check(children(branches, branch) == 54 && children(branches, latest) == 2, "Refreshing working changes discarded loaded history");
         runGit(L"switch --quiet alternate");
         waitFor([&] {
-            const auto current = nextItem(branches, TreeRelation::Root);
-            return current != branch && gitGroup(branches, false) && children(branches, branch) == 53;
+            const auto current = gitBranch(branches);
+            return current != branch && gitGroup(branches, false) && children(branches, branch) == 52;
         }, "Switching branches did not move both working groups off the previous branch");
-        const auto alternate = nextItem(branches, TreeRelation::Root);
+        const auto alternate = gitBranch(branches);
         runGit(L"checkout --detach --quiet");
         waitFor([&] {
-            const auto current = nextItem(branches, TreeRelation::Root);
-            return current != alternate && children(branches, 0) == 4 && gitGroup(branches, false) &&
+            const auto current = gitBranch(branches);
+            return current != alternate && children(branches, 0) == 5 && gitGroup(branches, false) &&
                 nextItem(branches, TreeRelation::Parent, gitGroup(branches, true)) == current;
         }, "Detached HEAD did not get working groups above its history");
     }
@@ -2909,24 +2912,46 @@ void comparisonSidebarTests(const fs::path& executable) {
     auto commitId = readText(fixture.root / L".git" / L"refs" / L"heads" / L"main"); commitId.resize(12);
     Application app(executable, fixture.root); app.tree();
     const auto changes = GetDlgItem(app.window, 4), viewer = FindWindowExW(app.window, nullptr, L"PoppyViewer", nullptr);
+    const auto explorer = app.tree();
+    waitFor([&] { return send(explorer, treeGetCount) == 4; }, "Comparison fixture files did not load");
+    // The .git directory sorts before base.txt and main.txt.
+    const auto gitDirectory = nextItem(explorer, TreeRelation::Child, nextItem(explorer, TreeRelation::Root));
+    send(explorer, treeSelect, nextItem(explorer, TreeRelation::Next, gitDirectory));
+    waitLines(viewer, 1); keepTab(app, 0);
     send(GetDlgItem(app.window, 3), BM_CLICK);
     waitFor([&] { return gitGroup(changes, true) != 0; }, "Comparison fixture branches did not load");
-    const auto current = nextItem(changes, TreeRelation::Root), topic = nextItem(changes, TreeRelation::Next, current);
-    const auto currentCompare = nextItem(changes, TreeRelation::Child, current);
-    check(currentCompare && nextItem(changes, TreeRelation::Next, currentCompare) == gitGroup(changes, true), "Compare is not above Staged Changes");
-    check(topic != 0, "The noncurrent branch is missing"); expand(changes, topic);
-    const auto compare = nextItem(changes, TreeRelation::Child, topic);
-    const auto choose = [&](const std::wstring& query) {
+    const auto compare = nextItem(changes, TreeRelation::Root), current = gitBranch(changes), topic = nextItem(changes, TreeRelation::Next, current);
+    check(compare && current && topic && !nextItem(changes, TreeRelation::Next, topic) &&
+          !nextItem(changes, TreeRelation::Parent, compare) && nextItem(changes, TreeRelation::Child, current) == gitGroup(changes, true),
+          "Compare is not a single repository-level row outside the branches");
+    const auto picker = FindWindowExW(app.window, nullptr, L"PoppyQuickPick", nullptr);
+    const auto pickerTitle = [&] { wchar_t caption[1024]{}; GetWindowTextW(picker, caption, 1024); return std::wstring(caption); };
+    const auto start = [&] {
         // Exercise the label click, independently of the expand/collapse arrow.
+        send(changes, WM_VSCROLL, SB_TOP);
         const int height = static_cast<int>(send(changes, treeGetRowHeight));
         const int y = (static_cast<int>(send(changes, treeGetRow, compare)) - scrollInfo(changes).nPos) * height + height / 2;
         click(changes, MulDiv(70, GetDpiForWindow(app.window), 96), y);
-        const auto picker = FindWindowExW(app.window, nullptr, L"PoppyQuickPick", L"Compare");
-        check(picker && IsWindowVisible(picker), "Clicking Compare did not open the search palette");
-        for (const auto ch : query) send(picker, WM_CHAR, ch);
-        waitFor([&] { send(picker, WM_KEYDOWN, VK_RETURN); return !IsWindowVisible(picker); }, "The comparison reference could not be selected");
+        check(picker && IsWindowVisible(picker) && pickerTitle() == L"Compare: Select source", "Compare did not ask for the source first");
     };
-    choose(L"main"); waitLines(viewer, 301, true);
+    const auto pick = [&](const std::wstring& query, bool source) {
+        for (const auto ch : query) send(picker, WM_CHAR, ch);
+        waitFor([&] {
+            send(picker, WM_KEYDOWN, VK_RETURN);
+            return source ? IsWindowVisible(picker) && pickerTitle().find(L"Compare: Select target") == 0 : !IsWindowVisible(picker);
+        }, "The comparison picker did not advance to its next step");
+    };
+    const auto choose = [&](const std::wstring& source, const std::wstring& target) {
+        start(); pick(source, true); pick(target, false);
+    };
+    const auto action = [&](int offset) {
+        send(changes, WM_VSCROLL, SB_TOP);
+        RECT client{}; GetClientRect(changes, &client);
+        const int height = static_cast<int>(send(changes, treeGetRowHeight));
+        const int y = (static_cast<int>(send(changes, treeGetRow, compare)) - scrollInfo(changes).nPos) * height + height / 2;
+        click(changes, client.right - MulDiv(offset, GetDpiForWindow(app.window), 96), y);
+    };
+    choose(L"main", L"topic"); waitLines(viewer, 301, true);
     check(!fs::exists(fixture.root / L"topic.txt"), "Comparing a noncurrent branch checked it out");
     const auto swap = nextItem(changes, TreeRelation::Child, compare);
     send(changes, treeSelect, swap); waitLines(viewer, 101, true);
@@ -2934,8 +2959,8 @@ void comparisonSidebarTests(const fs::path& executable) {
     send(changes, treeSelect, mode); waitLines(viewer, 402, true);
     // The newly allocated swap row reverses literal before/after revisions.
     send(changes, treeSelect, nextItem(changes, TreeRelation::Child, compare)); waitLines(viewer, 402, true);
-    choose(L"v1.0"); waitLines(viewer, 301, true);
-    choose(std::wstring(commitId.begin(), commitId.end())); waitLines(viewer, 402, true);
+    choose(L"v1.0", L"topic"); waitLines(viewer, 301, true);
+    choose(std::wstring(commitId.begin(), commitId.end()), L"topic"); waitLines(viewer, 402, true);
     // Individual comparison files use committed contents and remain read-only.
     mode = nextItem(changes, TreeRelation::Next, nextItem(changes, TreeRelation::Child, compare));
     const auto file = nextItem(changes, TreeRelation::Next, mode);
@@ -2944,10 +2969,35 @@ void comparisonSidebarTests(const fs::path& executable) {
     check(readText(fixture.root / L"main.txt").find('!') == std::string::npos, "A comparison edited a working file");
     runGit(L"diff --quiet"); runGit(L"diff --cached --quiet");
     // Escape cancels a new selection without replacing the existing review.
-    send(changes, treeSelect, compare);
-    const auto picker = FindWindowExW(app.window, nullptr, L"PoppyQuickPick", L"Compare");
-    check(IsWindowVisible(picker), "Compare could not be reopened"); send(picker, WM_KEYDOWN, VK_ESCAPE);
+    const auto previous = nextItem(changes, TreeRelation::Child, compare);
+    start(); send(picker, WM_KEYDOWN, VK_ESCAPE);
     check(!IsWindowVisible(picker), "Escape did not close the comparison picker"); waitLines(viewer, 100);
+    start(); pick(L"v1.0", true); send(picker, WM_KEYDOWN, VK_ESCAPE);
+    check(!IsWindowVisible(picker) && nextItem(changes, TreeRelation::Child, compare) == previous,
+          "Cancelling target selection replaced the previous comparison"); waitLines(viewer, 100);
+    auto oldGroup = gitGroup(changes, false); send(app.window, WM_KEYDOWN, VK_F5);
+    waitFor([&] { return gitGroup(changes, false) != oldGroup; }, "The comparison fixture did not refresh");
+    check(nextItem(changes, TreeRelation::Root) == compare && nextItem(changes, TreeRelation::Child, compare) == previous,
+          "Refreshing the repository discarded or duplicated the comparison"); waitLines(viewer, 100);
+    // Open All Changes is left of the clear button and remains the F4 action.
+    action(46); waitLines(viewer, 402, true);
+    check(!IsWindowVisible(picker) && nextItem(changes, TreeRelation::Child, compare) == previous, "Open All Changes cleared the comparison or opened a picker");
+    toggleTabPin(app, visibleTabCount(app) - 1);
+    send(changes, treeSelect, file); waitLines(viewer, 100);
+    action(18);
+    check(!nextItem(changes, TreeRelation::Child, compare) && !expanded(changes, compare), "The rightmost clear button did not reset Compare");
+    waitFor([&] { return visibleTabCount(app) == 1; }, "Clear left comparison tabs open or closed an unrelated file"); waitLines(viewer, 1);
+    // The same Compare row survives refresh, with no completed request restoring it.
+    oldGroup = gitGroup(changes, false); send(app.window, WM_KEYDOWN, VK_F5);
+    waitFor([&] { return gitGroup(changes, false) != oldGroup; }, "The cleared repository did not refresh");
+    check(nextItem(changes, TreeRelation::Root) == compare && !nextItem(changes, TreeRelation::Child, compare), "Refreshing duplicated or restored the cleared comparison");
+    // Arbitrary commits/tags work as both endpoints after resetting the mode.
+    choose(L"v1.0", std::wstring(commitId.begin(), commitId.end())); waitLines(viewer, 101, true);
+    choose(L"main", L"topic"); action(18);
+    oldGroup = gitGroup(changes, false); send(app.window, WM_KEYDOWN, VK_F5);
+    waitFor([&] { return gitGroup(changes, false) != oldGroup; }, "The pending comparison did not finish before refresh");
+    check(!nextItem(changes, TreeRelation::Child, compare) && visibleTabCount(app) == 1, "A late comparison completion restored content after Clear"); waitLines(viewer, 1);
+    runGit(L"diff --quiet"); runGit(L"diff --cached --quiet");
 }
 void multiRepositoryTests(const fs::path& executable) {
     wchar_t git[MAX_PATH]{};
@@ -3049,8 +3099,8 @@ void multiRepositoryTests(const fs::path& executable) {
         waitFor([&] { return IsWindowVisible(branches) && roots(branches); }, "Branch did not discover sibling repositories");
         const auto clientBranchRepo = nextItem(branches, TreeRelation::Root), serverBranchRepo = nextItem(branches, TreeRelation::Next, clientBranchRepo);
         for (const auto repo : {clientBranchRepo, serverBranchRepo}) {
-            const auto branch = nextItem(branches, TreeRelation::Child, repo);
-            waitFor([&] { return children(branches, branch) == 5; }, "A repository's main branch did not load Compare and its history");
+            const auto branch = gitBranch(branches, repo);
+            waitFor([&] { return children(branches, branch) == 4; }, "A repository's main branch did not load its history");
             const auto latest = nextItem(branches, TreeRelation::Next, gitGroup(branches, false, repo)), commit = nextItem(branches, TreeRelation::Next, latest);
             expand(branches, commit);
             waitFor([&] { return children(branches, commit) == 2; }, "A repository's commit did not load its files");

@@ -260,7 +260,9 @@ RECT Tree::actionBounds(TreeItem id, unsigned slot) const {
     const int y = (row(id) - top_) * rowHeight_, padding = MulDiv(6, dpi_, 96);
     const int width = MulDiv(24, dpi_, 96);
     int preceding = 0;
-    for (unsigned i = 0; i < slot; ++i) {
+    const bool primaryLeft = primaryActionOnLeft && primaryActionOnLeft(id);
+    for (const auto i : {primaryLeft ? 1u : 0u, primaryLeft ? 0u : 1u, 2u, 3u}) {
+        if (i == slot) break;
         const auto& previous = actionLabelFor(i);
         if (previous && !previous(id).empty()) ++preceding;
     }
@@ -388,7 +390,7 @@ void Tree::paint() {
         RECT action{};
         for (const unsigned slot : {0u, 1u, 2u, 3u}) if (actionVisible(row.item, slot)) {
             const auto bounds = actionBounds(row.item, slot);
-            if (bounds.right) action = bounds;
+            if (bounds.right && (!action.right || bounds.left < action.left)) action = bounds;
         }
         if (creating_ || row.item != renaming_) renderer_.label({x + indent_ + padding, y, action.right ? action.left - padding : std::max<LONG>(r.right, x + indent_ + widths_[row.item] + padding), y + rowHeight_},
             node->text, textColor(row.item), DT_LEFT | DT_VCENTER | DT_SINGLELINE | (action.right ? DT_END_ELLIPSIS : 0));

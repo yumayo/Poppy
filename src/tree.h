@@ -80,6 +80,8 @@ public:
     std::function<std::wstring(TreeItem)> actionLabel;
     std::function<Renderer::Icon(TreeItem)> actionIcon;
     std::function<void(TreeItem)> actionClicked;
+    // Put the primary action to the left of its secondary action on this row.
+    std::function<bool(TreeItem)> primaryActionOnLeft;
     std::function<std::wstring(TreeItem)> secondaryActionLabel;
     std::function<Renderer::Icon(TreeItem)> secondaryActionIcon;
     std::function<void(TreeItem)> secondaryActionClicked;

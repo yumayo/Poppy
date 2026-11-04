@@ -56,6 +56,7 @@ void QuickOpen::setProjects(std::vector<ResourceId> projects) {
 }
 void QuickOpen::setPicker(std::wstring title, std::function<std::vector<QuickOpenItem>(const std::string&, const std::atomic<bool>*)> search) {
     close(); pickerTitle_ = std::move(title); pickerSearch_ = std::move(search);
+    SetWindowTextW(window_, pickerTitle_.c_str());
 }
 void QuickOpen::show() {
     if (visible_) { ime_.cancel(window_); SetFocus(window_); anchor_ = 0; caret_ = query_.size(); caretChanged(); return; }
@@ -184,7 +185,11 @@ void QuickOpen::accept() {
     if (loading_ || selected_ >= result_.matches.size()) return;
     if (pickerMode_) {
         const auto item = pickerItems_[selected_];
-        close(false); if (picked) picked(item); return;
+        // A picker callback may replace itself to open the next selection step.
+        const auto accepted = picked; const auto focus = previousFocus_;
+        close(false); if (accepted) accepted(item);
+        if (visible_) previousFocus_ = focus;
+        return;
     }
     const auto& saved = result_.matches[selected_].exactRelative;
     const auto path = projectMode_ ? ResourceId::parse(saved) : root_ / std::string_view(saved);
