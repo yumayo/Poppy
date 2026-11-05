@@ -18,7 +18,7 @@ C++17 / Win32 / Direct2D / DirectWrite / ConPTYで実装しています。HTML�
 
 状態の保存にはSQLite3を使います。SQLite3はC++標準ライブラリには含まれません。`third_party/` はGit管理対象外のため、ビルド前に [SQLite公式サイト](https://sqlite.org/download.html) の `sqlite-amalgamation-*.zip` から、同じリリースの `sqlite3.c` と `sqlite3.h` を `third_party/sqlite/` に配置してください。SQLite 3.54.1でビルドと保存テストを確認しています。CMakeで静的リンクするため、配布先にSQLiteのDLLを追加する必要はありません。
 
-Windows向けビルドにはMicrosoft.Web.WebView2 SDK 1.0.4314.35も必要です。NuGetパッケージを`third_party/microsoft.web.webview2.1.0.4314.35/`へ展開し、`build/native/include/WebView2.h`と`build/native/x64/WebView2Loader.dll`がある状態にしてください。別の場所を使う場合はCMakeの`POPPY_WEBVIEW2_SDK`で指定します。CMakeはアーキテクチャに合う`WebView2Loader.dll`とライセンス・NOTICEを実行ファイルの隣へコピーします。配布時もこれらを同梱してください。HTMLプレビューを使うWindowsにはMicrosoft Edge WebView2 Runtimeが必要です。SDKとLoader DLLだけではブラウザー本体は含まれません。
+Windows向けビルドにはMicrosoft.Web.WebView2 SDK 1.0.4314.35も必要です。NuGetパッケージを`third_party/microsoft.web.webview2.1.0.4314.35/`へ展開し、`build/native/include/WebView2.h`と`build/native/x64/WebView2Loader.dll`がある状態にしてください。別の場所を使う場合はCMakeの`POPPY_WEBVIEW2_SDK`で指定します。CMakeはアーキテクチャに合う`WebView2Loader.dll`とライセンス・NOTICEを本体DLLと同じリリースフォルダーへコピーします。配布時もこれらを同梱してください。HTMLプレビューを使うWindowsにはMicrosoft Edge WebView2 Runtimeが必要です。SDKとLoader DLLだけではブラウザー本体は含まれません。
 
 ### Dockerでビルド
 
@@ -31,10 +31,10 @@ make artifact
 
 `make dev`は`docker compose up -d --build dev`を実行し、`poppy-dev`コンテナを常駐させます。Dockerの再起動後も自動起動します。明示的に停止した場合は`make dev`で再開できます。
 
-`make artifact`は`dev`を起動した後、`docker compose exec -T dev /usr/local/bin/poppy-build`を実行します。Docker内でLinux用のコアテストを実行した後、MinGW-w64でWindows x64向けReleaseビルドを行い、`out/docker/Poppy.exe`に出力します。ビルド終了後もコンテナは起動したままです。C++とwinpthreadsのランタイムは静的リンクします。生成した実行ファイルをWindows上で起動してください。
+`make artifact`は`dev`を起動した後、`docker compose exec -T dev /usr/local/bin/poppy-build`を実行します。Docker内でLinux用のコアテストを実行した後、MinGW-w64でWindows x64向けReleaseビルドを行い、`out/docker/live/`へ配信します。起動用の`Poppy.exe`は初回だけ配置し、以降は本体DLLと依存ファイルを別のリリースフォルダーへ追加して、次回の起動先を切り替えます。既存の`out/docker/Poppy.exe`は変更しません。ビルド終了後もコンテナは起動したままです。C++とwinpthreadsのランタイムは静的リンクします。生成した起動用実行ファイルをWindows上で起動してください。
 
 ```powershell
-.\out\docker\Poppy.exe --project "C:\work\project"
+.\out\docker\live\Poppy.exe --project "C:\work\project"
 ```
 
 初回のイメージ作成にはDocker HubとDebianパッケージ配布元への接続が必要です。イメージ作成後のテスト・コンパイルは、外部接続できない内部ネットワーク（`internal: true`）で実行します。ソースを読み取り専用でマウントし、中間生成物はComposeの`build-cache`ボリューム、完成した実行ファイルはホストの`out/docker`に保存します。並列コンパイル数は既定で2、`POPPY_BUILD_JOBS`環境変数で変更できます。
@@ -76,6 +76,17 @@ dp cmake --build /build/linux --parallel 2
 dp ctest --test-dir /build/linux --output-on-failure
 ```
 
+旧イメージの固定スクリプトは従来の`out/docker/Poppy.exe`を更新するため、今回の`docker/build.sh`を反映するにはホストで`make dev`を実行してください。イメージ更新前でも、初回に次の設定を行えばCMake経由で新構成だけを配信できます。その後は上記の`dp cmake --build /build/windows --parallel 2`で更新できます。Linuxヘルパーは先にLinux用ビルドで生成してください。
+
+```sh
+dp cmake -S . -B /build/windows -G Ninja \
+  -DCMAKE_TOOLCHAIN_FILE="$PWD/cmake/mingw-w64-x86_64.cmake" \
+  -DPOPPY_WSL_HELPER=/build/linux/poppy-wsl-helper \
+  -DPOPPY_PUBLISH_DIR=/output/live \
+  -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF
+dp cmake --build /build/windows --parallel 2
+```
+
 Composeはホストの`PWD`と同じ絶対パスにソースをマウントします。`dp`はAIコンテナの作業ディレクトリをそのまま引き継ぐため、`dev`とAIコンテナでリポジトリの絶対パスを揃えてください。
 
 ### Windowsで直接ビルド
@@ -86,10 +97,38 @@ Visual Studio 2022の「C++によるデスクトップ開発」、Windows SDK、
 cmake -S . -B out -A x64 -DBUILD_TESTING=ON
 cmake --build out --config Release
 ctest --test-dir out -C Release --output-on-failure
-.\out\Release\Poppy.exe --project "C:\work\project"
+.\out\Release\live\Poppy.exe --project "C:\work\project"
 ```
 
-フォルダー指定を省略すると開いていたプロジェクト一覧と選択を復元します。初回起動時は空のウィンドウが開きます。コマンドラインでフォルダーを指定した場合は、そのプロジェクトを優先します。起動済みの場合は既存のPoppyへ引数を渡し、ウィンドウを手前に表示します。Release版はCRTとSQLiteを静的リンクし、通常のコード表示とシェルには`Poppy.exe`を使います。ai-containerの起動アダプターを使う場合は、同じ場所の`ai/`フォルダーも配布します。通常利用にVisual StudioやCMakeは必要ありません。
+フォルダー指定を省略すると開いていたプロジェクト一覧と選択を復元します。初回起動時は空のウィンドウが開きます。コマンドラインでフォルダーを指定した場合は、そのプロジェクトを優先します。起動済みの場合は既存のPoppyへ引数を渡し、ウィンドウを手前に表示します。Release版はCRTとSQLiteを静的リンクします。配布には`live/`内の起動用EXE、`current.txt`、`launcher-abi.txt`と対象の`releases/`を含めてください。通常利用にVisual StudioやCMakeは必要ありません。
+
+### 起動したまま更新する
+
+`Poppy.exe`は起動時に`current.txt`を読み、その版の`PoppyApp.dll`へ処理を渡す固定のランチャーです。既存の単体EXEからは、最初の一度だけ旧Poppyを終了し、`out/docker/live/Poppy.exe`を起動する構成へ移行してください。保存先は従来と同じため、プロジェクトやタブの復元を引き継ぎます。以降の更新で配信済みの`Poppy.exe`を書き換える処理はありません。
+
+```text
+live/
+  Poppy.exe                 ← 初回だけ配置するランチャー
+  launcher-abi.txt
+  current.txt               ← 次回起動する版のID
+  releases/
+    <旧版のID>/             ← 起動中はそのまま使う
+    <新版のID>/
+      PoppyApp.dll
+      WebView2Loader.dll
+      WebView2-LICENSE.txt
+      WebView2-NOTICE.txt
+      wsl/poppy-wsl-helper   ← POPPY_WSL_HELPER指定時
+      ai/
+```
+
+Poppyを開いたまま`make artifact`または`dp cmake --build /build/windows --parallel 2`を実行できます。更新処理は本体DLL・WebView2・WSLヘルパー・AI連携ファイルを一時フォルダーへ揃え、内容のハッシュをIDにしたリリースフォルダーへ移してから、最後に`current.txt`を同一ディレクトリ内で原子的に差し替えます。コピー中に起動しても旧版を読み込み、コピーが失敗した場合は起動先を変更しません。同じ内容の再ビルドでは同じリリースを再利用します。
+
+起動中のPoppyは、本体DLLのある旧版のフォルダーからWebView2とWSLヘルパーを読み続けます。Poppyを終了して同じ`live/Poppy.exe`を開けば新版へ切り替わります。起動済みの状態でもう一度EXEを開く操作は、従来どおり既存ウィンドウを表示するため、更新を反映するには一度終了してください。更新の自動ダウンロードや自動再起動は行わず、ビルドからのローカル配信に対応します。
+
+配信先を変える場合はCMakeの`POPPY_PUBLISH_DIR`を指定します。直接ビルドの既定値は実行ファイルのビルド先にある`live/`です。ビルド用ランチャーは`PoppyLauncher.exe`という別名で生成し、従来のビルド先にある`Poppy.exe`も上書きしません。起動には配信先の`Poppy.exe`を使ってください。既存EXEがありランチャーの識別ファイルがない配信先は、上書きせずエラーにします。公開済みリリースは書き換えず、自動削除もしません。ディスク容量を整理する場合はPoppyを終了してから、`current.txt`のID以外のフォルダーを削除できます。元に戻す場合は、保持した旧版のIDを一時ファイルへ書いて`current.txt`と置き換え、Poppyを再起動します。
+
+ランチャーと本体は固定のC ABI `PoppyMainV1`で接続します。通常の機能追加は本体DLL側で行い、ランチャーの更新を必要としない構成を維持します。Windowsの`poppy_launcher_tests`は、旧DLLを読み込んだまま起動先を切り替え、新しい起動だけが新DLLを使うこと、旧版のリソース・引数・作業ディレクトリが維持されることを検証します。ポータブルな`poppy_publish_tests`は、EXEと旧版の保持、配信失敗・中断時の起動先保持、依存ファイルだけの更新も検証します。
 
 ### 起動引数
 
@@ -143,7 +182,7 @@ PROJECTSのカードは左ドラッグで並び替えられます。カード間
 
 閉じたプロジェクトも履歴に残り、Ctrl+Rまたは「Open folder」の「Recent projects…」から再び開けます。名前・パスで絞り込み、↑↓とEnter、または行のクリックで選択します。Escや外側のクリックで閉じます。同名フォルダーにはフルパス、WSLにはディストリビューションとユーザーも表示します。既に開いているプロジェクトはそのまま選択し、閉じたものは保存済みのタブや配置を復元します。すべてのプロジェクトを閉じて終了しても、履歴は次回起動時に残ります。
 
-「Open WSL folder…」では、エクスプローラーと同じWindows標準のフォルダー選択で`\\wsl.localhost`配下を辿り、WSLのプロジェクトを開けます。アドレスバーへのパスの貼り付けと、接続ユーザーの指定もできます。ファイル表示・編集・保存・名前変更・検索・Git・ターミナルに対応し、Windowsのプロジェクトと同時に利用できます。配布時は`wsl/poppy-wsl-helper`をPoppy.exeの隣に置いてください。接続・保存の制約と検証範囲は [WSL対応](docs/wsl-support.md) を参照してください。
+「Open WSL folder…」では、エクスプローラーと同じWindows標準のフォルダー選択で`\\wsl.localhost`配下を辿り、WSLのプロジェクトを開けます。アドレスバーへのパスの貼り付けと、接続ユーザーの指定もできます。ファイル表示・編集・保存・名前変更・検索・Git・ターミナルに対応し、Windowsのプロジェクトと同時に利用できます。配布時は`wsl/poppy-wsl-helper`を対象リリースの`PoppyApp.dll`と同じフォルダーに同梱してください。接続・保存の制約と検証範囲は [WSL対応](docs/wsl-support.md) を参照してください。
 
 ターミナル領域の「＋」でシェルを追加し、タブで切り替えます。ターミナルタブの右クリックで名前変更・終了、「＋」の右クリックでCodex・Claude Codeをai-containerで起動できます。設定手順は [ai-container連携](integration/ai/README.md)、所有関係と検証範囲は [実装メモ](docs/multi-project.md) を参照してください。再起動後は構成だけを復元し、以前のAIコマンドを自動実行しません。
 
@@ -472,7 +511,7 @@ WindowsではReleaseビルド後、次の順で確認します。
 メモリ計測用スクリプトも用意しています。
 
 ```powershell
-$app = Start-Process .\out\Release\Poppy.exe -PassThru
+$app = Start-Process .\out\Release\live\Poppy.exe -PassThru
 .\scripts\measure-memory.ps1 -ProcessId $app.Id -Samples 30 -CsvPath idle.csv
 # フォルダー・ファイルを開いた後にも同じように計測する
 .\scripts\measure-memory.ps1 -ProcessId $app.Id -Samples 30 -CsvPath viewer.csv

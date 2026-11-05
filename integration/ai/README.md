@@ -19,7 +19,7 @@ aicontainer claude
 
 PoppyはターミナルごとのUnixソケットをシェル起動前に開き、そのパスを`AICONTAINER_EVENT_SOCKET`へ自動設定します。WindowsプロジェクトのPowerShell・Git Bashでも、既定のWSL内にソケットを用意し、手入力の`wsl`へ`WSLENV`で引き継ぎます。Git Bashのパス変換でLinux側の`/tmp/poppy-events-…/events.sock`がWindowsの一時フォルダーへ書き換わらないよう、`MSYS2_ENV_CONV_EXCL`へこの変数だけを追加します。既存の除外設定は保持します。更新した`aicontainer`はこのソケットだけをコンテナの`/tmp/aicontainer-events.sock`へマウントし、hookへ引き継ぎます。`.aicontainer`への追加、起動プロファイル、ai-containerリポジトリのパス指定は不要です。この変更だけならDockerイメージの再ビルドも不要です。
 
-PowerShell経由でも、Poppy本体と同じ場所にリリースの`wsl/`フォルダーを配置してください。Poppy更新後はWSLターミナルも開き直します。ai-container側をコピーして利用している場合は、そのコピーも更新してください。Dockerデーモンは、起動元のWSLと同じソケットの実体を参照できる必要があります。リモートDockerへの転送は対象外です。
+PowerShell経由でも、対象リリースの`PoppyApp.dll`と同じ場所に`wsl/`フォルダーを配置してください。Poppy更新後はWSLターミナルも開き直します。ai-container側をコピーして利用している場合は、そのコピーも更新してください。Dockerデーモンは、起動元のWSLと同じソケットの実体を参照できる必要があります。リモートDockerへの転送は対象外です。
 
 WSLプロジェクトでは「＋」の右クリックにある`New Codex (ai-container)` / `New Claude Code (ai-container)`でも起動できます。WSLユーザーのBash起動設定から`aicontainer`を読み込み、通常と同じコンテナを起動します。WindowsプロジェクトではPowerShellから`wsl`へ入り、上記の`aicontainer`コマンドを使ってください。
 
@@ -63,7 +63,7 @@ hookは、ソケット自体が使えない場合に備えて、元の制御端�
 
 環境変数だけが欠落し、端末専用の`/tmp/aicontainer-events.sock`がすでにマウントされている場合は、そのソケットで通知を継続して異常を表示します。ログの`resolved_socket`で使用先を確認できます。他の端末のソケットは探索しません。環境変数もマウントもない場合は通知を復旧できないため、Poppyのターミナルを開き直し、その中からAIコンテナを作り直してください。
 
-この表示を有効にするには、更新したPoppy.exeと同梱の`wsl/`を配置し、AIコンテナ内で`install-codex-hooks.py`／`install-claude-hooks.py`を再実行してhookスクリプトも更新してください。Poppy・ターミナル・AIコンテナを起動し直すと、新しい接続先が引き継がれます。
+この表示を有効にするには、更新した本体DLLと同じリリースの`wsl/`を配信し、AIコンテナ内で`install-codex-hooks.py`／`install-claude-hooks.py`を再実行してhookスクリプトも更新してください。Poppy・ターミナル・AIコンテナを起動し直すと、新しい接続先が引き継がれます。
 
 ## Codexのpolling監視
 
@@ -101,7 +101,7 @@ HTTP通知とWindows上のCLI向け通知は廃止しました。`.aicontainer`�
 
 次に`AICONTAINER_EVENT_SOCKET`を引き継いだWSLプロセスとその子孫を終了し、ロックを解放するまで待ちます。PowerShell／Git Bashから手入力した`wsl`も対象です。WSLでは子からSIGTERMを送り、700 msで終了しないプロセスにはSIGKILLを送り、終了確認を続けます。最後にWindows側のジョブ内の全プロセスの終了を待ちます。通常の終了では、この後始末が終わるまでPoppy.exeは終了しません。Dockerがインストールされていない通常のシェルではコンテナ操作を省略します。Dockerがある環境で照会・停止を確認できない場合は再試行し、終了待ちを続けます。
 
-ターミナルごとに経路が独立するため、別のターミナルは終了しません。同じターミナル内で起動したAIは同じ終了対象になります。以前のPoppyから残ったコンテナや、通知ソケットを引き継がず起動した別の環境は識別できません。更新時はPoppy.exeと同梱の`wsl/`フォルダーを一緒に置き換え、ターミナルを開き直してください。
+ターミナルごとに経路が独立するため、別のターミナルは終了しません。同じターミナル内で起動したAIは同じ終了対象になります。以前のPoppyから残ったコンテナや、通知ソケットを引き継がず起動した別の環境は識別できません。更新時は本体DLLと同じリリースの`wsl/`フォルダーを配信してPoppyを再起動してください。ランチャーの`Poppy.exe`は更新しません。
 
 ## 検証
 

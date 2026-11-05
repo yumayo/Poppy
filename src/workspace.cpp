@@ -8,6 +8,7 @@
 #include "single_instance.h"
 #include "error_popup.h"
 #include "resource_ids.h"
+#include "launcher_api.h"
 #include <commctrl.h>
 #include <dwmapi.h>
 #include <shlobj.h>
@@ -662,7 +663,7 @@ case WM_DESTROY:singleInstance_->unpublish(window_);KillTimer(window_,1);KillTim
 }return DefWindowProcW(window_,m,a,b);}
 }
 }
-int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,PWSTR,int show){
+extern "C" __declspec(dllexport) int WINAPI PoppyMainV1(HINSTANCE instance,int show){
     const HRESULT com=OleInitialize(nullptr);
     int result=1;
     try{
@@ -683,6 +684,7 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,PWSTR,int show){
         if(singleInstance.acquireOrForward(options)){poppy::Workspace workspace;result=workspace.run(instance,show,options,singleInstance);}
         else result=0;
     }catch(const std::exception& error){MessageBoxW(nullptr,poppy::wide(error.what()).c_str(),L"Poppy",MB_OK|MB_ICONERROR);}
+    catch(...){MessageBoxW(nullptr,L"Poppy could not start.",L"Poppy",MB_OK|MB_ICONERROR);}
     if(SUCCEEDED(com))OleUninitialize();
     return result;
 }

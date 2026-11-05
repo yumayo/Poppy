@@ -86,6 +86,8 @@ private:
 std::wstring wide(std::string_view utf8);
 std::string utf8(std::wstring_view text);
 std::wstring winError(DWORD error = GetLastError());
+// Application resources belong to the loaded release, including after an update.
+fs::path applicationDirectory();
 std::wstring pathKey(const fs::path& path);
 inline std::wstring pathKey(const ResourceId& path) { return resourceWide(path.key()); }
 fs::path relocatePath(const fs::path& path, const fs::path& source, const fs::path& destination);

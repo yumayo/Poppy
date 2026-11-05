@@ -31,7 +31,7 @@ void TerminalPane::add(SavedTerminal configuration) {
         if (code == "missing-event-socket") message = L"AI通知の接続先が未設定です。AICONTAINER_EVENT_SOCKETがhookへ引き継がれず、通知ソケットもマウントされていません。";
         else if (code == "event-socket-recovered") message = L"AICONTAINER_EVENT_SOCKETがhookへ引き継がれていません。マウント済みソケットで通知を継続しています。";
         else message = L"AIのhookまたは監視プロセスから通知ソケットへ送信できません。";
-        reportError(*ptr, code, message + L"\n\nPoppyのターミナルを開き直し、その中からAIコンテナを作り直してください。更新時はPoppy.exeとwsl/を一緒に置き換え、aicontainerも更新してください。");
+        reportError(*ptr, code, message + L"\n\nPoppyのターミナルを開き直し、その中からAIコンテナを作り直してください。更新時は同じリリースの本体DLLとwsl/を配信してPoppyを再起動し、aicontainerも更新してください。");
     };
     session->terminal->launchFailed = [this, ptr](const std::wstring& message) {
         reportError(*ptr, "terminal-start-failed", L"ターミナルまたはAI通知リレーを起動できませんでした。\n\n" + message +

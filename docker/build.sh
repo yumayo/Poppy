@@ -22,24 +22,11 @@ ctest --test-dir /build/linux --output-on-failure
 cmake -S "$source_dir" -B /build/windows -G Ninja \
     "-DCMAKE_TOOLCHAIN_FILE=$source_dir/cmake/mingw-w64-x86_64.cmake" \
     -DPOPPY_WSL_HELPER=/build/linux/poppy-wsl-helper \
+    -DPOPPY_PUBLISH_DIR=/output/live \
     -DCMAKE_BUILD_TYPE=Release \
     -DBUILD_TESTING=OFF
 cmake --build /build/windows --parallel "$build_jobs"
 
-mkdir -p /output
-build_output=$(mktemp /output/Poppy.XXXXXX.exe)
-x86_64-w64-mingw32-strip --strip-all \
-    -o "$build_output" /build/windows/Poppy.exe
-# Windows may still hold the previous executable open. Keep the completed
-# artifact available without touching that running process.
-if mv -f "$build_output" /output/Poppy.exe; then
-    build_output=/output/Poppy.exe
-fi
-rm -rf /output/ai
-for dependency in WebView2Loader.dll WebView2-LICENSE.txt WebView2-NOTICE.txt; do
-    cp "/build/windows/$dependency" /output/
-done
-cp -R "$source_dir/integration/ai" /output/
-mkdir -p /output/wsl
-cp /build/linux/poppy-wsl-helper /output/wsl/poppy-wsl-helper
-printf 'Windows x64 build: %s (host: out/docker/)\n' "$build_output"
+# CMake publishes a complete versioned release and switches current.txt last.
+# The installed launcher and every previously published release stay untouched.
+printf 'Windows x64 build: /output/live/Poppy.exe (host: out/docker/live/Poppy.exe)\n'

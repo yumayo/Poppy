@@ -13,9 +13,8 @@ namespace poppy {
 namespace {
 using namespace wsl;
 std::string bundledWslHelper() {
-    std::wstring executable(32768, 0); const auto count = GetModuleFileNameW(nullptr, executable.data(), static_cast<DWORD>(executable.size())); if (!count || count >= executable.size()) throw std::runtime_error("Cannot locate Poppy's WSL helper"); executable.resize(count);
-    const auto helper = fs::path(executable).parent_path() / L"wsl" / L"poppy-wsl-helper";
-    std::ifstream file(helper, std::ios::binary | std::ios::ate); if (!file) throw std::runtime_error("The Linux helper is missing. Place the release's wsl folder beside Poppy.exe.");
+    const auto helper = applicationDirectory() / L"wsl" / L"poppy-wsl-helper";
+    std::ifstream file(helper, std::ios::binary | std::ios::ate); if (!file) throw std::runtime_error("The Linux helper is missing from this release. Publish the matching wsl folder with PoppyApp.dll.");
     const auto length = file.tellg(); if (length <= 0 || length > 32 * 1024 * 1024) throw std::runtime_error("Invalid Linux helper size");
     std::string binary(static_cast<size_t>(length), 0); file.seekg(0); if (!file.read(binary.data(), static_cast<std::streamsize>(binary.size()))) throw std::runtime_error("Cannot read Linux helper");
     return binary;

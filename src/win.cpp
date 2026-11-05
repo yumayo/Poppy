@@ -10,6 +10,17 @@
 #include <system_error>
 
 namespace poppy {
+fs::path applicationDirectory() {
+    HMODULE module = nullptr;
+    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            reinterpret_cast<LPCWSTR>(&applicationDirectory), &module))
+        throw std::runtime_error("Cannot locate the Poppy application module");
+    std::wstring path(32768, L'\0');
+    const auto count = GetModuleFileNameW(module, path.data(), static_cast<DWORD>(path.size()));
+    if (!count || count >= path.size()) throw std::runtime_error("Cannot locate the Poppy release directory");
+    path.resize(count);
+    return fs::path(path).parent_path();
+}
 bool ProcessJob::create() {
     stop();
     job_.reset(CreateJobObjectW(nullptr, nullptr));

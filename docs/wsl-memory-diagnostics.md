@@ -104,9 +104,9 @@ Linux上で、同じJSONフレームの生成・デコードと検索用デー�
 
 検索用一覧のメモリ・件数境界、上限時の既存項目の保持と検索、Unicodeとバックスラッシュの保持を単体テストで検証済みです。ヘルパー結合テストでは4 MiB超のGit出力を発生させ、その後のファイル読み込みが成功することも確認しました。Linux用の全17テストとWindows向けクロスビルドが成功しています。WindowsのGUI・実際のWSL接続・Poppy.exe全体のメモリ計測は未実施です。
 
-Windowsでの再確認には、更新した`Poppy.exe`と同じビルドの`wsl/poppy-wsl-helper`を使い、問題のフォルダーを開きます。必要なら既存の [measure-memory.ps1](../scripts/measure-memory.ps1) でPoppy.exeのメモリを記録できます。
+Windowsでの再確認には、更新した`PoppyApp.dll`と同じビルドの`wsl/poppy-wsl-helper`を含むリリースを`live/Poppy.exe`から起動し、問題のフォルダーを開きます。必要なら既存の [measure-memory.ps1](../scripts/measure-memory.ps1) でPoppy.exeのメモリを記録できます。
 
 ```powershell
-$poppy = Start-Process .\out\docker\Poppy.exe -PassThru
+$poppy = Start-Process .\out\docker\live\Poppy.exe -PassThru
 .\scripts\measure-memory.ps1 -ProcessId $poppy.Id -Samples 60 -CsvPath poppy-wsl-memory.csv
 ```

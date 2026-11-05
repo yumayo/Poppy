@@ -35,16 +35,10 @@ private:
     std::function<void(Args...)> action_;
 };
 template<class T> void retain(ComPtr<T>& target, T* object) { object->AddRef(); *target.put() = object; }
-std::wstring executableDirectory() {
-    std::wstring name(32768, L'\0');
-    const auto count = GetModuleFileNameW(nullptr, name.data(), static_cast<DWORD>(name.size()));
-    if (!count || count >= name.size()) throw std::runtime_error("Cannot locate Poppy.exe.");
-    name.resize(count); return fs::path(name).parent_path().wstring();
-}
 HMODULE loader() {
     // Keep the loader mapped while any asynchronous WebView2 callbacks exist.
     static HMODULE module = nullptr;
-    if (!module) module = LoadLibraryExW((executableDirectory() + L"\\WebView2Loader.dll").c_str(), nullptr,
+    if (!module) module = LoadLibraryExW((applicationDirectory() / L"WebView2Loader.dll").c_str(), nullptr,
         LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
     return module;
 }

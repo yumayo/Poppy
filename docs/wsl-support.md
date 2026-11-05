@@ -73,13 +73,21 @@ Windows x64とLinux x86_64の組み合わせを対象とします。WSLの登録
 配布する構成は次のとおりです。
 
 ```text
-Poppy.exe
-ai/                       # 既存のWindows用ai-containerアダプター
-wsl/
-  poppy-wsl-helper        # Linux x86_64の静的リンク実行ファイル
+live/
+  Poppy.exe               # 固定のランチャー
+  launcher-abi.txt
+  current.txt
+  releases/<リリースID>/
+    PoppyApp.dll
+    WebView2Loader.dll
+    WebView2-LICENSE.txt
+    WebView2-NOTICE.txt
+    ai/                   # AI連携ファイル
+    wsl/
+      poppy-wsl-helper    # Linux x86_64の静的リンク実行ファイル
 ```
 
-Dockerの`make artifact`はLinuxヘルパーもビルドし、`out/docker/wsl/`へ出力します。`docker/build.sh`を変更したため、既存のビルドコンテナではホスト側で`make dev`を実行して固定スクリプトを更新してください。
+Dockerの`make artifact`はLinuxヘルパーもビルドし、`out/docker/live/releases/<リリースID>/wsl/`へ出力します。起動中のPoppyは自身のDLLと同じリリースのヘルパーを使い、再起動で新版へ切り替わります。`docker/build.sh`を変更したため、既存のビルドコンテナではホスト側で`make dev`を実行して固定スクリプトを更新してください。
 
 Windowsで直接ビルドする場合は、Linux x86_64環境で先に`poppy-wsl-helper`ターゲットをビルドし、WindowsのCMakeへ`-DPOPPY_WSL_HELPER=C:/path/to/poppy-wsl-helper`を渡してください。指定しない場合もWindowsプロジェクトは利用できます。WSL接続時にヘルパーが見つからなければ、必要な配布フォルダーを案内します。利用者のWSLでのコンパイルやダウンロードは不要です。
 
