@@ -1,5 +1,6 @@
 #include "explorer_clipboard.h"
 #include "explorer_clipboard_paths.h"
+#include "file_drop.h"
 #include <shellapi.h>
 #include <shlobj.h>
 #include <cstring>
@@ -40,12 +41,7 @@ ExplorerClipboard readExplorerClipboard(HWND owner, const ResourceId& destinatio
         } catch (const std::exception&) { result.paths.clear(); }
         GlobalUnlock(memory);
     } else if (const auto drop = static_cast<HDROP>(GetClipboardData(CF_HDROP))) {
-        const auto count = DragQueryFileW(drop, 0xffffffff, nullptr, 0);
-        if (count > 50000) return result;
-        for (UINT i = 0; i < count; ++i) {
-            const auto length = DragQueryFileW(drop, i, nullptr, 0);
-            if (!length || length > 32767) { result.paths.clear(); return result; }
-            std::wstring path(length + 1, 0); DragQueryFileW(drop, i, path.data(), length + 1); path.resize(length);
+        for (const auto& path : shellFilePaths(drop)) {
             try {
                 auto resource = explorerClipboardPath(path, destination);
                 if (!resource.is_absolute()) { result.paths.clear(); return result; }

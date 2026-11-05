@@ -37,7 +37,7 @@ void copyLastWriteTime(const fs::path& source, const fs::path& destination) {
 #endif
 }
 }
-void copyResourcePath(const fs::path& source, const fs::path& destination) {
+void copyResourcePath(const fs::path& source, const fs::path& destination, bool rejectLinks) {
     if (!source.is_absolute() || !destination.is_absolute() || destination.filename().empty())
         throw std::runtime_error("Copy requires absolute file or folder paths.");
     if (fs::exists(fs::symlink_status(destination))) throw std::runtime_error("The destination already exists.");
@@ -88,7 +88,10 @@ void copyResourcePath(const fs::path& source, const fs::path& destination) {
         if (attributes & FILE_ATTRIBUTE_REPARSE_POINT) throw std::runtime_error("Copying links or junctions is not supported on Windows.");
 #endif
         const auto status = fs::symlink_status(item.source);
-        if (fs::is_symlink(status)) fs::copy_symlink(item.source, item.target);
+        if (fs::is_symlink(status)) {
+            if (rejectLinks) throw std::runtime_error("Copying Windows links or junctions into WSL is not supported.");
+            fs::copy_symlink(item.source, item.target);
+        }
         else if (fs::is_directory(status)) {
             fs::create_directory(item.target);
             directories.push_back(item);

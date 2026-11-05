@@ -3,6 +3,7 @@
 #include <stdexcept>
 #ifdef _WIN32
 #include "explorer_clipboard.h"
+#include "file_drop.h"
 #include <shellapi.h>
 #include <shlobj.h>
 #include <cstring>
@@ -42,8 +43,27 @@ void paths() {
         "A Windows file was changed by the file clipboard conversion");
 #endif
 }
+void pasteConnections() {
+    const auto target = ResourceId::wsl("Ubuntu", "/home/alice/project", "alice");
 #ifdef _WIN32
-void putShellFiles(HWND owner, const std::vector<std::wstring>& paths) {
+    const ResourceId windows = std::filesystem::path(L"C:\\work 日本語\\file.txt");
+#else
+    const ResourceId windows = std::filesystem::path("/windows/work 日本語/file.txt");
+#endif
+    check(canPasteExplorerResource(windows, target), "Windows files cannot be copied into WSL");
+    check(!canPasteExplorerResource(windows, target, true), "A cross-connection cut was accepted as a move");
+    check(canPasteExplorerResource(windows, windows.parent_path()), "A Windows file cannot be duplicated in its parent");
+    check(canPasteExplorerResource(target.at("/home/alice/file.txt"), target) &&
+        canPasteExplorerResource(target.at("/home/alice/folder"), target, true), "Same-connection WSL copy/move was rejected");
+    check(!canPasteExplorerResource(target, target) && !canPasteExplorerResource(target, target / std::string_view("nested")),
+        "A folder can be pasted into itself or a descendant");
+    check(!canPasteExplorerResource(ResourceId::wsl("Debian", "/file.txt", "alice"), target) &&
+        !canPasteExplorerResource(ResourceId::wsl("Ubuntu", "/file.txt", "bob"), target), "An unrelated WSL connection was accepted");
+    check(!canPasteExplorerResource(std::filesystem::path("relative.txt"), target) &&
+        !canPasteExplorerResource(target.root_path(), target), "An invalid copy source was accepted");
+}
+#ifdef _WIN32
+HGLOBAL shellFiles(const std::vector<std::wstring>& paths) {
     std::wstring names;
     for (const auto& path : paths) { names += path; names.push_back(0); }
     names.push_back(0);
@@ -55,11 +75,76 @@ void putShellFiles(HWND owner, const std::vector<std::wstring>& paths) {
     std::memcpy(bytes, &header, sizeof(header));
     std::memcpy(bytes + sizeof(header), names.data(), names.size() * sizeof(wchar_t));
     GlobalUnlock(memory);
+    return memory;
+}
+void putShellFiles(HWND owner, const std::vector<std::wstring>& paths) {
+    const auto memory = shellFiles(paths);
     if (!OpenClipboard(owner)) { GlobalFree(memory); throw std::runtime_error("Cannot open clipboard"); }
     const bool success = EmptyClipboard() && SetClipboardData(CF_HDROP, memory);
     CloseClipboard();
     if (!success) GlobalFree(memory);
     check(success, "Cannot publish Shell clipboard data");
+}
+class ShellData final : public IDataObject {
+public:
+    std::vector<std::wstring> paths;
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void** value) override {
+        if (!value) return E_POINTER;
+        *value = nullptr;
+        if (iid != IID_IUnknown && iid != IID_IDataObject) return E_NOINTERFACE;
+        *value = static_cast<IDataObject*>(this); AddRef(); return S_OK;
+    }
+    ULONG STDMETHODCALLTYPE AddRef() override { return ++references; }
+    ULONG STDMETHODCALLTYPE Release() override { return --references; }
+    HRESULT STDMETHODCALLTYPE GetData(FORMATETC* format, STGMEDIUM* medium) override {
+        if (!format || !medium) return E_POINTER;
+        if (format->cfFormat != CF_HDROP || !(format->tymed & TYMED_HGLOBAL)) return DV_E_FORMATETC;
+        *medium = {}; medium->tymed = TYMED_HGLOBAL; medium->hGlobal = shellFiles(paths); return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE GetDataHere(FORMATETC*, STGMEDIUM*) override { return E_NOTIMPL; }
+    HRESULT STDMETHODCALLTYPE QueryGetData(FORMATETC*) override { return E_NOTIMPL; }
+    HRESULT STDMETHODCALLTYPE GetCanonicalFormatEtc(FORMATETC*, FORMATETC*) override { return E_NOTIMPL; }
+    HRESULT STDMETHODCALLTYPE SetData(FORMATETC*, STGMEDIUM*, BOOL) override { return E_NOTIMPL; }
+    HRESULT STDMETHODCALLTYPE EnumFormatEtc(DWORD, IEnumFORMATETC**) override { return E_NOTIMPL; }
+    HRESULT STDMETHODCALLTYPE DAdvise(FORMATETC*, DWORD, IAdviseSink*, DWORD*) override { return OLE_E_ADVISENOTSUPPORTED; }
+    HRESULT STDMETHODCALLTYPE DUnadvise(DWORD) override { return OLE_E_ADVISENOTSUPPORTED; }
+    HRESULT STDMETHODCALLTYPE EnumDAdvise(IEnumSTATDATA**) override { return OLE_E_ADVISENOTSUPPORTED; }
+private:
+    ULONG references = 1;
+};
+void fileDrops() {
+    ShellData data; data.paths = {L"C:\\source 日本語\\file.txt", L"C:\\source\\folder"};
+    std::vector<std::wstring> copied;
+    bool allowed = true, hovering = false;
+    const auto sequence = GetClipboardSequenceNumber();
+    auto* target = new FileDropTarget(
+        [&](POINT point, const std::vector<std::wstring>& paths) {
+            hovering = allowed && point.x == 100 && point.y == 200 && paths == data.paths;
+            return hovering;
+        }, [&] { hovering = false; }, [&](const std::vector<std::wstring>& paths) { copied = paths; });
+    struct Release { FileDropTarget* target; ~Release() { target->Release(); } } release{target};
+    DWORD effect = DROPEFFECT_COPY | DROPEFFECT_MOVE;
+    check(target->DragEnter(&data, MK_SHIFT, {100, 200}, &effect) == S_OK && effect == DROPEFFECT_COPY && hovering,
+        "Explorer drag did not advertise copying (even with Shift)");
+    target->DragLeave(); check(!hovering && copied.empty(), "Cancelling an Explorer drag copied files or kept its highlight");
+    effect = DROPEFFECT_COPY;
+    target->DragEnter(&data, 0, {100, 200}, &effect);
+    allowed = false; effect = DROPEFFECT_COPY;
+    target->DragOver(0, {100, 200}, &effect);
+    check(effect == DROPEFFECT_NONE && !hovering, "An invalid destination accepted a file drop");
+    allowed = true; effect = DROPEFFECT_COPY | DROPEFFECT_MOVE;
+    target->Drop(&data, 0, {100, 200}, &effect);
+    check(effect == DROPEFFECT_COPY && copied == data.paths && !hovering, "A drop lost files, copied as a move or kept its highlight");
+    copied.clear(); effect = DROPEFFECT_MOVE;
+    target->Drop(&data, 0, {100, 200}, &effect);
+    check(effect == DROPEFFECT_NONE && copied.empty(), "A move-only source was accepted by the copy drop target");
+    data.paths = {L"C:\\source\\file.txt", L"relative.txt"}; effect = DROPEFFECT_COPY;
+    target->Drop(&data, 0, {100, 200}, &effect);
+    check(effect == DROPEFFECT_NONE && copied.empty(), "A malformed file list was partially copied");
+    check(sequence == GetClipboardSequenceNumber(), "Drag and drop changed the file clipboard");
+    const auto memory = shellFiles({L"C:\\source\\file.txt"});
+    const auto header = static_cast<DROPFILES*>(GlobalLock(memory)); header->pFiles = 0xffffffff; GlobalUnlock(memory);
+    check(shellFilePaths(memory).empty(), "A file list with an invalid offset was accepted"); GlobalFree(memory);
 }
 void clipboard() {
     const auto window = CreateWindowExW(0, L"STATIC", L"Poppy clipboard test", 0, 0, 0, 0, 0, HWND_MESSAGE, nullptr, nullptr, nullptr);
@@ -107,7 +192,9 @@ void clipboard() {
 int main() {
     try {
         paths();
+        pasteConnections();
 #ifdef _WIN32
+        fileDrops();
         clipboard();
 #endif
         std::cout << "Explorer clipboard tests passed\n"; return 0;

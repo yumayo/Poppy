@@ -2808,7 +2808,7 @@ void quickOpenStability() {
 }
 }
 int main(int argc, char** argv) {
-    const HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    const HRESULT com = OleInitialize(nullptr);
     int result = 0;
     try {
         initializeRendering();
@@ -2825,6 +2825,6 @@ int main(int argc, char** argv) {
             std::cout << "Direct2D rendering tests passed\n";
         }
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; result = 1; }
-    if (SUCCEEDED(com)) CoUninitialize();
+    if (SUCCEEDED(com)) OleUninitialize();
     return result;
 }

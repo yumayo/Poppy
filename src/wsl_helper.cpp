@@ -496,7 +496,7 @@ void Server::execute(const std::shared_ptr<Request>& r) {
         } else if (op == "saveFile") save(*r);
         else if (op == "createFile") create(*r);
         else if (op == "copyResource") {
-            copyResourcePath(std::filesystem::u8path(path(r->message)), std::filesystem::u8path(path({{"path", field(r->message, "destination")}})));
+            copyResourcePath(std::filesystem::u8path(path(r->message)), std::filesystem::u8path(path({{"path", field(r->message, "destination")}})), field(r->message, "rejectLinks") == "1");
             reply(*r, {{"done", "1"}});
         }
         else if (op == "removeResource") {

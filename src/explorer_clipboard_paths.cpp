@@ -25,4 +25,8 @@ std::optional<std::wstring> explorerShellPath(const ResourceId& path) {
     }
     return name;
 }
+bool canPasteExplorerResource(const ResourceId& source, const ResourceId& directory, bool cut) {
+    return source.is_absolute() && !source.filename().empty() && !source.contains(directory) &&
+        (source.sameAuthority(directory) || (!cut && !source.wsl() && directory.wsl()));
+}
 }

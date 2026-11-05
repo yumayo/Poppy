@@ -316,8 +316,23 @@ public:
     }
     std::wstring copyResource(const ResourceId& source, const ResourceId& destination) override {
         try {
-            if (!source.sameAuthority(destination)) return L"Cannot copy between WSL connections.";
-            call("copyResource", source, {{"destination", destination.u8string()}}, nullptr, {}, 600000);
+            auto from = source;
+            if (!source.wsl()) {
+                if (!source.is_absolute()) return L"Copy requires an absolute Windows path.";
+                // Resolve using this distribution's automount configuration and
+                // connection user instead of assuming Windows drives use /mnt.
+                auto args = connection_->command();
+                args.insert(args.end(), {L"wslpath", L"-a", L"-u", source.native()});
+                auto converted = runProcess(args, windowsProcessDirectory(), 10000);
+                if (converted.code || !converted.error.empty()) return L"Cannot access this Windows path from WSL.\n\n" + converted.error;
+                if (!converted.output.empty() && converted.output.back() == '\n') converted.output.pop_back();
+                if (!converted.output.empty() && converted.output.back() == '\r') converted.output.pop_back();
+                if (converted.output.empty() || converted.output.front() != '/' || converted.output.find_first_of("\r\n") != std::string::npos || converted.output.find('\0') != std::string::npos || !validUtf8(converted.output))
+                    return L"WSL did not return a valid Linux path for this Windows file or folder.";
+                from = destination.at(std::move(converted.output));
+            }
+            if (!from.sameAuthority(destination)) return L"Cannot copy between WSL connections.";
+            call("copyResource", from, {{"destination", destination.u8string()}, {"rejectLinks", source.wsl() ? "0" : "1"}}, nullptr, {}, 600000);
             return {};
         } catch (const std::exception& error) { return wide(error.what()); }
     }

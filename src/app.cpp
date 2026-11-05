@@ -17,6 +17,7 @@
 #include "file_changes.h"
 #include "explorer_history.h"
 #include "explorer_clipboard.h"
+#include "explorer_clipboard_paths.h"
 #include "status_bar.h"
 #include "editor_tabs.h"
 #include <commctrl.h>
@@ -327,6 +328,7 @@ private:
     void deleteItems(const std::vector<TreeItem>& items);
     void copyItems(const std::vector<TreeItem>& items, bool cut);
     void pasteFiles(TreeItem item);
+    void pasteFiles(TreeItem item, ExplorerClipboard clipboard);
     void moveItems(const std::vector<TreeItem>& items, TreeItem parent);
     void executeExplorerBatch(std::vector<ExplorerEdit> edits, std::vector<ResourceId> copies = {}, ExplorerClipboard clipboard = {});
     void applyExplorerBatch(const std::vector<ExplorerEdit>& edits, bool redo);
@@ -520,6 +522,18 @@ void ProjectRuntime::Impl::create() {
     explorer_.canDrag = [this](TreeItem item) { return explorer_.canRename(item) && !gitStagePending_; };
     explorer_.canDrop = [this](TreeItem item, TreeItem parent) { return canMoveFile(item, parent); };
     explorer_.moveCommitted = [this](const std::vector<TreeItem>& items, TreeItem parent) { moveItems(items, parent); };
+    explorer_.canDropFiles = [this](TreeItem item, const std::vector<std::wstring>& files) {
+        if (!canCreateItem(item) || gitStagePending_ || files.empty()) return false;
+        return std::all_of(files.begin(), files.end(), [&](const std::wstring& path) {
+            return canPasteExplorerResource(explorerClipboardPath(path, root_), node(item)->path);
+        });
+    };
+    explorer_.dropFilesRequested = [this](TreeItem item, const std::vector<std::wstring>& files) {
+        if (!explorer_.canDropFiles(item, files)) return;
+        ExplorerClipboard dropped;
+        for (const auto& path : files) dropped.paths.push_back(explorerClipboardPath(path, root_));
+        pasteFiles(item, std::move(dropped));
+    };
     explorer_.canOpenWithDefaultApp = [this](TreeItem item) { const auto n = node(item); return n && !n->directory && !n->unsupported && !root_.wsl(); };
     explorer_.openWithDefaultAppRequested = [this](TreeItem item) { if (const auto n = node(item); n && !n->directory) openWithDefaultApp(n->path); };
     explorer_.canRevealInFileExplorer = [this](TreeItem item) { const auto n = node(item); return n && !n->unsupported; };
@@ -1858,7 +1872,10 @@ void ProjectRuntime::Impl::copyItems(const std::vector<TreeItem>& items, bool cu
 }
 void ProjectRuntime::Impl::pasteFiles(TreeItem item) {
     if (!explorer_.canPasteFiles(item)) return;
-    auto clipboard = readExplorerClipboard(window_, root_);
+    pasteFiles(item, readExplorerClipboard(window_, root_));
+}
+void ProjectRuntime::Impl::pasteFiles(TreeItem item, ExplorerClipboard clipboard) {
+    if (!canPasteImage(item) || gitStagePending_) return;
     if (clipboard.paths.empty()) return;
     const auto target = node(item ? item : rootItem_);
     if (!target) return;
@@ -1870,8 +1887,11 @@ void ProjectRuntime::Impl::pasteFiles(TreeItem item) {
     std::set<std::wstring> clipboardPaths, sources;
     for (auto& source : clipboard.paths) { source = source.lexically_normal(); clipboardPaths.insert(pathKey(source)); }
     for (const auto& source : clipboard.paths) {
-        if (!source.is_absolute() || !source.sameAuthority(directory) || source.filename().empty() || source.contains(directory)) {
-            MessageBoxW(window_, L"Choose files or folders from the same Windows or WSL connection. A folder cannot be pasted into itself or its descendants.", L"Poppy — Paste", MB_OK | MB_ICONWARNING); return;
+        if (!canPasteExplorerResource(source, directory, clipboard.cut)) {
+            const auto error = source.contains(directory) ? L"A folder cannot be pasted into itself or its descendants." :
+                clipboard.cut && !source.sameAuthority(directory) ? L"Cut and paste requires the same Windows or WSL connection. Use Copy to copy Windows files into WSL." :
+                L"Choose files from the same connection, or copy Windows files into WSL.";
+            MessageBoxW(window_, error, L"Poppy — Paste", MB_OK | MB_ICONWARNING); return;
         }
         bool covered = false;
         for (auto parent = source.parent_path(); !parent.empty(); parent = parent.parent_path()) {

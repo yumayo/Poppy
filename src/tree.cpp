@@ -1,10 +1,12 @@
 #include "tree.h"
 #include "file_name.h"
+#include "file_drop.h"
 #include <algorithm>
 #include <commctrl.h>
+#include <stdexcept>
 
 namespace poppy {
-namespace { constexpr UINT_PTR dragTimer = 2, messageTimer = 3; }
+namespace { constexpr UINT_PTR dragTimer = 2, messageTimer = 3, externalDropTimer = 4; }
 void Tree::create(HWND parent, HINSTANCE instance, const wchar_t* title, int id) {
     WNDCLASSW cls{}; cls.lpfnWndProc = procedure; cls.hInstance = instance; cls.lpszClassName = treeClassName;
     cls.hCursor = LoadCursorW(nullptr, IDC_ARROW); cls.style = CS_DBLCLKS;
@@ -18,6 +20,16 @@ void Tree::create(HWND parent, HINSTANCE instance, const wchar_t* title, int id)
         SendMessageW(actionTips_, TTM_ADDTOOLW, 0, reinterpret_cast<LPARAM>(&tip));
     }
     setDpi(GetDpiForWindow(parent));
+    auto* target = new FileDropTarget(
+        [this](POINT screen, const std::vector<std::wstring>& files) { return updateExternalDrop(screen, files); },
+        [this] { endExternalDrop(); },
+        [this](const std::vector<std::wstring>& files) {
+            const auto target = externalTarget_;
+            if (target && dropFilesRequested) { SetFocus(window_); dropFilesRequested(target, files); }
+        });
+    const auto result = RegisterDragDrop(window_, target);
+    if (FAILED(result)) { target->Release(); throw std::runtime_error("Cannot register Explorer file drops (HRESULT " + std::to_string(static_cast<unsigned long>(result)) + ")."); }
+    dropTarget_ = target;
 }
 void Tree::setDpi(UINT dpi, int rowHeight) {
     const UINT previous = dpi_;
@@ -41,6 +53,7 @@ void Tree::release(const std::vector<std::pair<TreeItem, uintptr_t>>& items) {
     rowsDirty_ = true;
     for (const auto& pair : items) {
         if (drag_ && (pair.first == drag_->source || pair.first == drag_->target)) endDrag();
+        if (pair.first == externalTarget_) endExternalDrop();
         if (pair.first == renaming_ || pair.first == creationAnchor_) finishRename(false);
         if (pair.first == hotItem_) hover({-1, -1});
         widths_.erase(pair.first); if (removed) removed(pair.second);
@@ -250,6 +263,45 @@ void Tree::endDrag(bool drop) {
         std::all_of(sources.begin(), sources.end(), [&](TreeItem id) { return canDrop(id, drag.target); }))
         moveCommitted(sources, drag.target);
 }
+bool Tree::updateExternalDrop(POINT screen, const std::vector<std::wstring>& files) {
+    auto point = screen; ScreenToClient(window_, &point);
+    const auto content = Scrollbars::contentRect(window_);
+    auto target = PtInRect(&content, point) ? hit(point.y) : 0;
+    if (!target && PtInRect(&content, point)) target = child();
+    // Files use their containing folder, matching clipboard paste.
+    if (const auto value = item(target); value && !value->expandable) target = value->parent;
+    if (rename_ || drag_ || !target || !dropFilesRequested || !canDropFiles || !canDropFiles(target, files)) {
+        endExternalDrop(); return false;
+    }
+    cancelMessage();
+    const bool started = !externalTarget_;
+    if (target != externalTarget_) { externalTarget_ = target; externalHoverTime_ = GetTickCount64(); }
+    externalPoint_ = screen;
+    if (externalFiles_ != files) externalFiles_ = files;
+    if (started) SetTimer(window_, externalDropTimer, 80, nullptr);
+    InvalidateRect(window_, nullptr, FALSE);
+    return true;
+}
+void Tree::endExternalDrop() {
+    externalTarget_ = 0; externalFiles_.clear(); KillTimer(window_, externalDropTimer);
+    InvalidateRect(window_, nullptr, FALSE);
+}
+void Tree::tickExternalDrop() {
+    if (!externalTarget_) return;
+    const auto screen = externalPoint_;
+    auto point = screen; ScreenToClient(window_, &point);
+    const auto content = Scrollbars::contentRect(window_);
+    if (PtInRect(&content, point)) {
+        const int edge = std::min(rowHeight_, static_cast<int>(content.bottom) / 3);
+        if (point.y < edge) scroll(-1);
+        else if (point.y >= content.bottom - edge) scroll(1);
+    }
+    if (!updateExternalDrop(screen, externalFiles_)) return;
+    if (GetTickCount64() - externalHoverTime_ >= 600) {
+        const auto value = item(externalTarget_);
+        if (value && !value->expanded) expand(externalTarget_, true);
+    }
+}
 const std::function<std::wstring(TreeItem)>& Tree::actionLabelFor(unsigned slot) const {
     return slot == 3 ? quaternaryActionLabel : slot == 2 ? tertiaryActionLabel : slot == 1 ? secondaryActionLabel : actionLabel;
 }
@@ -372,7 +424,7 @@ void Tree::paint() {
             if (focus) renderer_.fill({0, y, MulDiv(2, dpi_, 96), y + rowHeight_}, accent);
         }
         if (!node) continue;
-        if (drag_ && drag_->active && drag_->target == row.item) {
+        if ((drag_ && drag_->active && drag_->target == row.item) || externalTarget_ == row.item) {
             renderer_.fill({0, y, r.right, y + rowHeight_}, RGB(50, 70, 94));
             renderer_.fill({0, y, MulDiv(3, dpi_, 96), y + rowHeight_}, accent);
         }
@@ -433,6 +485,7 @@ LRESULT Tree::handle(UINT m, WPARAM a, LPARAM b) {
     switch (m) {
     case WM_TIMER:
         if (a == dragTimer) tickDrag();
+        else if (a == externalDropTimer) tickExternalDrop();
         else if (a == messageTimer) showMessage();
         return 0;
     case WM_PAINT: paint(); return 0;
@@ -449,7 +502,7 @@ LRESULT Tree::handle(UINT m, WPARAM a, LPARAM b) {
         return DefWindowProcW(window_, m, a, b);
     case WM_SIZE: changed(); return 0;
     case WM_SHOWWINDOW:
-        if (!a) { cancelMessage(); ime_.cancel(window_); endDrag(); finishRename(false); trackingMouse_ = false; hover({-1, -1}); }
+        if (!a) { cancelMessage(); ime_.cancel(window_); endDrag(); endExternalDrop(); finishRename(false); trackingMouse_ = false; hover({-1, -1}); }
         return DefWindowProcW(window_, m, a, b);
     case WM_NOTIFY: {
         const auto header = reinterpret_cast<NMHDR*>(b);
@@ -462,7 +515,10 @@ LRESULT Tree::handle(UINT m, WPARAM a, LPARAM b) {
         }
         return 0;
     }
-    case WM_DESTROY: cancelMessage(); messagePopup_.destroy(); ime_.clear(); if (GetFocus() == window_) DestroyCaret(); endDrag(); finishRename(false); renderer_.discard(); return 0;
+    case WM_DESTROY:
+        endExternalDrop();
+        if (dropTarget_) { RevokeDragDrop(window_); dropTarget_->Release(); dropTarget_ = nullptr; }
+        cancelMessage(); messagePopup_.destroy(); ime_.clear(); if (GetFocus() == window_) DestroyCaret(); endDrag(); finishRename(false); renderer_.discard(); return 0;
     case WM_CONTEXTMENU: {
         cancelMessage();
         if (!renameRequested && !deleteRequested && !copyRequested && !pasteFilesRequested && !openWithDefaultAppRequested && !revealInFileExplorerRequested && !pasteImageRequested && !createCommitted) return 0;

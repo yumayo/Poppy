@@ -454,6 +454,24 @@ void copying(const std::string& executable) {
     helper.call("copyResource", source, {{"destination", (source / "nested" / "recursive").string()}}, nullptr, false);
     helper.call("copyResource", source, {{"destination", "relative"}}, nullptr, false);
     check(!fs::exists(source / "nested" / "recursive"), "Rejected WSL copy created a recursive destination");
+    // Windows imports arrive as absolute paths resolved by the destination's
+    // wslpath. They may live outside the project and exceed the preview limit.
+    const auto imported = outside.root / "Windows import 日本語";
+    fs::create_directories(imported / "empty");
+    const std::string binary("Windows\0bytes\r\n", 15);
+    write(imported / "binary.bin", binary);
+    write(imported / "large.bin", "large"); fs::resize_file(imported / "large.bin", 20 * 1024 * 1024);
+    helper.call("copyResource", imported, {{"destination", (target / "Windows import").string()}, {"rejectLinks", "1"}});
+    check(disk(target / "Windows import" / "binary.bin") == binary && fs::is_empty(target / "Windows import" / "empty") &&
+        fs::file_size(target / "Windows import" / "large.bin") == 20 * 1024 * 1024 && disk(imported / "binary.bin") == binary,
+        "Importing a Windows folder lost binary data, empty folders, large files or its source");
+    fs::create_symlink("binary.bin", imported / "link");
+    helper.call("copyResource", imported, {{"destination", (target / "rejected import").string()}, {"rejectLinks", "1"}}, nullptr, false);
+    check(!fs::exists(target / "rejected import"), "A rejected Windows import published a partial folder");
+    helper.call("copyResource", imported / "binary.bin", {{"destination", (target / "Windows import" / "binary.bin").string()}, {"rejectLinks", "1"}}, nullptr, false);
+    check(disk(target / "Windows import" / "binary.bin") == binary, "A Windows import overwrote an existing file");
+    for (const auto& entry : fs::directory_iterator(target))
+        check(entry.path().filename().string().rfind(".poppy-copy-", 0) != 0, "A Windows import leaked staging data");
     helper.eof();
 }
 void explorerHistory(const std::string& executable) {

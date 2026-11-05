@@ -6,6 +6,7 @@
 #include <optional>
 
 namespace poppy {
+class FileDropTarget;
 class Tree {
 public:
     // Batch hierarchy/label changes without changing WS_VISIBLE on hidden panes.
@@ -63,6 +64,8 @@ public:
     std::function<bool(TreeItem)> canDrag;
     std::function<bool(TreeItem, TreeItem)> canDrop;
     std::function<void(const std::vector<TreeItem>&, TreeItem)> moveCommitted;
+    std::function<bool(TreeItem, const std::vector<std::wstring>&)> canDropFiles;
+    std::function<void(TreeItem, const std::vector<std::wstring>&)> dropFilesRequested;
     std::function<bool(TreeItem)> canOpenWithDefaultApp;
     std::function<void(TreeItem)> openWithDefaultAppRequested;
     std::function<bool(TreeItem)> canRevealInFileExplorer;
@@ -101,6 +104,9 @@ private:
     void updateDrag(POINT point);
     void tickDrag();
     void endDrag(bool drop = false);
+    bool updateExternalDrop(POINT screen, const std::vector<std::wstring>& files);
+    void endExternalDrop();
+    void tickExternalDrop();
     bool selectionAllowed(const std::function<bool(TreeItem)>& allowed) const;
     void layoutRename();
     void imePosition();
@@ -158,5 +164,10 @@ private:
         ULONGLONG hoverTime = 0;
     };
     std::optional<Drag> drag_;
+    FileDropTarget* dropTarget_ = nullptr;
+    std::vector<std::wstring> externalFiles_;
+    TreeItem externalTarget_ = 0;
+    POINT externalPoint_{};
+    ULONGLONG externalHoverTime_ = 0;
 };
 }

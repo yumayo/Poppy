@@ -663,7 +663,7 @@ case WM_DESTROY:singleInstance_->unpublish(window_);KillTimer(window_,1);KillTim
 }
 }
 int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,PWSTR,int show){
-    const HRESULT com=CoInitializeEx(nullptr,COINIT_APARTMENTTHREADED);
+    const HRESULT com=OleInitialize(nullptr);
     int result=1;
     try{
         auto options=poppy::parseStartupCommandLine(GetCommandLineW());
@@ -683,6 +683,6 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,PWSTR,int show){
         if(singleInstance.acquireOrForward(options)){poppy::Workspace workspace;result=workspace.run(instance,show,options,singleInstance);}
         else result=0;
     }catch(const std::exception& error){MessageBoxW(nullptr,poppy::wide(error.what()).c_str(),L"Poppy",MB_OK|MB_ICONERROR);}
-    if(SUCCEEDED(com))CoUninitialize();
+    if(SUCCEEDED(com))OleUninitialize();
     return result;
 }
