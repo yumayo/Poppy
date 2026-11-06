@@ -55,6 +55,7 @@ private:
     void stopSelection();
     void imePosition();
     int point(int x, int y) const;
+    std::string linkAt(int x, int y) const;
     HWND window_ = nullptr;
     Renderer renderer_{D2D1_PRESENT_OPTIONS_IMMEDIATELY};
     ImeComposition ime_;
@@ -87,6 +88,8 @@ private:
     size_t scroll_ = 0;
     bool selecting_ = false;
     POINT selectionPoint_{};
+    POINT linkPoint_{};
+    std::string pressedLink_;
     static constexpr UINT_PTR selectionTimer = 0x5058;
     wchar_t highSurrogate_ = 0;
 };

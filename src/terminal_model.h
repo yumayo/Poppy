@@ -32,7 +32,7 @@ public:
     bool wrapPending() const { return active().wrap; }
     // A nonzero length joins this physical row to the next by automatic wrap.
     // A wide glyph can wrap with one unused cell at the right edge.
-    int wrappedLength(int y) const { return active().wrapped.at(static_cast<size_t>(y)); }
+    int wrappedLength(int y, size_t scroll = 0) const;
     bool cursorVisible() const { return cursorVisible_; }
     bool bracketedPaste() const { return bracketedPaste_; }
     bool applicationCursor() const { return applicationCursor_; }
@@ -61,7 +61,8 @@ private:
     void repair(int y);
     int columns_, rows_, top_ = 0, bottom_;
     Screen normal_, alternateScreen_;
-    std::deque<std::vector<Cell>> history_;
+    struct HistoryRow { std::vector<Cell> cells; int wrapped = 0; };
+    std::deque<HistoryRow> history_;
     size_t historyCells_ = 0;
     int64_t firstRow_ = 0;
     uint64_t generation_ = 0;

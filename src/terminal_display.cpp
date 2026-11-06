@@ -1,4 +1,5 @@
 #include "terminal_display.h"
+#include "terminal_link.h"
 #include <algorithm>
 
 namespace poppy {
@@ -35,12 +36,32 @@ bool TerminalDisplay::update(TerminalModel& model, size_t scroll, uint64_t now, 
     wrapped_.resize(cells_.size());
     for (int y = 0; y < model.rows(); ++y) {
         cells_[y] = model.row(y, scroll_); cells_[y].resize(static_cast<size_t>(columns_));
-        wrapped_[y] = scroll_ ? 0 : model.wrappedLength(y);
+        wrapped_[y] = model.wrappedLength(y, scroll_);
     }
+    continuesAbove_ = scroll_ < model.historySize() && model.wrappedLength(0, scroll_ + 1) != 0;
     cursorX_ = model.cursorX(); cursorY_ = model.cursorY(); cursorVisible_ = model.cursorVisible();
     wrapPending_ = model.wrapPending();
     dirty_ = false;
     return true;
+}
+std::string TerminalDisplay::linkAt(int column, int y) const {
+    if (column < 0 || column >= columns_ || y < 0 || y >= rows()) return {};
+    int first = y, last = y;
+    while (first > 0 && wrapped_[first - 1]) --first;
+    while (last + 1 < rows() && wrapped_[last]) ++last;
+    // A partially visible logical line must not open a partial destination.
+    if ((first == 0 && continuesAbove_) || wrapped_[last]) return {};
+    std::u32string text;
+    size_t position = 0;
+    for (int rowIndex = first; rowIndex <= last; ++rowIndex) {
+        const int length = wrapped_[rowIndex] ? wrapped_[rowIndex] : columns_;
+        if (rowIndex == y) {
+            if (column >= length) return {};
+            position = text.size() + column;
+        }
+        for (int x = 0; x < length; ++x) text += row(rowIndex)[x].continuation ? U' ' : row(rowIndex)[x].ch;
+    }
+    return terminalLinkAt(text, position);
 }
 TerminalPreedit TerminalDisplay::preedit(const CompositionText& text) const {
     TerminalPreedit result;

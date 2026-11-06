@@ -27,6 +27,7 @@ public:
     int cursorX() const { return cursorX_; }
     int cursorY() const { return cursorY_; }
     bool cursorVisible() const { return cursorVisible_ && !scroll_; }
+    std::string linkAt(int column, int row) const;
     TerminalPreedit preedit(const CompositionText& text) const;
     // Selection endpoints are cell boundaries; the end is exclusive.
     std::pair<int, int> selectionRange(int anchor, int caret) const;
@@ -47,6 +48,7 @@ private:
     uint64_t generation_ = 0;
     std::string selectionText_;
     bool cursorVisible_ = false, wrapPending_ = false, dirty_ = false, synchronizing_ = false;
+    bool continuesAbove_ = false;
     uint64_t syncSince_ = 0;
 };
 }

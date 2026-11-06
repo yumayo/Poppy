@@ -3,7 +3,9 @@
 #include "terminal_profile.h"
 #include "selection_scroll.h"
 #include <imm.h>
+#include <shellapi.h>
 #include <algorithm>
+#include <cstdlib>
 #include <map>
 #include <stdexcept>
 
@@ -331,6 +333,7 @@ void Terminal::scrollbars() {
     SetScrollInfo(window_, SB_VERT, &info, FALSE);
 }
 void Terminal::scroll(int offset) {
+    pressedLink_.clear();
     scroll_ = static_cast<size_t>(std::clamp(offset, 0, static_cast<int>(model_.historySize())));
     display_.update(model_, scroll_, GetTickCount64());
     scrollbars(); imePosition(); InvalidateRect(window_, nullptr, FALSE);
@@ -340,6 +343,8 @@ void Terminal::scroll(int offset) {
 void Terminal::extendSelection(int x, int y) {
     selectionPoint_ = {x, y};
     display_.extendSelection(model_, point(x, y));
+    if (hasSelection() || std::abs(x - linkPoint_.x) >= GetSystemMetrics(SM_CXDRAG) ||
+        std::abs(y - linkPoint_.y) >= GetSystemMetrics(SM_CYDRAG)) pressedLink_.clear();
     InvalidateRect(window_, nullptr, FALSE); UpdateWindow(window_);
 }
 void Terminal::scrollSelection() {
@@ -355,6 +360,7 @@ void Terminal::scrollSelection() {
     extendSelection(selectionPoint_.x, selectionPoint_.y);
 }
 void Terminal::stopSelection() {
+    pressedLink_.clear();
     if (window_) KillTimer(window_, selectionTimer);
     if (!selecting_) return;
     selecting_ = false;
@@ -382,6 +388,12 @@ int Terminal::point(int x, int y) const {
     if (y < 4) return 0;
     if (y >= 4 + rows * cellHeight_) return rows * columns;
     return ((y - 4) / cellHeight_) * columns + std::clamp((x - 6 + cellWidth_ / 2) / cellWidth_, 0, columns);
+}
+std::string Terminal::linkAt(int x, int y) const {
+    const auto rect = Scrollbars::contentRect(window_);
+    if (!started_ || ime_.active() || x < 6 || y < 4 || x >= rect.right - 6 || y >= rect.bottom) return {};
+    // Link hit testing uses the containing cell, not the nearest selection boundary.
+    return display_.linkAt((x - 6) / cellWidth_, (y - 4) / cellHeight_);
 }
 void Terminal::copy() {
     if (!hasSelection()) return;
@@ -449,6 +461,13 @@ LRESULT Terminal::handle(UINT m, WPARAM a, LPARAM b) {
     case WM_COPY: copy(); return 0;
     case WM_SETFOCUS: imePosition(); if (focused) focused(); InvalidateRect(window_, nullptr, FALSE); return 0;
     case WM_KILLFOCUS: stopSelection(); ime_.clear(); highSurrogate_ = 0; DestroyCaret(); InvalidateRect(window_, nullptr, FALSE); return 0;
+    case WM_SETCURSOR:
+        if (LOWORD(b) == HTCLIENT) {
+            POINT cursor{}; GetCursorPos(&cursor); ScreenToClient(window_, &cursor);
+            SetCursor(LoadCursorW(nullptr, !selecting_ && !linkAt(cursor.x, cursor.y).empty() ? IDC_HAND : IDC_IBEAM));
+            return TRUE;
+        }
+        break;
     case WM_LBUTTONDOWN:
         SetFocus(window_);
         ime_.cancel(window_); imePosition();
@@ -456,10 +475,30 @@ LRESULT Terminal::handle(UINT m, WPARAM a, LPARAM b) {
         selectionPoint_ = {GET_X_LPARAM(b), GET_Y_LPARAM(b)};
         display_.beginSelection(point(selectionPoint_.x, selectionPoint_.y));
         selecting_ = true; SetCapture(window_); SetTimer(window_, selectionTimer, 50, nullptr);
+        linkPoint_ = selectionPoint_; pressedLink_ = linkAt(linkPoint_.x, linkPoint_.y);
         InvalidateRect(window_, nullptr, FALSE);
         return 0;
     case WM_MOUSEMOVE: if (selecting_) extendSelection(GET_X_LPARAM(b), GET_Y_LPARAM(b)); return 0;
-    case WM_LBUTTONUP: if (selecting_) { extendSelection(GET_X_LPARAM(b), GET_Y_LPARAM(b)); stopSelection(); } return 0;
+    case WM_LBUTTONUP:
+        if (selecting_) {
+            const int x = GET_X_LPARAM(b), y = GET_Y_LPARAM(b);
+            extendSelection(x, y);
+            const auto url = pressedLink_;
+            const bool open = !url.empty() && GetCapture() == window_ && url == linkAt(x, y);
+            stopSelection();
+            if (open) {
+                const auto target = wide(url);
+                SHELLEXECUTEINFOW execute{}; execute.cbSize = sizeof(execute);
+                execute.fMask = SEE_MASK_FLAG_NO_UI | SEE_MASK_NOASYNC;
+                execute.hwnd = window_; execute.lpVerb = L"open"; execute.lpFile = target.c_str(); execute.nShow = SW_SHOWNORMAL;
+                // Pass the validated URL directly, without a shell or command arguments.
+                if (!ShellExecuteExW(&execute)) {
+                    const auto error = winError();
+                    MessageBoxW(window_, (target + L"\n\n" + error).c_str(), L"Poppy — Open URL", MB_OK | MB_ICONWARNING);
+                }
+            }
+        }
+        return 0;
     case WM_CANCELMODE: case WM_CAPTURECHANGED: stopSelection(); return 0;
     case WM_RBUTTONUP: if (hasSelection()) copy(); else { if (!started_) start(); paste(); } return 0;
     case WM_MOUSEWHEEL: {

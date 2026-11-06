@@ -53,11 +53,17 @@ void TerminalModel::resize(int columns, int rows) {
     }
     columns_ = columns; rows_ = rows; top_ = 0; bottom_ = rows - 1;
     // Old history rows keep their original width and are clipped/padded by the renderer.
+    for (auto& row : history_) row.wrapped = 0;
 }
 const std::vector<Cell>& TerminalModel::row(int y, size_t scroll) const {
     if (alternate_ || !scroll) return active().cells.at(static_cast<size_t>(y));
     const size_t offset = history_.size() - std::min(scroll, history_.size()) + static_cast<size_t>(y);
-    return offset < history_.size() ? history_[offset] : normal_.cells.at(offset - history_.size());
+    return offset < history_.size() ? history_[offset].cells : normal_.cells.at(offset - history_.size());
+}
+int TerminalModel::wrappedLength(int y, size_t scroll) const {
+    if (alternate_ || !scroll) return active().wrapped.at(static_cast<size_t>(y));
+    const size_t offset = history_.size() - std::min(scroll, history_.size()) + static_cast<size_t>(y);
+    return offset < history_.size() ? history_[offset].wrapped : normal_.wrapped.at(offset - history_.size());
 }
 void TerminalModel::erase(int y, int begin, int end) {
     auto& line = active().cells[y];
@@ -78,9 +84,9 @@ void TerminalModel::scrollUp(int count) {
     auto& s = active(); count = std::clamp(count, 1, bottom_ - top_ + 1);
     for (int i = 0; i < count; ++i) {
         if (!alternate_ && top_ == 0 && bottom_ == rows_ - 1) {
-            historyCells_ += s.cells.front().size(); history_.push_back(std::move(s.cells.front()));
+            historyCells_ += s.cells.front().size(); history_.push_back({std::move(s.cells.front()), s.wrapped.front()});
             // At most 1,000 lines AND 131,072 cells (roughly 2 MiB).
-            while (history_.size() > 1000 || historyCells_ > 131072) { historyCells_ -= history_.front().size(); history_.pop_front(); ++firstRow_; }
+            while (history_.size() > 1000 || historyCells_ > 131072) { historyCells_ -= history_.front().cells.size(); history_.pop_front(); ++firstRow_; }
         }
         if (top_ > 0) s.wrapped[top_ - 1] = 0;
         for (int y = top_; y < bottom_; ++y) { s.cells[y] = std::move(s.cells[y + 1]); s.wrapped[y] = s.wrapped[y + 1]; }
