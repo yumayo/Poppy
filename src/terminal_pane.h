@@ -27,7 +27,7 @@ struct TerminalSession {
 class TerminalPane {
 public:
     ~TerminalPane();
-    void create(HWND parent, HINSTANCE instance);
+    void create(HWND parent, HINSTANCE instance, bool docked = false);
     void setDpi(UINT dpi);
     void setDirectory(const ResourceId& directory);
     void relocate(const ResourceId& source, const ResourceId& destination);
@@ -47,7 +47,18 @@ public:
     std::wstring description() const;
     void stop(ShutdownDialog* progress = nullptr);
     bool key(const MSG& message);
-    bool contains(HWND window) const { return window == window_ || IsChild(window_, window); }
+    bool contains(HWND window) const;
+    size_t dockCount() const { return sessions_.size(); }
+    const SavedTerminal& dockConfiguration(size_t index) const { return sessions_[index]->configuration; }
+    std::wstring dockTitle(size_t index) const { return sessionName(*sessions_[index]); }
+    const AiStatus& dockStatus(size_t index) const { return sessions_[index]->ai; }
+    HWND dockWindow(size_t index) const { return sessions_[index]->terminal->window(); }
+    void dockSelect(size_t index, int group);
+    void dockPlace(size_t index, int group, bool displayed) { sessions_[index]->configuration.group = group; sessions_[index]->configuration.displayed = displayed; }
+    void dockClose(size_t index) { close(index); }
+    void dockMenu(size_t index, POINT point, RECT bounds);
+    void dockAdd(int group, bool dropdown, POINT point);
+    std::function<void()> dockChanged;
     HWND window() const { return active().terminal->window(); }
     HWND container() const { return window_; }
     std::function<void()> changed;
@@ -78,6 +89,8 @@ private:
     RECT groupBounds(int group) const;
     RECT addButtonBounds(int group, bool dropdown) const;
     int tabsRight(int group) const { return addButtonBounds(group, false).left; }
+    HWND dockParent_ = nullptr;
+    RECT dockRename_{};
     HWND window_ = nullptr, rename_ = nullptr, tooltips_ = nullptr;
     size_t renaming_ = 0, tools_ = 0;
     HINSTANCE instance_ = nullptr;

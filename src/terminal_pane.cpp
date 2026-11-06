@@ -7,7 +7,8 @@
 
 namespace poppy {
 TerminalPane::~TerminalPane() { stop(); sessions_.clear(); }
-void TerminalPane::create(HWND parent,HINSTANCE instance) {
+void TerminalPane::create(HWND parent,HINSTANCE instance, bool docked) {
+    dockParent_ = docked ? parent : nullptr;
     instance_ = instance;
     WNDCLASSW cls{}; cls.lpfnWndProc = procedure; cls.hInstance = instance; cls.lpszClassName = L"PoppyTerminalPane"; cls.hCursor = LoadCursorW(nullptr,IDC_ARROW); RegisterClassW(&cls);
     window_ = CreateWindowExW(0,cls.lpszClassName,L"Terminals",WS_CHILD|WS_CLIPCHILDREN|WS_CLIPSIBLINGS,0,0,0,0,parent,nullptr,instance,this);
@@ -22,7 +23,7 @@ void TerminalPane::add(SavedTerminal configuration) {
     if (configuration.name.empty()) configuration.name = "Shell";
     if (configuration.directory.empty()) configuration.directory = directory_.u8string();
     auto session = std::make_unique<TerminalSession>(); session->configuration = std::move(configuration);
-    session->terminal = std::make_unique<Terminal>(); session->terminal->create(window_,instance_);
+    session->terminal = std::make_unique<Terminal>(); session->terminal->create(dockParent_ ? dockParent_ : window_,instance_);
     session->terminal->setDpi(dpi_); session->terminal->setDirectory(directory_.wsl() ? windowsProcessDirectory() : fs::u8path(session->configuration.directory));
     if (directory_.wsl()) session->terminal->setDisplayDirectory(wide(session->configuration.directory) + L" · WSL · " + wide(directory_.location().distro));
     auto ptr = session.get();
@@ -131,6 +132,22 @@ void TerminalPane::add(SavedTerminal configuration) {
     };
     sessions_.push_back(std::move(session)); select(sessions_.size()-1);
 }
+bool TerminalPane::contains(HWND window) const {
+    if (window == window_ || IsChild(window_, window) || window == rename_) return true;
+    return std::any_of(sessions_.begin(), sessions_.end(), [window](const auto& s) {
+        return window == s->terminal->window() || IsChild(s->terminal->window(), window);
+    });
+}
+void TerminalPane::dockSelect(size_t index, int group) {
+    if (index >= sessions_.size()) return;
+    active_ = index; sessions_[index]->configuration.group = group;
+    for (auto& session : sessions_) if (session->configuration.group == group) session->configuration.displayed = false;
+    sessions_[index]->configuration.displayed = true;
+}
+void TerminalPane::dockMenu(size_t index, POINT point, RECT bounds) { dockRename_ = bounds; menu(index, point); }
+void TerminalPane::dockAdd(int group, bool dropdown, POINT point) {
+    if (dropdown) addMenu(group, point); else addShell(group, defaultShell_);
+}
 void TerminalPane::reportError(TerminalSession& session, const std::string& code, const std::wstring& message) {
     if (error && session.reportedErrors.insert(code).second)
         error(session.configuration.id + ":" + code,
@@ -171,7 +188,7 @@ void TerminalPane::restore(const ProjectSession& state) {
 void TerminalPane::snapshot(ProjectSession& state) const { state.terminals.clear();for(const auto& s:sessions_)state.terminals.push_back(s->configuration);state.activeTerminal=active().configuration.id; state.terminalRatio = ratio_; state.defaultShell = defaultShell_; }
 bool TerminalPane::apply(const AiEvent& event) {
     for(size_t i=0;i<sessions_.size();++i) if(sessions_[i]->notificationId==event.sessionId) {
-        const bool visible=sessions_[i]->configuration.displayed && IsWindowVisible(window_) && GetForegroundWindow()==GetAncestor(window_,GA_ROOT) && !IsIconic(GetAncestor(window_,GA_ROOT));
+        const bool visible=sessions_[i]->configuration.displayed && (dockParent_ ? IsWindowVisible(sessions_[i]->terminal->window()) : IsWindowVisible(window_)) && GetForegroundWindow()==GetAncestor(window_,GA_ROOT) && !IsIconic(GetAncestor(window_,GA_ROOT));
         sessions_[i]->ai.apply(event,GetTickCount64(),visible); InvalidateRect(window_,nullptr,FALSE); if(changed)changed();return true;
     }
     return false;
@@ -189,8 +206,16 @@ void TerminalPane::activateSession(const std::string& id) {
     if (found == sessions_.end()) return;
     select(static_cast<size_t>(found - sessions_.begin())); SetFocus(window());
 }
-void TerminalPane::acknowledge() { if(IsWindowVisible(window_) && GetForegroundWindow()==GetAncestor(window_,GA_ROOT) && !IsIconic(GetAncestor(window_,GA_ROOT))) for (const auto& session : sessions_) if (session->configuration.displayed) session->ai.acknowledge(); }
+void TerminalPane::acknowledge() {
+    if (GetForegroundWindow() != GetAncestor(window_, GA_ROOT) || IsIconic(GetAncestor(window_, GA_ROOT))) return;
+    for (const auto& session : sessions_) if (session->configuration.displayed && IsWindowVisible(session->terminal->window())) session->ai.acknowledge();
+}
 bool TerminalPane::animateAiStatus() {
+    if (dockParent_) {
+        const bool running = std::any_of(sessions_.begin(), sessions_.end(), [](const auto& s) { return s->ai.state == AiState::Running; });
+        if (running) InvalidateRect(dockParent_, nullptr, FALSE);
+        return running;
+    }
     if (!IsWindowVisible(window_)) return false;
     const auto rects = bounds();
     const int unit = MulDiv(26, dpi_, 96);
@@ -230,9 +255,10 @@ void TerminalPane::select(size_t index) {
 void TerminalPane::close(size_t index) {
     if(index>=sessions_.size())return;
     endDrag(); finishRename(false);
+    const int closedGroup = sessions_[index]->configuration.group;
     sessions_[index]->terminal->stop();DestroyWindow(sessions_[index]->terminal->window());sessions_.erase(sessions_.begin()+static_cast<std::ptrdiff_t>(index));
     if(index<active_)--active_;
-    if(sessions_.empty())add({"", "Shell", directory_.u8string(), 0, false, defaultShell_}); else select(std::min(active_,sessions_.size()-1));
+    if(sessions_.empty())add({"", "Shell", directory_.u8string(), closedGroup, false, defaultShell_}); else select(std::min(active_,sessions_.size()-1));
 }
 void TerminalPane::stop(ShutdownDialog* progress) {
     shutdownProgress_ = progress;
@@ -282,6 +308,13 @@ std::wstring TerminalPane::sessionName(const TerminalSession& session) const {
 }
 void TerminalPane::layout(){
     if(!window_||sessions_.empty())return;
+    if (dockParent_) {
+        for (const auto& session : sessions_) SetWindowTextW(session->terminal->window(), sessionName(*session).c_str());
+        if (rename_) SetWindowPos(rename_, HWND_TOP, dockRename_.left, dockRename_.top, std::max(1L, dockRename_.right - dockRename_.left),
+            std::max(1L, dockRename_.bottom - dockRename_.top), SWP_NOACTIVATE | SWP_SHOWWINDOW);
+        if (dockChanged) dockChanged();
+        return;
+    }
     normalizeGroups(); auto rects=bounds();
     for (int group = 0; group < 2; ++group) {
         const auto selected = groupTab(group); if (selected == sessions_.size()) continue;
@@ -380,14 +413,14 @@ bool TerminalPane::key(const MSG& message) {
 }
 void TerminalPane::menu(size_t index,POINT point){
     HMENU menu=CreatePopupMenu();AppendMenuW(menu,MF_STRING,1,L"Rename terminal");AppendMenuW(menu,MF_STRING,2,L"Close terminal");
-    const auto command=TrackPopupMenu(menu,TPM_RETURNCMD|TPM_RIGHTBUTTON,point.x,point.y,0,window_,nullptr);DestroyMenu(menu);
+    const auto command=TrackPopupMenu(menu,TPM_RETURNCMD|TPM_RIGHTBUTTON,point.x,point.y,0,dockParent_ ? dockParent_ : window_,nullptr);DestroyMenu(menu);
     if(command==2)close(index);
     else if(command==1){
         finishRename(false);
         renaming_=index;
         renameInput_.commitOnFocusLoss = true;
         renameInput_.finished = [this](bool commit) { finishRename(commit); };
-        rename_ = renameInput_.create(window_, instance_, sessionName(*sessions_[index]), foreground);
+        rename_ = renameInput_.create(dockParent_ ? dockParent_ : window_, instance_, sessionName(*sessions_[index]), foreground);
         layout();
         SendMessageW(rename_,EM_SETLIMITTEXT,120,0);SendMessageW(rename_,EM_SETSEL,0,-1);SetFocus(rename_);
     }
@@ -418,7 +451,7 @@ void TerminalPane::addMenu(int group, POINT point) {
         CheckMenuRadioItem(defaults, 5, 6, defaultShell_ == TerminalShell::GitBash ? 6 : 5, MF_BYCOMMAND);
         AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(defaults), L"Default shell for this project");
     }
-    const auto command = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, point.x, point.y, 0, window_, nullptr); DestroyMenu(menu);
+    const auto command = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, point.x, point.y, 0, dockParent_ ? dockParent_ : window_, nullptr); DestroyMenu(menu);
     if (command == 1 || command == 4) addShell(group, command == 4 ? TerminalShell::GitBash : TerminalShell::PowerShell);
     else if (command == 2 || command == 3) addAi(command == 2 ? L"codex" : L"claude", group);
     else if (command == 5 || command == 6) {

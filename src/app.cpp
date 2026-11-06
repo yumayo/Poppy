@@ -1,3 +1,5 @@
+#include "dock_layout.h"
+#include <deque>
 #include "viewer.h"
 #include "terminal_pane.h"
 #include "project_runtime.h"
@@ -78,6 +80,7 @@ std::unordered_set<std::string> ignoredNames(ProjectProvider& provider, const Re
 struct FileResult { std::shared_ptr<EditBuffer> buffer; std::shared_ptr<Document> document; std::wstring error; std::shared_ptr<const ImagePreview> image; };
 using Tab = EditorTab;
 std::wstring tabKey(const Tab& tab) {
+    if (!tab.terminalId.empty()) return L"terminal:" + wide(tab.terminalId);
     return pathKey(tab.path) + L"\n" + std::to_wstring(static_cast<int>(tab.diffKind)) + L"\n" + wide(tab.revision) +
         (tab.diffKind == GitDiffKind::Commit && !tab.diff ? L"\nrevision" : L"") + (tab.allChanges ? L"\nall" : L"") + (tab.gitRoot.empty() ? L"" : L"\n" + pathKey(tab.gitRoot));
 }
@@ -92,8 +95,8 @@ std::wstring tabTitle(const Tab& tab) {
     else if (tab.diffKind != GitDiffKind::Automatic) title += L" · Changes";
     return title + (tab.diff ? L" (diff)" : L"");
 }
-struct TabDrop { size_t position; RECT marker; int group = 0; };
-struct EditorGroup { RECT tabs{}, body{}, tools{}; int tabRight = 0; std::vector<size_t> indices, starts; size_t firstRow = 0, rows = 0; bool overflow() const { return starts.size() > rows; } };
+struct TabDrop { size_t position; RECT marker; int group = 0; DockSide side = DockSide::Center; bool inStrip = false; };
+struct EditorGroup { RECT tabs{}, body{}, tools{}, add{}, dropdown{}; int tabRight = 0; std::vector<size_t> indices, starts; size_t firstRow = 0, rows = 0; bool overflow() const { return starts.size() > rows; } };
 struct TabDrag {
     size_t index;
     POINT origin, point;
@@ -373,7 +376,7 @@ private:
     void updateTabDrag(POINT point);
     void scrollTabDrag();
     void endTabDrag(bool drop = false);
-    ResourceId selectedPath() const { return tabs_.empty() ? ResourceId{} : tabs_[activeTab_].path; }
+    ResourceId selectedPath() const { return activeTab_ >= tabs_.size() ? ResourceId{} : tabs_[activeTab_].path; }
     void showDiff();
     void refresh(bool force = true);
     void refreshGit(bool rescan = false);
@@ -396,7 +399,7 @@ private:
     UINT dpi_ = 96;
     int sidebar_ = 245, terminalHeight_ = 260, footer_ = 26, splitter_ = 5;
     int activityWidth_ = 48, sidebarHeader_ = 34, gitHeader_ = 180;
-    RECT activityRect_{}, sidebarRect_{}, sidebarSplitter_{}, terminalSplitter_{}, tabsRect_{};
+    RECT activityRect_{}, sidebarRect_{}, sidebarSplitter_{};
     int dragging_ = 0, dragOffset_ = 0;
     bool terminalVisible_ = true;
     bool updatingGitFiles_ = false;
@@ -418,14 +421,26 @@ private:
     std::set<std::wstring> collapsedGitPaths_;
     std::set<std::wstring> hiddenGitFiles_;
     Sidebar activeSidebar_ = Sidebar::Explorer;
-    Viewer viewers_[2];
+    std::deque<Viewer> viewers_;
+    int groupCount() const { return static_cast<int>(viewers_.size()); }
+    void ensureGroup(int group);
+    bool syncTerminalTabs();
+    size_t terminalIndex(const std::string& id) const;
+    std::wstring titleFor(const Tab& tab) const;
+    HWND selectedWindow() const;
+    void loadGroups(bool preserve = false);
+    void pruneGroups();
+    DockLayout dock_;
+    DockGeometry dockGeometry_;
+    int dockDragging_ = -1, hiddenDockGroup_ = -1;
+    bool syncingTerminals_ = false;
     Viewer& viewer() { return viewers_[focusedGroup_]; }
     const Viewer& viewer() const { return viewers_[focusedGroup_]; }
     size_t groupTab(int group) const { for (size_t i = 0; i < tabs_.size(); ++i) if (tabs_[i].group == group && tabs_[i].displayed) return i; return tabs_.size(); }
     void normalizeGroups();
     int focusedGroup_ = 0, editorRatio_ = 500;
-    EditorGroup editorGroups_[2];
-    RECT editorRect_{}, editorSplitter_{};
+    std::deque<EditorGroup> editorGroups_;
+    RECT editorRect_{};
     DropPreview dropPreview_;
     TerminalPane terminal_;
     QuickOpen quickOpen_;
@@ -444,7 +459,7 @@ private:
     ResourceId pendingTreeSelection_;
     ResourceId pendingExplorerFile_;
     std::map<std::wstring, ResourceId> pendingTreeSelections_;
-    bool waitingForGit_[2]{};
+    std::deque<bool> waitingForGit_;
     std::vector<Tab> tabs_;
     std::vector<std::weak_ptr<EditorNavigation>> navigationTabs_;
     bool restoringProject_ = true;
@@ -454,7 +469,8 @@ private:
 
     std::optional<TabDrag> tabDrag_;
     TreeItem rootItem_ = 0;
-    uint64_t generation_ = 0, serial_[2]{}, editorGitSerial_[2]{}, nextId_ = 1;
+    uint64_t generation_ = 0, nextId_ = 1;
+    std::deque<uint64_t> serial_, editorGitSerial_;
     std::map<uint64_t, TreeItem> nodes_;
     std::shared_ptr<GitWorkspace> git_;
     bool gitScanDirty_ = true;
@@ -690,31 +706,18 @@ void ProjectRuntime::Impl::create() {
     TOOLINFOW collapseTip{}; collapseTip.cbSize = sizeof(collapseTip); collapseTip.uFlags = TTF_SUBCLASS;
     collapseTip.hwnd = window_; collapseTip.uId = 50; collapseTip.lpszText = const_cast<wchar_t*>(L"Collapse All");
     SendMessageW(tooltips_, TTM_ADDTOOLW, 0, reinterpret_cast<LPARAM>(&collapseTip));
-    for (int group = 0; group < 2; ++group) {
-        auto& view = viewers_[group]; view.create(window_, instance_);
-        view.changed = [this, group] {
-            saveTab();
-            if (viewers_[1 - group].buffer() && viewers_[1 - group].buffer() == viewers_[group].buffer()) viewers_[1 - group].refreshBuffer();
-            updateTabs(false); if (owner_ && owner_->changed) owner_->changed();
-        };
-        view.save = [this, group] { saveFile(groupTab(group)); };
-        view.diffLayoutChanged = [this, group] {
-            viewers_[1 - group].setDiffLayout(viewers_[group].diffInline());
-            updateTabs(false); if (owner_ && owner_->changed) owner_->changed();
-        };
-        view.statusChanged = [this] { statusDirty_ = true; InvalidateRect(window_, nullptr, FALSE); };
-        view.focused = [this, group] {
-            const bool changed = focusedGroup_ != group;
-            focusedGroup_ = group; if (groupTab(group) < tabs_.size()) activeTab_ = groupTab(group);
-            if (changed) revealActiveFile();
-            updateTabs(false);
-            recordEditorNavigation();
-        };
-    }
-    terminal_.create(window_, instance_);
+    ensureGroup(1);
+    terminal_.create(window_, instance_, true);
+    terminal_.dockChanged = [this] { PostMessageW(window_, WM_APP + 15, 0, 0); };
     dropPreview_.create(window_, instance_);
-    terminal_.changed = [this] { if (owner_ && owner_->changed) owner_->changed(); };
+    terminal_.changed = [this] { PostMessageW(window_, WM_APP + 15, 0, 0); if (owner_ && owner_->changed) owner_->changed(); };
     terminal_.activated = [this](const std::string& id) {
+        if (syncingTerminals_ || restoringProject_) return;
+        saveTab(); const bool changed = syncTerminalTabs();
+        if (changed) pruneGroups();
+        const auto found = std::find_if(tabs_.begin(), tabs_.end(), [&](const Tab& t) { return t.terminalId == id; });
+        if (found != tabs_.end()) selectTab(static_cast<size_t>(found - tabs_.begin()));
+        if (changed) loadGroups();
         if (active_ && !restoringProject_ && owner_ && owner_->activated) owner_->activated({0, {}, id});
     };
     terminal_.error = [this](const std::string& key, const std::wstring& title, const std::wstring& message) {
@@ -723,10 +726,10 @@ void ProjectRuntime::Impl::create() {
     quickOpen_.create(window_, instance_);
     comparePicker_.create(window_, instance_, QuickOpenMode::Picker);
     quickOpen_.updated = [this] { statusDirty_ = true; };
-    quickOpen_.opened = [this](const ResourceId& path) { openFile(path); SetFocus(viewer().window()); };
+    quickOpen_.opened = [this](const ResourceId& path) { openFile(path); SetFocus(selectedWindow()); };
     searchPane_.create(window_, instance_);
     searchPane_.opened = [this](const ContentMatch& match, const std::string& query, bool matchCase) { openContentResult(match, query, matchCase); };
-    searchPane_.exit = [this] { SetFocus(viewer().window()); };
+    searchPane_.exit = [this] { SetFocus(selectedWindow()); };
     searchPane_.changed = [this] { if (owner_ && owner_->changed) owner_->changed(); };
     searchPane_.overlays = [this] {
         std::vector<SearchOverlay> result; std::set<std::string> seen;
@@ -739,6 +742,85 @@ void ProjectRuntime::Impl::create() {
         SetWindowLongPtrW(pane, GWL_STYLE, GetWindowLongPtrW(pane, GWL_STYLE) | WS_CLIPSIBLINGS);
     const BOOL dark = TRUE; DwmSetWindowAttribute(window_, 20, &dark, sizeof(dark));
     dpi(GetDpiForWindow(window_));
+}
+void ProjectRuntime::Impl::ensureGroup(int target) {
+    while (groupCount() <= target) {
+        const int group = groupCount();
+        viewers_.emplace_back(); editorGroups_.emplace_back();
+        waitingForGit_.push_back(false); serial_.push_back(0); editorGitSerial_.push_back(0);
+        auto& view = viewers_[group]; view.create(window_, instance_); view.setDpi(dpi_);
+        if (group) view.setDiffLayout(viewers_[0].diffInline());
+        SetWindowLongPtrW(view.window(), GWL_STYLE, GetWindowLongPtrW(view.window(), GWL_STYLE) | WS_CLIPSIBLINGS);
+        view.changed = [this, group] {
+            saveTab();
+            for (int other = 0; other < groupCount(); ++other)
+                if (other != group && viewers_[other].buffer() && viewers_[other].buffer() == viewers_[group].buffer()) viewers_[other].refreshBuffer();
+            updateTabs(false); if (owner_ && owner_->changed) owner_->changed();
+        };
+        view.save = [this, group] { saveFile(groupTab(group)); };
+        view.diffLayoutChanged = [this, group] {
+            for (int other = 0; other < groupCount(); ++other)
+                if (other != group) viewers_[other].setDiffLayout(viewers_[group].diffInline());
+            updateTabs(false); if (owner_ && owner_->changed) owner_->changed();
+        };
+        view.statusChanged = [this] { statusDirty_ = true; InvalidateRect(window_, nullptr, FALSE); };
+        view.focused = [this, group] {
+            const bool changed = focusedGroup_ != group;
+            focusedGroup_ = group; activeTab_ = groupTab(group);
+            if (changed) revealActiveFile();
+            updateTabs(false);
+            recordEditorNavigation();
+        };
+    }
+}
+size_t ProjectRuntime::Impl::terminalIndex(const std::string& id) const {
+    for (size_t i = 0; i < terminal_.dockCount(); ++i) if (terminal_.dockConfiguration(i).id == id) return i;
+    return terminal_.dockCount();
+}
+std::wstring ProjectRuntime::Impl::titleFor(const Tab& tab) const {
+    if (tab.terminalId.empty()) return tabTitle(tab);
+    const auto index = terminalIndex(tab.terminalId);
+    return index < terminal_.dockCount() ? terminal_.dockTitle(index) : L"Terminal";
+}
+HWND ProjectRuntime::Impl::selectedWindow() const {
+    const auto index = groupTab(focusedGroup_);
+    if (index < tabs_.size() && !tabs_[index].terminalId.empty()) {
+        const auto terminal = terminalIndex(tabs_[index].terminalId);
+        if (terminal < terminal_.dockCount()) return terminal_.dockWindow(terminal);
+    }
+    return viewer().window();
+}
+bool ProjectRuntime::Impl::syncTerminalTabs() {
+    bool changed = false;
+    const auto selected = activeTab_ < tabs_.size() ? tabKey(tabs_[activeTab_]) : std::wstring{};
+    tabs_.erase(std::remove_if(tabs_.begin(), tabs_.end(), [this, &changed](const Tab& tab) {
+        const bool removed = !tab.terminalId.empty() && terminalIndex(tab.terminalId) == terminal_.dockCount();
+        changed = changed || removed; return removed;
+    }), tabs_.end());
+    for (size_t i = 0; i < terminal_.dockCount(); ++i) {
+        const auto& config = terminal_.dockConfiguration(i);
+        const auto found = std::find_if(tabs_.begin(), tabs_.end(), [&](const Tab& tab) { return tab.terminalId == config.id; });
+        if (found == tabs_.end()) {
+            changed = true;
+            Tab tab; tab.terminalId = config.id; tab.group = config.group; tab.displayed = config.displayed;
+            if (!dock_.pane(tab.group)) tab.group = focusedGroup_;
+            tabs_.push_back(std::move(tab));
+        }
+    }
+    const auto found = std::find_if(tabs_.begin(), tabs_.end(), [&](const Tab& t) { return tabKey(t) == selected; });
+    activeTab_ = found == tabs_.end() ? 0 : static_cast<size_t>(found - tabs_.begin());
+    return changed;
+}
+void ProjectRuntime::Impl::loadGroups(bool preserve) {
+    for (int group = 0; group < groupCount(); ++group) if (dock_.pane(group)) loadTab(preserve, group);
+}
+void ProjectRuntime::Impl::pruneGroups() {
+    std::vector<int> occupied;
+    for (const auto& tab : tabs_) occupied.push_back(tab.group);
+    dock_.retain(occupied);
+    for (int group = 0; group < groupCount(); ++group) if (!dock_.pane(group)) {
+        ++serial_[group]; waitingForGit_[group] = false; viewers_[group].message(L"");
+    }
 }
 void ProjectRuntime::Impl::dpi(UINT value) {
     dpi_ = value; renderer_.setDpi(dpi_);
@@ -760,8 +842,6 @@ void ProjectRuntime::Impl::layout(bool revealTab) {
     const int editorLeft = sidebarOnRight ? 0 : sidebarLeft + side + splitter_;
     const int editorRight = sidebarOnRight ? sidebarLeft - splitter_ : width;
     const int content = std::max(0, height - footer_);
-    const int terminalSize = terminalVisible_ ? std::min(MulDiv(terminalHeight_, dpi_, 96), std::max(0, content - MulDiv(100, dpi_, 96))) : 0;
-    const int viewerSize = std::max(0, content - terminalSize - (terminalVisible_ ? splitter_ : 0));
     activityRect_ = {activityLeft, 0, activityLeft + activityWidth_, content};
     sidebarRect_ = {sidebarLeft, 0, sidebarLeft + side, content};
     TOOLINFOW collapseTip{}; collapseTip.cbSize = sizeof(collapseTip); collapseTip.hwnd = window_; collapseTip.uId = 50;
@@ -770,41 +850,51 @@ void ProjectRuntime::Impl::layout(bool revealTab) {
     POINT pointer{}; GetCursorPos(&pointer); ScreenToClient(window_, &pointer);
     collapseHover_ = PtInRect(&collapseTip.rect, pointer) != FALSE;
     sidebarSplitter_ = sidebarOnRight ? RECT{editorRight, 0, sidebarLeft, content} : RECT{sidebarRect_.right, 0, editorLeft, content};
-    terminalSplitter_ = {editorLeft, viewerSize, editorRight, viewerSize + (terminalVisible_ ? splitter_ : 0)};
     const int gitTop = sidebarHeader_ + gitHeader_;
     const bool showExplorer = activeSidebar_ == Sidebar::Explorer && !root_.empty();
     const bool showGitFiles = activeSidebar_ == Sidebar::Git && changes_.child();
     normalizeGroups();
-    editorRect_ = {editorLeft, 0, editorRight, viewerSize};
-    const bool split = std::any_of(tabs_.begin(), tabs_.end(), [](const Tab& tab) { return tab.group == 1; });
-    const int middle = editorLeft + MulDiv(std::max(0, editorRight - editorLeft - splitter_), editorRatio_, 1000);
-    editorSplitter_ = split ? RECT{middle, 0, middle + splitter_, viewerSize} : RECT{};
+    if (revealTab && !dockGeometry_.panes.empty() && std::none_of(dockGeometry_.panes.begin(), dockGeometry_.panes.end(), [this](const DockPlacement& pane) { return pane.group == focusedGroup_; })) terminalVisible_ = true;
+    editorRect_ = {editorLeft, 0, std::max(editorLeft, editorRight), content};
+    dockGeometry_ = dock_.arrange({editorRect_.left, 0, editorRect_.right, content}, splitter_, terminalVisible_);
+    if (std::none_of(dockGeometry_.panes.begin(), dockGeometry_.panes.end(), [this](const DockPlacement& pane) { return pane.group == focusedGroup_; }) && !dockGeometry_.panes.empty()) {
+        focusedGroup_ = dockGeometry_.panes.front().group; activeTab_ = groupTab(focusedGroup_);
+    }
     const int rowHeight = MulDiv(34, dpi_, 96);
-    const size_t maxRows = static_cast<size_t>(std::max(1, (viewerSize - MulDiv(100, dpi_, 96)) / rowHeight));
     tabRects_.assign(tabs_.size(), RECT{});
-    for (int group = 0; group < 2; ++group) {
-        auto& pane = editorGroups_[group]; pane.indices.clear();
+    for (auto& pane : editorGroups_) {
+        pane.tabs = {}; pane.body = {}; pane.tools = {}; pane.add = {}; pane.dropdown = {};
+        pane.indices.clear(); pane.starts.clear(); pane.rows = 0;
+    }
+    for (const auto& placement : dockGeometry_.panes) {
+        const int group = placement.group;
+        auto& pane = editorGroups_[group];
+        const auto area = placement.rect;
+        const int start = area.left, edge = area.right;
+        const size_t maxRows = static_cast<size_t>(std::max(1, (area.bottom - area.top - MulDiv(60, dpi_, 96)) / rowHeight));
         for (size_t i = 0; i < tabs_.size(); ++i) if (tabs_[i].group == group) pane.indices.push_back(i);
-        const int start = group ? middle + splitter_ : editorLeft, edge = group || !split ? editorRight : middle;
-        pane.tabs = {start, 0, edge, 0};
+        pane.tabs = {start, area.top, edge, area.top};
         const auto selected = groupTab(group);
-        // Keep the tab tools clear of every wrapped row and its scroll buttons.
         const int modeWidth = selected < tabs_.size() && tabs_[selected].diff ? 136 : htmlTab(group) ? 160 : 0;
-        const int toolsWidth = std::min(MulDiv(modeWidth, dpi_, 96), std::max(0, edge - start) / 2);
-        pane.tabRight = edge - toolsWidth;
-        pane.tools = {pane.tabRight, 0, edge, toolsWidth ? rowHeight : 0};
+        const int addWidth = std::min(MulDiv(58, dpi_, 96), std::max(0, edge - start));
+        const int toolsWidth = std::min(MulDiv(modeWidth, dpi_, 96), std::max(0, edge - start - addWidth) / 2);
+        pane.tabRight = edge - toolsWidth - addWidth;
+        pane.tools = {pane.tabRight, area.top, edge - addWidth, area.top + (toolsWidth ? rowHeight : 0)};
+        const int dropdown = std::min(MulDiv(24, dpi_, 96), addWidth);
+        pane.add = {edge - addWidth, area.top, edge - dropdown, std::min(area.bottom, area.top + rowHeight)};
+        pane.dropdown = {edge - dropdown, area.top, edge, pane.add.bottom};
         const auto wrap = [&](int available) {
             pane.starts.clear(); int x = start, row = -1;
             for (size_t j = 0; j < pane.indices.size(); ++j) {
                 const size_t i = pane.indices[j]; const auto& tab = tabs_[i];
-                const auto title = tabTitle(tab);
+                const auto title = titleFor(tab);
                 // Editing a preview switches its title from italic to normal
                 // without laying out the tabs again. Reserve both font styles
                 // and the modified marker from the start, even for clean tabs.
                 const int titleWidth = std::max(renderer_.textWidth(title), renderer_.textWidth(title, true));
-                const int width = std::min(std::max(0, available), titleWidth + MulDiv(12, dpi_, 96) + MulDiv(40, dpi_, 96));
+                const int width = std::min(std::max(0, available), titleWidth + MulDiv(tab.terminalId.empty() ? 52 : 78, dpi_, 96));
                 if (!j || tab.pinned != tabs_[pane.indices[j - 1]].pinned || (x > start && x + width > start + available)) { pane.starts.push_back(j); x = start; ++row; }
-                tabRects_[i] = {x, row * rowHeight, x + width, (row + 1) * rowHeight}; x += width;
+                tabRects_[i] = {x, area.top + row * rowHeight, x + width, area.top + (row + 1) * rowHeight}; x += width;
             }
             pane.rows = std::min(maxRows, pane.starts.size());
         };
@@ -816,17 +906,16 @@ void ProjectRuntime::Impl::layout(bool revealTab) {
             if (row < pane.firstRow) pane.firstRow = row;
             else if (row >= pane.firstRow + pane.rows) pane.firstRow = row - pane.rows + 1;
         }
-        pane.tabs.bottom = static_cast<int>(pane.rows) * rowHeight;
-        pane.body = {start, pane.tabs.bottom, edge, viewerSize};
+        pane.tabs.bottom = std::min(area.bottom, area.top + static_cast<int>(std::max<size_t>(1, pane.rows)) * rowHeight);
+        pane.body = {start, pane.tabs.bottom, edge, area.bottom};
         for (const auto i : pane.indices) OffsetRect(&tabRects_[i], 0, -static_cast<int>(pane.firstRow) * rowHeight);
     }
-    tabsRect_ = {editorLeft, 0, editorRight, std::max(editorGroups_[0].tabs.bottom, editorGroups_[1].tabs.bottom)};
     updateTabs(false);
     if (tabDrag_ && tabDrag_->active) tabDrag_->target = tabDropAt(tabDrag_->point);
 
     struct Placement { HWND window; int x, y, width, height, flags; };
     const int activityButtonLeft = activityLeft + (sidebarOnRight ? 1 : 0);
-    const std::array<Placement, 11> panes{{
+    std::vector<Placement> panes{
         {statusBar_.window(), 0, std::max(0, height - footer_), width, footer_, SWP_SHOWWINDOW},
         {explorerButton_, activityButtonLeft, 0, activityWidth_ - 1, activityWidth_, SWP_SHOWWINDOW},
         {searchButton_, activityButtonLeft, activityWidth_, activityWidth_ - 1, activityWidth_, SWP_SHOWWINDOW},
@@ -835,11 +924,22 @@ void ProjectRuntime::Impl::layout(bool revealTab) {
         {gitTree_, sidebarLeft, gitTop, side, std::max(0, content - gitTop), showGitFiles ? SWP_SHOWWINDOW : SWP_HIDEWINDOW},
         {gitCommit_.window(), sidebarLeft + MulDiv(12, dpi_, 96), sidebarHeader_ + MulDiv(56, dpi_, 96), side - MulDiv(24, dpi_, 96), MulDiv(90, dpi_, 96), activeSidebar_ == Sidebar::Git ? SWP_SHOWWINDOW : SWP_HIDEWINDOW},
         {searchPane_.window(), sidebarLeft, sidebarHeader_, side, std::max(0, content - sidebarHeader_), activeSidebar_ == Sidebar::Search ? SWP_SHOWWINDOW : SWP_HIDEWINDOW},
-        {viewers_[0].window(), editorGroups_[0].body.left, editorGroups_[0].body.top, std::max(0L, editorGroups_[0].body.right - editorGroups_[0].body.left), std::max(0L, editorGroups_[0].body.bottom - editorGroups_[0].body.top), SWP_SHOWWINDOW},
-        {viewers_[1].window(), editorGroups_[1].body.left, editorGroups_[1].body.top, std::max(0L, editorGroups_[1].body.right - editorGroups_[1].body.left), std::max(0L, editorGroups_[1].body.bottom - editorGroups_[1].body.top), split ? SWP_SHOWWINDOW : SWP_HIDEWINDOW},
-        {terminal_.container(), editorLeft, viewerSize + splitter_, std::max(0, editorRight - editorLeft), terminalSize,
-            terminalVisible_ ? SWP_SHOWWINDOW : SWP_HIDEWINDOW | SWP_NOMOVE | SWP_NOSIZE}
-    }};
+        {terminal_.container(), 0, 0, 0, 0, SWP_HIDEWINDOW}
+    };
+    for (int group = 0; group < groupCount(); ++group) {
+        const auto& rect = editorGroups_[group].body;
+        const auto selected = groupTab(group);
+        const bool show = rect.bottom > rect.top && (selected == tabs_.size() || tabs_[selected].terminalId.empty());
+        panes.push_back({viewers_[group].window(), rect.left, rect.top, std::max(0L, rect.right - rect.left), std::max(0L, rect.bottom - rect.top), show ? SWP_SHOWWINDOW : SWP_HIDEWINDOW});
+    }
+    for (size_t i = 0; i < terminal_.dockCount(); ++i) {
+        const auto found = std::find_if(tabs_.begin(), tabs_.end(), [&](const Tab& tab) { return tab.terminalId == terminal_.dockConfiguration(i).id; });
+        if (found == tabs_.end()) continue;
+        const auto& rect = editorGroups_[found->group].body;
+        terminal_.dockPlace(i, found->group, found->displayed);
+        if (found->displayed && found->group == focusedGroup_) terminal_.dockSelect(i, found->group);
+        panes.push_back({terminal_.dockWindow(i), rect.left, rect.top, std::max(0L, rect.right - rect.left), std::max(0L, rect.bottom - rect.top), found->displayed && rect.bottom > rect.top ? SWP_SHOWWINDOW : SWP_HIDEWINDOW});
+    }
     // Move every pane before painting. Copying old window pixels during a
     // Direct2D resize can carry the previous splitter into the new layout.
     constexpr UINT flags = SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOREDRAW | SWP_NOCOPYBITS;
@@ -896,15 +996,19 @@ void ProjectRuntime::Impl::paint() {
     } else if (root_.empty()) {
         dc.label({left, top + scaled(16), edge, sidebarRect_.bottom - scaled(12)}, L"Open a folder with Ctrl+O to browse files.", muted, DT_LEFT | DT_TOP | DT_WORDBREAK);
     }
-    if (!tabs_.empty()) {
-        dc.fill(tabsRect_, background);
+    {
+        for (const auto& pane : editorGroups_) dc.fill(pane.tabs, background);
         for (const auto i : visibleTabs_) {
             const auto rect = tabBounds(i);
             const bool active = tabs_[i].displayed;
             dc.fill(rect, active ? panel : background);
             if (active) dc.fill({rect.left, rect.top, rect.right, rect.top + scaled(2)}, accent);
-            const auto title = tabTitle(tabs_[i]);
-            dc.label({rect.left + scaled(12), rect.top, rect.right - scaled(40), rect.bottom}, title, active ? foreground : muted,
+            const auto title = titleFor(tabs_[i]);
+            if (!tabs_[i].terminalId.empty()) {
+                const auto index = terminalIndex(tabs_[i].terminalId);
+                if (index < terminal_.dockCount()) drawAiStatus(dc, {rect.left, rect.top, rect.left + scaled(26), rect.bottom}, terminal_.dockStatus(index).state, dpi_);
+            }
+            dc.label({rect.left + scaled(tabs_[i].terminalId.empty() ? 12 : 32), rect.top, rect.right - scaled(40), rect.bottom}, title, active ? foreground : muted,
                 DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS, tabs_[i].preview);
             // Draw unsaved state outside the ellipsized filename, before the
             // close/pin control. This also applies to editable diff tabs.
@@ -922,8 +1026,10 @@ void ProjectRuntime::Impl::paint() {
             } else dc.label({rect.right - scaled(28), rect.top, rect.right - scaled(4), rect.bottom}, L"×", muted, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
             dc.fill({rect.right - 1, rect.top, rect.right, rect.bottom}, border);
         }
-        for (int group = 0; group < 2; ++group) {
+        for (int group = 0; group < groupCount(); ++group) {
             const auto& pane = editorGroups_[group];
+            dc.label(pane.add, L"+", foreground, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            dc.label(pane.dropdown, L"⌄", muted, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
             const bool html = htmlTab(group);
             const bool secondSelected = html ? viewers_[group].htmlPreview() : viewers_[group].diffInline();
             for (const bool second : {false, true}) {
@@ -939,7 +1045,6 @@ void ProjectRuntime::Impl::paint() {
             }
             for (size_t row = 1; row <= pane.rows; ++row) { const int bottom = pane.tabs.top + static_cast<int>(row) * scaled(34); dc.fill({pane.tabs.left, bottom - 1, pane.tabs.right, bottom}, border); }
         }
-        if (tabDrag_ && tabDrag_->active && tabDrag_->target) dc.fill(tabDrag_->target->marker, accent);
     }
 }
 void ProjectRuntime::Impl::selectSidebar(Sidebar sidebar) {
@@ -1002,7 +1107,7 @@ void ProjectRuntime::Impl::setGitView(bool tree) {
     }
     changes_.restoreScroll(top, left);
     saveTab();
-    for (int group = 0; group < 2; ++group) {
+    for (int group = 0; group < groupCount(); ++group) {
         const auto index = groupTab(group);
         if (index < tabs_.size() && tabs_[index].diff && tabs_[index].allChanges) loadTab(true, group);
     }
@@ -1029,7 +1134,7 @@ std::wstring ProjectRuntime::Impl::gitVisibilityPath(TreeItem item) const {
 void ProjectRuntime::Impl::refreshAllChanges() {
     if (collapsingSidebar_) return;
     saveTab();
-    for (int group = 0; group < 2; ++group) {
+    for (int group = 0; group < groupCount(); ++group) {
         const auto index = groupTab(group);
         if (index < tabs_.size() && tabs_[index].diff && tabs_[index].allChanges) loadTab(true, group);
     }
@@ -1141,7 +1246,7 @@ void ProjectRuntime::Impl::openWorkingFile(const ResourceId& path) {
     if (activeTab_ < tabs_.size() && tabs_[activeTab_].diff) {
         saveTab(); tabs_[activeTab_].diff = false; layout(); loadTab();
     }
-    SetFocus(viewer().window());
+    SetFocus(selectedWindow());
 }
 void ProjectRuntime::Impl::stageGitChanges(TreeItem item, bool all) {
     if (updatingGitFiles_ || gitStagePending_ || gitDiscardPending_ || gitStashPending_ || gitCommitPending_ || renamePending_ || !git_ || git_->repositories.empty()) return;
@@ -1503,7 +1608,7 @@ void ProjectRuntime::Impl::requestComparison(TreeItem item, bool open) {
             }
             updateCommitFiles(item);
             if (!error.empty()) { insertHistory(item, error, {HistoryKind::Message, {}, {}, {}}, false, muted); status(L"Git comparison failed: " + error); return; }
-            if (open) { openGitDiff(root, GitDiffKind::Compare, range, true, root); SetFocus(viewer().window()); }
+            if (open) { openGitDiff(root, GitDiffKind::Compare, range, true, root); SetFocus(selectedWindow()); }
         });
     });
 }
@@ -1998,7 +2103,7 @@ void ProjectRuntime::Impl::applyExplorerBatch(const std::vector<ExplorerEdit>& e
     std::map<std::wstring, TreeItem> items;
     for (const auto& pair : nodes_) if (const auto n = node(pair.second)) items[pathKey(n->path)] = pair.second;
     std::vector<ResourceId> selected;
-    ++generation_; ++serial_[0]; ++serial_[1];
+    ++generation_; for (auto& serial : serial_) ++serial;
     for (const auto& edit : edits) {
         if (edit.kind == ExplorerEditKind::Move) {
             const auto source = redo ? edit.before : edit.after, destination = redo ? edit.after : edit.before;
@@ -2063,7 +2168,7 @@ void ProjectRuntime::Impl::applyRelocation(const ResourceId& source, const Resou
         if (pathKey(n->path) == pathKey(destination.parent_path())) parent = pair.second;
     }
     const bool moving = pathKey(source.parent_path()) != pathKey(destination.parent_path());
-    saveTab(); ++generation_; ++serial_[0]; ++serial_[1];
+    saveTab(); ++generation_; for (auto& serial : serial_) ++serial;
     std::map<std::wstring, ResourceId> expanded;
     for (const auto& pair : expandedPaths_) { auto path = relocateResource(pair.second, source, destination); expanded[pathKey(path)] = std::move(path); }
     expandedPaths_ = std::move(expanded); pendingTreeSelection_ = destination;
@@ -2200,7 +2305,7 @@ void ProjectRuntime::Impl::openFolder(ResourceId path) {
     terminal_.setDirectory(root_); watch(); if (connected_) quickOpen_.setRoot(root_); refreshGit();
     SetWindowTextW(window_, (L"Poppy — " + root_.native()).c_str()); status(L"F5: refresh  ·  F6: diff  ·  Ctrl+J: terminal"); InvalidateRect(window_, nullptr, FALSE);
     if (root_.wsl() && active_) connectRemote();
-    if (!tabs_.empty()) { if (activeTab_ < tabs_.size()) { focusedGroup_ = tabs_[activeTab_].group; for (auto& tab : tabs_) if (tab.group == focusedGroup_) tab.displayed = false; tabs_[activeTab_].displayed = true; } normalizeGroups(); layout(false); loadTab(false, 0); loadTab(false, 1); }
+    normalizeGroups(); layout(false); loadGroups();
     restoringProject_ = false;
 }
 void ProjectRuntime::Impl::connectRemote() {
@@ -2241,6 +2346,7 @@ void ProjectRuntime::Impl::connectRemote() {
 ProjectSession ProjectRuntime::Impl::saveSession() {
     saveTab();
     ProjectSession state;
+    normalizeGroups(); state.dockLayout = dock_.save();
     state.wslUid = wslUid_;
     state.sidebar = sidebar_; state.terminalHeight = terminalHeight_; state.terminalVisible = terminalVisible_;
     state.gitSidebar = activeSidebar_ == Sidebar::Git;
@@ -2265,7 +2371,12 @@ ProjectSession ProjectRuntime::Impl::saveSession() {
     terminal_.snapshot(state);
     return state;
 }
-void ProjectRuntime::Impl::restoreProject(const ProjectSession& state) {
+void ProjectRuntime::Impl::restoreProject(const ProjectSession& original) {
+    ProjectSession state = original;
+    RECT rect{}; GetClientRect(window_, &rect);
+    if (rect.bottom <= footer_) GetClientRect(GetParent(window_), &rect);
+    dock_ = restoreDockLayout(state, MulDiv(rect.bottom - footer_, 96, dpi_));
+    for (const auto& node : dock_.nodes()) if (node.leaf()) ensureGroup(node.group);
     wslUid_ = state.wslUid;
     focusedPane_ = state.focusedPane == "branch" ? "git" : state.focusedPane;
     editorGroups_[0].firstRow = state.firstTabRow; editorGroups_[1].firstRow = state.rightTabRow; editorRatio_ = state.editorRatio;
@@ -2290,12 +2401,33 @@ void ProjectRuntime::Impl::restoreProject(const ProjectSession& state) {
         const auto& saved = state.tabs[i];
         const auto path = root_.at(saved.path);
         if (!path.is_absolute()) continue;
-        Tab target{path, saved.diff, saved.fileView, saved.diffView, saved.pinned, {}, saved.group, saved.displayed, saved.diffKind, saved.revision, saved.allChanges, {}, {}, false, saved.gitRoot.empty() ? ResourceId{} : root_.at(saved.gitRoot)};
+        Tab target{path, saved.diff, saved.fileView, saved.diffView, saved.pinned, {}, saved.group, saved.displayed, saved.diffKind, saved.revision, saved.allChanges, {}, {}, false, saved.gitRoot.empty() ? ResourceId{} : root_.at(saved.gitRoot), {}, false, {}, {}};
         const auto duplicate = std::find_if(tabs_.begin(), tabs_.end(), [&](const Tab& tab) { return tabKey(tab) == tabKey(target); });
         if (duplicate != tabs_.end()) continue;
         if (i <= state.activeTab) activeTab_ = tabs_.size();
         tabs_.push_back(std::move(target));
     }
+    syncTerminalTabs();
+    // Restore interleaved editor/terminal ordering and the selected tab per leaf.
+    std::map<std::string, size_t> order;
+    for (const auto& node : dock_.nodes()) if (node.leaf()) for (const auto& key : node.tabs) order.emplace(key, order.size());
+    const auto activeEditor = activeTab_ < tabs_.size() ? tabKey(tabs_[activeTab_]) : std::wstring{};
+    std::stable_sort(tabs_.begin(), tabs_.end(), [&](const Tab& a, const Tab& b) {
+        const auto left = order.find(utf8(tabKey(a))), right = order.find(utf8(tabKey(b)));
+        return (left == order.end() ? order.size() : left->second) < (right == order.end() ? order.size() : right->second);
+    });
+    for (const auto& node : dock_.nodes()) if (node.leaf() && !node.active.empty()) {
+        const auto selected = std::find_if(tabs_.begin(), tabs_.end(), [&](const Tab& tab) { return tab.group == node.group && utf8(tabKey(tab)) == node.active; });
+        if (selected != tabs_.end()) {
+            for (auto& tab : tabs_) if (tab.group == node.group) tab.displayed = false;
+            selected->displayed = true;
+        }
+    }
+    const auto active = std::find_if(tabs_.begin(), tabs_.end(), [&](const Tab& tab) {
+        return focusedPane_ == "terminal" ? tab.terminalId == state.activeTerminal : tabKey(tab) == activeEditor;
+    });
+    if (active != tabs_.end()) focusedGroup_ = active->group;
+
 }
 void ProjectRuntime::Impl::forgetExpanded(const ResourceId& path) {
     for (auto iterator = expandedPaths_.begin(); iterator != expandedPaths_.end();) {
@@ -2372,7 +2504,7 @@ void ProjectRuntime::Impl::applyDirectory(TreeItem item, Node* directory, const 
 }
 void ProjectRuntime::Impl::revealActiveFile() {
     pendingExplorerFile_.clear();
-    if (activeTab_ >= tabs_.size() || tabs_[activeTab_].allChanges) return;
+    if (activeTab_ >= tabs_.size() || !tabs_[activeTab_].terminalId.empty() || tabs_[activeTab_].allChanges) return;
     const auto& path = tabs_[activeTab_].path;
     if (path.empty() || !root_.contains(path) || pathKey(path) == pathKey(root_)) return;
     pendingTreeSelection_.clear(); pendingTreeSelections_.clear();
@@ -2407,28 +2539,32 @@ void ProjectRuntime::Impl::revealPendingFile() {
     pendingExplorerFile_.clear();
 }
 void ProjectRuntime::Impl::normalizeGroups() {
-    if (tabs_.empty()) { focusedGroup_ = 0; activeTab_ = 0; return; }
-    if (std::none_of(tabs_.begin(), tabs_.end(), [](const Tab& t) { return t.group == 0; })) {
-        for (auto& tab : tabs_) tab.group = 0;
-        focusedGroup_ = 0; ++serial_[0]; ++serial_[1];
-        viewers_[0].loading(L"Loading…"); viewers_[1].message(L"");
-        PostMessageW(window_, WM_APP + 14, 0, 0);
-    }
-    for (int group = 0; group < 2; ++group) {
+    int firstGroup = 0;
+    for (const auto& node : dock_.nodes()) if (node.leaf()) { firstGroup = node.group; break; }
+    for (const auto& node : dock_.nodes()) if (node.leaf()) ensureGroup(node.group);
+    for (auto& tab : tabs_) if (!dock_.pane(tab.group)) tab.group = firstGroup;
+    for (int group = 0; group < groupCount(); ++group) {
         bool selected = false;
         for (auto& tab : tabs_) if (tab.group == group && tab.displayed) { if (selected) tab.displayed = false; selected = true; }
+        if (!selected) {
+            const auto found = std::find_if(tabs_.begin(), tabs_.end(), [group](const Tab& tab) { return tab.group == group; });
+            if (found != tabs_.end()) found->displayed = true;
+        }
+        if (auto pane = dock_.pane(group)) {
+            pane->tabs.clear(); pane->active.clear();
+            for (const auto& tab : tabs_) if (tab.group == group) {
+                const auto key = utf8(tabKey(tab)); pane->tabs.push_back(key);
+                if (tab.displayed) pane->active = key;
+            }
+        }
     }
-    for (int group = 0; group < 2; ++group) if (groupTab(group) == tabs_.size()) {
-        const auto found = std::find_if(tabs_.begin(), tabs_.end(), [group](const Tab& tab) { return tab.group == group; });
-        if (found != tabs_.end()) found->displayed = true;
-    }
-    if (groupTab(focusedGroup_) == tabs_.size()) focusedGroup_ = 0;
+    if (!dock_.pane(focusedGroup_)) focusedGroup_ = firstGroup;
     activeTab_ = groupTab(focusedGroup_);
 }
 RECT ProjectRuntime::Impl::tabBounds(size_t index) const { return tabRects_[index]; }
 bool ProjectRuntime::Impl::htmlTab(int group) const {
     const auto index = groupTab(group);
-    return index < tabs_.size() && !tabs_[index].diff && tabs_[index].diffKind != GitDiffKind::Commit && isHtmlExtension(tabs_[index].path.extension().native());
+    return index < tabs_.size() && tabs_[index].terminalId.empty() && !tabs_[index].diff && tabs_[index].diffKind != GitDiffKind::Commit && isHtmlExtension(tabs_[index].path.extension().native());
 }
 RECT ProjectRuntime::Impl::editorModeButton(int group, bool second) const {
     auto rect = editorGroups_[group].tools;
@@ -2437,7 +2573,7 @@ RECT ProjectRuntime::Impl::editorModeButton(int group, bool second) const {
     return rect;
 }
 bool ProjectRuntime::Impl::selectEditorMode(POINT point) {
-    for (int group = 0; group < 2; ++group) for (const bool second : {false, true}) {
+    for (int group = 0; group < groupCount(); ++group) for (const bool second : {false, true}) {
         const auto button = editorModeButton(group, second);
         if (!PtInRect(&button, point)) continue;
         if (htmlTab(group)) viewers_[group].setHtmlPreview(second);
@@ -2449,7 +2585,7 @@ bool ProjectRuntime::Impl::selectEditorMode(POINT point) {
 }
 bool ProjectRuntime::Impl::tabVisible(size_t i) const {
     const auto& pane = editorGroups_[tabs_[i].group]; const auto rect = tabBounds(i);
-    return rect.top >= pane.tabs.top && rect.bottom <= pane.tabs.bottom && rect.right > rect.left;
+    return rect.top >= pane.tabs.top && rect.bottom <= pane.tabs.bottom && rect.right > rect.left && pane.tabs.bottom > pane.tabs.top;
 }
 size_t ProjectRuntime::Impl::tabAt(POINT point) const {
     for (const auto i : visibleTabs_) { const auto rect = tabBounds(i); if (PtInRect(&rect, point)) return i; }
@@ -2458,29 +2594,39 @@ size_t ProjectRuntime::Impl::tabAt(POINT point) const {
 std::optional<TabDrop> ProjectRuntime::Impl::tabDropAt(POINT point) const {
     if (!tabDrag_ || tabDrag_->index >= tabs_.size() || !PtInRect(&editorRect_, point)) return std::nullopt;
     const auto& source = tabs_[tabDrag_->index];
-    for (int group = 0; group < 2; ++group) {
+    for (const auto& placement : dockGeometry_.panes) {
+        const int group = placement.group;
         const auto& pane = editorGroups_[group];
-        if (!PtInRect(&pane.tabs, point)) continue;
-        if (PtInRect(&pane.tools, point)) return std::nullopt;
-        if (pane.overflow() && point.x >= pane.tabRight - MulDiv(56, dpi_, 96) && point.y >= pane.tabs.bottom - MulDiv(34, dpi_, 96)) return std::nullopt;
-        const int stroke = std::max(2, MulDiv(3, dpi_, 96)), inset = MulDiv(3, dpi_, 96);
-        const auto target = [&](size_t position, const RECT& rect, LONG x) { const LONG left = std::clamp<LONG>(x - stroke / 2, pane.tabs.left, std::max(pane.tabs.left, pane.tabs.right - stroke)); return TabDrop{position, {left, rect.top + inset, left + stroke, rect.bottom - inset}, group}; };
-        std::optional<TabDrop> result;
-        for (const auto i : pane.indices) {
-            const auto rect = tabBounds(i);
-            if (!tabVisible(i) || point.y < rect.top || point.y >= rect.bottom || tabs_[i].pinned != source.pinned) continue;
-            if (point.x < rect.left + (rect.right - rect.left) / 2) return target(i, rect, rect.left);
-            result = target(i + 1, rect, rect.right);
+        if (PtInRect(&pane.tabs, point)) {
+            if (point.x >= pane.tabRight) return std::nullopt;
+            const int stroke = std::max(2, MulDiv(3, dpi_, 96)), inset = MulDiv(3, dpi_, 96);
+            const auto target = [&](size_t position, const RECT& rect, LONG x) {
+                const LONG left = std::clamp<LONG>(x - stroke / 2, pane.tabs.left, std::max<LONG>(pane.tabs.left, pane.tabRight - stroke));
+                return TabDrop{position, {left, rect.top + inset, left + stroke, rect.bottom - inset}, group, DockSide::Center, true};
+            };
+            std::optional<TabDrop> result;
+            for (const auto i : pane.indices) {
+                const auto rect = tabBounds(i);
+                if (!tabVisible(i) || point.y < rect.top || point.y >= rect.bottom || tabs_[i].pinned != source.pinned) continue;
+                if (point.x < rect.left + (rect.right - rect.left) / 2) return target(i, rect, rect.left);
+                result = target(i + 1, rect, rect.right);
+            }
+            if (result) return result;
+            size_t position = tabs_.size();
+            for (const auto i : pane.indices) {
+                if (source.pinned && !tabs_[i].pinned) { position = i; break; }
+                position = i + 1;
+            }
+            return target(position, pane.tabs, pane.tabs.left);
         }
-        return result;
+        if (!PtInRect(&pane.body, point)) continue;
+        auto side = DockLayout::dropSide({pane.body.left, pane.body.top, pane.body.right, pane.body.bottom}, point.x, point.y);
+        if (group == source.group && side != DockSide::Center && pane.indices.size() <= 1) return std::nullopt;
+        if (group == source.group && side == DockSide::Center) return std::nullopt;
+        const auto preview = DockLayout::preview(placement.rect, side);
+        return TabDrop{tabs_.size(), {preview.left, preview.top, preview.right, preview.bottom}, group, side};
     }
-    const bool split = !editorGroups_[1].indices.empty();
-    const int middle = split ? editorSplitter_.left : (editorRect_.left + editorRect_.right) / 2;
-    const int group = point.x < middle ? 0 : 1;
-    if (group == source.group && split) return std::nullopt;
-    if (!split && tabs_.size() < 2) return std::nullopt;
-    RECT marker = split ? editorGroups_[group].body : RECT{group ? middle : editorRect_.left, tabsRect_.bottom, group ? editorRect_.right : middle, editorRect_.bottom};
-    return TabDrop{tabs_.size(), marker, group};
+    return std::nullopt;
 }
 void ProjectRuntime::Impl::updateTabDrag(POINT point) {
     if (!tabDrag_) return;
@@ -2517,16 +2663,22 @@ void ProjectRuntime::Impl::endTabDrag(bool drop) {
     if (drop && drag.target) {
         saveTab(); const auto from = drag.index; auto tab = std::move(tabs_[from]);
         int targetGroup = drag.target->group;
-        // Creating a left pane moves the other tabs to the right.
-        if (editorGroups_[1].indices.empty() && targetGroup == 0 && drag.target->marker.bottom > tabsRect_.bottom) { for (auto& value : tabs_) value.group = 1; }
+        if (drag.target->side != DockSide::Center) {
+            targetGroup = dock_.split(targetGroup, drag.target->side);
+            if (targetGroup < 0) { tabs_[from] = std::move(tab); layout(); return; }
+            ensureGroup(targetGroup);
+        }
         tab.group = targetGroup; tab.displayed = true;
         for (auto& value : tabs_) if (value.group == targetGroup) value.displayed = false;
         tabs_.erase(tabs_.begin() + static_cast<std::ptrdiff_t>(from));
         size_t position = drag.target->position; if (position > from) --position;
         position = std::min(position, tabs_.size());
-        if (drag.target->marker.bottom > tabsRect_.bottom) {
-            const auto found = std::find_if(tabs_.begin(), tabs_.end(), [&](const Tab& t) { return t.group == targetGroup && (!t.pinned || tab.pinned); });
-            position = static_cast<size_t>(found - tabs_.begin());
+        if (!drag.target->inStrip) {
+            position = tabs_.size();
+            for (size_t i = 0; i < tabs_.size(); ++i) if (tabs_[i].group == targetGroup) {
+                if (tab.pinned && !tabs_[i].pinned) { position = i; break; }
+                position = i + 1;
+            }
         }
         tabs_.insert(tabs_.begin() + static_cast<std::ptrdiff_t>(position), std::move(tab));
         // Moving a preview to another group replaces that group's clean preview.
@@ -2536,8 +2688,10 @@ void ProjectRuntime::Impl::endTabDrag(bool drop) {
                 if (i < position) --position;
             }
         }
-        focusedGroup_ = targetGroup; ++serial_[0]; ++serial_[1];
-        normalizeGroups(); layout(); loadTab(false, 0); loadTab(false, 1); SetFocus(viewer().window()); return;
+        focusedGroup_ = targetGroup; for (auto& serial : serial_) ++serial;
+        pruneGroups(); normalizeGroups(); layout(); loadGroups(); SetFocus(selectedWindow());
+        if (owner_ && owner_->changed) owner_->changed();
+        return;
     }
     layout();
 }
@@ -2548,13 +2702,13 @@ void ProjectRuntime::Impl::updateTabs(bool reveal) {
     visibleTabs_.clear();
     for (size_t i = 0; i < tabs_.size(); ++i) if (i < tabRects_.size() && tabVisible(i)) visibleTabs_.push_back(i);
     tabTools_ = visibleTabs_.size();
-    for (size_t j = 0; j < visibleTabs_.size(); ++j) { TOOLINFOW tip{}; tip.cbSize = sizeof(tip); tip.uFlags = TTF_SUBCLASS; tip.hwnd = window_; tip.uId = 100 + j; tip.rect = tabBounds(visibleTabs_[j]); tip.lpszText = LPSTR_TEXTCALLBACKW; SendMessageW(tooltips_, TTM_ADDTOOLW, 0, reinterpret_cast<LPARAM>(&tip)); }
+    for (size_t j = 0; j < visibleTabs_.size(); ++j) { TOOLINFOW tip{}; tip.cbSize = sizeof(tip); tip.uFlags = TTF_SUBCLASS; tip.hwnd = window_; tip.uId = 100 + j; tip.rect = tabBounds(visibleTabs_[j]); tip.lParam = tabs_[visibleTabs_[j]].terminalId.empty() ? 0 : reinterpret_cast<LPARAM>(terminal_.dockWindow(terminalIndex(tabs_[visibleTabs_[j]].terminalId))); tip.lpszText = LPSTR_TEXTCALLBACKW; SendMessageW(tooltips_, TTM_ADDTOOLW, 0, reinterpret_cast<LPARAM>(&tip)); }
     InvalidateRect(window_, nullptr, FALSE);
 }
 void ProjectRuntime::Impl::saveTab() {
-    for (int group = 0; group < 2; ++group) {
+    for (int group = 0; group < groupCount(); ++group) {
         const auto index = groupTab(group); auto& view = viewers_[group];
-        if (index >= tabs_.size() || !view.hasDocument()) continue;
+        if (index >= tabs_.size() || !tabs_[index].terminalId.empty() || !view.hasDocument()) continue;
         auto& tab = tabs_[index]; (tab.diff ? tab.diffView : tab.fileView) = view.state();
         if (view.buffer()) tab.buffer = view.buffer();
     }
@@ -2633,7 +2787,7 @@ void ProjectRuntime::Impl::openContentResult(const ContentMatch& match, const st
     auto& tab = tabs_[index]; tab.diff = false; tab.searchTarget = match; tab.searchQuery = query; tab.searchMatchCase = matchCase;
     focusedGroup_ = tab.group;
     for (auto& current : tabs_) if (current.group == focusedGroup_) current.displayed = false;
-    tab.displayed = true; activeTab_ = index; layout(); loadTab(false, focusedGroup_); SetFocus(viewer().window());
+    tab.displayed = true; activeTab_ = index; layout(); loadTab(false, focusedGroup_); SetFocus(selectedWindow());
     recordEditorNavigation();
 }
 void ProjectRuntime::Impl::applyContentResult(size_t index) {
@@ -2655,6 +2809,10 @@ void ProjectRuntime::Impl::openGitDiff(const ResourceId& path, GitDiffKind kind,
 void ProjectRuntime::Impl::recordEditorNavigation() {
     if (!active_ || restoringProject_ || activeTab_ >= tabs_.size() || !owner_ || !owner_->activated) return;
     auto& tab = tabs_[activeTab_];
+    if (!tab.terminalId.empty()) {
+        if (owner_->activated) owner_->activated({0, {}, tab.terminalId});
+        return;
+    }
     if (!tab.navigation) {
         rememberEditorTab(tab);
         navigationTabs_.erase(std::remove_if(navigationTabs_.begin(), navigationTabs_.end(), [](const auto& item) { return item.expired(); }), navigationTabs_.end());
@@ -2665,8 +2823,14 @@ void ProjectRuntime::Impl::recordEditorNavigation() {
 void ProjectRuntime::Impl::selectTab(size_t index) {
     endTabDrag();
     if (index >= tabs_.size()) return;
-    if (index == activeTab_) { revealActiveFile(); recordEditorNavigation(); return; }
-    saveTab(); focusedGroup_ = tabs_[index].group; for (auto& tab : tabs_) if (tab.group == focusedGroup_) tab.displayed = false; tabs_[index].displayed = true; activeTab_ = index; updateTabs(); loadTab();
+    if (index == activeTab_ && tabs_[index].displayed && tabs_[index].group == focusedGroup_) {
+        if (!IsWindowVisible(selectedWindow())) { terminalVisible_ = true; layout(); }
+        revealActiveFile(); recordEditorNavigation(); return;
+    }
+    saveTab(); focusedGroup_ = tabs_[index].group;
+    if (std::none_of(dockGeometry_.panes.begin(), dockGeometry_.panes.end(), [this](const DockPlacement& pane) { return pane.group == focusedGroup_; })) terminalVisible_ = true;
+    for (auto& tab : tabs_) if (tab.group == focusedGroup_) tab.displayed = false;
+    tabs_[index].displayed = true; activeTab_ = index; updateTabs(); loadTab();
     recordEditorNavigation();
 }
 void ProjectRuntime::Impl::closeTab(size_t index) {
@@ -2682,7 +2846,9 @@ void ProjectRuntime::Impl::closeTabs(const std::vector<size_t>& indices) {
     std::set<const EditBuffer*> confirmed;
     for (size_t i = 0; i < tabs_.size(); ++i) if (closing[i] && (!tabs_[i].buffer || confirmed.insert(tabs_[i].buffer.get()).second) && !confirmTab(i)) return;
     saveTab(); bool active = false;
-    for (int group = 0; group < 2; ++group) {
+    std::vector<std::string> terminalIds;
+    for (size_t i = 0; i < tabs_.size(); ++i) if (closing[i] && !tabs_[i].terminalId.empty()) terminalIds.push_back(tabs_[i].terminalId);
+    for (int group = 0; group < groupCount(); ++group) {
         const auto selected = groupTab(group);
         if (selected >= tabs_.size() || !closing[selected]) continue;
         active = true;
@@ -2696,14 +2862,18 @@ void ProjectRuntime::Impl::closeTabs(const std::vector<size_t>& indices) {
             if (tabKey(entry->tab) == key) entry->closed = true;
         tabs_.erase(tabs_.begin() + static_cast<std::ptrdiff_t>(i));
     }
+    syncingTerminals_ = true;
+    for (const auto& id : terminalIds) { const auto index = terminalIndex(id); if (index < terminal_.dockCount()) terminal_.dockClose(index); }
+    syncingTerminals_ = false;
+    syncTerminalTabs(); pruneGroups();
     layout();
     if (active) {
         pendingExplorerFile_.clear();
-        ++serial_[0]; ++serial_[1];
-        if (!tabs_.empty()) { loadTab(false, 0); loadTab(false, 1); }
+        for (auto& serial : serial_) ++serial;
+        if (!tabs_.empty()) { loadGroups(); }
         else { viewer().message(L"Select a file on the left.\n\nEdit here and save with Ctrl+S, or use your AI CLI in the terminal."); status(L"Ready"); }
     }
-    SetFocus(viewer().window());
+    SetFocus(selectedWindow());
     recordEditorNavigation();
 }
 void ProjectRuntime::Impl::toggleTabPin(size_t index) {
@@ -2722,15 +2892,28 @@ void ProjectRuntime::Impl::toggleTabPin(size_t index) {
 }
 void ProjectRuntime::Impl::tabMenu(POINT screen) {
     endTabDrag();
+    if (screen.x != -1 || screen.y != -1) {
+        auto local = screen; ScreenToClient(window_, &local);
+        for (int group = 0; group < groupCount(); ++group) if (PtInRect(&editorGroups_[group].add, local) || PtInRect(&editorGroups_[group].dropdown, local)) {
+            focusedGroup_ = group; terminal_.dockAdd(group, true, screen); return;
+        }
+    }
     if (tabs_.empty()) return;
     size_t index;
     if (screen.x == -1 && screen.y == -1) {
         updateTabs(); index = activeTab_;
+        if (index >= tabs_.size()) return;
         const auto rect = tabBounds(index);
         screen = {rect.left, rect.bottom}; ClientToScreen(window_, &screen);
     } else {
         auto point = screen; ScreenToClient(window_, &point); index = tabAt(point);
         if (index >= tabs_.size()) return;
+    }
+    if (index >= tabs_.size()) return;
+    if (!tabs_[index].terminalId.empty()) {
+        const auto terminal = terminalIndex(tabs_[index].terminalId);
+        if (terminal < terminal_.dockCount()) terminal_.dockMenu(terminal, screen, tabBounds(index));
+        return;
     }
     const auto path = tabs_[index].path;
     const auto key = tabKey(tabs_[index]);
@@ -2779,14 +2962,17 @@ void ProjectRuntime::Impl::tabMenu(POINT screen) {
 }
 void ProjectRuntime::Impl::loadTab(bool preserve, int group) {
     if (group < 0) group = focusedGroup_;
+    ++serial_[group];
     if (!preserve && group == focusedGroup_) revealActiveFile();
     waitingForGit_[group] = false;
     const size_t index = groupTab(group); if (index >= tabs_.size()) { viewers_[group].message(L"Select a file."); return; }
     preserve = preserve && viewers_[group].hasDocument();
-    const auto& tab = tabs_[index]; const auto path = tab.path;
+    const auto& tab = tabs_[index];
+    if (!tab.terminalId.empty()) { viewers_[group].message(L""); return; }
+    const auto path = tab.path;
     if (!tab.allChanges && (tab.diffKind == GitDiffKind::Automatic || tab.diffKind == GitDiffKind::Changes)) shareBuffer(path);
     const auto state = tab.diff ? tab.diffView : tab.fileView;
-    const auto serial = ++serial_[group], generation = generation_;
+    const auto serial = serial_[group], generation = generation_;
     if (!tab.diff && tab.buffer && (tab.buffer->dirty() || tab.buffer->saving)) {
         viewers_[group].edit(tab.buffer, path, preserve); if (!preserve) viewers_[group].restore(state);
         refreshEditorGit(group);
@@ -2967,7 +3153,7 @@ void ProjectRuntime::Impl::loadTab(bool preserve, int group) {
 void ProjectRuntime::Impl::refreshEditorGit(int group) {
     const auto request = ++editorGitSerial_[group];
     const auto index = groupTab(group);
-    if (index >= tabs_.size() || tabs_[index].diff || !viewers_[group].buffer()) return;
+    if (index >= tabs_.size() || !tabs_[index].terminalId.empty() || tabs_[index].diff || !viewers_[group].buffer()) return;
     const auto path = tabs_[index].path;
     const auto repo = git_ ? git_->repository(path) : nullptr;
     if (!repo || !repo->error.empty() || (root_.wsl() && !connected_)) { viewers_[group].setGitBase({}); return; }
@@ -3000,7 +3186,7 @@ void ProjectRuntime::Impl::refreshEditorGit(int group) {
     });
 }
 void ProjectRuntime::Impl::showDiff() {
-    if (tabs_.empty()) { status(L"Select a file to view its Git diff."); return; }
+    if (activeTab_ >= tabs_.size() || !tabs_[activeTab_].terminalId.empty()) { status(L"Select a file to view its Git diff."); return; }
     auto& tab = tabs_[activeTab_];
     if (tab.diffKind != GitDiffKind::Automatic) {
         if (!tab.allChanges && tab.diffKind != GitDiffKind::Commit && tab.diffKind != GitDiffKind::Compare) { const auto path = tab.path; openFile(path); }
@@ -3053,7 +3239,7 @@ void ProjectRuntime::Impl::refreshGit(bool rescan) {
             }
             updateGitFiles();
             refreshBranches();
-            for (int group = 0; group < 2; ++group) {
+            for (int group = 0; group < groupCount(); ++group) {
                 if (waitingForGit_[group]) loadTab(false, group);
                 else refreshEditorGit(group);
             }
@@ -3084,7 +3270,7 @@ void ProjectRuntime::Impl::refresh(bool force) {
     const bool showingGitChanges = std::any_of(tabs_.begin(), tabs_.end(), [](const Tab& tab) { return tab.displayed && tab.diff && tab.diffKind != GitDiffKind::Commit && tab.diffKind != GitDiffKind::Compare; });
     if (!tabs_.empty() && (force || fileDirty_ || showingGitChanges)) {
         if (!IsWindowVisible(window_) && !viewer().hasDocument()) { fileDirty_ = true; return; }
-        saveTab(); loadTab(true, 0); loadTab(true, 1);
+        saveTab(); loadGroups(true);
     }
     fileDirty_ = false;
 }
@@ -3108,7 +3294,7 @@ void ProjectRuntime::Impl::pollWatch() {
         const bool usageChanged = !(usage == watchUsage_);
         if (usageChanged) { watchUsage_ = usage; statusDirty_ = true; }
         const auto changes = connected_ ? provider_->takeChanges() : ProviderChanges{};
-        if (connected_ && provider_->state() != ConnectionState::Ready) { connected_ = false; ++generation_; ++serial_[0]; ++serial_[1]; connectionError_ = provider_->error(); status(L"WSL disconnected. " + connectionError_ + L" Your edits have been kept. Use F5 to reconnect."); if (owner_ && owner_->changed) owner_->changed(); }
+        if (connected_ && provider_->state() != ConnectionState::Ready) { connected_ = false; ++generation_; for (auto& serial : serial_) ++serial; connectionError_ = provider_->error(); status(L"WSL disconnected. " + connectionError_ + L" Your edits have been kept. Use F5 to reconnect."); if (owner_ && owner_->changed) owner_->changed(); }
         else if (connected_) {
             if (changes.watchLimited || (usageChanged && usage && usage->limited)) { watchLimited_ = true; status(watchLimitMessage(usage)); }
             if (changes.changed) {
@@ -3131,7 +3317,7 @@ void ProjectRuntime::Impl::pollWatch() {
             relevant |= change.relevant; filesDirty_ |= change.files;
             if (change.content && !tabs_.empty()) {
                 const auto changed = pathKey(root_ / name), selected = pathKey(selectedPath());
-                if (changed == selected || selected.rfind(changed + L"\\", 0) == 0 || (groupTab(1 - focusedGroup_) < tabs_.size() && changed == pathKey(tabs_[groupTab(1 - focusedGroup_)].path))) fileDirty_ = true;
+                if (changed == selected || selected.rfind(changed + L"\\", 0) == 0 || std::any_of(tabs_.begin(), tabs_.end(), [&](const Tab& tab) { return tab.displayed && changed == pathKey(tab.path); })) fileDirty_ = true;
             }
             if (!info->NextEntryOffset) break;
             offset += info->NextEntryOffset;
@@ -3151,7 +3337,25 @@ void ProjectRuntime::Impl::stopWatch(ShutdownDialog* progress) {
     watchDirectory_.reset(); watchEvent_.reset(); watchPending_ = dirty_ = fileDirty_ = filesDirty_ = false;
 }
 void ProjectRuntime::Impl::toggleTerminal() {
-    terminalVisible_ = !terminalVisible_; layout(); SetFocus(terminalVisible_ ? terminal_.window() : viewer().window());
+    endTabDrag();
+    saveTab();
+    const auto previous = dockGeometry_.panes;
+    const int focused = focusedGroup_;
+    terminalVisible_ = !terminalVisible_;
+    if (terminalVisible_) {
+        if (dock_.pane(hiddenDockGroup_)) focusedGroup_ = hiddenDockGroup_;
+        else {
+            const auto full = dock_.arrange({editorRect_.left, editorRect_.top, editorRect_.right, editorRect_.bottom}, splitter_);
+            for (const auto& pane : full.panes) if (std::none_of(previous.begin(), previous.end(), [&](const DockPlacement& old) { return old.group == pane.group; })) { focusedGroup_ = pane.group; break; }
+        }
+    }
+    layout(false);
+    if (!terminalVisible_) {
+        if (focused != focusedGroup_) hiddenDockGroup_ = focused;
+        else for (const auto& pane : previous) if (std::none_of(dockGeometry_.panes.begin(), dockGeometry_.panes.end(), [&](const DockPlacement& current) { return current.group == pane.group; })) { hiddenDockGroup_ = pane.group; break; }
+    }
+    SetFocus(selectedWindow());
+    if (owner_ && owner_->changed) owner_->changed();
 }
 LRESULT CALLBACK ProjectRuntime::Impl::procedure(HWND w, UINT m, WPARAM a, LPARAM b) {
     auto* self = reinterpret_cast<ProjectRuntime::Impl*>(GetWindowLongPtrW(w, GWLP_USERDATA));
@@ -3168,13 +3372,16 @@ LRESULT ProjectRuntime::Impl::handle(UINT m, WPARAM a, LPARAM b) {
     case WM_DPICHANGED: { dpi(HIWORD(a)); const auto r = reinterpret_cast<RECT*>(b); SetWindowPos(window_, nullptr, r->left, r->top, r->right - r->left, r->bottom - r->top, SWP_NOZORDER | SWP_NOACTIVATE); return 0; }
     case wmWork: worker_->dispatch(); gitWorker_->dispatch(); return 0;
     case WM_TIMER: if (a == timerId) pollWatch(); else if (a == tabDragTimerId) scrollTabDrag(); return 0;
-    case WM_APP + 14: loadTab(false, 0); loadTab(false, 1); return 0;
+    case WM_APP + 15:
+        if (!restoringProject_) { saveTab(); const bool changed = syncTerminalTabs(); if (changed) pruneGroups(); layout(false); if (changed) loadGroups(); }
+        return 0;
+    case WM_APP + 14: loadGroups(); return 0;
     case WM_APP + 13: if (!root_.empty()) { if (!watchDirectory_) watch(); refresh(); } return 0;
     case WM_APP + 12:
         if (!root_.empty() && IsWindowVisible(window_)) {
             pollWatch();
             if (!root_.wsl() || connected_) {
-                for (int group = 0; group < 2; ++group) if (groupTab(group) < tabs_.size() && !viewers_[group].hasDocument()) loadTab(true, group);
+                for (int group = 0; group < groupCount(); ++group) if (groupTab(group) < tabs_.size() && !viewers_[group].hasDocument()) loadTab(true, group);
                 if (watchLimited_) status(watchLimitMessage(watchUsage_));
             }
         }
@@ -3188,14 +3395,23 @@ LRESULT ProjectRuntime::Impl::handle(UINT m, WPARAM a, LPARAM b) {
             const auto button = gitViewButton(tree);
             if (PtInRect(&button, point)) { setGitView(tree); return 0; }
         }
-        if (PtInRect(&tabsRect_, point)) {
+        for (int group = 0; group < groupCount(); ++group) {
+            const auto& pane = editorGroups_[group];
+            if (PtInRect(&pane.add, point) || PtInRect(&pane.dropdown, point)) {
+                focusedGroup_ = group;
+                POINT screen{pane.dropdown.right, pane.dropdown.bottom}; ClientToScreen(window_, &screen);
+                terminal_.dockAdd(group, PtInRect(&pane.dropdown, point) != FALSE, screen);
+                return 0;
+            }
+        }
+        if (std::any_of(editorGroups_.begin(), editorGroups_.end(), [&](const EditorGroup& pane) { return PtInRect(&pane.tabs, point) != FALSE; })) {
             if (selectEditorMode(point)) return 0;
             const auto index = tabAt(point);
             if (index < tabs_.size()) {
                 const auto rect = tabBounds(index);
                 if (!tabs_[index].pinned && point.x >= rect.right - MulDiv(28, dpi_, 96)) closeTab(index);
                 else {
-                    selectTab(index); SetFocus(viewer().window());
+                    selectTab(index); SetFocus(selectedWindow());
                     tabDrag_ = TabDrag{index, point, point, false, std::nullopt};
                     SetCapture(window_);
                 }
@@ -3208,8 +3424,10 @@ LRESULT ProjectRuntime::Impl::handle(UINT m, WPARAM a, LPARAM b) {
             return 0;
         }
         if (PtInRect(&sidebarSplitter_, point)) { dragging_ = 1; dragOffset_ = point.x - sidebarSplitter_.left; }
-        else if (terminalVisible_ && PtInRect(&terminalSplitter_, point)) dragging_ = 2;
-        else if (PtInRect(&editorSplitter_, point)) dragging_ = 3;
+        else for (const auto& divider : dockGeometry_.dividers) {
+            const RECT rect{divider.rect.left, divider.rect.top, divider.rect.right, divider.rect.bottom};
+            if (PtInRect(&rect, point)) { dragging_ = 2; dockDragging_ = divider.node; break; }
+        }
         if (dragging_) SetCapture(window_);
         return 0;
     }
@@ -3222,7 +3440,7 @@ LRESULT ProjectRuntime::Impl::handle(UINT m, WPARAM a, LPARAM b) {
         if (index < tabs_.size()) {
             const auto rect = tabBounds(index);
             if (!tabs_[index].pinned && point.x >= rect.right - MulDiv(28, dpi_, 96)) return 0;
-            selectTab(index); tabs_[index].preview = false; updateTabs(); SetFocus(viewer().window());
+            selectTab(index); tabs_[index].preview = false; updateTabs(); SetFocus(selectedWindow());
             if (owner_ && owner_->changed) owner_->changed();
         }
         return 0;
@@ -3245,8 +3463,12 @@ LRESULT ProjectRuntime::Impl::handle(UINT m, WPARAM a, LPARAM b) {
                 const int side = sidebarOnRight ? r.right - activityWidth_ - splitter_ - boundary : boundary - activityWidth_;
                 sidebar_ = std::clamp(MulDiv(side, 96, dpi_), 130, std::max(130, MulDiv(r.right - activityWidth_ - splitter_, 96, dpi_) - 250));
             }
-            else if (dragging_ == 3) editorRatio_ = std::clamp(MulDiv(GET_X_LPARAM(b) - editorRect_.left, 1000, std::max(1L, editorRect_.right - editorRect_.left - splitter_)), 200, 800);
-            else terminalHeight_ = std::clamp(MulDiv(r.bottom - footer_ - GET_Y_LPARAM(b), 96, dpi_), 100, std::max(100, MulDiv(r.bottom - footer_, 96, dpi_) - 120));
+            else for (const auto& divider : dockGeometry_.dividers) if (divider.node == dockDragging_) {
+                const int position = divider.horizontal ? GET_Y_LPARAM(b) - divider.area.top : GET_X_LPARAM(b) - divider.area.left;
+                const int extent = divider.horizontal ? divider.area.bottom - divider.area.top : divider.area.right - divider.area.left;
+                dock_.resize(divider.node, MulDiv(position, 1000, std::max(1, extent - splitter_)));
+                break;
+            }
             layout();
         } return 0;
     }
@@ -3267,15 +3489,18 @@ LRESULT ProjectRuntime::Impl::handle(UINT m, WPARAM a, LPARAM b) {
             const auto collapse = collapseButton();
             if (PtInRect(&collapse, p)) { SetCursor(LoadCursorW(nullptr, IDC_HAND)); return TRUE; }
             for (const auto& pane : editorGroups_) if (PtInRect(&pane.tools, p)) { SetCursor(LoadCursorW(nullptr, IDC_HAND)); return TRUE; }
-            if (PtInRect(&sidebarSplitter_, p) || PtInRect(&editorSplitter_, p)) { SetCursor(LoadCursorW(nullptr, IDC_SIZEWE)); return TRUE; }
-            if (terminalVisible_ && PtInRect(&terminalSplitter_, p)) { SetCursor(LoadCursorW(nullptr, IDC_SIZENS)); return TRUE; }
+            if (PtInRect(&sidebarSplitter_, p)) { SetCursor(LoadCursorW(nullptr, IDC_SIZEWE)); return TRUE; }
+            for (const auto& divider : dockGeometry_.dividers) {
+                const RECT rect{divider.rect.left, divider.rect.top, divider.rect.right, divider.rect.bottom};
+                if (PtInRect(&rect, p)) { SetCursor(LoadCursorW(nullptr, divider.horizontal ? IDC_SIZENS : IDC_SIZEWE)); return TRUE; }
+            }
         }
         break;
     case WM_NOTIFY: {
         const auto header = reinterpret_cast<NMHDR*>(b);
         if (header->hwndFrom == tooltips_ && header->code == TTN_GETDISPINFOW && header->idFrom >= 100 && header->idFrom - 100 < tabTools_) {
             const size_t index = visibleTabs_[header->idFrom - 100];
-            if (index < tabs_.size()) { tabTip_ = tabs_[index].path.native(); reinterpret_cast<NMTTDISPINFOW*>(b)->lpszText = tabTip_.data(); }
+            if (index < tabs_.size()) { tabTip_ = tabs_[index].terminalId.empty() ? tabs_[index].path.native() : titleFor(tabs_[index]); reinterpret_cast<NMTTDISPINFOW*>(b)->lpszText = tabTip_.data(); }
             return 0;
         }
         return 0;
@@ -3289,6 +3514,10 @@ LRESULT ProjectRuntime::Impl::handle(UINT m, WPARAM a, LPARAM b) {
     return DefWindowProcW(window_, m, a, b);
 }
 bool ProjectRuntime::Impl::key(const MSG& message) {
+        if (message.message == WM_KEYDOWN && message.wParam == VK_ESCAPE && tabDrag_) { endTabDrag(); return true; }
+        if (message.message == WM_KEYDOWN && (GetKeyState(VK_CONTROL) & 0x8000) &&
+            !(GetKeyState(VK_SHIFT) & 0x8000) && !(GetKeyState(VK_MENU) & 0x8000) &&
+            (message.wParam == 'J' || message.wParam == VK_OEM_3)) { quickOpen_.close(); comparePicker_.close(); toggleTerminal(); return true; }
         if (terminal_.key(message)) return true;
         // Let every terminal session (and its rename input) receive its own keys.
         if (terminal_.contains(message.hwnd)) return false;
@@ -3299,9 +3528,7 @@ bool ProjectRuntime::Impl::key(const MSG& message) {
         const bool key = message.message == WM_KEYDOWN;
         const bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
         const bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
-        if (key && message.wParam == VK_ESCAPE && tabDrag_) { endTabDrag(); return true; }
         if (key && ctrl && !shift && !(GetKeyState(VK_MENU) & 0x8000) && message.wParam == 'N') { newFile(); return true; }
-        if (key && ctrl && !shift && !(GetKeyState(VK_MENU) & 0x8000) && message.wParam == 'J') { quickOpen_.close(); toggleTerminal(); return true; }
         if (key && ctrl && shift && !(GetKeyState(VK_MENU) & 0x8000) && message.wParam == 'F') { quickOpen_.close(); selectSidebar(Sidebar::Search); return true; }
         if (key && ctrl && !shift && !(GetKeyState(VK_MENU) & 0x8000) && message.wParam == 'P') { comparePicker_.close(); quickOpen_.show(); return true; }
         if (key && ctrl && message.wParam == 'O') { quickOpen_.close(); chooseFolder(); return true; }
@@ -3318,13 +3545,12 @@ bool ProjectRuntime::Impl::key(const MSG& message) {
         if (key && ctrl && shift && message.wParam == 'E') { selectSidebar(Sidebar::Explorer); return true; }
         if (key && ctrl && shift && message.wParam == 'G') { selectSidebar(Sidebar::Git); return true; }
         if (key && ctrl && shift && message.wParam == 'B') { selectSidebar(Sidebar::Git); return true; }
-        if (key && ctrl && message.wParam == VK_OEM_3) { toggleTerminal(); return true; }
-        if (key && ctrl && message.wParam == VK_TAB && !tabs_.empty()) { selectTab((activeTab_ + (shift ? tabs_.size() - 1 : 1)) % tabs_.size()); SetFocus(viewer().window()); return true; }
+        if (key && ctrl && message.wParam == VK_TAB && !tabs_.empty()) { selectTab(activeTab_ >= tabs_.size() ? 0 : (activeTab_ + (shift ? tabs_.size() - 1 : 1)) % tabs_.size()); SetFocus(selectedWindow()); return true; }
         if (key && ctrl && message.wParam == 'W' && GetFocus() != terminal_.window()) { closeTab(activeTab_); return true; }
         if (key && message.wParam == VK_F5 && GetFocus() != terminal_.window()) { refresh(); if (activeSidebar_ == Sidebar::Search) searchPane_.refresh(); return true; }
         if (key && message.wParam == VK_F6 && GetFocus() != terminal_.window()) { showDiff(); return true; }
         if (key && message.wParam == VK_F7 && GetFocus() != terminal_.window()) { const bool inlineView = !viewer().diffInline(); for (auto& view : viewers_) view.setDiffLayout(inlineView); return true; }
-        if (key && message.wParam == VK_TAB && GetFocus() != terminal_.window() && GetFocus() != viewers_[0].window() && GetFocus() != viewers_[1].window()) {
+        if (key && message.wParam == VK_TAB && GetFocus() != terminal_.window() && std::none_of(viewers_.begin(), viewers_.end(), [](const Viewer& view) { return GetFocus() == view.window(); })) {
             const HWND files = activeSidebar_ == Sidebar::Search ? searchPane_.window() : activeSidebar_ == Sidebar::Explorer ? (IsWindowVisible(tree_) ? tree_ : explorerButton_) : (IsWindowVisible(gitTree_) ? gitTree_ : gitButton_);
             SetFocus(GetFocus() == files ? viewer().window() : terminalVisible_ ? terminal_.window() : files); return true;
         }
@@ -3386,7 +3612,7 @@ void ProjectRuntime::activate(bool active) {
         ShowWindow(window(), SW_SHOWNA); impl_->layout(false);
         HWND focus = impl_->lastFocus_;
         if (!focus || !IsWindow(focus) || !IsWindowVisible(focus)) {
-            focus = impl_->focusedPane_ == "terminal" && impl_->terminalVisible_ ? impl_->terminal_.window() : impl_->focusedPane_ == "explorer" && IsWindowVisible(impl_->tree_) ? impl_->tree_ : impl_->focusedPane_ == "git" && IsWindowVisible(impl_->gitTree_) ? impl_->gitTree_ : impl_->viewer().window();
+            focus = impl_->focusedPane_ == "terminal" && impl_->terminalVisible_ ? impl_->terminal_.window() : impl_->focusedPane_ == "explorer" && IsWindowVisible(impl_->tree_) ? impl_->tree_ : impl_->focusedPane_ == "git" && IsWindowVisible(impl_->gitTree_) ? impl_->gitTree_ : impl_->selectedWindow();
         }
         SetFocus(focus); impl_->terminal_.acknowledge(); PostMessageW(window(), WM_APP+12, 0, 0);
         if (!impl_->restoringProject_ && focus == impl_->terminal_.window() && activated)
@@ -3395,7 +3621,7 @@ void ProjectRuntime::activate(bool active) {
     }
 }
 void ProjectRuntime::setDpi(UINT dpi) { impl_->dpi(dpi); }
-void ProjectRuntime::poll() { if (ready()) impl_->pollWatch(); impl_->terminal_.pollNotifications(); if (IsWindowVisible(impl_->terminal_.container())) impl_->terminal_.acknowledge(); }
+void ProjectRuntime::poll() { if (ready()) impl_->pollWatch(); impl_->terminal_.pollNotifications(); impl_->terminal_.acknowledge(); }
 bool ProjectRuntime::animateAiStatus() { return impl_->terminal_.animateAiStatus(); }
 bool ProjectRuntime::key(const MSG& message) { return impl_->key(message); }
 bool ProjectRuntime::terminalInput(HWND window) const { return impl_->terminal_.contains(window); }
@@ -3429,18 +3655,18 @@ void ProjectRuntime::navigate(const NavigationTarget& target) {
         impl_->tabs_[index].displayed = true; impl_->activeTab_ = index;
         impl_->layout(); impl_->loadTab();
     } else impl_->selectTab(index);
-    SetFocus(impl_->viewer().window());
+    SetFocus(impl_->selectedWindow());
 }
 size_t ProjectRuntime::documentBytes() const {
     if (std::any_of(impl_->tabs_.begin(), impl_->tabs_.end(), [](const Tab& tab) { return tab.buffer && (tab.buffer->dirty() || tab.buffer->saving); })) return 0;
     size_t bytes = 0; for (const auto& view : impl_->viewers_) bytes += view.documentBytes();
-    for (const auto& tab : impl_->tabs_) if (tab.buffer && tab.buffer != impl_->viewers_[0].buffer() && tab.buffer != impl_->viewers_[1].buffer()) bytes += tab.buffer->document.text.capacity() + tab.buffer->baseline.capacity();
+    for (const auto& tab : impl_->tabs_) if (tab.buffer && std::none_of(impl_->viewers_.begin(), impl_->viewers_.end(), [&](const Viewer& view) { return view.buffer() == tab.buffer; })) bytes += tab.buffer->document.text.capacity() + tab.buffer->baseline.capacity();
     return bytes;
 }
 void ProjectRuntime::releaseDocument() {
     impl_->saveTab(); if (std::any_of(impl_->tabs_.begin(), impl_->tabs_.end(), [](const Tab& tab) { return tab.buffer && (tab.buffer->dirty() || tab.buffer->saving); })) return;
     for (auto& tab : impl_->tabs_) { tab.buffer.reset(); tab.diffBefore.reset(); }
-    for (int group = 0; group < 2; ++group) { ++impl_->serial_[group]; impl_->waitingForGit_[group] = false; impl_->viewers_[group].message(L""); }
+    for (int group = 0; group < impl_->groupCount(); ++group) { ++impl_->serial_[group]; impl_->waitingForGit_[group] = false; impl_->viewers_[group].message(L""); }
 }
 HWND ProjectRuntime::window() const { return impl_->window_; }
 bool ProjectRuntime::ready() const { return !impl_->root_.empty(); }

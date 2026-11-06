@@ -18,6 +18,8 @@ struct EditorTab {
     // Restored tabs stay permanent; only newly opened tabs start as previews.
     bool preview = false;
     std::shared_ptr<EditorNavigation> navigation = {};
+    // Terminal sessions share the same tab strip and docking groups.
+    std::string terminalId;
 };
 
 // History retains metadata only, including previews replaced by another file.

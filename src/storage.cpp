@@ -1,5 +1,6 @@
 #include "storage.h"
 #include "resource.h"
+#include "dock_layout.h"
 #include "content_search_protocol.h"
 #include <sqlite3.h>
 #include <algorithm>
@@ -12,6 +13,8 @@ namespace poppy {
 namespace {
 namespace fs = std::filesystem;
 constexpr size_t maxSavedTabs = 10000, maxSavedDirectories = 50000;
+constexpr const char* dockViews =
+    "CREATE TABLE IF NOT EXISTS dock_layout (id INTEGER PRIMARY KEY CHECK(id=1), layout TEXT NOT NULL);";
 constexpr const char* projectViews =
     "CREATE TABLE view_state (id INTEGER PRIMARY KEY CHECK(id=1), explorer_top INTEGER NOT NULL, explorer_left INTEGER NOT NULL,"
     " git_top INTEGER NOT NULL, git_left INTEGER NOT NULL, first_tab_row INTEGER NOT NULL, git_selected TEXT NOT NULL, focused_pane TEXT NOT NULL, active_terminal TEXT NOT NULL);"
@@ -155,7 +158,7 @@ void projectSchema(Database& db) {
         "CREATE TABLE IF NOT EXISTS tabs (position INTEGER PRIMARY KEY, path TEXT NOT NULL, diff INTEGER NOT NULL,"
         " file_top INTEGER NOT NULL, file_left INTEGER NOT NULL, file_anchor INTEGER NOT NULL, file_caret INTEGER NOT NULL, file_after INTEGER NOT NULL,"
         " diff_top INTEGER NOT NULL, diff_left INTEGER NOT NULL, diff_anchor INTEGER NOT NULL, diff_caret INTEGER NOT NULL, diff_after INTEGER NOT NULL, pinned INTEGER NOT NULL);"
-        "CREATE TABLE IF NOT EXISTS expanded (path TEXT PRIMARY KEY);") + projectViews + splitViews + projectConnection + gitComparisons + wrappedViews + wrappedDiffViews + comparisonRepositories + terminalShells + contentSearchState).c_str(), {
+        "CREATE TABLE IF NOT EXISTS expanded (path TEXT PRIMARY KEY);") + projectViews + splitViews + projectConnection + gitComparisons + wrappedViews + wrappedDiffViews + comparisonRepositories + terminalShells + contentSearchState + dockViews).c_str(), {
         "ALTER TABLE session ADD COLUMN diff_inline INTEGER NOT NULL DEFAULT 0;"
         "UPDATE session SET diff_inline=COALESCE((SELECT diff_inline FROM tabs WHERE diff<>0"
         " ORDER BY (position=(SELECT active_tab FROM session WHERE id=1)) DESC,position LIMIT 1),0);"
@@ -164,7 +167,7 @@ void projectSchema(Database& db) {
         "ALTER TABLE tabs DROP COLUMN file_inline;"
         "ALTER TABLE tabs DROP COLUMN diff_inline;",
         "ALTER TABLE session ADD COLUMN git_tree INTEGER NOT NULL DEFAULT 0;",
-        "ALTER TABLE tabs ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0;", projectViews, splitViews, projectConnection, gitComparisons, wrappedViews, wrappedDiffViews, comparisonRepositories, terminalShells, contentSearchState});
+        "ALTER TABLE tabs ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0;", projectViews, splitViews, projectConnection, gitComparisons, wrappedViews, wrappedDiffViews, comparisonRepositories, terminalShells, contentSearchState, dockViews});
 }
 }
 struct Storage::Impl {
@@ -296,8 +299,10 @@ std::optional<ProjectSession> Storage::loadProject(const std::string& key, const
     while (collapsed.row()) state.collapsedGit.push_back(collapsed.text(0));
     Statement layout(db, "SELECT editor_ratio,terminal_ratio,right_tab_row FROM split_layout WHERE id=1");
     if (layout.row()) { state.editorRatio = bounded(layout.number(0), 200, 800); state.terminalRatio = bounded(layout.number(1), 200, 800); state.rightTabRow = position(layout.number(2)); }
+    Statement dock(db, "SELECT layout FROM dock_layout WHERE id=1");
+    if (dock.row()) { DockLayout layout; if (layout.restore(dock.text(0))) state.dockLayout = dock.text(0); }
     Statement groups(db, "SELECT path,pane,displayed FROM tab_groups");
-    while (groups.row()) for (auto& tab : state.tabs) if (tab.path == groups.text(0)) { tab.group = bounded(groups.number(1), 0, 1); tab.displayed = groups.number(2) != 0; break; }
+    while (groups.row()) for (auto& tab : state.tabs) if (tab.path == groups.text(0)) { tab.group = bounded(groups.number(1), 0, DockLayout::maxGroups - 1); tab.displayed = groups.number(2) != 0; break; }
     Statement comparisons(db, "SELECT position,kind,revision,all_changes,pane,displayed,repository FROM git_comparisons");
     while (comparisons.row()) {
         const auto index = comparisons.number(0);
@@ -305,10 +310,10 @@ std::optional<ProjectSession> Storage::loadProject(const std::string& key, const
         auto& tab = state.tabs[static_cast<size_t>(index)];
         tab.diffKind = static_cast<GitDiffKind>(bounded(comparisons.number(1), 0, static_cast<int>(GitDiffKind::Compare)));
         tab.revision = comparisons.text(2); tab.allChanges = comparisons.number(3) != 0; tab.gitRoot = comparisons.text(6);
-        tab.group = bounded(comparisons.number(4), 0, 1); tab.displayed = comparisons.number(5) != 0;
+        tab.group = bounded(comparisons.number(4), 0, DockLayout::maxGroups - 1); tab.displayed = comparisons.number(5) != 0;
     }
     Statement terminalGroups(db, "SELECT terminal_id,pane,displayed FROM terminal_groups");
-    while (terminalGroups.row()) for (auto& terminal : state.terminals) if (terminal.id == terminalGroups.text(0)) { terminal.group = bounded(terminalGroups.number(1), 0, 1); terminal.displayed = terminalGroups.number(2) != 0; break; }
+    while (terminalGroups.row()) for (auto& terminal : state.terminals) if (terminal.id == terminalGroups.text(0)) { terminal.group = bounded(terminalGroups.number(1), 0, DockLayout::maxGroups - 1); terminal.displayed = terminalGroups.number(2) != 0; break; }
     Statement search(db, "SELECT query,match_case,respect_ignore,status,selected,top,visible FROM search_state WHERE id=1");
     if (search.row()) {
         state.search.query = search.text(0); state.search.matchCase = search.number(1) != 0; state.search.respectIgnore = search.number(2) != 0;
@@ -366,6 +371,8 @@ void Storage::saveProject(const std::string& key, const std::string& path, const
     }
     Statement collapsed(db, "INSERT OR IGNORE INTO git_collapsed VALUES(?)");
     for (const auto& value : state.collapsedGit) { collapsed.text(1, value); collapsed.run(); collapsed.reset(); }
+    Statement dock(db, "INSERT OR REPLACE INTO dock_layout VALUES(1,?)");
+    dock.text(1, state.dockLayout); dock.run();
     db.exec("DELETE FROM tab_groups; DELETE FROM terminal_groups;");
     Statement layout(db, "INSERT OR REPLACE INTO split_layout VALUES(1,?,?,?)");
     layout.number(1, state.editorRatio); layout.number(2, state.terminalRatio); layout.number(3, static_cast<sqlite3_int64>(state.rightTabRow)); layout.run();

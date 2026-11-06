@@ -1,5 +1,6 @@
 #include "storage.h"
 #include "resource.h"
+#include "dock_layout.h"
 #include <sqlite3.h>
 #include <chrono>
 #include <iostream>
@@ -42,7 +43,7 @@ bool same(const poppy::SavedSearch& a, const poppy::SavedSearch& b) {
     return true;
 }
 bool same(const poppy::ProjectSession& a, const poppy::ProjectSession& b) {
-    if (a.wslUid != b.wslUid || a.defaultShell != b.defaultShell || a.searchSidebar != b.searchSidebar || !same(a.search, b.search)) return false;
+    if (a.dockLayout != b.dockLayout || a.wslUid != b.wslUid || a.defaultShell != b.defaultShell || a.searchSidebar != b.searchSidebar || !same(a.search, b.search)) return false;
     if (a.sidebar != b.sidebar || a.terminalHeight != b.terminalHeight || a.terminalVisible != b.terminalVisible ||
         a.gitSidebar != b.gitSidebar || a.branchSidebar != b.branchSidebar || a.diffInline != b.diffInline || a.gitTree != b.gitTree || a.activeTab != b.activeTab || a.expanded != b.expanded || a.selected != b.selected || a.tabs.size() != b.tabs.size() || a.explorerTop != b.explorerTop || a.explorerLeft != b.explorerLeft ||
         a.gitTop != b.gitTop || a.gitLeft != b.gitLeft || a.firstTabRow != b.firstTabRow || a.rightTabRow != b.rightTabRow || a.editorRatio != b.editorRatio || a.terminalRatio != b.terminalRatio || a.gitSelected != b.gitSelected ||
@@ -71,6 +72,11 @@ void roundTripAndIsolation() {
     state.tabs[0].fileView.wrapOffset = 137;
     state.tabs[1].diffView.wrapOffset = 89;
     state.editorRatio = 350; state.terminalRatio = 640; state.rightTabRow = 4; state.terminals[1].group = 1; state.terminals[1].displayed = true;
+    poppy::DockLayout dock;
+    int leaf = dock.split(0, poppy::DockSide::Bottom);
+    for (int i = 0; i < 5; ++i) leaf = dock.split(leaf, poppy::DockSide::Right);
+    dock.pane(leaf)->tabs = {"terminal:claude", "file\n日本語.cpp"}; dock.pane(leaf)->active = "terminal:claude";
+    state.dockLayout = dock.save(); state.tabs[1].group = leaf; state.terminals[1].group = leaf;
     state.expanded = {path, path + "\\src", path + "\\src\\日本語"}; state.selected = state.tabs.front().path;
     poppy::AppSession app;
     app.lastProject = path; app.openProjects = {path, "D:\\other"}; app.openProjectKeys = {key, "d:\\other"}; app.projectListWidth = 233; app.x = -1500; app.y = 120; app.width = 1200; app.height = 800; app.positioned = true; app.maximized = true;

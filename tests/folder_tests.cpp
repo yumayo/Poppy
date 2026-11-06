@@ -238,13 +238,7 @@ HWND tabTooltips(const Application& app) {
     check(result != nullptr, "The tab tooltips are missing");
     return result;
 }
-int visibleTabCount(const Application& app) {
-    // Three activity buttons and the sidebar's Collapse All button precede tabs.
-    return static_cast<int>(send(tabTooltips(app), TTM_GETTOOLCOUNT)) - 4;
-}
-RECT tabBounds(const Application& app, int visibleIndex) {
-    // Tooltip regions expose the actual clickable bounds without assuming a
-    // font's character widths. Tooltip messages need memory in Poppy's process.
+TOOLINFOW dockTabInfo(const Application& app, int visibleIndex) {
     struct RemoteMemory {
         HANDLE process; void* value;
         ~RemoteMemory() { if (value) VirtualFreeEx(process, value, 0, MEM_RELEASE); }
@@ -255,7 +249,50 @@ RECT tabBounds(const Application& app, int visibleIndex) {
     check(WriteProcessMemory(memory.process, memory.value, &tool, sizeof(tool), nullptr) != FALSE, "Could not write a tooltip query");
     check(send(tabTooltips(app), TTM_GETTOOLINFOW, 0, reinterpret_cast<LPARAM>(memory.value)) != FALSE, "A tab tooltip region is missing");
     check(ReadProcessMemory(memory.process, memory.value, &tool, sizeof(tool), nullptr) != FALSE, "Could not read a tab tooltip region");
-    return tool.rect;
+    return tool;
+}
+int dockTabCount(const Application& app) { return static_cast<int>(send(tabTooltips(app), TTM_GETTOOLCOUNT)) - 4; }
+int visibleTabCount(const Application& app) {
+    int files = 0;
+    for (int i = 0; i < dockTabCount(app); ++i) if (!dockTabInfo(app, i).lParam) ++files;
+    return files;
+}
+RECT tabBounds(const Application& app, int visibleIndex) {
+    for (int i = 0; i < dockTabCount(app); ++i) {
+        const auto info = dockTabInfo(app, i);
+        if (!info.lParam && visibleIndex-- == 0) return info.rect;
+    }
+    throw std::runtime_error("An editor tab tooltip region is missing");
+}
+RECT terminalTabBounds(const Application& app, HWND terminal) {
+    for (int i = 0; i < dockTabCount(app); ++i) {
+        const auto info = dockTabInfo(app, i);
+        if (info.lParam == reinterpret_cast<LPARAM>(terminal)) return info.rect;
+    }
+    throw std::runtime_error("A terminal tab tooltip region is missing");
+}
+void clickTerminalTab(const Application& app, HWND terminal) {
+    const auto rect = terminalTabBounds(app, terminal);
+    click(app.window, rect.left + MulDiv(12, GetDpiForWindow(app.window), 96), (rect.top + rect.bottom) / 2);
+}
+POINT terminalAddPoint(const Application& app, HWND terminal, bool dropdown = false) {
+    const auto body = bounds(app.window, terminal);
+    auto header = terminalTabBounds(app, terminal);
+    for (int i = 0; i < dockTabCount(app); ++i) {
+        const auto info = dockTabInfo(app, i);
+        if (info.lParam && info.rect.left >= body.left && info.rect.right <= body.right) header.top = (std::min)(header.top, info.rect.top);
+    }
+    return {body.right - MulDiv(dropdown ? 12 : 41, GetDpiForWindow(app.window), 96), header.top + MulDiv(17, GetDpiForWindow(app.window), 96)};
+}
+void addTerminal(const Application& app, HWND terminal) { const auto point = terminalAddPoint(app, terminal); click(app.window, point.x, point.y); }
+HWND otherVisibleViewer(HWND surface, HWND except) {
+    HWND result = nullptr;
+    waitFor([&] {
+        for (HWND child = nullptr; (child = FindWindowExW(surface, child, L"PoppyViewer", nullptr));)
+            if (child != except && IsWindowVisible(child)) { result = child; return true; }
+        return false;
+    }, "A split editor did not become visible");
+    return result;
 }
 void clickTab(const Application& app, int visibleIndex, bool middle = false, bool close = false) {
     const auto rect = tabBounds(app, visibleIndex);
@@ -278,6 +315,17 @@ void beginTabDrag(const Application& app, int visibleIndex, POINT target) {
 void dragTab(const Application& app, int visibleIndex, POINT target, UINT cancel = 0) {
     beginTabDrag(app, visibleIndex, target);
     if (cancel) send(app.window, cancel);
+    send(app.window, WM_LBUTTONUP, 0, MAKELPARAM(target.x, target.y));
+}
+void dragTerminalTab(const Application& app, HWND terminal, POINT target, UINT cancel = 0) {
+    const auto rect = terminalTabBounds(app, terminal);
+    const POINT origin{rect.left + MulDiv(12, GetDpiForWindow(app.window), 96), (rect.top + rect.bottom) / 2};
+    send(app.window, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(origin.x, origin.y));
+    send(app.window, WM_MOUSEMOVE, MK_LBUTTON, MAKELPARAM(target.x, target.y));
+    if (cancel == WM_KEYDOWN) {
+        PostMessageW(terminal, WM_KEYDOWN, VK_ESCAPE, 0);
+        waitFor([&] { GUITHREADINFO info{}; info.cbSize = sizeof(info); return GetGUIThreadInfo(app.process.dwThreadId, &info) && info.hwndCapture != app.window; }, "Escape from a terminal did not cancel docking");
+    } else if (cancel) send(app.window, cancel);
     send(app.window, WM_LBUTTONUP, 0, MAKELPARAM(target.x, target.y));
 }
 enum class TabMenuCommand { Pin, CopyPath, CopyRelativePath, CloseOthers, CloseAll };
@@ -354,7 +402,7 @@ void navigationHistoryTests(const fs::path& executable) {
     Application app(executable, fixture.root);
     const auto tree = app.tree(), surface = app.window;
     const auto left = FindWindowExW(surface, nullptr, L"PoppyViewer", nullptr);
-    const auto right = FindWindowExW(surface, left, L"PoppyViewer", nullptr);
+    HWND right = nullptr;
     waitFor([&] { return send(tree, treeGetCount) == 4; }, "Navigation fixture did not load");
     const auto a = nextItem(tree, TreeRelation::Child, nextItem(tree, TreeRelation::Root));
     const auto b = nextItem(tree, TreeRelation::Next, a), c = nextItem(tree, TreeRelation::Next, b);
@@ -392,7 +440,8 @@ void navigationHistoryTests(const fs::path& executable) {
 
     const auto pane = bounds(surface, left);
     const auto px = [dpi = GetDpiForWindow(surface)](int value) { return MulDiv(value, dpi, 96); };
-    dragTab(app, 0, {pane.left + (pane.right - pane.left) * 3 / 4, pane.top + px(80)});
+    dragTab(app, 0, {pane.right - 10, (pane.top + pane.bottom) / 2});
+    right = otherVisibleViewer(app.window, left);
     waitFor([&] { return IsWindowVisible(right) != FALSE; }, "Navigation split did not open");
     waitLines(right, 400); waitLines(left, 300);
     click(left, px(30), px(40)); command(left, false);
@@ -400,19 +449,18 @@ void navigationHistoryTests(const fs::path& executable) {
     command(right, true);
     waitFor([&] { return focused(left); }, "Forward did not focus the left editor group");
 
-    const auto terminals = FindWindowExW(surface, nullptr, L"PoppyTerminalPane", nullptr);
+    const auto terminals = surface;
     const auto first = FindWindowExW(terminals, nullptr, L"PoppyTerminal", nullptr);
-    click(terminals, px(40), px(16));
-    RECT client{}; GetClientRect(terminals, &client); click(terminals, client.right - px(41), px(16));
+    clickTerminalTab(app, first); addTerminal(app, first);
     const auto second = FindWindowExW(terminals, first, L"PoppyTerminal", nullptr);
     check(second && focused(second), "Adding a terminal did not focus its session");
     mouse(second, false);
     waitFor([&] { return focused(first) && IsWindowVisible(first) && !IsWindowVisible(second); }, "Back did not select the first terminal");
     command(first, false);
     waitFor([&] { return focused(left); }, "Back did not move from Terminal to Editor");
-    controlShortcut(app, left, 'J', [&] { return !IsWindowVisible(terminals); }, "Cannot hide Terminal for navigation");
+    controlShortcut(app, left, 'J', [&] { return !IsWindowVisible(first); }, "Cannot hide Terminal for navigation");
     command(left, true);
-    waitFor([&] { return IsWindowVisible(terminals) && focused(first); }, "Forward did not reveal and focus Terminal");
+    waitFor([&] { return IsWindowVisible(first) && focused(first); }, "Forward did not reveal and focus Terminal");
     command(first, true);
     waitFor([&] { return focused(second); }, "Forward lost the second terminal");
     check(PostMessageW(terminals, WM_CONTEXTMENU, reinterpret_cast<WPARAM>(terminals), MAKELPARAM(-1, -1)), "Cannot open the terminal menu");
@@ -579,20 +627,21 @@ void previewTabSplitTests(const fs::path& executable) {
     for (int i = 0; i < 3; ++i) writeLines(fixture.root / (std::wstring(1, L'a' + i) + L".txt"), 200 + i * 100);
     Application app(executable, fixture.root);
     const auto tree = app.tree(), left = FindWindowExW(app.window, nullptr, L"PoppyViewer", nullptr);
-    const auto right = FindWindowExW(app.window, left, L"PoppyViewer", nullptr);
+    HWND right = nullptr;
     waitFor([&] { return send(tree, treeGetCount) == 4; }, "Split preview fixture did not load");
     const auto a = nextItem(tree, TreeRelation::Child, nextItem(tree, TreeRelation::Root));
     const auto b = nextItem(tree, TreeRelation::Next, a), c = nextItem(tree, TreeRelation::Next, b);
     send(tree, treeSelect, a); waitLines(left, 200); keepTab(app, 0);
     send(tree, treeSelect, b); waitLines(left, 300);
     auto body = bounds(app.window, left);
-    dragTab(app, 1, {body.left + (body.right - body.left) * 3 / 4, body.top + 60});
+    dragTab(app, 1, {body.right - 10, (body.top + body.bottom) / 2});
+    right = otherVisibleViewer(app.window, left);
     waitLines(left, 200); waitLines(right, 300);
     clickTab(app, 0);
     send(tree, treeSelect, c); waitLines(left, 400);
     check(visibleTabCount(app) == 3 && lastTextRow(right) == 300, "Opening a left preview replaced the right preview");
     body = bounds(app.window, right);
-    dragTab(app, 2, {body.left + (body.right - body.left) * 3 / 4, body.top + 60});
+    dragTab(app, 2, {(body.left + body.right) / 2, (body.top + body.bottom) / 2});
     waitLines(left, 200); waitLines(right, 400);
     check(visibleTabCount(app) == 2, "Moving a preview left two previews in its destination group");
     send(tree, treeSelect, b); waitLines(right, 300);
@@ -603,13 +652,13 @@ void htmlTabToolsTests(const fs::path& executable) {
     writeLines(fixture.root / L"a.html", 200); writeLines(fixture.root / L"b.HTM", 300); writeLines(fixture.root / L"c.txt", 400);
     Application app(executable, fixture.root);
     const auto tree = app.tree(), left = FindWindowExW(app.window, nullptr, L"PoppyViewer", nullptr);
-    const auto right = FindWindowExW(app.window, left, L"PoppyViewer", nullptr);
+    HWND right = nullptr;
     waitFor([&] { return send(tree, treeGetCount) == 4; }, "HTML tab fixture did not load");
     const UINT dpi = GetDpiForWindow(app.window);
     const auto selectMode = [&](HWND viewer, bool preview, UINT message = WM_LBUTTONDOWN) {
         const auto rect = bounds(app.window, viewer);
-        const int toolsWidth = (std::min)(MulDiv(160, dpi, 96), static_cast<int>(rect.right - rect.left) / 2);
-        const auto point = MAKELPARAM(rect.right - toolsWidth * (preview ? 1 : 3) / 4, MulDiv(17, dpi, 96));
+        const int toolsWidth = (std::min)(MulDiv(160, dpi, 96), (static_cast<int>(rect.right - rect.left) - MulDiv(58, dpi, 96)) / 2);
+        const auto point = MAKELPARAM(rect.right - MulDiv(58, dpi, 96) - toolsWidth * (preview ? 1 : 3) / 4, tabBounds(app, viewer == left ? 0 : 1).top + MulDiv(17, dpi, 96));
         send(app.window, message, MK_LBUTTON, point); send(app.window, WM_LBUTTONUP, 0, point);
     };
     const auto waitSource = [&](HWND viewer, int lines) {
@@ -627,7 +676,7 @@ void htmlTabToolsTests(const fs::path& executable) {
     }
     const auto switchMode = [&](HWND viewer, bool preview, UINT message = WM_LBUTTONDOWN) {
         const auto rect = bounds(app.window, viewer);
-        const int toolsWidth = (std::min)(MulDiv(160, dpi, 96), static_cast<int>(rect.right - rect.left) / 2);
+        const int toolsWidth = (std::min)(MulDiv(160, dpi, 96), (static_cast<int>(rect.right - rect.left) - MulDiv(58, dpi, 96)) / 2);
         selectMode(viewer, preview, message);
         GUITHREADINFO input{}; input.cbSize = sizeof(input);
         check(GetGUIThreadInfo(app.process.dwThreadId, &input) && input.hwndCapture != app.window && visibleTabCount(app) == 3,
@@ -637,7 +686,7 @@ void htmlTabToolsTests(const fs::path& executable) {
         for (int i = 0; i < visibleTabCount(app); ++i) {
             const auto tab = tabBounds(app, i);
             if (tab.left >= rect.left && tab.left < rect.right)
-                check(tab.right <= rect.right - toolsWidth, "HTML tools overlapped a wrapped tab");
+                check(tab.right <= rect.right - MulDiv(58, dpi, 96) - toolsWidth, "HTML tools overlapped a wrapped tab");
         }
     };
     clickTab(app, 0); waitSource(left, 200);
@@ -649,10 +698,11 @@ void htmlTabToolsTests(const fs::path& executable) {
     clickTab(app, 2); waitLines(left, 400);
     // Ordinary files do not retain the HTML buttons from the previous tab.
     auto body = bounds(app.window, left);
-    click(app.window, body.right - MulDiv(20, dpi, 96), MulDiv(17, dpi, 96));
+    click(app.window, body.right - MulDiv(70, dpi, 96), MulDiv(17, dpi, 96));
     check(lastTextRow(left) == 400 && visibleTabCount(app) == 3, "An ordinary file retained HTML tools");
     clickTab(app, 0); waitSource(left, 200);
-    dragTab(app, 1, {body.left + (body.right - body.left) * 3 / 4, body.top + 60});
+    dragTab(app, 1, {body.right - 10, (body.top + body.bottom) / 2});
+    right = otherVisibleViewer(app.window, left);
     waitSource(left, 200); waitSource(right, 300);
     SetWindowPos(app.host, nullptr, 0, 0, MulDiv(1000, dpi, 96), MulDiv(700, dpi, 96), SWP_NOMOVE | SWP_NOZORDER);
     send(app.window, WM_NULL);
@@ -754,7 +804,7 @@ void bulkTabSplitTests(const fs::path& executable) {
     for (int i = 0; i < 3; ++i) writeLines(fixture.root / (std::wstring(1, L'a' + i) + L".txt"), 200 + i * 100);
     Application app(executable, fixture.root);
     const auto tree = app.tree(), left = FindWindowExW(app.window, nullptr, L"PoppyViewer", nullptr);
-    const auto right = FindWindowExW(app.window, left, L"PoppyViewer", nullptr);
+    HWND right = nullptr;
     waitFor([&] { return send(tree, treeGetCount) == 4; }, "Bulk split fixture did not load");
     auto item = nextItem(tree, TreeRelation::Child, nextItem(tree, TreeRelation::Root));
     for (int i = 0; i < 3; ++i) {
@@ -762,7 +812,8 @@ void bulkTabSplitTests(const fs::path& executable) {
         item = nextItem(tree, TreeRelation::Next, item);
     }
     const auto original = bounds(app.window, left);
-    dragTab(app, 2, {original.left + (original.right - original.left) * 3 / 4, original.top + 60});
+    dragTab(app, 2, {original.right - 10, (original.top + original.bottom) / 2});
+    right = otherVisibleViewer(app.window, left);
     waitLines(left, 300); waitLines(right, 400);
     send(right, WM_VSCROLL, SB_LINEDOWN); const auto top = scrollInfo(right).nPos;
     tabMenuCommand(app, 0, TabMenuCommand::CloseOthers); waitLines(left, 200); waitLines(right, 400);
@@ -771,11 +822,11 @@ void bulkTabSplitTests(const fs::path& executable) {
     // Close the left group while the right one has focus. It must migrate to
     // the remaining viewer without losing its document or position.
     clickTab(app, 1); waitLines(right, 400);
-    tabMenuCommand(app, 0, TabMenuCommand::CloseAll); waitLines(left, 400);
-    check(visibleTabCount(app) == 1 && !IsWindowVisible(right) && scrollInfo(left).nPos == top,
+    tabMenuCommand(app, 0, TabMenuCommand::CloseAll); waitLines(right, 400);
+    check(visibleTabCount(app) == 1 && !IsWindowVisible(left) && scrollInfo(right).nPos == top,
           "Close All crossed editor groups or failed to collapse the empty left group");
     tabMenuCommand(app, 0, TabMenuCommand::CloseAll);
-    check(visibleTabCount(app) == 0 && scrollInfo(left).nMax == 0, "Close All left an empty split document");
+    check(visibleTabCount(app) == 0, "Close All left an empty split document");
 }
 void tabTests(const fs::path& executable) {
     Fixture fixture;
@@ -1702,13 +1753,14 @@ void splitPaneTests(const fs::path& executable) {
     {
         Application app(executable, fixture.root); const auto tree = app.tree();
         const auto left = FindWindowExW(app.window, nullptr, L"PoppyViewer", nullptr);
-        const auto right = FindWindowExW(app.window, left, L"PoppyViewer", nullptr);
+        HWND right = nullptr;
         waitFor([&] { return send(tree, treeGetCount) == 3; }, "Split fixture did not load");
         const auto first = nextItem(tree, TreeRelation::Child, nextItem(tree, TreeRelation::Root));
         send(tree, treeSelect, first); waitLines(left, 120); keepTab(app, 0);
         send(tree, treeSelect, nextItem(tree, TreeRelation::Next, first)); waitLines(left, 240);
         const auto original = bounds(app.window, left);
-        dragTab(app, 1, {original.left + (original.right-original.left)*3/4, original.top + 60});
+        dragTab(app, 1, {original.right - 10, (original.top + original.bottom) / 2});
+        right = otherVisibleViewer(app.window, left);
         waitFor([&] { return IsWindowVisible(right); }, "Editor drag did not create a right group");
         waitLines(left, 120); waitLines(right, 240);
         const auto l = bounds(app.window,left), r = bounds(app.window,right);
@@ -1725,28 +1777,106 @@ void splitPaneTests(const fs::path& executable) {
         send(app.window,WM_MOUSEMOVE,MK_LBUTTON,MAKELPARAM(x+30,y));
         send(app.window,WM_LBUTTONUP,0,MAKELPARAM(x+30,y)); divider=bounds(app.window,left).right;
         check(divider>l.right,"Editor divider did not move");
-        const auto terminalPane=FindWindowExW(app.window,nullptr,L"PoppyTerminalPane",nullptr);
-        RECT client{};GetClientRect(terminalPane,&client);const auto dpi=GetDpiForWindow(terminalPane);
-        click(terminalPane,client.right-MulDiv(41,dpi,96),MulDiv(16,dpi,96));
-        send(terminalPane,WM_LBUTTONDOWN,MK_LBUTTON,MAKELPARAM(MulDiv(135,dpi,96),MulDiv(16,dpi,96)));
-        send(terminalPane,WM_MOUSEMOVE,MK_LBUTTON,MAKELPARAM(client.right*3/4,client.bottom/2));
-        send(terminalPane,WM_LBUTTONUP,0,MAKELPARAM(client.right*3/4,client.bottom/2));
-        const auto terminalLeft=FindWindowExW(terminalPane,nullptr,L"PoppyTerminal",nullptr);
-        const auto terminalRight=FindWindowExW(terminalPane,terminalLeft,L"PoppyTerminal",nullptr);
-        check(IsWindowVisible(terminalLeft)&&IsWindowVisible(terminalRight),"Terminal drag did not show two sessions");
-        check(bounds(terminalPane,terminalLeft).right<bounds(terminalPane,terminalRight).left,"Terminal sessions overlap");
+        const auto terminalLeft = FindWindowExW(app.window, nullptr, L"PoppyTerminal", nullptr);
+        addTerminal(app, terminalLeft);
+        const auto terminalRight = FindWindowExW(app.window, terminalLeft, L"PoppyTerminal", nullptr);
+        const auto body = bounds(app.window, terminalRight);
+        dragTerminalTab(app, terminalRight, {body.right - 10, (body.top + body.bottom) / 2});
+        check(IsWindowVisible(terminalLeft) && IsWindowVisible(terminalRight), "Terminal drag did not show two sessions");
+        check(bounds(app.window, terminalLeft).right < bounds(app.window, terminalRight).left, "Terminal sessions overlap");
     }
     {
         Application app(executable,fixture.root);app.tree();
-        const auto left=FindWindowExW(app.window,nullptr,L"PoppyViewer",nullptr),right=FindWindowExW(app.window,left,L"PoppyViewer",nullptr);
+        const auto left=FindWindowExW(app.window,nullptr,L"PoppyViewer",nullptr),right=otherVisibleViewer(app.window,left);
         waitLines(left,120);waitLines(right,240);
         check(IsWindowVisible(right)&&bounds(app.window,left).right==divider,"Restart lost editor groups or divider");
-        const auto pane=FindWindowExW(app.window,nullptr,L"PoppyTerminalPane",nullptr);
+        const auto pane=app.window;
         const auto a=FindWindowExW(pane,nullptr,L"PoppyTerminal",nullptr),b=FindWindowExW(pane,a,L"PoppyTerminal",nullptr);
         check(IsWindowVisible(a)&&IsWindowVisible(b),"Restart lost terminal groups");
         const auto target=tabBounds(app,0);dragTab(app,1,{target.right-1,(target.top+target.bottom)/2});
         waitFor([&]{return !IsWindowVisible(right);},"Moving the last right tab did not collapse the split");
         waitLines(left,240);
+    }
+}
+std::set<DWORD> childProcesses(DWORD parent);
+void dockLayoutTests(const fs::path& executable) {
+    Fixture fixture;
+    for (int i = 0; i < 5; ++i) writeLines(fixture.root / (std::wstring(1, L'a' + i) + L".txt"), 100 + i * 10);
+    std::vector<RECT> savedBounds;
+    {
+        Application app(executable, fixture.root); const auto tree = app.tree();
+        const auto original = FindWindowExW(app.window, nullptr, L"PoppyViewer", nullptr);
+        waitFor([&] { return send(tree, treeGetCount) == 6; }, "Dock fixture did not load");
+        auto item = nextItem(tree, TreeRelation::Child, nextItem(tree, TreeRelation::Root));
+        for (int i = 0; i < 5; ++i) {
+            send(tree, treeSelect, item); waitLines(original, 100 + i * 10); keepTab(app, i);
+            item = nextItem(tree, TreeRelation::Next, item);
+        }
+        clickTab(app, 0); send(original, WM_CHAR, '!');
+        const auto shell = FindWindowExW(app.window, nullptr, L"PoppyTerminal", nullptr);
+        click(shell, 10, 10);
+        for (const auto ch : std::wstring(L"[Console]::Title = 'Dock session'\r")) send(shell, WM_CHAR, ch);
+        waitFor([&] { wchar_t text[128]{}; GetWindowTextW(shell, text, 128); return std::wstring(text) == L"Dock session"; }, "Dock shell did not start");
+        const auto topTab = tabBounds(app, 0);
+        for (const auto cancel : {WM_CANCELMODE, WM_KEYDOWN}) {
+            dragTerminalTab(app, shell, {topTab.right - 2, (topTab.top + topTab.bottom) / 2}, cancel);
+            check(IsWindowVisible(original) && IsWindowVisible(shell), "Cancelling a dock drag changed the layout");
+        }
+        dragTerminalTab(app, shell, {topTab.right - 2, (topTab.top + topTab.bottom) / 2});
+        check(!IsWindowVisible(original) && IsWindowVisible(shell), "Terminal did not join the editor's tab strip");
+        clickTab(app, 0); waitLines(original, 100);
+        clickTerminalTab(app, shell);
+        const auto whole = bounds(app.window, shell);
+        dragTab(app, 0, {(whole.left + whole.right) / 2, whole.bottom - 10});
+        const auto viewerFor = [&](int lines) {
+            HWND result = nullptr;
+            waitFor([&] {
+                for (HWND view = nullptr; (view = FindWindowExW(app.window, view, L"PoppyViewer", nullptr));)
+                    if (IsWindowVisible(view) && lastTextRow(view) == lines) { result = view; return true; }
+                return false;
+            }, "Docked editor did not show its original document");
+            return result;
+        };
+        const auto lower = viewerFor(100);
+        check(bounds(app.window, shell).bottom < bounds(app.window, lower).top, "Editor did not move below the terminal");
+        controlShortcut(app, shell, 'J', [&] { return !IsWindowVisible(lower); }, "Ctrl+J from a terminal did not hide the lower editor");
+        check(IsWindowVisible(shell), "Ctrl+J hid a terminal in the upper region");
+        controlShortcut(app, shell, 'J', [&] { return IsWindowVisible(lower) != FALSE; }, "Ctrl+J did not restore the lower editor");
+        const auto save = [&] {
+            std::ifstream file(fixture.root / L"a.txt"); char first = 0; file.get(first); return first == '!';
+        };
+        controlShortcut(app, lower, 'S', save, "Dock movement lost an unsaved editor buffer");
+        HWND destination = lower;
+        for (int i = 1; i < 5; ++i) {
+            const auto rect = bounds(app.window, destination);
+            POINT target = i == 1 ? POINT{rect.right - 10, (rect.top + rect.bottom) / 2} :
+                i == 2 ? POINT{(rect.left + rect.right) / 2, rect.bottom - 8} :
+                i == 3 ? POINT{rect.left + 8, (rect.top + rect.bottom) / 2} : POINT{(rect.left + rect.right) / 2, rect.top + 1};
+            dragTab(app, 0, target); destination = viewerFor(100 + i * 10);
+        }
+        int visible = 0;
+        for (HWND view = nullptr; (view = FindWindowExW(app.window, view, L"PoppyViewer", nullptr));) if (IsWindowVisible(view)) ++visible;
+        check(visible == 5 && IsWindowVisible(shell) && visibleTabCount(app) == 5, "Dock layout is limited to four regions");
+        // The same running ConPTY session must survive every reparent/layout operation.
+        for (const auto ch : std::wstring(L"Set-Content -NoNewline -Encoding Ascii dock-alive.txt alive\r")) send(shell, WM_CHAR, ch);
+        waitFor([&] { std::ifstream file(fixture.root / L"dock-alive.txt"); std::string text; return file && std::getline(file, text) && text == "alive"; }, "Dock movement restarted or stopped the terminal");
+        for (int i = 0; i < 5; ++i) savedBounds.push_back(bounds(app.window, viewerFor(100 + i * 10)));
+    }
+    {
+        Application app(executable, fixture.root); app.tree();
+        for (int i = 0; i < 5; ++i) {
+            HWND found = nullptr;
+            waitFor([&] {
+                for (HWND view = nullptr; (view = FindWindowExW(app.window, view, L"PoppyViewer", nullptr));)
+                    if (IsWindowVisible(view) && lastTextRow(view) == 100 + i * 10) { found = view; return true; }
+                return false;
+            }, "Restart lost a recursively docked editor");
+            const auto rect = bounds(app.window, found);
+            check(EqualRect(&rect, &savedBounds[i]), "Restart changed a nested dock layout");
+        }
+        const auto shell = FindWindowExW(app.window, nullptr, L"PoppyTerminal", nullptr);
+        check(IsWindowVisible(shell) && bounds(app.window, shell).top < savedBounds.front().top, "Restart lost the upper terminal placement");
+        check(childProcesses(app.process.dwProcessId).empty(), "Restoring a dock layout automatically started a terminal");
     }
 }
 void sidebarTests(const fs::path& executable) {
@@ -1758,7 +1888,7 @@ void sidebarTests(const fs::path& executable) {
     const auto explorer = FindWindowExW(app.window, nullptr, activityButtonClassName, L"Explorer");
     const auto git = GetDlgItem(app.window, 3);
     const auto viewer = FindWindowExW(app.window, nullptr, L"PoppyViewer", nullptr);
-    const auto terminal = FindWindowExW(app.window, nullptr, L"PoppyTerminalPane", nullptr);
+    const auto terminal = FindWindowExW(app.window, nullptr, L"PoppyTerminal", nullptr);
     check(explorer && git && viewer && terminal, "Activity buttons or panes are missing");
     TreeItem nested = 0;
     waitFor([&] {
@@ -1779,8 +1909,8 @@ void sidebarTests(const fs::path& executable) {
         check(activityRect.left == 0 && activityRect.right <= treeRect.left && treeRect.right < viewerRect.left,
               "Activity bar, sidebar and editor are not arranged from left to right");
     }
-    check(activityRect.top == 0 && viewerRect.top == 0, "The removed toolbar still reserves space above the workspace");
-    check(treeRect.top > viewerRect.top, "Explorer is missing its sidebar heading");
+    check(activityRect.top == 0 && viewerRect.top == MulDiv(34, dpi, 96), "The removed toolbar still reserves space above the workspace");
+    check(treeRect.top == viewerRect.top, "Explorer and empty dock headers are misaligned");
     send(git, WM_KEYDOWN, VK_SPACE);
     check(IsWindowVisible(tree), "Space activated the activity button before key release");
     send(git, WM_KEYUP, VK_SPACE);
@@ -2621,8 +2751,8 @@ void editableGitDiffTests(const fs::path& executable) {
     const UINT dpi = GetDpiForWindow(app.window);
     const auto switchLayout = [&](HWND pane, bool inlineView) {
         const auto rect = bounds(app.window, pane);
-        const int toolsWidth = (std::min)(MulDiv(136, dpi, 96), static_cast<int>(rect.right - rect.left) / 2);
-        click(app.window, rect.right - toolsWidth * (inlineView ? 1 : 3) / 4, MulDiv(17, dpi, 96));
+        const int toolsWidth = (std::min)(MulDiv(136, dpi, 96), (static_cast<int>(rect.right - rect.left) - MulDiv(58, dpi, 96)) / 2);
+        click(app.window, rect.right - MulDiv(58, dpi, 96) - toolsWidth * (inlineView ? 1 : 3) / 4, MulDiv(17, dpi, 96));
     };
     const auto inlineRows = scrollInfo(viewer).nMax;
     const auto tabCount = visibleTabCount(app);
@@ -3177,15 +3307,15 @@ void multiProjectTests(const fs::path& executable) {
     open(c.root); check(app.window!=surfaceA && app.window!=surfaceB,"Projects reused a surface");
     select(0); check(app.window==surfaceA && nextItem(treeA,TreeRelation::Root)==rootA,"Switching rebuilt the explorer");
     check(lastTextRow(viewerA)==200 && scrollInfo(viewerA).nPos==top,"A-B-A lost the document or its view position");
-    const auto terminals = FindWindowExW(surfaceA,nullptr,L"PoppyTerminalPane",nullptr);check(terminals!=nullptr,"Project has no terminal pane");
+    const auto terminals = surfaceA;check(terminals!=nullptr,"Project has no terminal pane");
     HWND shell = FindWindowExW(terminals,nullptr,L"PoppyTerminal",nullptr);check(shell!=nullptr,"Project has no shell");
     const auto before = childProcesses(app.process.dwProcessId);
     click(shell,10,10); // Start only this project's shell.
     DWORD shellPid = 0;
     waitFor([&] { for (const auto child : childProcesses(app.process.dwProcessId)) if (!before.count(child)) shellPid = child; return shellPid != 0; }, "Shell process did not start");
     const auto shellProcess = OpenProcess(SYNCHRONIZE, FALSE, shellPid); check(shellProcess != nullptr, "Cannot inspect the running shell");
-    const auto px=[dpi=GetDpiForWindow(terminals)](int v){return MulDiv(v,dpi,96);};
-    RECT client{};GetClientRect(terminals,&client);click(terminals,client.right-px(41),px(16));
+    const auto px=[dpi=GetDpiForWindow(app.host)](int v){return MulDiv(v,dpi,96);};
+    addTerminal(app, shell);
     check(FindWindowExW(terminals,shell,L"PoppyTerminal",nullptr)!=nullptr,"Adding a shell replaced the first session");
     select(1);
     writeFile(a.root / L"background.txt");
@@ -3215,7 +3345,7 @@ void multiProjectTests(const fs::path& executable) {
         waitLines(FindWindowExW(restored.window, nullptr, L"PoppyViewer", nullptr), 200);
         size_t count = 0; for (HWND project = nullptr; (project = FindWindowExW(restored.host, project, L"PoppyProject", nullptr));) ++count;
         check(count == 2 && nextItem(tree, TreeRelation::Root), "Restart lost the open list or reopened a closed project");
-        const auto pane = FindWindowExW(restored.window, nullptr, L"PoppyTerminalPane", nullptr);
+        const auto pane = restored.window;
         count = 0; for (HWND terminal = nullptr; (terminal = FindWindowExW(pane, terminal, L"PoppyTerminal", nullptr));) ++count;
         check(count == 2, "Restart lost terminal configuration");
         check(childProcesses(restored.process.dwProcessId).empty(), "Restoring terminal configuration automatically started a process");
@@ -3407,7 +3537,7 @@ void terminalTitleTests(const fs::path& executable) {
     Fixture fixture; writeFile(fixture.root / L"test.txt");
     {
         Application app(executable, fixture.root); app.tree();
-        const auto pane = FindWindowExW(app.window, nullptr, L"PoppyTerminalPane", nullptr);
+        const auto pane = app.window;
         const auto shell = FindWindowExW(pane, nullptr, L"PoppyTerminal", nullptr);
         check(shell != nullptr, "Project has no shell for title tests");
         const auto name = [](HWND window) { wchar_t text[512]{}; GetWindowTextW(window, text, 512); return std::wstring(text); };
@@ -3416,9 +3546,7 @@ void terminalTitleTests(const fs::path& executable) {
         click(shell, 10, 10);
         type(shell, L"[Console]::Title = 'Build 日本語'\r");
         waitFor([&] { return name(shell) == L"Build 日本語"; }, "ConPTY title did not reach the terminal tab");
-        const auto px = [dpi = GetDpiForWindow(pane)](int value) { return MulDiv(value, dpi, 96); };
-        RECT client{}; GetClientRect(pane, &client);
-        click(pane, client.right - px(41), px(16));
+        addTerminal(app, shell);
         const auto second = FindWindowExW(pane, shell, L"PoppyTerminal", nullptr);
         check(second && name(second) == L"PowerShell", "New terminal inherited another session's title");
         click(second, 10, 10);
@@ -3428,9 +3556,9 @@ void terminalTitleTests(const fs::path& executable) {
         type(shell, L"[Console]::Title = 'Background title'\r");
         waitFor([&] { return name(shell) == L"Background title"; }, "Hidden terminal stopped updating its title");
         check(name(second) == L"Second title", "Background title changed the active terminal's name");
-        click(pane, px(40), px(16));
+        clickTerminalTab(app, shell);
 
-        check(PostMessageW(pane, WM_CONTEXTMENU, reinterpret_cast<WPARAM>(pane), MAKELPARAM(-1, -1)), "Cannot open terminal context menu");
+        check(PostMessageW(app.window, WM_CONTEXTMENU, reinterpret_cast<WPARAM>(app.window), MAKELPARAM(-1, -1)), "Cannot open terminal context menu");
         waitFor([&] { GUITHREADINFO info{}; info.cbSize = sizeof(info); return GetGUIThreadInfo(app.process.dwThreadId, &info) && (info.flags & GUI_INMENUMODE); }, "Terminal context menu did not open");
         PostMessageW(pane, WM_KEYDOWN, VK_HOME, 0); PostMessageW(pane, WM_KEYDOWN, VK_RETURN, 0);
         HWND edit = nullptr;
@@ -3445,7 +3573,7 @@ void terminalTitleTests(const fs::path& executable) {
     }
     {
         Application app(executable, fixture.root); app.tree();
-        const auto pane = FindWindowExW(app.window, nullptr, L"PoppyTerminalPane", nullptr);
+        const auto pane = app.window;
         const auto first = FindWindowExW(pane, nullptr, L"PoppyTerminal", nullptr);
         const auto second = FindWindowExW(pane, first, L"PoppyTerminal", nullptr);
         wchar_t text[128]{}; GetWindowTextW(first, text, 128);
@@ -3463,21 +3591,22 @@ void terminalShellTests(const fs::path& executable) {
         return result;
     };
     const auto choose = [](const Application& app, HWND pane, std::initializer_list<WPARAM> keys) {
-        RECT rect{}; GetClientRect(pane, &rect); const auto dpi = GetDpiForWindow(pane);
-        check(PostMessageW(pane, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(rect.right-MulDiv(12,dpi,96),MulDiv(16,dpi,96))), "Could not click the shell dropdown");
+        HWND active = nullptr;
+        for (HWND child = nullptr; (child = FindWindowExW(pane, child, L"PoppyTerminal", nullptr));) if (IsWindowVisible(child)) active = child;
+        const auto point = terminalAddPoint(app, active, true);
+        check(PostMessageW(pane, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(point.x, point.y)), "Could not click the shell dropdown");
         const auto open = [&] { GUITHREADINFO info{}; info.cbSize = sizeof(info); return GetGUIThreadInfo(app.process.dwThreadId, &info) && (info.flags & GUI_INMENUMODE); };
         waitFor(open, "Shell dropdown did not open");
         for (auto key : keys) PostMessageW(pane, WM_KEYDOWN, key, 0);
         waitFor([&] { return !open(); }, "Shell dropdown did not close");
         send(pane, WM_NULL);
     };
-    const auto plus = [](HWND pane) {
-        RECT rect{}; GetClientRect(pane, &rect); const auto dpi = GetDpiForWindow(pane);
-        click(pane, rect.right-MulDiv(41,dpi,96), MulDiv(16,dpi,96));
+    const auto plus = [](const Application& app, HWND pane) {
+        for (HWND child = nullptr; (child = FindWindowExW(pane, child, L"PoppyTerminal", nullptr));) if (IsWindowVisible(child)) { addTerminal(app, child); return; }
     };
     {
         Application app(executable, fixture.root); app.tree();
-        const auto pane = FindWindowExW(app.window, nullptr, L"PoppyTerminalPane", nullptr);
+        const auto pane = app.window;
         choose(app, pane, {VK_ESCAPE});
         check(sessions(pane).size() == 1, "Cancelling shell selection added a terminal");
         choose(app, pane, {VK_HOME, VK_DOWN, VK_RETURN});
@@ -3495,22 +3624,22 @@ void terminalShellTests(const fs::path& executable) {
         }
         choose(app, pane, {VK_END, VK_RIGHT, VK_END, VK_RETURN});
         check(sessions(pane).size() == 2, "Changing the default added a terminal");
-        plus(pane); tabs = sessions(pane);
+        plus(app, pane); tabs = sessions(pane);
         check(tabs.size() == 3 && name(tabs[2]) == L"Git Bash", "Plus did not use the Git Bash default");
         choose(app, pane, {VK_HOME, VK_RETURN}); tabs = sessions(pane);
         check(tabs.size() == 4 && name(tabs[3]) == L"PowerShell", "Explicit PowerShell selection ignored the chosen profile");
     }
     {
         Application app(executable, fixture.root); app.tree();
-        const auto pane = FindWindowExW(app.window, nullptr, L"PoppyTerminalPane", nullptr);
+        const auto pane = app.window;
         auto tabs = sessions(pane);
         check(tabs.size() == 4 && name(tabs[0]) == L"PowerShell" && name(tabs[1]) == L"Git Bash" &&
               name(tabs[2]) == L"Git Bash" && name(tabs[3]) == L"PowerShell", "Restart lost terminal shell profiles");
         check(childProcesses(app.process.dwProcessId).empty(), "Restoring shell profiles automatically started a process");
-        plus(pane); tabs = sessions(pane);
+        plus(app, pane); tabs = sessions(pane);
         check(tabs.size() == 5 && name(tabs[4]) == L"Git Bash", "Restart lost the default or explicit selection changed it");
         choose(app, pane, {VK_END, VK_RIGHT, VK_HOME, VK_RETURN});
-        plus(pane); tabs = sessions(pane);
+        plus(app, pane); tabs = sessions(pane);
         check(tabs.size() == 6 && name(tabs[5]) == L"PowerShell", "Could not switch the default back to PowerShell");
     }
 }
@@ -3521,17 +3650,14 @@ void terminalShortcutTests(const fs::path& executable) {
     const auto root = nextItem(tree, TreeRelation::Root);
     waitFor([&] { return nextItem(tree, TreeRelation::Child, root) != 0; }, "Shortcut file did not load");
     send(tree, treeSelect, nextItem(tree, TreeRelation::Child, root)); waitLines(viewer, 200);
-    const auto pane = FindWindowExW(app.window, nullptr, L"PoppyTerminalPane", nullptr);
+    const auto pane = app.window;
     const auto first = FindWindowExW(pane, nullptr, L"PoppyTerminal", nullptr);
     check(first != nullptr, "Shortcut terminal is missing");
-    const auto px = [dpi = GetDpiForWindow(pane)](int value) { return MulDiv(value, dpi, 96); };
-    RECT client{}; GetClientRect(pane, &client);
-    click(pane, client.right - px(41), px(16));
+    addTerminal(app, first);
     const auto second = FindWindowExW(pane, first, L"PoppyTerminal", nullptr);
     check(second != nullptr, "Second shortcut terminal is missing");
-    send(pane, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(px(40), px(16)));
-    send(pane, WM_MOUSEMOVE, MK_LBUTTON, MAKELPARAM(client.right * 3 / 4, client.bottom / 2));
-    send(pane, WM_LBUTTONUP, 0, MAKELPARAM(client.right * 3 / 4, client.bottom / 2));
+    const auto body = bounds(app.window, second);
+    dragTerminalTab(app, first, {body.left + 10, (body.top + body.bottom) / 2});
     check(IsWindowVisible(first) && IsWindowVisible(second), "Shortcut terminals did not split");
     struct Input {
         DWORD thread; BYTE previous[256]{};
@@ -3543,7 +3669,7 @@ void terminalShortcutTests(const fs::path& executable) {
     } input(app.process.dwThreadId);
     struct Shortcut { WPARAM key; bool ctrl, shift; };
     const Shortcut shortcuts[] = {{'O', true, false}, {'R', true, false}, {'N', true, false},
-        {'P', true, false}, {'F', true, false}, {'W', true, false}, {'J', true, false},
+        {'P', true, false}, {'F', true, false}, {'W', true, false},
         {'F', true, true}, {'E', true, true}, {'G', true, true}, {'B', true, true},
         {VK_F3, false, false}, {VK_F5, false, false}, {VK_F6, false, false}, {VK_F7, false, false}};
     for (const auto shell : {first, second}) {
@@ -3570,7 +3696,7 @@ void terminalShortcutTests(const fs::path& executable) {
         BYTE keys[256]{}; SetKeyboardState(keys);
         GUITHREADINFO focus{}; focus.cbSize = sizeof(focus);
         check(GetGUIThreadInfo(app.process.dwThreadId, &focus) && focus.hwndFocus == shell, "A shortcut moved terminal focus");
-        check(IsWindowVisible(pane) && IsWindowVisible(tree) && visibleTabCount(app) == 1, "A terminal shortcut changed application panes or tabs");
+        check(IsWindowVisible(first) && IsWindowVisible(second) && IsWindowVisible(tree) && visibleTabCount(app) == 1, "A terminal shortcut changed application panes or tabs");
     }
 }
 void terminalBackspaceTests(const fs::path& executable) {
@@ -3578,7 +3704,7 @@ void terminalBackspaceTests(const fs::path& executable) {
     writeFile(fixture.root / L"test.txt");
     Application app(executable, fixture.root);
     app.tree();
-    const auto pane = FindWindowExW(app.window, nullptr, L"PoppyTerminalPane", nullptr);
+    const auto pane = app.window;
     const auto shell = FindWindowExW(pane, nullptr, L"PoppyTerminal", nullptr);
     check(shell != nullptr, "Project has no shell for Backspace tests");
     click(shell, 10, 10);
@@ -3629,7 +3755,7 @@ void sessionTests(const fs::path& executable) {
         send(tree, treeSelect, third); waitLines(viewer, 100); keepTab(app, 2);
         send(tree, treeSelect, second); waitLines(viewer, 300);
         const auto px = [dpi = GetDpiForWindow(app.window)](int value) { return MulDiv(value, dpi, 96); };
-        const auto terminal = FindWindowExW(app.window, nullptr, L"PoppyTerminalPane", nullptr);
+        const auto terminal = FindWindowExW(app.window, nullptr, L"PoppyTerminal", nullptr);
         check(terminal && IsWindowVisible(terminal), "Session terminal is missing");
         controlShortcut(app, viewer, 'J', [&] { return !IsWindowVisible(terminal); }, "Ctrl+J did not hide the session terminal");
         const auto pane = bounds(app.window, viewer);
@@ -3653,7 +3779,7 @@ void sessionTests(const fs::path& executable) {
         const auto tree = app.tree(), viewer = FindWindowExW(app.window, nullptr, L"PoppyViewer", nullptr);
         waitLines(viewer, 300);
         check(scrollInfo(viewer).nPos == secondTop, "Restart lost the active tab or its scroll position");
-        check(!IsWindowVisible(FindWindowExW(app.window, nullptr, L"PoppyTerminalPane", nullptr)), "Restart lost terminal visibility");
+        check(!IsWindowVisible(FindWindowExW(app.window, nullptr, L"PoppyTerminal", nullptr)), "Restart lost terminal visibility");
         check(!IsWindowVisible(tree), "Restart lost the active sidebar");
         const auto pane = bounds(app.window, viewer);
         check((sidebarOnRight ? pane.right : pane.left) == sidebarEdge, "Restart lost sidebar width");
@@ -3681,11 +3807,12 @@ void sessionTests(const fs::path& executable) {
 }
 int wmain(int argc, wchar_t** argv) {
     try {
-        check(argc == 2, "Pass the path to Poppy.exe");
+        check(argc == 2 || (argc == 3 && std::wstring(argv[2]) == L"--dock-only"), "Pass the path to Poppy.exe");
         SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+        if (argc == 3) { Fixture appData; AppDataEnvironment environment(appData.root); dockLayoutTests(fs::absolute(argv[1])); return 0; }
         for (const auto test : {folderTests, explorerSortTests, sidebarTests, treeInteractionTests, collapseAllSidebarTests, navigationHistoryTests, previewTabTests, explorerPreviewTabTests, previewTabSplitTests, tabTests, rapidTabMiddleClickTests, pinnedTabTests,
                 tabCopyPathTests, bulkTabCloseTests, bulkTabSaveTests, bulkTabSplitTests, explorerActiveFileTests, htmlTabToolsTests, editorTailTests,
-                tabDragTests, wrappingTabDragTests, wrappingTabTests, renameTests, explorerMoveTests, explorerDeleteTests, explorerDeleteConfirmationTests, explorerMultipleSelectionTests, crossProjectFolderCopyTests, createItemTests, newFileShortcutTests, pasteImageTests, splitPaneTests, quickOpenTests, fullSearchTests, searchRetentionTests, gitSidebarTests, gitIgnoredExplorerTests, gitAutoRefreshTests, editableGitDiffTests, branchSidebarTests, comparisonSidebarTests, multiRepositoryTests, sessionTests, multiProjectTests, recentProjectTests, projectDragTests, scrollingProjectDragTests, terminalTitleTests, terminalShellTests, terminalShortcutTests, terminalBackspaceTests}) {
+                tabDragTests, wrappingTabDragTests, wrappingTabTests, renameTests, explorerMoveTests, explorerDeleteTests, explorerDeleteConfirmationTests, explorerMultipleSelectionTests, crossProjectFolderCopyTests, createItemTests, newFileShortcutTests, pasteImageTests, splitPaneTests, dockLayoutTests, quickOpenTests, fullSearchTests, searchRetentionTests, gitSidebarTests, gitIgnoredExplorerTests, gitAutoRefreshTests, editableGitDiffTests, branchSidebarTests, comparisonSidebarTests, multiRepositoryTests, sessionTests, multiProjectTests, recentProjectTests, projectDragTests, scrollingProjectDragTests, terminalTitleTests, terminalShellTests, terminalShortcutTests, terminalBackspaceTests}) {
             Fixture appData; AppDataEnvironment environment(appData.root);
             test(fs::absolute(argv[1]));
         }

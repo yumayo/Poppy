@@ -42,6 +42,7 @@ struct SavedSearch {
 };
 struct ProjectSession {
     std::string wslUid;
+    std::string dockLayout;
     int sidebar = 245, terminalHeight = 260;
     bool terminalVisible = true, gitSidebar = false, diffInline = true, gitTree = true;
     bool branchSidebar = false;

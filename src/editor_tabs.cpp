@@ -1,9 +1,10 @@
 #include "editor_tabs.h"
 #include <algorithm>
+#include <set>
 
 namespace poppy {
 std::optional<std::wstring> editorTabPathText(const EditorTab& tab, const ResourceId& root, bool relative) {
-    if (tab.allChanges || tab.path.empty() || (relative && root.empty())) return std::nullopt;
+    if (!tab.terminalId.empty() || tab.allChanges || tab.path.empty() || (relative && root.empty())) return std::nullopt;
     auto path = relative ? tab.path.lexically_relative(root) : tab.path;
     if (path.empty()) return std::nullopt;
     return path.make_preferred().native();
@@ -48,15 +49,18 @@ void saveEditorTabs(ProjectSession& state, const std::vector<EditorTab>& tabs, s
     int activeGroup = active < tabs.size() ? tabs[active].group : 0;
     for (size_t i = 0; i < tabs.size(); ++i) {
         const auto& tab = tabs[i];
+        if (!tab.terminalId.empty()) continue;
         if (tab.preview && !tab.pinned && (!tab.buffer || (!tab.buffer->dirty() && !tab.buffer->saving))) continue;
         state.tabs.push_back({tab.path.u8string(), tab.diff, tab.fileView, tab.diffView, tab.pinned, tab.group,
             tab.displayed, tab.diffKind, tab.revision, tab.allChanges, tab.gitRoot.u8string()});
     }
-    if (std::none_of(state.tabs.begin(), state.tabs.end(), [](const SavedTab& tab) { return tab.group == 0; })) {
+    if (state.dockLayout.empty() && std::none_of(state.tabs.begin(), state.tabs.end(), [](const SavedTab& tab) { return tab.group == 0; })) {
         for (auto& tab : state.tabs) tab.group = 0;
         activeGroup = 0;
     }
-    for (int group = 0; group < 2; ++group) {
+    std::set<int> groups;
+    for (const auto& tab : state.tabs) groups.insert(tab.group);
+    for (int group : groups) {
         auto selected = std::find_if(state.tabs.begin(), state.tabs.end(), [group](const SavedTab& tab) { return tab.group == group && tab.displayed; });
         if (selected == state.tabs.end()) selected = std::find_if(state.tabs.begin(), state.tabs.end(), [group](const SavedTab& tab) { return tab.group == group; });
         if (selected != state.tabs.end()) {
