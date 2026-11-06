@@ -29,12 +29,31 @@ void textTests() {
     const std::string bigEndian{char(0xfe), char(0xff), char(0x30), char(0x42)};
     check(decodeText(bigEndian, decoded, encoding, error) && decoded == "あ", "UTF-16 big endian converted");
     check(!decodeText(std::string("a\0b", 3), decoded, encoding, error), "binary rejected");
-    check(!decodeText("\xc0\xaf", decoded, encoding, error), "overlong UTF-8 rejected");
-    check(!decodeText("\xed\xa0\x80", decoded, encoding, error), "UTF-8 surrogate rejected");
-    check(!decodeText("\xe3\x81", decoded, encoding, error), "truncated UTF-8 rejected");
+    const std::string replacement = u8"\ufffd";
+    struct InvalidText { std::string bytes, expected; };
+    for (const auto& test : {
+        InvalidText{"\x80", replacement},
+        InvalidText{"\xff", replacement},
+        InvalidText{"\xc0\xaf", replacement + replacement},
+        InvalidText{"\xed\xa0\x80", replacement + replacement + replacement},
+        InvalidText{"\xf4\x90\x80\x80", replacement + replacement + replacement + replacement},
+        InvalidText{"\xe3\x81", replacement + replacement},
+        InvalidText{"before\xe3\r\nafter", "before" + replacement + "\r\nafter"},
+        InvalidText{u8"前😀" "\x80" u8"後", u8"前😀" + replacement + u8"後"},
+        InvalidText{"\xff" u8"\ufffd" "\xff", replacement + replacement + replacement}
+    }) {
+        check(decodeText(test.bytes, decoded, encoding, error) && decoded == test.expected && encoding == "UTF-8", "invalid UTF-8 bytes replaced without swallowing valid text");
+        check(decodeText("\xef\xbb\xbf" + test.bytes, decoded, encoding, error) && decoded == test.expected, "mixed UTF-8 with BOM replaced");
+    }
+    check(!decodeText(std::string("a\xff\0b", 4), decoded, encoding, error), "NUL still rejected after replacement");
+    std::string limit(maxFileBytes - 3, 'a'); limit += '\xff';
+    check(decodeText(limit, decoded, encoding, error) && decoded.size() == maxFileBytes && decoded.substr(decoded.size() - 3) == replacement, "replacement at decoded size limit accepted");
+    limit += 'a';
+    check(!decodeText(limit, decoded, encoding, error) && error == "Decoded text exceeds the 16 MiB preview limit.", "replacement expansion beyond decoded size limit rejected");
+    check(!decodeText(std::string(maxFileBytes / 3 + 1, '\x80'), decoded, encoding, error), "repeated replacement expansion bounded");
     const std::string brokenSurrogate{char(0xff), char(0xfe), char(0x00), char(0xdc)};
     check(!decodeText(brokenSurrogate, decoded, encoding, error), "unpaired UTF-16 surrogate rejected");
-    check(decodeText("\xef\xbf\xbd", decoded, encoding, error), "literal replacement character is valid UTF-8");
+    check(decodeText(replacement, decoded, encoding, error) && decoded == replacement, "literal replacement character is valid UTF-8");
     size_t p = 0; decodeUtf8("\xe3\x81", p, false); check(p == 0, "incomplete streaming scalar retained");
     p = 0; decodeUtf8("\xe3\x1b", p, false); check(p == 1, "invalid streaming scalar does not swallow ESC");
 

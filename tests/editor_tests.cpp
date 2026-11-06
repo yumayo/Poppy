@@ -56,6 +56,24 @@ EditBuffer load(std::string bytes) {
     check(decodeText(bytes, buffer.document.text, buffer.document.encoding, error));
     indexDocument(buffer.document); buffer.initialize(std::move(bytes)); return buffer;
 }
+void mixedUtf8Files() {
+    const std::string source = u8"<?php // 日本語😀\r\n$pool->internalAddGeneratedFile('" "\x80\xff" "');\r\n";
+    const std::string expected = u8"<?php // 日本語😀\r\n$pool->internalAddGeneratedFile('\ufffd\ufffd');\r\n";
+    for (const auto& bom : {std::string{}, std::string("\xef\xbb\xbf")}) {
+        auto buffer = load(bom + source);
+        check(!buffer.dirty() && buffer.baseline == bom + source);
+        check(buffer.document.text == expected && buffer.document.encoding == "UTF-8");
+        check(buffer.document.lines.size() == 3 && buffer.newline() == "\r\n");
+        const size_t position = expected.find(u8"\ufffd");
+        check(buffer.next(position) == position + 3 && buffer.previous(position + 3) == position);
+        check(buffer.replace(position, position + 3, "X") && buffer.dirty());
+        const auto edited = buffer.document.text;
+        check(buffer.encoded() == bom + edited && load(buffer.encoded()).document.text == edited);
+        size_t anchor = 0, caret = 0;
+        check(buffer.undo(anchor, caret) && !buffer.dirty() && buffer.document.text == expected);
+        check(buffer.redo(anchor, caret) && buffer.dirty() && buffer.document.text == edited);
+    }
+}
 void lineCutting() {
     struct Case { std::string before; size_t anchor, caret, begin, end; std::string copied, after; };
     const std::vector<Case> cases{
@@ -339,6 +357,7 @@ void selectionScrolling() {
 }
 int main() {
     compositionLayout();
+    mixedUtf8Files();
     lineCutting();
     lineMovement();
     selectionScrolling();

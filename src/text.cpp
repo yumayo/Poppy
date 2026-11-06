@@ -57,13 +57,30 @@ bool decodeText(std::string bytes, std::string& out, std::string& encoding, std:
         return true;
     }
     if (bytes.compare(0, 3, "\xef\xbb\xbf") == 0) bytes.erase(0, 3);
+    size_t decodedSize = bytes.size(), copied = 0;
+    if (decodedSize > maxFileBytes) { error = "Decoded text exceeds the 16 MiB preview limit."; return false; }
+    std::string replaced;
     for (size_t p = 0; p < bytes.size();) {
         const size_t start = p;
         const char32_t c = decodeUtf8(bytes, p);
         if (!c) { error = "Binary files are not displayed."; return false; }
-        if (c == 0xfffd && bytes.compare(start, p - start, "\xef\xbf\xbd") != 0) { error = "Use UTF-8 or UTF-16 (with BOM) to preview this file."; return false; }
+        if (c == 0xfffd && p - start == 1) {
+            if (decodedSize > maxFileBytes - 2) { error = "Decoded text exceeds the 16 MiB preview limit."; return false; }
+            decodedSize += 2;
+            // Copy valid spans unchanged; allocate only when replacement is needed.
+            if (!copied) replaced.reserve(decodedSize);
+            replaced.append(bytes, copied, start - copied);
+            appendUtf8(replaced, c);
+            copied = p;
+        }
     }
-    encoding = "UTF-8"; out = std::move(bytes); return true;
+    if (copied) {
+        replaced.append(bytes, copied, bytes.size() - copied);
+        out = std::move(replaced);
+    } else {
+        out = std::move(bytes);
+    }
+    encoding = "UTF-8"; return true;
 }
 Language languageFor(std::string ext) {
     std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
