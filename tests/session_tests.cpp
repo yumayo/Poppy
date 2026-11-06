@@ -6,6 +6,40 @@
 
 namespace {
 void check(bool value, const char* message) { if (!value) throw std::runtime_error(message); }
+void editorTabPathTests() {
+    using namespace poppy;
+    const auto root = ResourceId::wsl("Ubuntu", "/home/user/日本語 project", "user");
+    EditorTab tab; tab.path = root / std::string_view("nested/repository/src/日本語 file.cpp");
+    tab.gitRoot = root / std::string_view("nested/repository");
+    for (const auto kind : {GitDiffKind::Automatic, GitDiffKind::Changes, GitDiffKind::Staged, GitDiffKind::Commit, GitDiffKind::Compare}) {
+        tab.diffKind = kind; tab.diff = kind != GitDiffKind::Automatic;
+        check(editorTabPathText(tab, root, false) == L"/home/user/日本語 project/nested/repository/src/日本語 file.cpp",
+              "Copy Path must preserve the Linux path for file and Git tabs");
+        check(editorTabPathText(tab, root, true) == L"nested/repository/src/日本語 file.cpp",
+              "Copy Relative Path must use the project root rather than the Git root");
+    }
+    tab.path = root / std::string_view("file\\name.txt");
+    check(editorTabPathText(tab, root, true) == L"file\\name.txt", "Copying a Linux path changed a literal backslash");
+    check(!editorTabPathText(tab, ResourceId::wsl("Debian", "/project"), true), "Paths from different WSL connections cannot be relative");
+    tab.allChanges = true;
+    check(!editorTabPathText(tab, root, false) && !editorTabPathText(tab, root, true), "All Changes has no single file path to copy");
+    tab = {};
+    check(!editorTabPathText(tab, root, false) && !editorTabPathText(tab, root, true), "An empty tab has no path to copy");
+
+    const auto localRoot = std::filesystem::temp_directory_path() / std::filesystem::u8path("日本語 project");
+    auto relative = std::filesystem::u8path("nested/日本語 file.cpp");
+    auto localPath = localRoot / relative;
+    tab.path = localPath;
+    check(editorTabPathText(tab, ResourceId(localRoot), false) == resourceWide(localPath.make_preferred().u8string()),
+          "Copy Path must use the local absolute path and native separators");
+    check(editorTabPathText(tab, ResourceId(localRoot), true) == resourceWide(relative.make_preferred().u8string()),
+          "Copy Relative Path must preserve Unicode and native separators");
+    check(!editorTabPathText(tab, {}, true), "A relative path requires a project root");
+#ifdef _WIN32
+    tab.path = std::filesystem::path(L"D:\\other\\file.txt");
+    check(!editorTabPathText(tab, ResourceId(L"C:\\project"), true), "Different drives have no relative path");
+#endif
+}
 void editorTabTests() {
     using namespace poppy;
     const auto target = [](const char* name, int group = 0, GitDiffKind kind = GitDiffKind::Automatic) {
@@ -113,6 +147,7 @@ void editorTabTests() {
 }
 int main() {
     try {
+        editorTabPathTests();
         editorTabTests();
         using poppy::projectDirectoryName;
         check(projectDirectoryName("D:\\repository\\yumayo\\PoppyWorktrees\\PoppyDirect2D") ==

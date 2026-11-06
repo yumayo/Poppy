@@ -280,7 +280,7 @@ void dragTab(const Application& app, int visibleIndex, POINT target, UINT cancel
     if (cancel) send(app.window, cancel);
     send(app.window, WM_LBUTTONUP, 0, MAKELPARAM(target.x, target.y));
 }
-enum class TabMenuCommand { Pin, CloseOthers, CloseAll };
+enum class TabMenuCommand { Pin, CopyPath, CopyRelativePath, CloseOthers, CloseAll };
 void tabMenuCommand(const Application& app, int visibleIndex, TabMenuCommand command, bool wait = true) {
     const auto rect = tabBounds(app, visibleIndex);
     POINT point{rect.left + 1, (rect.top + rect.bottom) / 2}; ClientToScreen(app.window, &point);
@@ -292,8 +292,11 @@ void tabMenuCommand(const Application& app, int visibleIndex, TabMenuCommand com
         return (info.flags & GUI_INMENUMODE) != 0;
     };
     waitFor(menuOpen, "The tab context menu did not open");
-    // Pin is first; Close Others and Close All are the last two entries.
-    PostMessageW(app.window, WM_KEYDOWN, command == TabMenuCommand::Pin ? VK_HOME : VK_END, 0);
+    // Path commands follow Pin; bulk close commands are the last two entries.
+    const bool fromStart = command == TabMenuCommand::Pin || command == TabMenuCommand::CopyPath || command == TabMenuCommand::CopyRelativePath;
+    PostMessageW(app.window, WM_KEYDOWN, fromStart ? VK_HOME : VK_END, 0);
+    if (command == TabMenuCommand::CopyPath || command == TabMenuCommand::CopyRelativePath) PostMessageW(app.window, WM_KEYDOWN, VK_DOWN, 0);
+    if (command == TabMenuCommand::CopyRelativePath) PostMessageW(app.window, WM_KEYDOWN, VK_DOWN, 0);
     if (command == TabMenuCommand::CloseOthers) PostMessageW(app.window, WM_KEYDOWN, VK_UP, 0);
     PostMessageW(app.window, WM_KEYDOWN, VK_RETURN, 0);
     waitFor([&] { return !menuOpen(); }, "The tab context menu did not close");
@@ -302,6 +305,35 @@ void tabMenuCommand(const Application& app, int visibleIndex, TabMenuCommand com
 }
 void toggleTabPin(const Application& app, int visibleIndex) {
     tabMenuCommand(app, visibleIndex, TabMenuCommand::Pin);
+}
+void tabCopyPathTests(const fs::path& executable) {
+    Fixture fixture;
+    const auto firstPath = fixture.root / L"a 日本語.txt";
+    writeLines(firstPath, 200); writeLines(fixture.root / L"b.txt", 300);
+    Application app(executable, fixture.root);
+    const auto tree = app.tree(), viewer = FindWindowExW(app.window, nullptr, L"PoppyViewer", nullptr);
+    waitFor([&] { return send(tree, treeGetCount) == 3; }, "Path copy fixture did not load");
+    const auto first = nextItem(tree, TreeRelation::Child, nextItem(tree, TreeRelation::Root));
+    send(tree, treeSelect, first); waitLines(viewer, 200); keepTab(app, 0);
+    send(tree, treeSelect, nextItem(tree, TreeRelation::Next, first)); waitLines(viewer, 300);
+    const auto clipboard = [&] {
+        check(OpenClipboard(app.host) != FALSE, "Cannot read the path clipboard");
+        const auto value = GetClipboardData(CF_UNICODETEXT);
+        const auto data = value ? static_cast<const wchar_t*>(GlobalLock(value)) : nullptr;
+        const std::wstring result = data ? data : L"";
+        if (data) GlobalUnlock(value);
+        CloseClipboard(); return result;
+    };
+    const auto copy = [&](TabMenuCommand command, const std::wstring& expected) {
+        tabMenuCommand(app, 0, command);
+        check(clipboard() == expected, "A tab path command copied the wrong path");
+        check(lastTextRow(viewer) == 300 && visibleTabCount(app) == 2, "Copying an inactive tab changed the active file or tabs");
+    };
+    copy(TabMenuCommand::CopyPath, firstPath.native());
+    copy(TabMenuCommand::CopyRelativePath, L"a 日本語.txt");
+    toggleTabPin(app, 0);
+    copy(TabMenuCommand::CopyPath, firstPath.native());
+    copy(TabMenuCommand::CopyRelativePath, L"a 日本語.txt");
 }
 void answerTabSave(const Application& app, const std::wstring& filename, int answer) {
     HWND dialog = nullptr;
@@ -3652,7 +3684,7 @@ int wmain(int argc, wchar_t** argv) {
         check(argc == 2, "Pass the path to Poppy.exe");
         SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         for (const auto test : {folderTests, explorerSortTests, sidebarTests, treeInteractionTests, collapseAllSidebarTests, navigationHistoryTests, previewTabTests, explorerPreviewTabTests, previewTabSplitTests, tabTests, rapidTabMiddleClickTests, pinnedTabTests,
-                bulkTabCloseTests, bulkTabSaveTests, bulkTabSplitTests, explorerActiveFileTests, htmlTabToolsTests, editorTailTests,
+                tabCopyPathTests, bulkTabCloseTests, bulkTabSaveTests, bulkTabSplitTests, explorerActiveFileTests, htmlTabToolsTests, editorTailTests,
                 tabDragTests, wrappingTabDragTests, wrappingTabTests, renameTests, explorerMoveTests, explorerDeleteTests, explorerDeleteConfirmationTests, explorerMultipleSelectionTests, crossProjectFolderCopyTests, createItemTests, newFileShortcutTests, pasteImageTests, splitPaneTests, quickOpenTests, fullSearchTests, searchRetentionTests, gitSidebarTests, gitIgnoredExplorerTests, gitAutoRefreshTests, editableGitDiffTests, branchSidebarTests, comparisonSidebarTests, multiRepositoryTests, sessionTests, multiProjectTests, recentProjectTests, projectDragTests, scrollingProjectDragTests, terminalTitleTests, terminalShellTests, terminalShortcutTests, terminalBackspaceTests}) {
             Fixture appData; AppDataEnvironment environment(appData.root);
             test(fs::absolute(argv[1]));

@@ -2734,6 +2734,8 @@ void ProjectRuntime::Impl::tabMenu(POINT screen) {
     }
     const auto path = tabs_[index].path;
     const auto key = tabKey(tabs_[index]);
+    const auto absolutePath = editorTabPathText(tabs_[index], root_, false);
+    const auto relativePath = editorTabPathText(tabs_[index], root_, true);
     const bool pinned = tabs_[index].pinned;
     const int group = tabs_[index].group;
     bool closeOthers = false, closeAll = false;
@@ -2744,6 +2746,8 @@ void ProjectRuntime::Impl::tabMenu(POINT screen) {
     HMENU menu = CreatePopupMenu();
     if (!menu) return;
     AppendMenuW(menu, MF_STRING, 1, pinned ? L"Unpin tab" : L"Pin tab");
+    if (absolutePath) AppendMenuW(menu, MF_STRING, 7, L"Copy Path");
+    if (relativePath) AppendMenuW(menu, MF_STRING, 8, L"Copy Relative Path");
     if (!tabs_[index].allChanges && tabs_[index].diffKind != GitDiffKind::Commit && tabs_[index].diffKind != GitDiffKind::Compare) {
         AppendMenuW(menu, MF_STRING, 4, L"Reveal in File Explorer");
         AppendMenuW(menu, MF_STRING, 3, L"Open with Default Application");
@@ -2761,6 +2765,10 @@ void ProjectRuntime::Impl::tabMenu(POINT screen) {
         else if (command == 2) closeTab(index);
         else if (command == 3) openWithDefaultApp(path);
         else if (command == 4) revealInFileExplorer(path);
+        else if ((command == 7 && absolutePath) || (command == 8 && relativePath)) {
+            if (!copyText(window_, command == 7 ? *absolutePath : *relativePath))
+                MessageBoxW(window_, L"Cannot write the path to the clipboard. Try again.", L"Poppy — Clipboard", MB_OK | MB_ICONWARNING);
+        }
         else if (command == 5 || command == 6) {
             std::vector<size_t> indices;
             for (size_t i = 0; i < tabs_.size(); ++i)

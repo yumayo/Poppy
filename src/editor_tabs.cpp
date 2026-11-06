@@ -2,6 +2,12 @@
 #include <algorithm>
 
 namespace poppy {
+std::optional<std::wstring> editorTabPathText(const EditorTab& tab, const ResourceId& root, bool relative) {
+    if (tab.allChanges || tab.path.empty() || (relative && root.empty())) return std::nullopt;
+    auto path = relative ? tab.path.lexically_relative(root) : tab.path;
+    if (path.empty()) return std::nullopt;
+    return path.make_preferred().native();
+}
 void rememberEditorTab(EditorTab& tab) {
     if (!tab.navigation) tab.navigation = std::make_shared<EditorNavigation>();
     auto& saved = tab.navigation->tab;

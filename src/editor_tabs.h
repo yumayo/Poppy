@@ -27,6 +27,8 @@ struct EditorNavigation {
 };
 void rememberEditorTab(EditorTab& tab);
 bool sameEditorTab(const EditorTab& left, const EditorTab& right);
+// Aggregate tabs have no single file path. Relative paths use the project root.
+std::optional<std::wstring> editorTabPathText(const EditorTab& tab, const ResourceId& root, bool relative);
 
 // Reuse an existing tab, or replace the clean preview in the target group.
 size_t openEditorPreview(std::vector<EditorTab>& tabs, EditorTab target);
