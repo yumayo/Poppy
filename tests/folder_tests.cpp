@@ -273,13 +273,8 @@ RECT editorModeTools(const Application& app, HWND viewer, int modeWidth) {
     const auto body = bounds(app.window, viewer);
     const UINT dpi = GetDpiForWindow(app.window);
     const LONG top = body.top - MulDiv(34, dpi, 96);
-    bool firstRow = true;
-    for (int i = 0; i < dockTabCount(app); ++i) {
-        const auto tab = dockTabInfo(app, i).rect;
-        if (tab.left >= body.left && tab.left < body.right && tab.bottom == top) firstRow = false;
-    }
-    const int width = (std::min)(MulDiv(modeWidth, dpi, 96), (static_cast<int>(body.right - body.left) - MulDiv(58, dpi, 96)) / 2);
-    const LONG right = body.right - (firstRow ? MulDiv(58, dpi, 96) : 0);
+    const int width = (std::min)(MulDiv(modeWidth, dpi, 96), static_cast<int>(body.right - body.left) / 2);
+    const LONG right = body.right;
     return {right - width, top, right, body.top};
 }
 RECT terminalTabBounds(const Application& app, HWND terminal) {
@@ -778,7 +773,7 @@ void htmlTabToolsTests(const fs::path& executable) {
     check(tabBounds(app, 0).top < tabBounds(app, 1).top, "HTML tools fixture did not create a pinned row");
     const auto tools = editorModeTools(app, left, 160);
     check(tools.top == tabBounds(app, 2).top, "HTML tools did not follow the bottom tab row");
-    click(app.window, tools.right - MulDiv(58, dpi, 96) - (tools.right - tools.left) / 4, tabBounds(app, 0).top + MulDiv(17, dpi, 96));
+    click(app.window, tools.right - (tools.right - tools.left) / 4, tabBounds(app, 0).top + MulDiv(17, dpi, 96));
     check(lastTextRow(left) == 200 && visibleTabCount(app) == 3, "HTML mode tools retained their old top-row hit region");
     switchMode(left, true); waitFor([&] { return scrollInfo(left).nMax == 0; }, "Bottom-row Preview did not activate HTML preview");
     switchMode(left, false); waitLines(left, 200);

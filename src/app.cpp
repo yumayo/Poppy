@@ -896,11 +896,14 @@ void ProjectRuntime::Impl::layout(bool revealTab) {
         pane.tabs = {start, area.top, edge, area.top};
         const auto selected = groupTab(group);
         const int modeWidth = selected < tabs_.size() && tabs_[selected].diff ? 136 : htmlTab(group) ? 160 : 0;
-        const int addWidth = std::min(MulDiv(58, dpi_, 96), std::max(0, edge - start));
+        const bool terminal = selected < tabs_.size() && !tabs_[selected].terminalId.empty();
+        const int addWidth = terminal ? std::min(MulDiv(58, dpi_, 96), std::max(0, edge - start)) : 0;
         const int toolsWidth = std::min(MulDiv(modeWidth, dpi_, 96), std::max(0, edge - start - addWidth) / 2);
-        const int dropdown = std::min(MulDiv(24, dpi_, 96), addWidth);
-        pane.add = {edge - addWidth, area.top, edge - dropdown, std::min(area.bottom, area.top + rowHeight)};
-        pane.dropdown = {edge - dropdown, area.top, edge, pane.add.bottom};
+        if (addWidth) {
+            const int dropdown = std::min(MulDiv(24, dpi_, 96), addWidth);
+            pane.add = {edge - addWidth, area.top, edge - dropdown, std::min(area.bottom, area.top + rowHeight)};
+            pane.dropdown = {edge - dropdown, area.top, edge, pane.add.bottom};
+        }
         std::vector<TabSize> sizes;
         for (const auto i : pane.indices) {
             const auto& tab = tabs_[i];
