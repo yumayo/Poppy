@@ -565,26 +565,39 @@ void Renderer::icon(Icon icon, const RECT& rect, COLORREF value, float rotation)
 }
 }
 
+poppy::DropPreview::~DropPreview() { if (window_) DestroyWindow(window_); }
 void poppy::DropPreview::create(HWND parent, HINSTANCE instance, bool tab) {
-    tab_ = tab;
+    tab_ = tab; parent_ = parent;
     WNDCLASSW cls{}; cls.lpfnWndProc = procedure; cls.hInstance = instance; cls.lpszClassName = tab ? L"PoppyDraggedTab" : L"PoppyDropPreview";
     RegisterClassW(&cls);
-    window_ = CreateWindowExW(WS_EX_TRANSPARENT | WS_EX_NOACTIVATE, cls.lpszClassName, L"", WS_CHILD | WS_CLIPSIBLINGS, 0, 0, 0, 0, parent, nullptr, instance, this);
+    // Both overlays are opaque. WS_EX_TRANSPARENT would defer their painting
+    // until the editor/terminal underneath has repainted during mouse input.
+    window_ = CreateWindowExW(WS_EX_NOACTIVATE | (tab ? WS_EX_TOOLWINDOW : 0), cls.lpszClassName, L"",
+        tab ? WS_POPUP : WS_CHILD | WS_CLIPSIBLINGS, 0, 0, 0, 0, tab ? GetAncestor(parent, GA_ROOT) : parent, nullptr, instance, this);
 }
 void poppy::DropPreview::show(const RECT& rect, const std::wstring& text, bool italic) {
+    auto position = rect;
+    MapWindowPoints(parent_, nullptr, reinterpret_cast<POINT*>(&position), 2);
+    RECT previous{}; GetWindowRect(window_, &previous);
+    const bool changed = text_ != text || italic_ != italic;
+    if (!changed && IsWindowVisible(window_) && EqualRect(&position, &previous)) return;
     if (text_ != text) { text_ = text; SetWindowTextW(window_, text.c_str()); }
     italic_ = italic;
-    SetWindowPos(window_, HWND_TOP, rect.left, rect.top, std::max(0L, rect.right - rect.left), std::max(0L, rect.bottom - rect.top), SWP_NOACTIVATE | SWP_SHOWWINDOW | SWP_NOCOPYBITS);
+    if (!tab_) position = rect;
+    SetWindowPos(window_, HWND_TOP, position.left, position.top, std::max(0L, position.right - position.left), std::max(0L, position.bottom - position.top), SWP_NOACTIVATE | SWP_SHOWWINDOW | SWP_NOCOPYBITS);
     RedrawWindow(window_, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW);
 }
 LRESULT CALLBACK poppy::DropPreview::procedure(HWND window, UINT message, WPARAM a, LPARAM b) {
     auto* self = reinterpret_cast<DropPreview*>(GetWindowLongPtrW(window, GWLP_USERDATA));
     if (message == WM_NCCREATE) { self = static_cast<DropPreview*>(reinterpret_cast<CREATESTRUCTW*>(b)->lpCreateParams); self->window_ = window; SetWindowLongPtrW(window, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(self)); }
     if (message == WM_NCHITTEST) return HTTRANSPARENT;
+    if (message == WM_MOUSEACTIVATE) return MA_NOACTIVATE;
     if (message == WM_ERASEBKGND) return 1;
+    if (self && message == WM_NCDESTROY) { self->window_ = nullptr; SetWindowLongPtrW(window, GWLP_USERDATA, 0); }
     if (self && message == WM_PAINT) {
         const auto dpi = GetDpiForWindow(window);
-        self->renderer_.setDpi(dpi); Renderer::Paint paint(self->renderer_, window); if (!paint) return 0;
+        if (self->dpi_ != dpi) { self->renderer_.setDpi(dpi); self->dpi_ = dpi; }
+        Renderer::Paint paint(self->renderer_, window); if (!paint) return 0;
         RECT rect{}; GetClientRect(window, &rect);
         self->renderer_.fill(rect, self->tab_ ? panel : rgb(35, 58, 65)); self->renderer_.outline(rect, accent, 2);
         if (self->tab_) {

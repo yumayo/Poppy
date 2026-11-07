@@ -158,6 +158,11 @@ RECT bounds(HWND parent, HWND child) {
     MapWindowPoints(nullptr, parent, reinterpret_cast<POINT*>(&rect), 2);
     return rect;
 }
+HWND draggedTab(const Application& app) {
+    for (HWND window = nullptr; (window = FindWindowExW(nullptr, window, L"PoppyDraggedTab", nullptr));)
+        if (GetWindow(window, GW_OWNER) == app.host && IsWindowVisible(window)) return window;
+    return nullptr;
+}
 template<class Predicate>
 void controlShortcut(const Application& app, HWND target, WPARAM key, Predicate completed, const char* message) {
     struct Input {
@@ -319,10 +324,12 @@ void dragTab(const Application& app, int visibleIndex, POINT target, UINT cancel
 }
 void tabDragPreview(const Application& app, int visibleIndex, HWND pane, bool splittable = true) {
     const auto body = bounds(app.window, pane);
+    const auto source = tabBounds(app, visibleIndex);
+    const POINT origin{source.left + MulDiv(12, GetDpiForWindow(app.window), 96), (source.top + source.bottom) / 2};
     const POINT center{(body.left + body.right) / 2, (body.top + body.bottom) / 2};
     beginTabDrag(app, visibleIndex, center);
     const auto preview = FindWindowExW(app.window, nullptr, L"PoppyDropPreview", nullptr);
-    const auto tab = FindWindowExW(app.window, nullptr, L"PoppyDraggedTab", nullptr);
+    const auto tab = draggedTab(app);
     check(preview && tab && IsWindowVisible(preview) && IsWindowVisible(tab), "A same-pane drag has no destination or dragged tab");
     const auto destination = bounds(app.window, preview);
     check(EqualRect(&destination, &body), "The center drop preview covers the tab strip");
@@ -330,6 +337,13 @@ void tabDragPreview(const Application& app, int visibleIndex, HWND pane, bool sp
     check(std::wstring(text) == L"Move tab here", "The unchanged center destination has no guidance");
     GetWindowTextW(tab, text, 128);
     check(text[0] != 0 && send(tab, WM_NCHITTEST) == HTTRANSPARENT, "The dragged tab has no title or intercepts mouse input");
+    const auto follows = [&](POINT point) {
+        auto expected = source;
+        OffsetRect(&expected, point.x - origin.x, point.y - origin.y);
+        const auto actual = bounds(app.window, tab);
+        check(EqualRect(&actual, &expected), "The dragged tab lost the grabbed point or stopped at the client edge");
+    };
+    follows(center);
     send(app.window, WM_MOUSEMOVE, MK_LBUTTON, MAKELPARAM(body.left + 1, body.top + 1));
     const auto firstTab = bounds(app.window, tab);
     send(app.window, WM_MOUSEMOVE, MK_LBUTTON, MAKELPARAM(body.left + 9, body.top + 8));
@@ -344,12 +358,18 @@ void tabDragPreview(const Application& app, int visibleIndex, HWND pane, bool sp
     };
     for (const auto& target : targets) {
         send(app.window, WM_MOUSEMOVE, MK_LBUTTON, MAKELPARAM(target.point.x, target.point.y));
+        follows(target.point);
         const auto rect = bounds(app.window, preview), actualBody = bounds(app.window, pane);
         const auto expected = splittable ? target.preview : body;
         check(IsWindowVisible(preview) && EqualRect(&rect, &expected), "A directional drop preview includes tabs or disappears for a sole tab");
         check(EqualRect(&actualBody, &body), "Previewing a drop changed the pane layout");
     }
-    send(app.window, WM_MOUSEMOVE, MK_LBUTTON, MAKELPARAM(-20, -20));
+    RECT client{}; GetClientRect(app.window, &client);
+    const POINT outside[] = {{client.right - 1, client.bottom - 1}, {client.right + 30, client.bottom + 30}, {-20, -20}};
+    for (const auto point : outside) {
+        send(app.window, WM_MOUSEMOVE, MK_LBUTTON, MAKELPARAM(point.x, point.y));
+        follows(point);
+    }
     check(!IsWindowVisible(preview) && IsWindowVisible(tab), "Leaving drop targets hid the dragged tab");
     send(app.window, WM_CANCELMODE);
     check(!IsWindowVisible(preview) && !IsWindowVisible(tab), "Cancelling a drag left an overlay visible");
@@ -363,6 +383,10 @@ void dragTerminalTab(const Application& app, HWND terminal, POINT target, UINT c
     const POINT origin{rect.left + MulDiv(12, GetDpiForWindow(app.window), 96), (rect.top + rect.bottom) / 2};
     send(app.window, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(origin.x, origin.y));
     send(app.window, WM_MOUSEMOVE, MK_LBUTTON, MAKELPARAM(target.x, target.y));
+    auto expected = rect;
+    OffsetRect(&expected, target.x - origin.x, target.y - origin.y);
+    const auto actual = bounds(app.window, draggedTab(app));
+    check(EqualRect(&actual, &expected), "The dragged terminal tab does not follow the grabbed point");
     if (cancel == WM_KEYDOWN) {
         PostMessageW(terminal, WM_KEYDOWN, VK_ESCAPE, 0);
         waitFor([&] { GUITHREADINFO info{}; info.cbSize = sizeof(info); return GetGUIThreadInfo(app.process.dwThreadId, &info) && info.hwndCapture != app.window; }, "Escape from a terminal did not cancel docking");
@@ -1069,7 +1093,7 @@ void tabDragTests(const fs::path& executable) {
             return info.hwndCapture == nullptr;
         }, "Escape did not release tab drag capture");
         check(!IsWindowVisible(FindWindowExW(app.window, nullptr, L"PoppyDropPreview", nullptr)) &&
-              !IsWindowVisible(FindWindowExW(app.window, nullptr, L"PoppyDraggedTab", nullptr)), "Escape left a drag overlay visible");
+              !draggedTab(app), "Escape left a drag overlay visible");
         send(app.window, WM_LBUTTONUP); checkOrder({200, 300, 400, 500});
         auto empty = after(3); empty.x += px(20);
         dragTab(app, 0, empty); checkOrder({300, 400, 500, 200});
@@ -1123,9 +1147,13 @@ void wrappingTabDragTests(const fs::path& executable) {
     clickTab(app, 0); waitLines(viewer, 107);
     const POINT next{pane.right - px(14), y};
     beginTabDrag(app, 0, next);
+    const auto ghost = draggedTab(app);
+    const auto beforeScroll = bounds(app.window, ghost);
     // Fire the repeat timer while hovering over the next-row button. The
     // source tab must stay captured even after its row is no longer visible.
     for (int i = 0; i < 8; ++i) send(app.window, WM_TIMER, 2);
+    const auto afterScroll = bounds(app.window, ghost);
+    check(EqualRect(&beforeScroll, &afterScroll), "Scrolling the source strip moved or resized the dragged tab");
     const auto target = tabBounds(app, visibleTabCount(app) - 1);
     const POINT drop{target.right - 1, (target.top + target.bottom) / 2};
     send(app.window, WM_MOUSEMOVE, MK_LBUTTON, MAKELPARAM(drop.x, drop.y));

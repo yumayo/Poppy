@@ -100,6 +100,7 @@ struct EditorGroup { RECT tabs{}, body{}, tools{}, add{}, dropdown{}; int tabRig
 struct TabDrag {
     size_t index;
     POINT origin, point;
+    RECT source;
     bool active = false;
     std::optional<TabDrop> target;
 };
@@ -2641,17 +2642,14 @@ void ProjectRuntime::Impl::updateTabDrag(POINT point) {
         const auto rect = drag.target->marker;
         dropPreview_.show(rect);
     } else dropPreview_.hide();
-    const auto source = tabBounds(drag.index);
-    RECT client{}; GetClientRect(window_, &client);
-    const LONG width = std::min(client.right, std::max<LONG>(MulDiv(80, dpi_, 96), source.right - source.left));
-    const LONG height = std::min(client.bottom, source.bottom - source.top);
-    const LONG left = std::clamp<LONG>(point.x + MulDiv(14, dpi_, 96), 0, client.right - width);
-    const LONG top = std::clamp<LONG>(point.y + MulDiv(18, dpi_, 96), 0, client.bottom - height);
+    // Keep the grabbed point under the cursor, even at the client edges or
+    // when scrolling the source tab strip changes its current bounds.
+    auto rect = drag.source;
+    OffsetRect(&rect, point.x - drag.origin.x, point.y - drag.origin.y);
     const auto& tab = tabs_[drag.index];
     auto title = titleFor(tab);
     if (tab.buffer && tab.buffer->dirty()) title += L" *";
-    tabPreview_.show({left, top, left + width, top + height}, title, tab.preview);
-    InvalidateRect(window_, nullptr, FALSE);
+    tabPreview_.show(rect, title, tab.preview);
 }
 void ProjectRuntime::Impl::scrollTabDrag() {
     if (!tabDrag_ || !tabDrag_->active) return;
@@ -3425,7 +3423,7 @@ LRESULT ProjectRuntime::Impl::handle(UINT m, WPARAM a, LPARAM b) {
                 if (!tabs_[index].pinned && point.x >= rect.right - MulDiv(28, dpi_, 96)) closeTab(index);
                 else {
                     selectTab(index); SetFocus(selectedWindow());
-                    tabDrag_ = TabDrag{index, point, point, false, std::nullopt};
+                    tabDrag_ = TabDrag{index, point, point, rect, false, std::nullopt};
                     SetCapture(window_);
                 }
             } else for (auto& pane : editorGroups_) if (pane.overflow() && PtInRect(&pane.tabs, point) && point.x < pane.tabRight && point.y >= pane.tabs.bottom - MulDiv(34, dpi_, 96)) {

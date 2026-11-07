@@ -22,6 +22,64 @@ namespace {
 void check(bool condition, const char* message) {
     if (!condition) throw std::runtime_error(message);
 }
+void continuousDraggedTab() {
+    const auto instance = GetModuleHandleW(nullptr);
+    const auto root = CreateWindowExW(0, L"STATIC", L"Tab drag test", WS_POPUP | WS_CLIPCHILDREN,
+        100, 100, 480, 320, nullptr, nullptr, instance, nullptr);
+    check(root != nullptr, "Cannot create tab drag owner");
+    struct Owner { HWND window; ~Owner() { DestroyWindow(window); } } owner{root};
+    const auto parent = CreateWindowExW(0, L"STATIC", L"Project", WS_CHILD | WS_VISIBLE | WS_CLIPCHILDREN,
+        25, 30, 400, 240, root, nullptr, instance, nullptr);
+    check(parent != nullptr, "Cannot create tab drag project");
+    ShowWindow(root, SW_SHOWNOACTIVATE);
+    HWND tabWindow = nullptr;
+    {
+        DropPreview destination, tab;
+        destination.create(parent, instance); tab.create(parent, instance, true);
+        for (HWND window = nullptr; (window = FindWindowExW(nullptr, window, L"PoppyDraggedTab", nullptr));)
+            if (GetWindow(window, GW_OWNER) == root) { tabWindow = window; break; }
+        const auto dropWindow = FindWindowExW(parent, nullptr, L"PoppyDropPreview", nullptr);
+        check(tabWindow && dropWindow && !IsChild(parent, tabWindow), "The dragged tab is clipped to the project");
+        struct Paints { unsigned count = 0; RECT bounds{}; } tabPaints, dropPaints;
+        const auto observe = [](HWND window, UINT message, WPARAM a, LPARAM b, UINT_PTR, DWORD_PTR data) -> LRESULT {
+            const auto result = DefSubclassProc(window, message, a, b);
+            if (message == WM_PAINT) {
+                auto& paints = *reinterpret_cast<Paints*>(data);
+                ++paints.count; GetWindowRect(window, &paints.bounds);
+            }
+            return result;
+        };
+        check(SetWindowSubclass(tabWindow, observe, 1, reinterpret_cast<DWORD_PTR>(&tabPaints)) &&
+              SetWindowSubclass(dropWindow, observe, 1, reinterpret_cast<DWORD_PTR>(&dropPaints)), "Cannot observe drag painting");
+        const RECT body{0, 34, 400, 240};
+        destination.show(body);
+        const auto dropCount = dropPaints.count;
+        for (int i = 0; i < 10; ++i) destination.show(body);
+        check(dropPaints.count == dropCount, "Moving inside a destination repaints the entire preview");
+        SetCapture(parent);
+        const auto focus = GetFocus();
+        // Keep the underlying view invalid and do not pump queued WM_PAINT.
+        // Every drag step must still present at the new cursor position.
+        for (int i = 0; i < 12; ++i) {
+            const RECT rect{-40 + i * 45, -20 + i * 30, 120 + i * 45, 14 + i * 30};
+            auto expected = rect;
+            MapWindowPoints(parent, nullptr, reinterpret_cast<POINT*>(&expected), 2);
+            InvalidateRect(parent, nullptr, FALSE);
+            const auto before = tabPaints.count;
+            tab.show(rect, L"Dragged tab 日本語", true);
+            check(tabPaints.count > before && EqualRect(&tabPaints.bounds, &expected),
+                "Continuous mouse input deferred the dragged tab paint or painted at the old position");
+            check(!GetUpdateRect(tabWindow, nullptr, FALSE), "The dragged tab still has a pending paint");
+            check(GetCapture() == parent && GetFocus() == focus, "The dragged tab stole capture or focus");
+        }
+        check(SendMessageW(tabWindow, WM_NCHITTEST, 0, 0) == HTTRANSPARENT &&
+              SendMessageW(tabWindow, WM_MOUSEACTIVATE, 0, 0) == MA_NOACTIVATE, "The dragged tab intercepts mouse input");
+        ReleaseCapture(); tab.hide(); destination.hide();
+        check(!IsWindowVisible(tabWindow) && !IsWindowVisible(dropWindow), "Cancelling left a drag preview visible");
+        RemoveWindowSubclass(tabWindow, observe, 1); RemoveWindowSubclass(dropWindow, observe, 1);
+    }
+    check(!IsWindow(tabWindow), "Destroying a project left its dragged tab popup alive");
+}
 void shutdownProgress() {
     const auto instance = GetModuleHandleW(nullptr);
     const auto parent = CreateWindowExW(0, L"STATIC", L"Shutdown test", WS_POPUP, 100, 100, 1040, 720, nullptr, nullptr, instance, nullptr);
@@ -2816,6 +2874,7 @@ int main(int argc, char** argv) {
             htmlPreviewRuntime();
             std::cout << "WebView2 runtime reuse tests passed\n";
         } else {
+            continuousDraggedTab();
             shutdownProgress();
             persistentErrorPopup();
             editorBottomPadding(); editorTailFollowing();
