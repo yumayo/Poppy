@@ -10,6 +10,8 @@
 #include "resource_ids.h"
 #include "launcher_api.h"
 #include "scrollbars.h"
+#include "app_update.h"
+#include "update_title_button.h"
 #include <commctrl.h>
 #include <dwmapi.h>
 #include <shlobj.h>
@@ -41,6 +43,22 @@ fs::path stateDirectory() {
     if (FAILED(SHGetKnownFolderPath(FOLDERID_RoamingAppData, KF_FLAG_CREATE, nullptr, &value))) throw std::runtime_error("Cannot locate application data");
     fs::path path(value); CoTaskMemFree(value); return path / L"yumayo" / L"Poppy";
 }
+fs::path launcherExecutable() {
+    std::wstring path(32768, L'\0');
+    const auto count = GetModuleFileNameW(nullptr, path.data(), static_cast<DWORD>(path.size()));
+    if (!count || count >= path.size()) throw std::runtime_error("Cannot locate Poppy.exe");
+    path.resize(count); return fs::path(path);
+}
+void restartApplication() {
+    const auto executable = launcherExecutable();
+    // Restore the saved workspace, rather than replaying the original --project arguments.
+    auto command = processCommandLine({executable.native()});
+    STARTUPINFOW startup{}; startup.cb = sizeof(startup);
+    PROCESS_INFORMATION process{};
+    if (!CreateProcessW(executable.c_str(), command.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr, &startup, &process))
+        throw std::runtime_error("Cannot restart Poppy: " + utf8(winError()));
+    CloseHandle(process.hThread); CloseHandle(process.hProcess);
+}
 struct OpenProject {
     uint64_t id = 0;
     ResourceId path;
@@ -58,6 +76,7 @@ struct ProjectDrag {
 class Workspace {
 public:
     int run(HINSTANCE instance, int show, const StartupOptions& options, SingleInstance& singleInstance);
+    bool restartRequested() const { return restartRequested_; }
 private:
     static LRESULT CALLBACK procedure(HWND,UINT,WPARAM,LPARAM);
     static LRESULT CALLBACK scrollbarProcedure(HWND,UINT,WPARAM,LPARAM);
@@ -79,6 +98,7 @@ private:
     void navigate(bool forward);
     void close(size_t index);
     void tick();
+    void checkUpdate();
     void animateAiStatus();
     void save(OpenProject& project);
     void saveApp();
@@ -109,6 +129,8 @@ private:
     Scrollbars scrollbars_;
     QuickOpen recent_;
     ErrorPopup errors_;
+    UpdateTitleButton updateButton_;
+    fs::path installation_, runningRelease_;
     AiEventQueue events_{[this] { PostMessageW(window_, wmAiEvent, 0, 0); }};
     std::unique_ptr<Worker> storageWorker_;
     // This connection is created, used and destroyed on storageWorker_ only.
@@ -129,6 +151,8 @@ private:
     bool listingWsl_ = false;
     bool initialShowPending_ = true;
     bool dragging_ = false, restoring_ = true, appDirty_ = false, closing_ = false;
+    bool updateCheckPending_ = false, restartRequested_ = false;
+    ULONGLONG updateCheckedAt_ = 0;
     ULONGLONG appChanged_ = 0;
     std::wstring tipText_, storageError_;
     int px(int value) const { return MulDiv(value,dpi_,96); }
@@ -136,6 +160,7 @@ private:
 OpenProject* Workspace::find(uint64_t id) { const auto found=std::find_if(projects_.begin(),projects_.end(),[&](const OpenProject& project){return project.id==id;});return found==projects_.end()?nullptr:&*found; }
 int Workspace::run(HINSTANCE instance,int show,const StartupOptions& options,SingleInstance& singleInstance) {
     initializeRendering();instance_=instance;initialShow_=show;singleInstance_=&singleInstance;
+    installation_=launcherExecutable().parent_path();runningRelease_=applicationDirectory();
     for(const auto& project:options.projects)pendingProjects_.emplace_back(project);
     INITCOMMONCONTROLSEX common{sizeof(common),ICC_WIN95_CLASSES};InitCommonControlsEx(&common);
     WNDCLASSEXW cls{};
@@ -187,6 +212,7 @@ void Workspace::create(){
     recent_.create(window_,instance_,QuickOpenMode::Projects);recent_.setDpi(dpi_);
     recent_.opened=[this](const ResourceId& path){open(path);};
     const BOOL dark=TRUE;DwmSetWindowAttribute(window_,20,&dark,sizeof(dark));
+    updateButton_.create(window_,instance_);
     tooltips_=CreateWindowExW(WS_EX_TOPMOST,TOOLTIPS_CLASSW,nullptr,WS_POPUP|TTS_ALWAYSTIP|TTS_NOPREFIX,CW_USEDEFAULT,CW_USEDEFAULT,CW_USEDEFAULT,CW_USEDEFAULT,window_,nullptr,instance_,nullptr);
     SendMessageW(tooltips_,TTM_SETMAXTIPWIDTH,0,700);
     storageWorker_=std::make_unique<Worker>(window_);
@@ -423,6 +449,7 @@ void Workspace::saveApp(){
 void Workspace::saveAll(){for(auto& project:projects_)save(project);saveApp();storageWorker_->drain();storageWorker_->dispatch();}
 void Workspace::finishClose(){
     closing_=true;
+    updateButton_.available(false);
     endProjectDrag();recent_.close(false);
     if(GetCapture())ReleaseCapture();
     KillTimer(window_,1);KillTimer(window_,77);KillTimer(window_,aiAnimationTimerId);
@@ -478,12 +505,25 @@ void Workspace::checkFolder(OpenProject& project) {
 void Workspace::markDirty(){if(!projects_.empty()){projects_[active_].dirty=true;projects_[active_].changedAt=GetTickCount64();}}
 void Workspace::tick(){
     scrollProjectDrag();
+    checkUpdate();
     const auto now=GetTickCount64();
     for(size_t i=0;i<projects_.size();++i){auto& project=projects_[i];project.runtime->poll();if(project.dirty&&now-project.changedAt>=650)save(project);
     }
     trimDocuments();
     if(appDirty_&&now-appChanged_>=650)saveApp();
     animateAiStatus();
+}
+void Workspace::checkUpdate() {
+    const auto now = GetTickCount64();
+    if (updateCheckPending_ || now - updateCheckedAt_ < 2000) return;
+    updateCheckedAt_ = now; updateCheckPending_ = true;
+    storageWorker_->submit(L"check-update", [this] {
+        const bool available = applicationUpdateAvailable(installation_, runningRelease_);
+        storageWorker_->complete([this, available] {
+            updateCheckPending_ = false;
+            if (!closing_) updateButton_.available(available);
+        });
+    });
 }
 void Workspace::animateAiStatus() {
     bool running = false;
@@ -668,6 +708,9 @@ case WM_CREATE:create();return 0;case WM_PAINT:paint();return 0;case WM_ERASEBKG
 case WM_GETMINMAXINFO:reinterpret_cast<MINMAXINFO*>(b)->ptMinTrackSize={px(900),px(480)};return 0;
 case WM_DPICHANGED:{endProjectDrag();dpi_=HIWORD(a);renderer_.setDpi(dpi_);scrollbarRenderer_.setDpi(dpi_);recent_.setDpi(dpi_);errors_.setDpi(dpi_);for(auto& project:projects_)project.runtime->setDpi(dpi_);const auto rect=reinterpret_cast<RECT*>(b);SetWindowPos(window_,nullptr,rect->left,rect->top,rect->right-rect->left,rect->bottom-rect->top,SWP_NOZORDER|SWP_NOACTIVATE);layout();return 0;}
 case WM_MOVE: errors_.layout(); return 0;
+case WM_WINDOWPOSCHANGED:{const auto result=DefWindowProcW(window_,m,a,b);updateButton_.layout();return result;}
+case WM_ENABLE: updateButton_.layout(); break;
+case WM_DWMCOMPOSITIONCHANGED:case WM_THEMECHANGED:updateButton_.layout();break;
 case wmWork:if(!closing_&&storageWorker_)storageWorker_->dispatch();return 0;
 case wmStartup:applyStartupRequests();return 0;
 case WM_APP + 21:{ const auto project = find(static_cast<uint64_t>(a)); if (!project || project->runtime->hasUnsaved()) return 0; const bool active = project == &projects_[active_]; const auto index = static_cast<size_t>(project - projects_.data()); close(index); if (active) for (size_t i = 0; i < projects_.size(); ++i) if (projects_[i].id == static_cast<uint64_t>(b)) { select(i); break; } return 0; }
@@ -711,6 +754,14 @@ case WM_COPYDATA:{
 }
 case WM_QUERYENDSESSION:if(!closing_){for(auto& project:projects_)if(!project.runtime->canClose())return FALSE;saveAll();}return TRUE;
 case WM_ENDSESSION:if(a&&!closing_){closing_=true;saveAll();for(auto& project:projects_)project.runtime->shutdown();DestroyWindow(window_);}return 0;
+case WM_SYSCOMMAND:
+    if((a&0xFFF0)==restartUpdateCommand){
+        if(closing_||restoring_)return 0;
+        if(!applicationUpdateAvailable(installation_,runningRelease_)){updateButton_.available(false);return 0;}
+        for(auto& project:projects_)if(!project.runtime->canClose())return 0;
+        restartRequested_=true;finishClose();return 0;
+    }
+    break;
 case WM_CLOSE:if(closing_)return 0;for(auto& project:projects_)if(!project.runtime->canClose())return 0;finishClose();return 0;
 case WM_DESTROY:singleInstance_->unpublish(window_);KillTimer(window_,1);KillTimer(window_,aiAnimationTimerId);errors_.destroy();projects_.clear();if(storageWorker_){storageWorker_->submit(L"release-storage",[this]{storage_.reset();});storageWorker_->drain();storageWorker_->stop();}PostQuitMessage(0);return 0;
 }return DefWindowProcW(window_,m,a,b);}
@@ -733,9 +784,17 @@ extern "C" __declspec(dllexport) int WINAPI PoppyMainV1(HINSTANCE instance,int s
             }
             if(!(attributes&FILE_ATTRIBUTE_DIRECTORY))throw std::runtime_error("The project path is not a directory: "+poppy::utf8(project));
         }
-        poppy::SingleInstance singleInstance(poppy::stateDirectory());
-        if(singleInstance.acquireOrForward(options)){poppy::Workspace workspace;result=workspace.run(instance,show,options,singleInstance);}
-        else result=0;
+        bool restart=false;
+        {
+            poppy::SingleInstance singleInstance(poppy::stateDirectory());
+            if(singleInstance.acquireOrForward(options)){
+                poppy::Workspace workspace;result=workspace.run(instance,show,options,singleInstance);
+                restart=workspace.restartRequested();
+            }else result=0;
+        }
+        // Release the instance lock after saving and stopping all project resources,
+        // so the new launcher can own the workspace instead of forwarding back to us.
+        if(restart)poppy::restartApplication();
     }catch(const std::exception& error){MessageBoxW(nullptr,poppy::wide(error.what()).c_str(),L"Poppy",MB_OK|MB_ICONERROR);}
     catch(...){MessageBoxW(nullptr,L"Poppy could not start.",L"Poppy",MB_OK|MB_ICONERROR);}
     if(SUCCEEDED(com))OleUninitialize();

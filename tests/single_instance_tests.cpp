@@ -1,7 +1,11 @@
 #include "single_instance.h"
 #include <array>
+#include <dwmapi.h>
+#include <fstream>
 #include <iostream>
 #include <stdexcept>
+#include <tlhelp32.h>
+#include "update_title_button.h"
 
 namespace fs = std::filesystem;
 namespace {
@@ -53,6 +57,11 @@ struct Application {
     }
     Application(const Application&) = delete;
     Application& operator=(const Application&) = delete;
+    explicit Application(DWORD processId) {
+        process.dwProcessId = processId;
+        process.hProcess = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE, FALSE, processId);
+        check(process.hProcess != nullptr, "Cannot track the restarted Poppy");
+    }
     ~Application() {
         if (auto window = processWindow(process.dwProcessId)) PostMessageW(window, WM_CLOSE, 0, 0);
         if (WaitForSingleObject(process.hProcess, 5000) != WAIT_OBJECT_0) {
@@ -171,14 +180,92 @@ void simultaneous(const fs::path& executable, Fixture& fixture) {
         waitProject(*owner, path, 3);
     }
 }
+void restartUpdate(const fs::path& executable, Fixture& fixture) {
+    AppDataEnvironment environment(fixture.folder(L"update profile"));
+    const auto installation = fixture.folder(L"update installation 日本語");
+    std::ifstream pointer(executable.parent_path() / "current.txt");
+    std::string selected; pointer >> selected;
+    check(selected.size() == 64, "Cannot find the published application fixture");
+    fs::copy_file(executable, installation / "Poppy.exe");
+    for (const char id : {'a', 'b'}) {
+        const auto release = installation / "releases" / std::string(64, id);
+        fs::create_directories(release);
+        fs::copy(executable.parent_path() / "releases" / selected, release, fs::copy_options::recursive);
+    }
+    const auto publish = [&](char id) {
+        { std::ofstream file(installation / "current.next"); file << std::string(64, id) << '\n'; }
+        check(MoveFileExW((installation / "current.next").c_str(), (installation / "current.txt").c_str(), MOVEFILE_REPLACE_EXISTING) != FALSE,
+            "Cannot publish the update fixture");
+    };
+    publish('a');
+    const auto first = fixture.folder(L"update first"), last = fixture.folder(L"update selected");
+    Application app(installation / "Poppy.exe", {L"--project", first.native()});
+    const auto host = waitProject(app, first, 1);
+    { Application second(installation / "Poppy.exe", {L"--project", last.native()}); second.exited(); }
+    waitProject(app, last, 2);
+    const auto button = processWindow(app.process.dwProcessId, L"PoppyUpdateTitleButton");
+    check(button && !IsWindowVisible(button), "Restart was visible without a new release");
+    const auto aligned = [&] {
+        RECT frame{}, caption{}, bounds{};
+        return IsWindowVisible(button) && GetWindowRect(host, &frame) && GetWindowRect(button, &bounds) &&
+            SUCCEEDED(DwmGetWindowAttribute(host, DWMWA_CAPTION_BUTTON_BOUNDS, &caption, sizeof(caption))) &&
+            bounds.right == frame.left + caption.left && bounds.top == frame.top + caption.top &&
+            bounds.bottom == frame.top + caption.bottom;
+    };
+    publish('b');
+    waitFor(aligned, "Restart was not immediately left of the minimize button");
+    check(GetMenuState(GetSystemMenu(host, FALSE), poppy::restartUpdateCommand, MF_BYCOMMAND) != static_cast<UINT>(-1),
+        "The update action was missing from the keyboard-accessible system menu");
+    ShowWindow(host, SW_MAXIMIZE);
+    waitFor(aligned, "Maximizing detached Restart from the caption buttons");
+    ShowWindow(host, SW_MINIMIZE);
+    waitFor([&] { return !IsWindowVisible(button); }, "Restart remained visible while minimized");
+    ShowWindow(host, SW_RESTORE);
+    waitFor(aligned, "Restoring detached Restart from the caption buttons");
+    ShowWindow(host, SW_SHOWNORMAL);
+    RECT frame{}; GetWindowRect(host, &frame);
+    SetWindowPos(host, nullptr, frame.left + 16, frame.top + 16, 0, 0, SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOSIZE);
+    waitFor(aligned, "Moving detached Restart from the caption buttons");
+    publish('a');
+    waitFor([&] { return !IsWindowVisible(button); }, "Withdrawing the update left Restart visible");
+    publish('b');
+    waitFor(aligned, "Republishing the update did not restore Restart");
+    SendMessageW(button, BM_CLICK, 0, 0);
+    app.exited();
+    DWORD replacement = 0;
+    waitFor([&] {
+        struct Search { DWORD old, found = 0; std::wstring title; } search{app.process.dwProcessId, 0, L"Poppy — " + last.native()};
+        EnumWindows([](HWND window, LPARAM context) -> BOOL {
+            auto& search = *reinterpret_cast<Search*>(context);
+            DWORD process = 0; GetWindowThreadProcessId(window, &process);
+            if (process != search.old && FindWindowExW(window, nullptr, L"PoppyProject", search.title.c_str())) {
+                search.found = process; return FALSE;
+            }
+            return TRUE;
+        }, reinterpret_cast<LPARAM>(&search));
+        replacement = search.found; return replacement != 0;
+    }, "Restart did not open a replacement workspace");
+    Application restarted(replacement);
+    waitProject(restarted, last, 2);
+    poppy::Handle modules(CreateToolhelp32Snapshot(TH32CS_SNAPMODULE, replacement));
+    check(static_cast<bool>(modules), "Cannot inspect the restarted application modules");
+    MODULEENTRY32W module{}; module.dwSize = sizeof(module);
+    fs::path loaded;
+    for (BOOL found = Module32FirstW(modules.value, &module); found; found = Module32NextW(modules.value, &module))
+        if (std::wstring(module.szModule) == L"PoppyApp.dll") { loaded = module.szExePath; break; }
+    check(!loaded.empty() && fs::equivalent(loaded.parent_path(), installation / "releases" / std::string(64, 'b')),
+        "Restart did not load the newly published DLL");
+    const auto restartedButton = processWindow(replacement, L"PoppyUpdateTitleButton");
+    check(restartedButton && !IsWindowVisible(restartedButton), "Restart did not load the newly published release");
+}
 }
 int wmain(int argc, wchar_t** argv) {
     try {
         check(argc == 2, "Pass the path to Poppy.exe");
         Fixture fixture; AppDataEnvironment environment(fixture.folder(L"profile"));
         const auto executable = fs::absolute(argv[1]);
-        forwarding(executable, fixture); simultaneous(executable, fixture);
-        std::cout << "Startup forwarding, duplicate, relative path, activation, profile, persistence and simultaneous startup tests passed\n";
+        forwarding(executable, fixture); simultaneous(executable, fixture); restartUpdate(executable, fixture);
+        std::cout << "Startup forwarding, persistence, simultaneous startup and update restart tests passed\n";
         return 0;
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
 }
