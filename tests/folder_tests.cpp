@@ -269,6 +269,19 @@ RECT tabBounds(const Application& app, int visibleIndex) {
     }
     throw std::runtime_error("An editor tab tooltip region is missing");
 }
+RECT editorModeTools(const Application& app, HWND viewer, int modeWidth) {
+    const auto body = bounds(app.window, viewer);
+    const UINT dpi = GetDpiForWindow(app.window);
+    const LONG top = body.top - MulDiv(34, dpi, 96);
+    bool firstRow = true;
+    for (int i = 0; i < dockTabCount(app); ++i) {
+        const auto tab = dockTabInfo(app, i).rect;
+        if (tab.left >= body.left && tab.left < body.right && tab.bottom == top) firstRow = false;
+    }
+    const int width = (std::min)(MulDiv(modeWidth, dpi, 96), (static_cast<int>(body.right - body.left) - MulDiv(58, dpi, 96)) / 2);
+    const LONG right = body.right - (firstRow ? MulDiv(58, dpi, 96) : 0);
+    return {right - width, top, right, body.top};
+}
 RECT terminalTabBounds(const Application& app, HWND terminal) {
     for (int i = 0; i < dockTabCount(app); ++i) {
         const auto info = dockTabInfo(app, i);
@@ -721,9 +734,8 @@ void htmlTabToolsTests(const fs::path& executable) {
     waitFor([&] { return send(tree, treeGetCount) == 4; }, "HTML tab fixture did not load");
     const UINT dpi = GetDpiForWindow(app.window);
     const auto selectMode = [&](HWND viewer, bool preview, UINT message = WM_LBUTTONDOWN) {
-        const auto rect = bounds(app.window, viewer);
-        const int toolsWidth = (std::min)(MulDiv(160, dpi, 96), (static_cast<int>(rect.right - rect.left) - MulDiv(58, dpi, 96)) / 2);
-        const auto point = MAKELPARAM(rect.right - MulDiv(58, dpi, 96) - toolsWidth * (preview ? 1 : 3) / 4, tabBounds(app, viewer == left ? 0 : 1).top + MulDiv(17, dpi, 96));
+        const auto tools = editorModeTools(app, viewer, 160);
+        const auto point = MAKELPARAM(tools.right - (tools.right - tools.left) * (preview ? 1 : 3) / 4, (tools.top + tools.bottom) / 2);
         send(app.window, message, MK_LBUTTON, point); send(app.window, WM_LBUTTONUP, 0, point);
     };
     const auto waitSource = [&](HWND viewer, int lines) {
@@ -741,7 +753,7 @@ void htmlTabToolsTests(const fs::path& executable) {
     }
     const auto switchMode = [&](HWND viewer, bool preview, UINT message = WM_LBUTTONDOWN) {
         const auto rect = bounds(app.window, viewer);
-        const int toolsWidth = (std::min)(MulDiv(160, dpi, 96), (static_cast<int>(rect.right - rect.left) - MulDiv(58, dpi, 96)) / 2);
+        const auto tools = editorModeTools(app, viewer, 160);
         selectMode(viewer, preview, message);
         GUITHREADINFO input{}; input.cbSize = sizeof(input);
         check(GetGUIThreadInfo(app.process.dwThreadId, &input) && input.hwndCapture != app.window && visibleTabCount(app) == 3,
@@ -750,8 +762,8 @@ void htmlTabToolsTests(const fs::path& executable) {
         check(EqualRect(&rect, &after), "HTML mode switching moved the viewer below a toolbar");
         for (int i = 0; i < visibleTabCount(app); ++i) {
             const auto tab = tabBounds(app, i);
-            if (tab.left >= rect.left && tab.left < rect.right)
-                check(tab.right <= rect.right - MulDiv(58, dpi, 96) - toolsWidth, "HTML tools overlapped a wrapped tab");
+            if (tab.left >= rect.left && tab.left < rect.right && tab.top == tools.top)
+                check(tab.right <= tools.left, "HTML tools overlapped a bottom-row tab");
         }
     };
     clickTab(app, 0); waitSource(left, 200);
@@ -760,6 +772,17 @@ void htmlTabToolsTests(const fs::path& executable) {
     switchMode(left, false); waitLines(left, 200);
     switchMode(left, true, WM_LBUTTONDBLCLK); waitFor([&] { return scrollInfo(left).nMax == 0; }, "Double clicking Preview did not select preview mode");
     switchMode(left, false); waitLines(left, 200);
+    // A pinned row forces multiple rows while keeping the selected HTML at
+    // the top. Its mode buttons must still live alongside the bottom tabs.
+    toggleTabPin(app, 0);
+    check(tabBounds(app, 0).top < tabBounds(app, 1).top, "HTML tools fixture did not create a pinned row");
+    const auto tools = editorModeTools(app, left, 160);
+    check(tools.top == tabBounds(app, 2).top, "HTML tools did not follow the bottom tab row");
+    click(app.window, tools.right - MulDiv(58, dpi, 96) - (tools.right - tools.left) / 4, tabBounds(app, 0).top + MulDiv(17, dpi, 96));
+    check(lastTextRow(left) == 200 && visibleTabCount(app) == 3, "HTML mode tools retained their old top-row hit region");
+    switchMode(left, true); waitFor([&] { return scrollInfo(left).nMax == 0; }, "Bottom-row Preview did not activate HTML preview");
+    switchMode(left, false); waitLines(left, 200);
+    toggleTabPin(app, 0);
     clickTab(app, 2); waitLines(left, 400);
     // Ordinary files do not retain the HTML buttons from the previous tab.
     auto body = bounds(app.window, left);
@@ -2825,9 +2848,8 @@ void editableGitDiffTests(const fs::path& executable) {
     waitFor([&] { return text() == L"working\r\n"; }, "Changes did not expose the editable working text");
     const UINT dpi = GetDpiForWindow(app.window);
     const auto switchLayout = [&](HWND pane, bool inlineView) {
-        const auto rect = bounds(app.window, pane);
-        const int toolsWidth = (std::min)(MulDiv(136, dpi, 96), (static_cast<int>(rect.right - rect.left) - MulDiv(58, dpi, 96)) / 2);
-        click(app.window, rect.right - MulDiv(58, dpi, 96) - toolsWidth * (inlineView ? 1 : 3) / 4, MulDiv(17, dpi, 96));
+        const auto tools = editorModeTools(app, pane, 136);
+        click(app.window, tools.right - (tools.right - tools.left) * (inlineView ? 1 : 3) / 4, (tools.top + tools.bottom) / 2);
     };
     const auto inlineRows = scrollInfo(viewer).nMax;
     const auto tabCount = visibleTabCount(app);

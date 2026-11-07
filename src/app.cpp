@@ -898,7 +898,6 @@ void ProjectRuntime::Impl::layout(bool revealTab) {
         const int modeWidth = selected < tabs_.size() && tabs_[selected].diff ? 136 : htmlTab(group) ? 160 : 0;
         const int addWidth = std::min(MulDiv(58, dpi_, 96), std::max(0, edge - start));
         const int toolsWidth = std::min(MulDiv(modeWidth, dpi_, 96), std::max(0, edge - start - addWidth) / 2);
-        pane.tools = {edge - toolsWidth - addWidth, area.top, edge - addWidth, area.top + (toolsWidth ? rowHeight : 0)};
         const int dropdown = std::min(MulDiv(24, dpi_, 96), addWidth);
         pane.add = {edge - addWidth, area.top, edge - dropdown, std::min(area.bottom, area.top + rowHeight)};
         pane.dropdown = {edge - dropdown, area.top, edge, pane.add.bottom};
@@ -911,7 +910,7 @@ void ProjectRuntime::Impl::layout(bool revealTab) {
             sizes.push_back({titleWidth + MulDiv(tab.terminalId.empty() ? 52 : 78, dpi_, 96), tab.pinned});
         }
         const auto found = std::find(pane.indices.begin(), pane.indices.end(), selected);
-        const auto layout = layoutTabs(sizes, edge - start, pane.tabRight(area.top) - start, MulDiv(56, dpi_, 96), maxRows,
+        const auto layout = layoutTabs(sizes, edge - start, edge - start - addWidth, edge - start - toolsWidth, MulDiv(56, dpi_, 96), maxRows,
             pane.firstRow, revealTab ? static_cast<size_t>(found - pane.indices.begin()) : sizes.size());
         pane.starts = layout.starts; pane.rows = layout.rows; pane.firstRow = layout.firstRow;
         for (size_t j = 0; j < pane.indices.size(); ++j) {
@@ -921,6 +920,11 @@ void ProjectRuntime::Impl::layout(bool revealTab) {
         }
         pane.tabs.bottom = std::min(area.bottom, area.top + static_cast<int>(std::max<size_t>(1, pane.rows)) * rowHeight);
         pane.body = {start, pane.tabs.bottom, edge, area.bottom};
+        if (toolsWidth) {
+            const int top = area.top + static_cast<int>(std::max<size_t>(1, pane.rows) - 1) * rowHeight;
+            const int right = edge - (top == area.top ? addWidth : 0);
+            pane.tools = {right - toolsWidth, top, right, pane.tabs.bottom};
+        }
         if (pane.overflow()) {
             const int top = pane.tabs.top + static_cast<int>(pane.rows - 1) * rowHeight;
             const LONG right = pane.tabRight(top);
