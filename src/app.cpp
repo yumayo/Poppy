@@ -302,7 +302,7 @@ private:
     void dpi(UINT value);
     void layout(bool revealTab = true);
     void paint();
-    void selectSidebar(Sidebar sidebar);
+    void selectSidebar(Sidebar sidebar, bool toggle = false);
     RECT collapseButton() const;
     void collapseSidebar();
     RECT gitViewButton(bool tree) const;
@@ -440,6 +440,7 @@ private:
     std::set<std::wstring> collapsedGitPaths_;
     std::set<std::wstring> hiddenGitFiles_;
     Sidebar activeSidebar_ = Sidebar::Explorer;
+    bool sidebarVisible_ = true;
     std::deque<Viewer> viewers_;
     int groupCount() const { return static_cast<int>(viewers_.size()); }
     void ensureGroup(int group);
@@ -712,9 +713,9 @@ void ProjectRuntime::Impl::create() {
     explorerActivity_.create(window_, instance_, L"Explorer", explorerCommand, false); explorerButton_ = explorerActivity_.window();
     gitActivity_.create(window_, instance_, L"Source Control", gitCommand, true); gitButton_ = gitActivity_.window();
     searchActivity_.create(window_, instance_, L"Search", searchCommand, false, false, true); searchButton_ = searchActivity_.window();
-    explorerActivity_.clicked = [this] { selectSidebar(Sidebar::Explorer); };
-    gitActivity_.clicked = [this] { selectSidebar(Sidebar::Git); };
-    searchActivity_.clicked = [this] { selectSidebar(Sidebar::Search); };
+    explorerActivity_.clicked = [this] { selectSidebar(Sidebar::Explorer, true); };
+    gitActivity_.clicked = [this] { selectSidebar(Sidebar::Git, true); };
+    searchActivity_.clicked = [this] { selectSidebar(Sidebar::Search, true); };
     explorerActivity_.select(true);
     statusBar_.create(window_, instance_);
     tooltips_ = CreateWindowExW(WS_EX_TOPMOST, TOOLTIPS_CLASSW, nullptr, WS_POPUP | TTS_ALWAYSTIP | TTS_NOPREFIX, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, window_, nullptr, instance_, nullptr);
@@ -857,11 +858,12 @@ void ProjectRuntime::Impl::layout(bool revealTab) {
     if (!tree_) return;
     RECT r{}; GetClientRect(window_, &r);
     const int width = static_cast<int>(r.right), height = static_cast<int>(r.bottom);
-    const int side = std::clamp(MulDiv(sidebar_, dpi_, 96), MulDiv(130, dpi_, 96), std::max(MulDiv(130, dpi_, 96), width - activityWidth_ - splitter_ - MulDiv(250, dpi_, 96)));
+    const int side = sidebarVisible_ ? std::clamp(MulDiv(sidebar_, dpi_, 96), MulDiv(130, dpi_, 96), std::max(MulDiv(130, dpi_, 96), width - activityWidth_ - splitter_ - MulDiv(250, dpi_, 96))) : 0;
+    const int sidebarSplitter = sidebarVisible_ ? splitter_ : 0;
     const int activityLeft = sidebarOnRight ? width - activityWidth_ : 0;
     const int sidebarLeft = sidebarOnRight ? activityLeft - side : activityWidth_;
-    const int editorLeft = sidebarOnRight ? 0 : sidebarLeft + side + splitter_;
-    const int editorRight = sidebarOnRight ? sidebarLeft - splitter_ : width;
+    const int editorLeft = sidebarOnRight ? 0 : sidebarLeft + side + sidebarSplitter;
+    const int editorRight = sidebarOnRight ? sidebarLeft - sidebarSplitter : width;
     const int content = std::max(0, height - footer_);
     activityRect_ = {activityLeft, 0, activityLeft + activityWidth_, content};
     sidebarRect_ = {sidebarLeft, 0, sidebarLeft + side, content};
@@ -872,8 +874,8 @@ void ProjectRuntime::Impl::layout(bool revealTab) {
     collapseHover_ = PtInRect(&collapseTip.rect, pointer) != FALSE;
     sidebarSplitter_ = sidebarOnRight ? RECT{editorRight, 0, sidebarLeft, content} : RECT{sidebarRect_.right, 0, editorLeft, content};
     const int gitTop = sidebarHeader_ + gitHeader_;
-    const bool showExplorer = activeSidebar_ == Sidebar::Explorer && !root_.empty();
-    const bool showGitFiles = activeSidebar_ == Sidebar::Git && changes_.child();
+    const bool showExplorer = sidebarVisible_ && activeSidebar_ == Sidebar::Explorer && !root_.empty();
+    const bool showGitFiles = sidebarVisible_ && activeSidebar_ == Sidebar::Git && changes_.child();
     normalizeGroups();
     if (revealTab && !dockGeometry_.panes.empty() && std::none_of(dockGeometry_.panes.begin(), dockGeometry_.panes.end(), [this](const DockPlacement& pane) { return pane.group == focusedGroup_; })) terminalVisible_ = true;
     editorRect_ = {editorLeft, 0, std::max(editorLeft, editorRight), content};
@@ -946,8 +948,8 @@ void ProjectRuntime::Impl::layout(bool revealTab) {
         {gitButton_, activityButtonLeft, 2 * activityWidth_, activityWidth_ - 1, activityWidth_, SWP_SHOWWINDOW},
         {tree_, sidebarLeft, sidebarHeader_, side, std::max(0, content - sidebarHeader_), showExplorer ? SWP_SHOWWINDOW : SWP_HIDEWINDOW},
         {gitTree_, sidebarLeft, gitTop, side, std::max(0, content - gitTop), showGitFiles ? SWP_SHOWWINDOW : SWP_HIDEWINDOW},
-        {gitCommit_.window(), sidebarLeft + MulDiv(12, dpi_, 96), sidebarHeader_ + MulDiv(56, dpi_, 96), side - MulDiv(24, dpi_, 96), MulDiv(90, dpi_, 96), activeSidebar_ == Sidebar::Git ? SWP_SHOWWINDOW : SWP_HIDEWINDOW},
-        {searchPane_.window(), sidebarLeft, sidebarHeader_, side, std::max(0, content - sidebarHeader_), activeSidebar_ == Sidebar::Search ? SWP_SHOWWINDOW : SWP_HIDEWINDOW},
+        {gitCommit_.window(), sidebarLeft + MulDiv(12, dpi_, 96), sidebarHeader_ + MulDiv(56, dpi_, 96), std::max(0, side - MulDiv(24, dpi_, 96)), MulDiv(90, dpi_, 96), sidebarVisible_ && activeSidebar_ == Sidebar::Git ? SWP_SHOWWINDOW : SWP_HIDEWINDOW},
+        {searchPane_.window(), sidebarLeft, sidebarHeader_, side, std::max(0, content - sidebarHeader_), sidebarVisible_ && activeSidebar_ == Sidebar::Search ? SWP_SHOWWINDOW : SWP_HIDEWINDOW},
         {terminal_.container(), 0, 0, 0, 0, SWP_HIDEWINDOW}
     };
     for (int group = 0; group < groupCount(); ++group) {
@@ -993,33 +995,35 @@ void ProjectRuntime::Impl::paint() {
     dc.fill(activityRect_, background);
     const int activityBorder = sidebarOnRight ? activityRect_.left : activityRect_.right - 1;
     dc.fill({activityBorder, 0, activityBorder + 1, activityRect_.bottom}, border);
-    dc.fill(sidebarRect_, panel);
-    const int left = sidebarRect_.left + scaled(14), edge = sidebarRect_.right - scaled(12), top = sidebarHeader_;
-    const auto collapse = collapseButton();
-    dc.label({left, 0, collapse.right ? collapse.left - scaled(6) : edge, top}, activeSidebar_ == Sidebar::Explorer ? L"EXPLORER" : activeSidebar_ == Sidebar::Git ? L"SOURCE CONTROL" : L"SEARCH", foreground);
-    if (collapse.right) {
-        if (collapseHover_) dc.fill(collapse, RGB(255, 255, 255), 0.10f);
-        auto icon = collapse; InflateRect(&icon, -scaled(4), -scaled(4));
-        dc.icon(Renderer::Icon::CollapseAll, icon, foreground);
-    }
-    dc.fill({sidebarRect_.left, top - 1, sidebarRect_.right, top}, border);
-    if (activeSidebar_ == Sidebar::Git) {
-        const bool repository = git_ && !git_->repositories.empty();
-        dc.label({left, top, edge, top + scaled(28)}, repository ? (git_->repositories.size() == 1 ? git_->repositories.front()->branch : std::to_wstring(git_->repositories.size()) + L" repositories") : L"Git", repository ? accent : muted);
-        const auto summary = repository ? std::to_wstring(git_->changed + git_->untracked) + L" pending changes" : L"";
-        dc.label({left, top + scaled(28), edge, top + scaled(56)}, summary, muted);
-        for (const bool tree : {true, false}) {
-            const auto button = gitViewButton(tree);
-            dc.fill(button, tree == gitTreeView_ ? rgb(50, 70, 94) : background);
-            dc.label(button, tree ? L"Tree" : L"List", tree == gitTreeView_ ? foreground : muted, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    if (sidebarVisible_) {
+        dc.fill(sidebarRect_, panel);
+        const int left = sidebarRect_.left + scaled(14), edge = sidebarRect_.right - scaled(12), top = sidebarHeader_;
+        const auto collapse = collapseButton();
+        dc.label({left, 0, collapse.right ? collapse.left - scaled(6) : edge, top}, activeSidebar_ == Sidebar::Explorer ? L"EXPLORER" : activeSidebar_ == Sidebar::Git ? L"SOURCE CONTROL" : L"SEARCH", foreground);
+        if (collapse.right) {
+            if (collapseHover_) dc.fill(collapse, RGB(255, 255, 255), 0.10f);
+            auto icon = collapse; InflateRect(&icon, -scaled(4), -scaled(4));
+            dc.icon(Renderer::Icon::CollapseAll, icon, foreground);
         }
-        dc.fill({sidebarRect_.left, top + gitHeader_ - 1, sidebarRect_.right, top + gitHeader_}, border);
-        if (!changes_.child()) {
-            const std::wstring message = root_.empty() ? L"Open a folder to view source control." : !git_ || branchesLoading_ ? L"Loading source control…" : !git_->error.empty() ? L"Git unavailable.\n" + git_->error.substr(0, 2048) + L"\nPress F5 to retry." : git_->repositories.empty() ? L"No Git repositories found in this folder." : !branchError_.empty() ? branchError_ + L"\nPress F5 to retry." : L"No branches or commits yet.";
-            dc.label({left, top + gitHeader_ + scaled(16), edge, sidebarRect_.bottom - scaled(12)}, message, muted, DT_LEFT | DT_TOP | DT_WORDBREAK);
+        dc.fill({sidebarRect_.left, top - 1, sidebarRect_.right, top}, border);
+        if (activeSidebar_ == Sidebar::Git) {
+            const bool repository = git_ && !git_->repositories.empty();
+            dc.label({left, top, edge, top + scaled(28)}, repository ? (git_->repositories.size() == 1 ? git_->repositories.front()->branch : std::to_wstring(git_->repositories.size()) + L" repositories") : L"Git", repository ? accent : muted);
+            const auto summary = repository ? std::to_wstring(git_->changed + git_->untracked) + L" pending changes" : L"";
+            dc.label({left, top + scaled(28), edge, top + scaled(56)}, summary, muted);
+            for (const bool tree : {true, false}) {
+                const auto button = gitViewButton(tree);
+                dc.fill(button, tree == gitTreeView_ ? rgb(50, 70, 94) : background);
+                dc.label(button, tree ? L"Tree" : L"List", tree == gitTreeView_ ? foreground : muted, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            }
+            dc.fill({sidebarRect_.left, top + gitHeader_ - 1, sidebarRect_.right, top + gitHeader_}, border);
+            if (!changes_.child()) {
+                const std::wstring message = root_.empty() ? L"Open a folder to view source control." : !git_ || branchesLoading_ ? L"Loading source control…" : !git_->error.empty() ? L"Git unavailable.\n" + git_->error.substr(0, 2048) + L"\nPress F5 to retry." : git_->repositories.empty() ? L"No Git repositories found in this folder." : !branchError_.empty() ? branchError_ + L"\nPress F5 to retry." : L"No branches or commits yet.";
+                dc.label({left, top + gitHeader_ + scaled(16), edge, sidebarRect_.bottom - scaled(12)}, message, muted, DT_LEFT | DT_TOP | DT_WORDBREAK);
+            }
+        } else if (root_.empty()) {
+            dc.label({left, top + scaled(16), edge, sidebarRect_.bottom - scaled(12)}, L"Open a folder with Ctrl+O to browse files.", muted, DT_LEFT | DT_TOP | DT_WORDBREAK);
         }
-    } else if (root_.empty()) {
-        dc.label({left, top + scaled(16), edge, sidebarRect_.bottom - scaled(12)}, L"Open a folder with Ctrl+O to browse files.", muted, DT_LEFT | DT_TOP | DT_WORDBREAK);
     }
     {
         for (const auto& pane : editorGroups_) dc.fill(pane.tabs, background);
@@ -1071,24 +1075,26 @@ void ProjectRuntime::Impl::paint() {
         }
     }
 }
-void ProjectRuntime::Impl::selectSidebar(Sidebar sidebar) {
+void ProjectRuntime::Impl::selectSidebar(Sidebar sidebar, bool toggle) {
+    sidebarVisible_ = !toggle || !sidebarVisible_ || activeSidebar_ != sidebar;
     activeSidebar_ = sidebar; layout();
-    explorerActivity_.select(sidebar == Sidebar::Explorer); gitActivity_.select(sidebar == Sidebar::Git);
-    searchActivity_.select(sidebar == Sidebar::Search); searchPane_.active(sidebar == Sidebar::Search && active_);
+    explorerActivity_.select(sidebarVisible_ && sidebar == Sidebar::Explorer); gitActivity_.select(sidebarVisible_ && sidebar == Sidebar::Git);
+    searchActivity_.select(sidebarVisible_ && sidebar == Sidebar::Search); searchPane_.active(sidebarVisible_ && sidebar == Sidebar::Search && active_);
     if (owner_ && owner_->changed) owner_->changed();
+    if (!sidebarVisible_) { SetFocus(selectedWindow()); return; }
     if (sidebar == Sidebar::Search) { searchPane_.focus(); return; }
     if (sidebar == Sidebar::Git) refreshGit();
     if (sidebar == Sidebar::Explorer) explorer_.showSelection();
     SetFocus(sidebar == Sidebar::Explorer ? (IsWindowVisible(tree_) ? tree_ : explorerButton_) : (IsWindowVisible(gitTree_) ? gitTree_ : gitButton_));
 }
 RECT ProjectRuntime::Impl::collapseButton() const {
-    if (activeSidebar_ == Sidebar::Search) return {};
+    if (!sidebarVisible_ || activeSidebar_ == Sidebar::Search) return {};
     const int size = MulDiv(26, dpi_, 96), right = sidebarRect_.right - MulDiv(10, dpi_, 96);
     const int top = (sidebarHeader_ - size) / 2;
     return {right - size, top, right, top + size};
 }
 void ProjectRuntime::Impl::collapseSidebar() {
-    if (activeSidebar_ == Sidebar::Search) return;
+    if (!sidebarVisible_ || activeSidebar_ == Sidebar::Search) return;
     if (activeSidebar_ == Sidebar::Explorer) {
         pendingExplorerFile_.clear(); pendingTreeSelection_.clear(); pendingTreeSelections_.clear();
         expandedPaths_.clear();
@@ -3429,7 +3435,7 @@ LRESULT ProjectRuntime::Impl::handle(UINT m, WPARAM a, LPARAM b) {
         const POINT point{GET_X_LPARAM(b), GET_Y_LPARAM(b)};
         const auto collapse = collapseButton();
         if (PtInRect(&collapse, point)) { collapseSidebar(); return 0; }
-        if (activeSidebar_ == Sidebar::Git) for (const bool tree : {true, false}) {
+        if (sidebarVisible_ && activeSidebar_ == Sidebar::Git) for (const bool tree : {true, false}) {
             const auto button = gitViewButton(tree);
             if (PtInRect(&button, point)) { setGitView(tree); return 0; }
         }
@@ -3586,11 +3592,11 @@ bool ProjectRuntime::Impl::key(const MSG& message) {
         if (key && ctrl && shift && message.wParam == 'B') { selectSidebar(Sidebar::Git); return true; }
         if (key && ctrl && message.wParam == VK_TAB && !tabs_.empty()) { selectTab(activeTab_ >= tabs_.size() ? 0 : (activeTab_ + (shift ? tabs_.size() - 1 : 1)) % tabs_.size()); SetFocus(selectedWindow()); return true; }
         if (key && ctrl && message.wParam == 'W' && GetFocus() != terminal_.window()) { closeTab(activeTab_); return true; }
-        if (key && message.wParam == VK_F5 && GetFocus() != terminal_.window()) { refresh(); if (activeSidebar_ == Sidebar::Search) searchPane_.refresh(); return true; }
+        if (key && message.wParam == VK_F5 && GetFocus() != terminal_.window()) { refresh(); if (sidebarVisible_ && activeSidebar_ == Sidebar::Search) searchPane_.refresh(); return true; }
         if (key && message.wParam == VK_F6 && GetFocus() != terminal_.window()) { showDiff(); return true; }
         if (key && message.wParam == VK_F7 && GetFocus() != terminal_.window()) { const bool inlineView = !viewer().diffInline(); for (auto& view : viewers_) view.setDiffLayout(inlineView); return true; }
         if (key && message.wParam == VK_TAB && GetFocus() != terminal_.window() && std::none_of(viewers_.begin(), viewers_.end(), [](const Viewer& view) { return GetFocus() == view.window(); })) {
-            const HWND files = activeSidebar_ == Sidebar::Search ? searchPane_.window() : activeSidebar_ == Sidebar::Explorer ? (IsWindowVisible(tree_) ? tree_ : explorerButton_) : (IsWindowVisible(gitTree_) ? gitTree_ : gitButton_);
+            const HWND files = !sidebarVisible_ ? explorerButton_ : activeSidebar_ == Sidebar::Search ? searchPane_.window() : activeSidebar_ == Sidebar::Explorer ? (IsWindowVisible(tree_) ? tree_ : explorerButton_) : (IsWindowVisible(gitTree_) ? gitTree_ : gitButton_);
             SetFocus(GetFocus() == files ? viewer().window() : terminalVisible_ ? terminal_.window() : files); return true;
         }
 
@@ -3637,7 +3643,7 @@ void ProjectRuntime::revalidate() { PostMessageW(window(), WM_APP+13, 0, 0); }
 void ProjectRuntime::initialize(const ResourceId& path, const ProjectSession& state, bool saved) { if (saved) impl_->initialState_ = state; impl_->openFolder(path); }
 void ProjectRuntime::activate(bool active) {
     impl_->active_ = active;
-    impl_->searchPane_.active(active && impl_->activeSidebar_ == Sidebar::Search);
+    impl_->searchPane_.active(active && impl_->sidebarVisible_ && impl_->activeSidebar_ == Sidebar::Search);
     if (active && impl_->root_.wsl() && !impl_->connected_ && impl_->provider_ && impl_->provider_->state() == ConnectionState::Disconnected) impl_->connectRemote();
     if (!active) {
         impl_->saveTab(); impl_->lastFocus_ = GetFocus();

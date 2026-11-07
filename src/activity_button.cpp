@@ -85,6 +85,7 @@ LRESULT ActivityButton::handle(UINT m, WPARAM a, LPARAM b) {
         return 0;
     case WM_KEYUP: if (a == VK_SPACE && keyPressed_) { keyPressed_ = false; InvalidateRect(window_, nullptr, FALSE); activate(); } return 0;
     case WM_CHAR: return 0;
+    case BM_GETCHECK: return selected_ ? BST_CHECKED : BST_UNCHECKED;
     case BM_CLICK: activate(); return 0;
     case WM_DESTROY: cancel(); renderer_.discard(); return 0;
     default: return DefWindowProcW(window_, m, a, b);

@@ -164,7 +164,7 @@ HWND draggedTab(const Application& app) {
     return nullptr;
 }
 template<class Predicate>
-void controlShortcut(const Application& app, HWND target, WPARAM key, Predicate completed, const char* message) {
+void controlShortcut(const Application& app, HWND target, WPARAM key, Predicate completed, const char* message, bool shift = false) {
     struct Input {
         DWORD thread; BYTE previous[256]{};
         explicit Input(DWORD target) : thread(target) {
@@ -175,6 +175,7 @@ void controlShortcut(const Application& app, HWND target, WPARAM key, Predicate 
     } input(app.process.dwThreadId);
     SetFocus(target);
     BYTE keys[256]{}; keys[VK_CONTROL] = keys[VK_LCONTROL] = 0x80;
+    if (shift) keys[VK_SHIFT] = keys[VK_LSHIFT] = 0x80;
     check(SetKeyboardState(keys) && PostMessageW(target, WM_KEYDOWN, key, 0), "Cannot post shortcut");
     waitFor(completed, message);
 }
@@ -2053,6 +2054,58 @@ void sidebarTests(const fs::path& executable) {
     }
     send(app.window, WM_LBUTTONUP, 0, MAKELPARAM(x + delta, y));
 
+    const auto search = GetDlgItem(app.window, 7);
+    const auto searchPane = FindWindowExW(app.window, nullptr, L"PoppySearchPane", nullptr);
+    const auto commitPane = FindWindowExW(app.window, nullptr, L"PoppyGitCommitPane", nullptr);
+    const auto changes = GetDlgItem(app.window, 4);
+    check(search && searchPane && commitPane && changes, "Sidebar controls are missing");
+    const auto shownEditor = bounds(app.window, viewer), shownTree = bounds(app.window, tree);
+    const auto selection = [&](HWND selected) {
+        for (const auto button : {explorer, git, search})
+            check(send(button, BM_GETCHECK) == (button == selected ? BST_CHECKED : BST_UNCHECKED), "Activity selection does not match the visible sidebar");
+    };
+    const auto hidden = [&] {
+        selection(nullptr);
+        check(!IsWindowVisible(tree) && !IsWindowVisible(changes) && !IsWindowVisible(commitPane) && !IsWindowVisible(searchPane),
+              "Hiding the sidebar left a sidebar control visible");
+        const auto editor = bounds(app.window, viewer), console = bounds(app.window, terminal), activity = bounds(app.window, explorer);
+        RECT client{}; GetClientRect(app.window, &client);
+        check(sidebarOnRight ? editor.left == 0 && editor.right == activity.left - 1 : editor.left == activity.right + 1 && editor.right == client.right,
+              "Hiding the sidebar did not release its width and splitter to the editor");
+        check(console.left == editor.left && console.right == editor.right, "Hiding the sidebar did not expand the terminal with the editor");
+        for (const auto button : {explorer, git, search}) check(IsWindowVisible(button), "Hiding the sidebar also hid an activity button");
+    };
+    for (const auto button : {explorer, git, search}) {
+        if (send(button, BM_GETCHECK) != BST_CHECKED) click(button, 10, 10);
+        selection(button);
+        click(button, 10, 10); hidden();
+        // The hidden splitter must not remain draggable over the expanded editor.
+        send(app.window, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(x + delta, y));
+        send(app.window, WM_MOUSEMOVE, MK_LBUTTON, MAKELPARAM(x + 2 * delta, y));
+        send(app.window, WM_LBUTTONUP, 0, MAKELPARAM(x + 2 * delta, y));
+        hidden();
+        // A hidden sidebar stays hidden when the project window is resized.
+        check(SetWindowPos(app.window, nullptr, 0, 0, MulDiv(1180, dpi, 96) + delta, MulDiv(820, dpi, 96), SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE) != FALSE,
+              "Could not resize with the sidebar hidden");
+        hidden();
+        check(SetWindowPos(app.window, nullptr, 0, 0, MulDiv(1180, dpi, 96), MulDiv(820, dpi, 96), SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE) != FALSE,
+              "Could not restore the project window size");
+        const WPARAM key = button == explorer ? 'E' : button == git ? 'G' : 'F';
+        for (int repeat = 0; repeat < 2; ++repeat) {
+            controlShortcut(app, viewer, key, [&] { return send(button, BM_GETCHECK) == BST_CHECKED && GetFocus() != viewer; }, "The sidebar shortcut did not open and focus its sidebar", true);
+            selection(button);
+        }
+        const auto restored = bounds(app.window, viewer);
+        check(EqualRect(&restored, &shownEditor), "Reopening a sidebar lost its saved width");
+        click(button, 10, 10); hidden();
+        // Reopening a different sidebar must select only that activity.
+        click(button == explorer ? git : explorer, 10, 10);
+        selection(button == explorer ? git : explorer);
+    }
+    if (send(explorer, BM_GETCHECK) != BST_CHECKED) send(explorer, BM_CLICK);
+    const auto restoredTree = bounds(app.window, tree);
+    check(EqualRect(&restoredTree, &shownTree) && expanded(tree, nested), "Toggling sidebars changed Explorer's width or expansion state");
+
     const auto editor = bounds(app.window, viewer), console = bounds(app.window, terminal);
     const int terminalX = editor.left + delta, terminalY = editor.bottom;
     send(app.window, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(terminalX, terminalY));
@@ -2491,7 +2544,8 @@ void fullSearchTests(const fs::path& executable) {
     controlShortcut(app, viewer, 'S', [&] { return readText(fixture.root / L"file.txt").find('!') != std::string::npos; }, "Could not save an edited search result");
     finished(1);
     check(PostMessageW(input, WM_KEYDOWN, VK_F5, 0) != FALSE, "Could not refresh edited project search"); finished(0);
-    send(button, BM_CLICK); type(L"!"); finished(1);
+    controlShortcut(app, viewer, 'F', [&] { return GetFocus() == input; }, "Could not focus the visible search sidebar", true);
+    type(L"!"); finished(1);
     send(input, WM_KEYDOWN, VK_RETURN); waitLines(viewer, 300);
     send(viewer, WM_CHAR, '\r'); waitLines(viewer, 301); finished(1);
     check(PostMessageW(input, WM_KEYDOWN, VK_F5, 0) != FALSE, "Could not refresh project search");
@@ -2543,7 +2597,11 @@ void searchRetentionTests(const fs::path& executable) {
         check(app.window == surface && title(pane) == savedTitle && scrollInfo(pane).nPos == top, "Switching projects reset search results");
         send(FindWindowExW(surface, nullptr, activityButtonClassName, L"Explorer"), BM_CLICK); send(button, BM_CLICK);
         check(title(pane) == savedTitle && scrollInfo(pane).nPos == top, "Switching sidebars reset search results");
-        send(input, WM_KEYDOWN, VK_ESCAPE); send(button, BM_CLICK);
+        send(button, BM_CLICK);
+        check(!IsWindowVisible(pane) && title(pane) == savedTitle && scrollInfo(pane).nPos == top, "Hiding Search reset its results or scroll position");
+        send(button, BM_CLICK);
+        check(IsWindowVisible(pane) && title(pane) == savedTitle && scrollInfo(pane).nPos == top, "Reopening Search reset its results or scroll position");
+        send(input, WM_KEYDOWN, VK_ESCAPE);
         check(title(pane) == savedTitle, "Esc replaced a completed search status");
     }
     {
