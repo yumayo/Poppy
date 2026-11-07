@@ -565,14 +565,17 @@ void Renderer::icon(Icon icon, const RECT& rect, COLORREF value, float rotation)
 }
 }
 
-void poppy::DropPreview::create(HWND parent, HINSTANCE instance) {
-    WNDCLASSW cls{}; cls.lpfnWndProc = procedure; cls.hInstance = instance; cls.lpszClassName = L"PoppyDropPreview";
+void poppy::DropPreview::create(HWND parent, HINSTANCE instance, bool tab) {
+    tab_ = tab;
+    WNDCLASSW cls{}; cls.lpfnWndProc = procedure; cls.hInstance = instance; cls.lpszClassName = tab ? L"PoppyDraggedTab" : L"PoppyDropPreview";
     RegisterClassW(&cls);
     window_ = CreateWindowExW(WS_EX_TRANSPARENT | WS_EX_NOACTIVATE, cls.lpszClassName, L"", WS_CHILD | WS_CLIPSIBLINGS, 0, 0, 0, 0, parent, nullptr, instance, this);
 }
-void poppy::DropPreview::show(const RECT& rect) {
-    SetWindowPos(window_, HWND_TOP, rect.left, rect.top, std::max(0L, rect.right - rect.left), std::max(0L, rect.bottom - rect.top), SWP_NOACTIVATE | SWP_SHOWWINDOW);
-    InvalidateRect(window_, nullptr, FALSE);
+void poppy::DropPreview::show(const RECT& rect, const std::wstring& text, bool italic) {
+    if (text_ != text) { text_ = text; SetWindowTextW(window_, text.c_str()); }
+    italic_ = italic;
+    SetWindowPos(window_, HWND_TOP, rect.left, rect.top, std::max(0L, rect.right - rect.left), std::max(0L, rect.bottom - rect.top), SWP_NOACTIVATE | SWP_SHOWWINDOW | SWP_NOCOPYBITS);
+    RedrawWindow(window_, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW);
 }
 LRESULT CALLBACK poppy::DropPreview::procedure(HWND window, UINT message, WPARAM a, LPARAM b) {
     auto* self = reinterpret_cast<DropPreview*>(GetWindowLongPtrW(window, GWLP_USERDATA));
@@ -580,9 +583,16 @@ LRESULT CALLBACK poppy::DropPreview::procedure(HWND window, UINT message, WPARAM
     if (message == WM_NCHITTEST) return HTTRANSPARENT;
     if (message == WM_ERASEBKGND) return 1;
     if (self && message == WM_PAINT) {
-        self->renderer_.setDpi(GetDpiForWindow(window)); Renderer::Paint paint(self->renderer_, window); if (!paint) return 0;
-        RECT rect{}; GetClientRect(window, &rect); self->renderer_.fill(rect, rgb(35, 58, 65)); self->renderer_.outline(rect, accent, 2);
-        if (rect.right > 80 && rect.bottom > 40) self->renderer_.label(rect, L"Move tab here", accent, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        const auto dpi = GetDpiForWindow(window);
+        self->renderer_.setDpi(dpi); Renderer::Paint paint(self->renderer_, window); if (!paint) return 0;
+        RECT rect{}; GetClientRect(window, &rect);
+        self->renderer_.fill(rect, self->tab_ ? panel : rgb(35, 58, 65)); self->renderer_.outline(rect, accent, 2);
+        if (self->tab_) {
+            self->renderer_.fill({0, 0, rect.right, MulDiv(2, dpi, 96)}, accent);
+            InflateRect(&rect, -MulDiv(12, dpi, 96), 0);
+        }
+        self->renderer_.label(rect, self->text_, self->tab_ ? foreground : accent,
+            (self->tab_ ? DT_LEFT : DT_CENTER) | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS, self->italic_);
         return 0;
     }
     return DefWindowProcW(window, message, a, b);

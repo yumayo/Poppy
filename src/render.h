@@ -117,15 +117,17 @@ private:
     int height_ = 1, caretWidth_ = 1;
 };
 
-// A child overlay keeps the drop target visible above the editor/ConPTY views.
+// Child overlays keep the drop target and dragged tab above editor/ConPTY views.
 class DropPreview {
 public:
-    void create(HWND parent, HINSTANCE instance);
-    void show(const RECT& rect);
+    void create(HWND parent, HINSTANCE instance, bool tab = false);
+    void show(const RECT& rect, const std::wstring& text = L"Move tab here", bool italic = false);
     void hide() { ShowWindow(window_, SW_HIDE); }
 private:
     static LRESULT CALLBACK procedure(HWND, UINT, WPARAM, LPARAM);
     HWND window_ = nullptr;
-    Renderer renderer_;
+    Renderer renderer_{D2D1_PRESENT_OPTIONS_IMMEDIATELY};
+    std::wstring text_;
+    bool tab_ = false, italic_ = false;
 };
 }

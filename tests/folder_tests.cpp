@@ -317,6 +317,47 @@ void dragTab(const Application& app, int visibleIndex, POINT target, UINT cancel
     if (cancel) send(app.window, cancel);
     send(app.window, WM_LBUTTONUP, 0, MAKELPARAM(target.x, target.y));
 }
+void tabDragPreview(const Application& app, int visibleIndex, HWND pane, bool splittable = true) {
+    const auto body = bounds(app.window, pane);
+    const POINT center{(body.left + body.right) / 2, (body.top + body.bottom) / 2};
+    beginTabDrag(app, visibleIndex, center);
+    const auto preview = FindWindowExW(app.window, nullptr, L"PoppyDropPreview", nullptr);
+    const auto tab = FindWindowExW(app.window, nullptr, L"PoppyDraggedTab", nullptr);
+    check(preview && tab && IsWindowVisible(preview) && IsWindowVisible(tab), "A same-pane drag has no destination or dragged tab");
+    const auto destination = bounds(app.window, preview);
+    check(EqualRect(&destination, &body), "The center drop preview covers the tab strip");
+    wchar_t text[128]{}; GetWindowTextW(preview, text, 128);
+    check(std::wstring(text) == L"Move tab here", "The unchanged center destination has no guidance");
+    GetWindowTextW(tab, text, 128);
+    check(text[0] != 0 && send(tab, WM_NCHITTEST) == HTTRANSPARENT, "The dragged tab has no title or intercepts mouse input");
+    send(app.window, WM_MOUSEMOVE, MK_LBUTTON, MAKELPARAM(body.left + 1, body.top + 1));
+    const auto firstTab = bounds(app.window, tab);
+    send(app.window, WM_MOUSEMOVE, MK_LBUTTON, MAKELPARAM(body.left + 9, body.top + 8));
+    const auto movedTab = bounds(app.window, tab);
+    check(movedTab.left - firstTab.left == 8 && movedTab.top - firstTab.top == 7, "The dragged tab does not follow the mouse");
+    struct Target { POINT point; RECT preview; };
+    const Target targets[] = {
+        {{body.left + 1, center.y}, {body.left, body.top, center.x, body.bottom}},
+        {{body.right - 1, center.y}, {center.x, body.top, body.right, body.bottom}},
+        {{center.x, body.top + 1}, {body.left, body.top, body.right, center.y}},
+        {{center.x, body.bottom - 1}, {body.left, center.y, body.right, body.bottom}}
+    };
+    for (const auto& target : targets) {
+        send(app.window, WM_MOUSEMOVE, MK_LBUTTON, MAKELPARAM(target.point.x, target.point.y));
+        const auto rect = bounds(app.window, preview), actualBody = bounds(app.window, pane);
+        const auto expected = splittable ? target.preview : body;
+        check(IsWindowVisible(preview) && EqualRect(&rect, &expected), "A directional drop preview includes tabs or disappears for a sole tab");
+        check(EqualRect(&actualBody, &body), "Previewing a drop changed the pane layout");
+    }
+    send(app.window, WM_MOUSEMOVE, MK_LBUTTON, MAKELPARAM(-20, -20));
+    check(!IsWindowVisible(preview) && IsWindowVisible(tab), "Leaving drop targets hid the dragged tab");
+    send(app.window, WM_CANCELMODE);
+    check(!IsWindowVisible(preview) && !IsWindowVisible(tab), "Cancelling a drag left an overlay visible");
+    beginTabDrag(app, visibleIndex, center);
+    send(app.window, WM_LBUTTONUP, 0, MAKELPARAM(center.x, center.y));
+    const auto after = bounds(app.window, pane);
+    check(EqualRect(&after, &body) && !IsWindowVisible(preview) && !IsWindowVisible(tab), "An unchanged center drop changed layout or left an overlay visible");
+}
 void dragTerminalTab(const Application& app, HWND terminal, POINT target, UINT cancel = 0) {
     const auto rect = terminalTabBounds(app, terminal);
     const POINT origin{rect.left + MulDiv(12, GetDpiForWindow(app.window), 96), (rect.top + rect.bottom) / 2};
@@ -1027,6 +1068,8 @@ void tabDragTests(const fs::path& executable) {
             check(GetGUIThreadInfo(app.process.dwThreadId, &info) != FALSE, "Could not read drag capture");
             return info.hwndCapture == nullptr;
         }, "Escape did not release tab drag capture");
+        check(!IsWindowVisible(FindWindowExW(app.window, nullptr, L"PoppyDropPreview", nullptr)) &&
+              !IsWindowVisible(FindWindowExW(app.window, nullptr, L"PoppyDraggedTab", nullptr)), "Escape left a drag overlay visible");
         send(app.window, WM_LBUTTONUP); checkOrder({200, 300, 400, 500});
         auto empty = after(3); empty.x += px(20);
         dragTab(app, 0, empty); checkOrder({300, 400, 500, 200});
@@ -1068,6 +1111,7 @@ void wrappingTabDragTests(const fs::path& executable) {
     }
     const auto first = tabBounds(app, 0), last = tabBounds(app, 7);
     check(first.top < last.top, "The drag test tabs did not wrap");
+    tabDragPreview(app, 0, viewer);
     dragTab(app, 7, {first.left + 1, (first.top + first.bottom) / 2}); waitLines(viewer, 107);
     clickTab(app, 0); waitLines(viewer, 107);
     for (int i = 1; i < 8; ++i) { clickTab(app, i); waitLines(viewer, 99 + i); }
@@ -1812,6 +1856,8 @@ void dockLayoutTests(const fs::path& executable) {
             send(tree, treeSelect, item); waitLines(original, 100 + i * 10); keepTab(app, i);
             item = nextItem(tree, TreeRelation::Next, item);
         }
+        tabDragPreview(app, 0, original);
+        for (int i = 0; i < 5; ++i) { clickTab(app, i); waitLines(original, 100 + i * 10); }
         clickTab(app, 0); send(original, WM_CHAR, '!');
         const auto shell = FindWindowExW(app.window, nullptr, L"PoppyTerminal", nullptr);
         click(shell, 10, 10);
@@ -1839,9 +1885,10 @@ void dockLayoutTests(const fs::path& executable) {
         };
         const auto lower = viewerFor(100);
         check(bounds(app.window, shell).bottom < bounds(app.window, lower).top, "Editor did not move below the terminal");
-        controlShortcut(app, shell, 'J', [&] { return !IsWindowVisible(lower); }, "Ctrl+J from a terminal did not hide the lower editor");
+        tabDragPreview(app, visibleTabCount(app) - 1, lower, false);
+        controlShortcut(app, lower, 'J', [&] { return !IsWindowVisible(lower); }, "Ctrl+J from an editor did not hide the lower editor");
         check(IsWindowVisible(shell), "Ctrl+J hid a terminal in the upper region");
-        controlShortcut(app, shell, 'J', [&] { return IsWindowVisible(lower) != FALSE; }, "Ctrl+J did not restore the lower editor");
+        controlShortcut(app, shell, VK_OEM_3, [&] { return IsWindowVisible(lower) != FALSE; }, "Ctrl+` from a terminal did not restore the lower editor");
         const auto save = [&] {
             std::ifstream file(fixture.root / L"a.txt"); char first = 0; file.get(first); return first == '!';
         };
@@ -3668,7 +3715,7 @@ void terminalShortcutTests(const fs::path& executable) {
         ~Input() { SetKeyboardState(previous); AttachThreadInput(GetCurrentThreadId(), thread, FALSE); }
     } input(app.process.dwThreadId);
     struct Shortcut { WPARAM key; bool ctrl, shift; };
-    const Shortcut shortcuts[] = {{'O', true, false}, {'R', true, false}, {'N', true, false},
+    const Shortcut shortcuts[] = {{'O', true, false}, {'J', true, false}, {'R', true, false}, {'N', true, false},
         {'P', true, false}, {'F', true, false}, {'W', true, false},
         {'F', true, true}, {'E', true, true}, {'G', true, true}, {'B', true, true},
         {VK_F3, false, false}, {VK_F5, false, false}, {VK_F6, false, false}, {VK_F7, false, false}};
@@ -3678,7 +3725,8 @@ void terminalShortcutTests(const fs::path& executable) {
         // application's message loop must translate and dispatch each key.
         const auto command = L"for ($i=0; $i -lt " + std::to_wstring(sizeof(shortcuts) / sizeof(shortcuts[0])) +
             L"; $i++) { [Console]::Title = ('shortcut-' + $i); $k = [Console]::ReadKey($true); "
-            L"if ($i -eq 0 -and [int]$k.KeyChar -ne 15) { throw 'Ctrl+O was changed' } }; [Console]::Title = 'shortcut-done'\r";
+            L"if ($i -eq 0 -and [int]$k.KeyChar -ne 15) { throw 'Ctrl+O was changed' }; "
+            L"if ($i -eq 1 -and [int]$k.KeyChar -ne 10) { throw 'Ctrl+J was changed' } }; [Console]::Title = 'shortcut-done'\r";
         for (const auto ch : command) send(shell, WM_CHAR, ch);
         const auto waitTitle = [&](const std::wstring& expected) {
             waitFor([&] { wchar_t title[128]{}; GetWindowTextW(shell, title, 128); return title == expected; },

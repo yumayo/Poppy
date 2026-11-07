@@ -441,7 +441,7 @@ private:
     int focusedGroup_ = 0, editorRatio_ = 500;
     std::deque<EditorGroup> editorGroups_;
     RECT editorRect_{};
-    DropPreview dropPreview_;
+    DropPreview dropPreview_, tabPreview_;
     TerminalPane terminal_;
     QuickOpen quickOpen_;
     QuickOpen comparePicker_;
@@ -710,6 +710,7 @@ void ProjectRuntime::Impl::create() {
     terminal_.create(window_, instance_, true);
     terminal_.dockChanged = [this] { PostMessageW(window_, WM_APP + 15, 0, 0); };
     dropPreview_.create(window_, instance_);
+    tabPreview_.create(window_, instance_, true);
     terminal_.changed = [this] { PostMessageW(window_, WM_APP + 15, 0, 0); if (owner_ && owner_->changed) owner_->changed(); };
     terminal_.activated = [this](const std::string& id) {
         if (syncingTerminals_ || restoringProject_) return;
@@ -911,7 +912,6 @@ void ProjectRuntime::Impl::layout(bool revealTab) {
         for (const auto i : pane.indices) OffsetRect(&tabRects_[i], 0, -static_cast<int>(pane.firstRow) * rowHeight);
     }
     updateTabs(false);
-    if (tabDrag_ && tabDrag_->active) tabDrag_->target = tabDropAt(tabDrag_->point);
 
     struct Placement { HWND window; int x, y, width, height, flags; };
     const int activityButtonLeft = activityLeft + (sidebarOnRight ? 1 : 0);
@@ -957,6 +957,7 @@ void ProjectRuntime::Impl::layout(bool revealTab) {
     terminal_.acknowledge();
     quickOpen_.layout();
     comparePicker_.layout();
+    if (tabDrag_ && tabDrag_->active) updateTabDrag(tabDrag_->point);
     RedrawWindow(window_, nullptr, nullptr, RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_UPDATENOW);
 }
 void ProjectRuntime::Impl::paint() {
@@ -2620,10 +2621,10 @@ std::optional<TabDrop> ProjectRuntime::Impl::tabDropAt(POINT point) const {
             return target(position, pane.tabs, pane.tabs.left);
         }
         if (!PtInRect(&pane.body, point)) continue;
-        auto side = DockLayout::dropSide({pane.body.left, pane.body.top, pane.body.right, pane.body.bottom}, point.x, point.y);
-        if (group == source.group && side != DockSide::Center && pane.indices.size() <= 1) return std::nullopt;
-        if (group == source.group && side == DockSide::Center) return std::nullopt;
-        const auto preview = DockLayout::preview(placement.rect, side);
+        const DockRect body{pane.body.left, pane.body.top, pane.body.right, pane.body.bottom};
+        auto side = DockLayout::dropSide(body, point.x, point.y);
+        if (group == source.group && pane.indices.size() <= 1) side = DockSide::Center;
+        const auto preview = DockLayout::preview(body, side);
         return TabDrop{tabs_.size(), {preview.left, preview.top, preview.right, preview.bottom}, group, side};
     }
     return std::nullopt;
@@ -2640,6 +2641,16 @@ void ProjectRuntime::Impl::updateTabDrag(POINT point) {
         const auto rect = drag.target->marker;
         dropPreview_.show(rect);
     } else dropPreview_.hide();
+    const auto source = tabBounds(drag.index);
+    RECT client{}; GetClientRect(window_, &client);
+    const LONG width = std::min(client.right, std::max<LONG>(MulDiv(80, dpi_, 96), source.right - source.left));
+    const LONG height = std::min(client.bottom, source.bottom - source.top);
+    const LONG left = std::clamp<LONG>(point.x + MulDiv(14, dpi_, 96), 0, client.right - width);
+    const LONG top = std::clamp<LONG>(point.y + MulDiv(18, dpi_, 96), 0, client.bottom - height);
+    const auto& tab = tabs_[drag.index];
+    auto title = titleFor(tab);
+    if (tab.buffer && tab.buffer->dirty()) title += L" *";
+    tabPreview_.show({left, top, left + width, top + height}, title, tab.preview);
     InvalidateRect(window_, nullptr, FALSE);
 }
 void ProjectRuntime::Impl::scrollTabDrag() {
@@ -2651,16 +2662,18 @@ void ProjectRuntime::Impl::scrollTabDrag() {
         if (point.x >= pane.tabRight - button && pane.firstRow + pane.rows < pane.starts.size()) ++pane.firstRow;
         else if (point.x >= pane.tabRight - 2 * button && point.x < pane.tabRight - button && pane.firstRow) --pane.firstRow;
         else return;
-        layout(false); updateTabDrag(point); return;
+        layout(false); return;
     }
 }
 void ProjectRuntime::Impl::endTabDrag(bool drop) {
     if (!tabDrag_) return;
-    const auto drag = *tabDrag_; tabDrag_.reset(); KillTimer(window_, tabDragTimerId); dropPreview_.hide();
+    const auto drag = *tabDrag_; tabDrag_.reset(); KillTimer(window_, tabDragTimerId); dropPreview_.hide(); tabPreview_.hide();
     if (GetCapture() == window_) ReleaseCapture();
     if (!drag.active) return;
     SendMessageW(tooltips_, TTM_ACTIVATE, TRUE, 0);
     if (drop && drag.target) {
+        // Returning to the same pane's body keeps tab order and layout intact.
+        if (!drag.target->inStrip && drag.target->side == DockSide::Center && drag.target->group == tabs_[drag.index].group) { layout(); return; }
         saveTab(); const auto from = drag.index; auto tab = std::move(tabs_[from]);
         int targetGroup = drag.target->group;
         if (drag.target->side != DockSide::Center) {
@@ -3515,9 +3528,10 @@ LRESULT ProjectRuntime::Impl::handle(UINT m, WPARAM a, LPARAM b) {
 }
 bool ProjectRuntime::Impl::key(const MSG& message) {
         if (message.message == WM_KEYDOWN && message.wParam == VK_ESCAPE && tabDrag_) { endTabDrag(); return true; }
+        // Ctrl+J belongs to the shell; Ctrl+` can still toggle the lower pane.
         if (message.message == WM_KEYDOWN && (GetKeyState(VK_CONTROL) & 0x8000) &&
             !(GetKeyState(VK_SHIFT) & 0x8000) && !(GetKeyState(VK_MENU) & 0x8000) &&
-            (message.wParam == 'J' || message.wParam == VK_OEM_3)) { quickOpen_.close(); comparePicker_.close(); toggleTerminal(); return true; }
+            (message.wParam == VK_OEM_3 || (message.wParam == 'J' && !terminal_.contains(message.hwnd)))) { quickOpen_.close(); comparePicker_.close(); toggleTerminal(); return true; }
         if (terminal_.key(message)) return true;
         // Let every terminal session (and its rename input) receive its own keys.
         if (terminal_.contains(message.hwnd)) return false;
