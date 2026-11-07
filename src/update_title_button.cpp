@@ -34,9 +34,9 @@ void UpdateTitleButton::layout() {
     const auto dpi = GetDpiForWindow(owner_);
     if (dpi_ != dpi) { dpi_ = dpi; renderer_.setDpi(dpi); }
     // DWM supplies the actual minimize-button edge, including maximized/DPI layouts.
-    const int width = MulDiv(108, dpi_, 96);
-    SetWindowPos(window_, nullptr, frame.left + buttons.left - width, frame.top + buttons.top,
-        width, buttons.bottom - buttons.top, SWP_NOACTIVATE | SWP_NOZORDER | SWP_SHOWWINDOW);
+    const int width = MulDiv(80, dpi_, 96), margin = MulDiv(4, dpi_, 96);
+    SetWindowPos(window_, nullptr, frame.left + buttons.left - width, frame.top + buttons.top + margin,
+        width, buttons.bottom - buttons.top - 2 * margin, SWP_NOACTIVATE | SWP_NOZORDER | SWP_SHOWWINDOW);
     InvalidateRect(window_, nullptr, FALSE);
 }
 bool UpdateTitleButton::contains(LPARAM point) const {
@@ -51,11 +51,10 @@ void UpdateTitleButton::cancel() {
 void UpdateTitleButton::paint() {
     Renderer::Paint paint(renderer_, window_); if (!paint) return;
     RECT rect{}; GetClientRect(window_, &rect);
-    const auto px = [this](int value) { return MulDiv(value, dpi_, 96); };
+    renderer_.fill(rect, accent);
+    InflateRect(&rect, -1, -1);
     renderer_.fill(rect, pressed_ && hover_ ? border : hover_ ? panel : RGB(32, 32, 32));
-    const int size = px(16), y = (rect.bottom - size) / 2;
-    renderer_.icon(Renderer::Icon::Restart, {px(12), y, px(12) + size, y + size}, accent);
-    renderer_.label({px(36), 0, rect.right - px(8), rect.bottom}, L"Restart", accent);
+    renderer_.label(rect, L"Restart", accent, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 }
 LRESULT CALLBACK UpdateTitleButton::procedure(HWND window, UINT message, WPARAM a, LPARAM b) {
     auto self = reinterpret_cast<UpdateTitleButton*>(GetWindowLongPtrW(window, GWLP_USERDATA));
