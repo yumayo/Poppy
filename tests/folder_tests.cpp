@@ -3537,7 +3537,12 @@ void multiProjectTests(const fs::path& executable) {
         app.tree();
         checkStatusBar();
     };
-    const auto select = [&](size_t index) { const UINT dpi=GetDpiForWindow(app.host);click(app.host,MulDiv(60,dpi,96),MulDiv(44+static_cast<int>(index)*projectRowHeight+24,dpi,96));app.tree();checkStatusBar(); };
+    const auto select = [&](size_t index) {
+        const UINT dpi=GetDpiForWindow(app.host);const auto left=bounds(app.host,app.window).left;
+        click(app.host,MulDiv(60,dpi,96),MulDiv(44+static_cast<int>(index)*projectRowHeight+24,dpi,96));app.tree();
+        if(bounds(app.host,app.window).left!=left)click(app.host,MulDiv(16,dpi,96),MulDiv(22,dpi,96));
+        checkStatusBar();
+    };
     open(b.root); const auto surfaceB = app.window; const auto treeB = app.tree();
     const auto viewerB = FindWindowExW(surfaceB, nullptr, L"PoppyViewer", nullptr);
     waitFor([&] { return nextItem(treeB, TreeRelation::Child, nextItem(treeB, TreeRelation::Root)) != 0; }, "Project B did not load");
@@ -3561,15 +3566,27 @@ void multiProjectTests(const fs::path& executable) {
     check(lastTextRow(viewerB) == 300 && app.window == surfaceB, "An inactive result changed the visible project");
     select(0);check(IsWindow(shell) && WaitForSingleObject(shellProcess, 0) == WAIT_TIMEOUT,"Switching destroyed a running terminal");
     expandedProjectLeft=bounds(app.host,surfaceA).left;
-    click(app.host,px(16),px(22));
-    check(bounds(app.host,surfaceA).left==px(64)+px(5),"Collapsing PROJECTS did not expand the active project");
+    click(app.host,px(20),px(68));
+    check(bounds(app.host,surfaceA).left==expandedProjectLeft,"The AI status icon toggled PROJECTS");
+    send(app.host,WM_LBUTTONDOWN,MK_LBUTTON,MAKELPARAM(px(60),px(68)));
+    send(app.host,WM_LBUTTONUP,0,MAKELPARAM(px(300),px(68)));
+    check(bounds(app.host,surfaceA).left==expandedProjectLeft,"Releasing outside the project card toggled PROJECTS");
+    for(const auto cancel:{WM_CANCELMODE,WM_CAPTURECHANGED}){
+        send(app.host,WM_LBUTTONDOWN,MK_LBUTTON,MAKELPARAM(px(60),px(68)));
+        send(app.host,cancel);send(app.host,WM_LBUTTONUP,0,MAKELPARAM(px(60),px(68)));
+        check(bounds(app.host,surfaceA).left==expandedProjectLeft,"A cancelled project click toggled PROJECTS");
+    }
+    send(app.host,WM_LBUTTONDOWN,MK_LBUTTON,MAKELPARAM(px(60),px(68)));
+    check(bounds(app.host,surfaceA).left==expandedProjectLeft,"Pressing the active project toggled PROJECTS before release");
+    send(app.host,WM_LBUTTONUP,0,MAKELPARAM(px(60),px(68)));
+    check(bounds(app.host,surfaceA).left==px(64)+px(5),"Clicking the active project did not collapse PROJECTS");
     click(app.host,px(30),px(44+64+18));app.tree();checkStatusBar();
-    check(app.window==surfaceB,"The compact project list did not select the second project");
+    check(app.window==surfaceB&&bounds(app.host,surfaceB).left==px(64)+px(5),"Selecting another project changed the compact list width");
     click(app.host,px(30),px(44+18));app.tree();checkStatusBar();
     check(app.window==surfaceA&&nextItem(treeA,TreeRelation::Root)==rootA&&scrollInfo(viewerA).nPos==top&&
           IsWindow(shell)&&WaitForSingleObject(shellProcess,0)==WAIT_TIMEOUT,"Collapsing PROJECTS lost a document or running terminal");
-    click(app.host,px(16),px(22));
-    check(bounds(app.host,surfaceA).left==expandedProjectLeft,"Expanding PROJECTS did not restore the previous width");
+    click(app.host,px(30),px(44+18));
+    check(bounds(app.host,surfaceA).left==expandedProjectLeft,"Clicking the active project did not restore the expanded width");
     LARGE_INTEGER frequency{}; QueryPerformanceFrequency(&frequency); double maximum = 0;
     for (int i = 0; i < 6; ++i) { LARGE_INTEGER start{}, end{}; QueryPerformanceCounter(&start); select(i % 2); QueryPerformanceCounter(&end); maximum = std::max(maximum, (end.QuadPart-start.QuadPart)*1000.0/frequency.QuadPart); }
     std::cout << "Retained project switch maximum: " << maximum << " ms\n";
@@ -3582,6 +3599,7 @@ void multiProjectTests(const fs::path& executable) {
     send(app.host,WM_LBUTTONDOWN,MK_LBUTTON,MAKELPARAM(px(60),px(44+2*projectRowHeight+24)));
     send(app.host,WM_MOUSEMOVE,MK_LBUTTON,MAKELPARAM(px(60),px(45)));
     send(app.host,WM_LBUTTONUP,0,MAKELPARAM(px(60),px(45)));
+    check(bounds(app.host,surfaceA).left==expandedProjectLeft,"Dragging the active project toggled PROJECTS");
     select(0);check(app.window==surfaceA,"Dragging a project back to the first row failed");
     open(a.root);check(app.window==surfaceA,"Reopening a registered path duplicated the project");
     const auto oldB=surfaceB;const auto dpi=GetDpiForWindow(app.host);click(app.host,MulDiv(60,dpi,96),MulDiv(44+projectRowHeight+24,dpi,96),true);
@@ -3719,7 +3737,7 @@ void projectDragTests(const fs::path& executable) {
         const auto px=[dpi=GetDpiForWindow(app.host)](int value){return MulDiv(value,dpi,96);};
         const auto point=[&](int row,int offset){return POINT{px(60),px(44+row*projectRowHeight+offset)};};
         const auto order=[&](std::initializer_list<HWND> expected){
-            int index=0;for(const auto surface:expected){const auto p=point(index++,24);click(app.host,p.x,p.y);app.tree();check(app.window==surface,"Project drag produced the wrong order");}
+            int index=0;for(const auto surface:expected){const auto p=point(index++,24);if(!IsWindowVisible(surface))click(app.host,p.x,p.y);app.tree();check(app.window==surface,"Project drag produced the wrong order");}
         };
         const auto begin=[&](int from,POINT target){
             const auto p=point(from,24);send(app.host,WM_LBUTTONDOWN,MK_LBUTTON,MAKELPARAM(p.x,p.y));
@@ -3793,7 +3811,7 @@ void scrollingProjectDragTests(const fs::path& executable) {
     send(app.host,WM_MOUSEMOVE,MK_LBUTTON,MAKELPARAM(px(60),px(45)));
     for(int i=0;i<20;++i)send(app.host,WM_TIMER,1);
     send(app.host,WM_LBUTTONUP,0,MAKELPARAM(px(60),px(45)));
-    click(app.host,px(60),px(68));app.tree();check(app.window==surfaces[0],"Auto-scroll did not move the last project to the start");
+    click(app.host,px(20),px(68));app.tree();check(app.window==surfaces[0],"Auto-scroll did not move the last project to the start");
 
     RECT bar{};GetClientRect(scrollbar,&bar);const int x=bar.right/2,arrow=bar.right;
     click(scrollbar,x,bar.bottom-1);

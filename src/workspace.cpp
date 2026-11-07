@@ -76,6 +76,7 @@ struct ProjectDrag {
     POINT origin, point;
     bool active = false;
     std::optional<size_t> position;
+    bool toggleOnClick = false;
 };
 class Workspace {
 public:
@@ -656,6 +657,8 @@ void Workspace::endProjectDrag(bool drop) {
             }
         }
     }
+    if (drop && !drag.active && drag.toggleOnClick && active_ < projects_.size() &&
+        projects_[active_].id == drag.id && hit(drag.point) == active_) toggleProjectList();
     InvalidateRect(window_,nullptr,FALSE);
 }
 std::wstring Workspace::subtitle(size_t index) const {
@@ -783,13 +786,20 @@ case WM_LBUTTONDOWN:{
     else if(PtInRect(&collapseButton,point))toggleProjectList();
     else if(PtInRect(&addButton,point))choose();
     else if(const auto index=hit(point);index<projects_.size()){
-        const auto icon=aiStatusBounds(row(index));select(index,PtInRect(&icon,point));
-        projectDrag_=ProjectDrag{projects_[index].id,point,point,false,std::nullopt};SetCapture(window_);
+        const auto icon=aiStatusBounds(row(index));const bool attention=PtInRect(&icon,point);
+        const bool toggleOnClick=index==active_&&!attention;
+        select(index,attention);
+        projectDrag_=ProjectDrag{projects_[index].id,point,point,false,std::nullopt,toggleOnClick};SetCapture(window_);
     }
     return 0;
 }
 case WM_MOUSEMOVE:if(projectDrag_){updateProjectDrag({GET_X_LPARAM(b),GET_Y_LPARAM(b)});return 0;}if(dragging_){session_.projectListWidth=std::clamp(MulDiv(GET_X_LPARAM(b),96,dpi_),100,600);appDirty_=true;appChanged_=GetTickCount64();layout();}return 0;
-case WM_LBUTTONUP:if(projectDrag_&&projectDrag_->active)updateProjectDrag({GET_X_LPARAM(b),GET_Y_LPARAM(b)});endProjectDrag(true);dragging_=false;if(GetCapture()==window_)ReleaseCapture();return 0;
+case WM_LBUTTONUP:
+    if(projectDrag_){
+        const POINT point{GET_X_LPARAM(b),GET_Y_LPARAM(b)};
+        if(projectDrag_->active)updateProjectDrag(point);else projectDrag_->point=point;
+    }
+    endProjectDrag(true);dragging_=false;if(GetCapture()==window_)ReleaseCapture();return 0;
 case WM_CANCELMODE:endProjectDrag();dragging_=false;if(GetCapture()==window_)ReleaseCapture();return 0;
 case WM_CAPTURECHANGED:endProjectDrag();dragging_=false;return 0;
 case WM_KEYDOWN:if(a==VK_ESCAPE&&projectDrag_){endProjectDrag();return 0;}break;
