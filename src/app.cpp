@@ -2815,8 +2815,9 @@ void ProjectRuntime::Impl::openFile(const ResourceId& path, bool diff, bool reve
         updateTabs(); recordEditorNavigation(); return;
     }
     saveTab();
-    if (found == tabs_.end()) { Tab tab; tab.path = path; tab.diff = diff; tab.group = focusedGroup_; index = openEditorPreview(tabs_, std::move(tab)); }
+    if (found == tabs_.end()) { Tab tab; tab.path = path; tab.diff = diff; index = openEditorFilePreview(tabs_, std::move(tab), dock_, focusedGroup_); }
     else if (diff) found->diff = true;
+    if (index >= tabs_.size()) { status(L"Cannot open file: too many tab groups."); return; }
     focusedGroup_ = tabs_[index].group; for (auto& tab : tabs_) if (tab.group == focusedGroup_) tab.displayed = false; tabs_[index].displayed = true; activeTab_ = index; layout(); loadTab(false, focusedGroup_, revealExplorer);
     recordEditorNavigation();
 }
@@ -2826,7 +2827,8 @@ void ProjectRuntime::Impl::openContentResult(const ContentMatch& match, const st
     endTabDrag(); saveTab();
     auto found = std::find_if(tabs_.begin(), tabs_.end(), [&](const Tab& tab) { return tab.diffKind == GitDiffKind::Automatic && tab.path == path; });
     size_t index = static_cast<size_t>(found - tabs_.begin());
-    if (found == tabs_.end()) { Tab tab; tab.path = path; tab.group = focusedGroup_; index = openEditorPreview(tabs_, std::move(tab)); }
+    if (found == tabs_.end()) { Tab tab; tab.path = path; index = openEditorFilePreview(tabs_, std::move(tab), dock_, focusedGroup_); }
+    if (index >= tabs_.size()) { status(L"Cannot open file: too many tab groups."); return; }
     auto& tab = tabs_[index]; tab.diff = false; tab.searchTarget = match; tab.searchQuery = query; tab.searchMatchCase = matchCase;
     focusedGroup_ = tab.group;
     for (auto& current : tabs_) if (current.group == focusedGroup_) current.displayed = false;
@@ -2842,8 +2844,9 @@ void ProjectRuntime::Impl::applyContentResult(size_t index) {
 void ProjectRuntime::Impl::openGitDiff(const ResourceId& path, GitDiffKind kind, std::string revision, bool allChanges, ResourceId root, bool fullContext) {
     if (path.empty()) return;
     endTabDrag(); saveTab();
-    Tab target; target.path = path; target.diff = !fullContext; target.diffKind = kind; target.revision = std::move(revision); target.allChanges = allChanges; target.group = focusedGroup_; target.gitRoot = std::move(root);
-    const size_t index = openEditorPreview(tabs_, std::move(target));
+    Tab target; target.path = path; target.diff = !fullContext; target.diffKind = kind; target.revision = std::move(revision); target.allChanges = allChanges; target.gitRoot = std::move(root);
+    const size_t index = openEditorFilePreview(tabs_, std::move(target), dock_, focusedGroup_);
+    if (index >= tabs_.size()) { status(L"Cannot open diff: too many tab groups."); return; }
     focusedGroup_ = tabs_[index].group;
     for (auto& tab : tabs_) if (tab.group == focusedGroup_) tab.displayed = false;
     tabs_[index].displayed = true; activeTab_ = index; layout(); loadTab();
@@ -3691,8 +3694,9 @@ void ProjectRuntime::navigate(const NavigationTarget& target) {
     if (found == impl_->tabs_.end()) {
         auto tab = target.editor->tab; tab.navigation = target.editor;
         // A previously split group may have disappeared while this preview was hidden.
-        if (impl_->groupTab(tab.group) == impl_->tabs_.size()) tab.group = impl_->focusedGroup_;
-        index = openEditorPreview(impl_->tabs_, std::move(tab));
+        if (!impl_->dock_.pane(tab.group)) index = openEditorFilePreview(impl_->tabs_, std::move(tab), impl_->dock_, impl_->focusedGroup_);
+        else index = openEditorPreview(impl_->tabs_, std::move(tab));
+        if (index >= impl_->tabs_.size()) { impl_->status(L"Cannot open file: too many tab groups."); return; }
         impl_->tabs_[index].navigation = target.editor;
         // The replacement can occupy the active index, but needs a fresh document.
         impl_->focusedGroup_ = impl_->tabs_[index].group;

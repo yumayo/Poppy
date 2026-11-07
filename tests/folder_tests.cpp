@@ -721,6 +721,37 @@ void previewTabSplitTests(const fs::path& executable) {
     send(tree, treeSelect, b); waitLines(right, 300);
     check(visibleTabCount(app) == 2, "Dragging a preview made it permanent");
 }
+void fileDockPlacementTests(const fs::path& executable) {
+    Fixture fixture;
+    for (int i = 0; i < 3; ++i) writeLines(fixture.root / (std::wstring(1, L'a' + i) + L".txt"), 200 + i * 100);
+    Application app(executable, fixture.root);
+    const auto tree = app.tree(), upper = FindWindowExW(app.window, nullptr, L"PoppyViewer", nullptr);
+    const auto shell = FindWindowExW(app.window, nullptr, L"PoppyTerminal", nullptr);
+    waitFor([&] { return send(tree, treeGetCount) == 4; }, "File placement fixture did not load");
+    const auto a = nextItem(tree, TreeRelation::Child, nextItem(tree, TreeRelation::Root));
+    const auto b = nextItem(tree, TreeRelation::Next, a), c = nextItem(tree, TreeRelation::Next, b);
+    const auto open = [&](TreeItem item, int lines) {
+        clickTerminalTab(app, shell);
+        send(tree, treeSelect, item); waitLines(upper, lines);
+        check(IsWindowVisible(upper) && IsWindowVisible(shell) && bounds(app.window, upper).bottom < bounds(app.window, shell).top,
+              "Opening an Explorer file placed it in the lower terminal group");
+    };
+    open(a, 200); open(b, 300);
+    check(visibleTabCount(app) == 1, "Opening files from Terminal did not reuse the upper preview");
+    keepTab(app, 0); open(c, 400); keepTab(app, 1);
+    const auto lowerTab = terminalTabBounds(app, shell);
+    dragTab(app, 1, {lowerTab.right - 2, (lowerTab.top + lowerTab.bottom) / 2});
+    const auto lower = otherVisibleViewer(app.window, upper);
+    waitLines(lower, 400);
+    send(tree, treeSelect, a); waitLines(upper, 200);
+    check(IsWindowVisible(lower) && lastTextRow(lower) == 400, "A new upper preview replaced a manually placed lower file");
+    send(tree, treeSelect, c); waitLines(lower, 400);
+    check(!IsWindowVisible(shell) && visibleTabCount(app) == 3, "Reopening a lower file moved or duplicated its tab");
+    while (visibleTabCount(app)) clickTab(app, 0, false, true);
+    check(IsWindowVisible(shell), "Closing all files also hid the remaining terminal");
+    open(b, 300);
+    check(visibleTabCount(app) == 1, "Opening a file after closing all files created extra tabs");
+}
 void htmlTabToolsTests(const fs::path& executable) {
     Fixture fixture;
     writeLines(fixture.root / L"a.html", 200); writeLines(fixture.root / L"b.HTM", 300); writeLines(fixture.root / L"c.txt", 400);
@@ -2536,7 +2567,10 @@ void fullSearchTests(const fs::path& executable) {
         }, "Project search did not publish its expected results");
     };
     type(L"unique-needle"); finished(1);
+    const auto shell = FindWindowExW(app.window, nullptr, L"PoppyTerminal", nullptr);
+    clickTerminalTab(app, shell);
     send(input, WM_KEYDOWN, VK_RETURN); waitLines(viewer, 300);
+    check(IsWindowVisible(viewer) && IsWindowVisible(shell), "Opening a search result replaced the lower terminal");
     check(scrollInfo(viewer).nPos > 150, "Search result did not reveal the matching line");
     // Editing and saving keep the old results; only an explicit search uses
     // the current contents. Dirty buffers must still override disk contents.
@@ -2660,7 +2694,10 @@ void gitSidebarTests(const fs::path& executable) {
         auto group = gitGroup(changes, false);
         auto docs = nextItem(changes, TreeRelation::Child, group), src = nextItem(changes, TreeRelation::Next, docs);
         check(expanded(changes, docs) && expanded(changes, src), "Git folders did not start expanded");
+        const auto shell = FindWindowExW(app.window, nullptr, L"PoppyTerminal", nullptr);
+        clickTerminalTab(app, shell);
         send(changes, treeSelect, group); send(changes, WM_KEYDOWN, VK_F4); waitLines(viewer, 905, true);
+        check(IsWindowVisible(viewer) && IsWindowVisible(shell), "Opening All Changes replaced the lower terminal");
         expand(changes, src, false); waitLines(viewer, 603, true);
         expand(changes, src); waitLines(viewer, 905, true);
         const auto visibilityNested = nextItem(changes, TreeRelation::Child, src);
@@ -2698,7 +2735,9 @@ void gitSidebarTests(const fs::path& executable) {
         clickTab(app, 0, false, true);
         send(changes, treeSelect, docs);
         check(scrollInfo(viewer).nMax == 0, "Selecting a Git folder opened a file");
+        clickTerminalTab(app, shell);
         send(changes, treeSelect, nextItem(changes, TreeRelation::Child, docs)); waitLines(viewer, 200);
+        check(IsWindowVisible(viewer) && IsWindowVisible(shell), "Opening a Source Control file replaced the lower terminal");
         const auto clickFolder = [&](UINT message, int x) {
             const int height = static_cast<int>(send(changes, treeGetRowHeight));
             const int y = (static_cast<int>(send(changes, treeGetRow, src)) - scrollInfo(changes).nPos) * height + height / 2;
@@ -4036,8 +4075,8 @@ int wmain(int argc, wchar_t** argv) {
     try {
         check(argc == 2 || (argc == 3 && std::wstring(argv[2]) == L"--dock-only"), "Pass the path to Poppy.exe");
         SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
-        if (argc == 3) { Fixture appData; AppDataEnvironment environment(appData.root); dockLayoutTests(fs::absolute(argv[1])); return 0; }
-        for (const auto test : {folderTests, explorerSortTests, sidebarTests, treeInteractionTests, collapseAllSidebarTests, navigationHistoryTests, previewTabTests, explorerPreviewTabTests, previewTabSplitTests, tabTests, rapidTabMiddleClickTests, pinnedTabTests,
+        if (argc == 3) { Fixture appData; AppDataEnvironment environment(appData.root); fileDockPlacementTests(fs::absolute(argv[1])); dockLayoutTests(fs::absolute(argv[1])); return 0; }
+        for (const auto test : {folderTests, explorerSortTests, sidebarTests, treeInteractionTests, collapseAllSidebarTests, navigationHistoryTests, previewTabTests, explorerPreviewTabTests, previewTabSplitTests, fileDockPlacementTests, tabTests, rapidTabMiddleClickTests, pinnedTabTests,
                 tabCopyPathTests, bulkTabCloseTests, bulkTabSaveTests, bulkTabSplitTests, explorerActiveFileTests, htmlTabToolsTests, editorTailTests,
                 tabDragTests, wrappingTabDragTests, wrappingTabTests, renameTests, explorerMoveTests, explorerDeleteTests, explorerDeleteConfirmationTests, explorerMultipleSelectionTests, crossProjectFolderCopyTests, createItemTests, newFileShortcutTests, pasteImageTests, splitPaneTests, dockLayoutTests, quickOpenTests, fullSearchTests, searchRetentionTests, gitSidebarTests, gitIgnoredExplorerTests, gitAutoRefreshTests, editableGitDiffTests, branchSidebarTests, comparisonSidebarTests, multiRepositoryTests, sessionTests, multiProjectTests, recentProjectTests, projectDragTests, scrollingProjectDragTests, terminalTitleTests, terminalShellTests, terminalShortcutTests, terminalBackspaceTests}) {
             Fixture appData; AppDataEnvironment environment(appData.root);

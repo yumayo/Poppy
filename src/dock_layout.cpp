@@ -16,6 +16,17 @@ const DockNode* DockLayout::pane(int group) const {
     for (const auto& node : nodes_) if (node.leaf() && node.group == group) return &node;
     return nullptr;
 }
+int DockLayout::topGroup(int preferred, const std::vector<int>& excluded) const {
+    const auto visit = [&](const auto& self, int index) -> int {
+        const auto& node = nodes_[index];
+        if (node.leaf()) return std::find(excluded.begin(), excluded.end(), node.group) == excluded.end() ? node.group : -1;
+        const int first = self(self, node.first);
+        if (node.horizontal || (first >= 0 && first == preferred)) return first;
+        const int second = self(self, node.second);
+        return first < 0 || (second >= 0 && second == preferred) ? second : first;
+    };
+    return visit(visit, 0);
+}
 int DockLayout::split(int group, DockSide side) {
     if (side == DockSide::Center) return group;
     const auto original = pane(group);

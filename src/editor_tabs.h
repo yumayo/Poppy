@@ -8,6 +8,7 @@
 
 namespace poppy {
 struct EditorNavigation;
+class DockLayout;
 struct EditorTab {
     ResourceId path; bool diff = false; ViewState fileView, diffView; bool pinned = false;
     std::shared_ptr<EditBuffer> buffer; int group = 0; bool displayed = false;
@@ -34,6 +35,9 @@ std::optional<std::wstring> editorTabPathText(const EditorTab& tab, const Resour
 
 // Reuse an existing tab, or replace the clean preview in the target group.
 size_t openEditorPreview(std::vector<EditorTab>& tabs, EditorTab target);
+// New file tabs use the top row, creating a pane above terminals when necessary.
+// Existing tabs keep their placement. Returns tabs.size() if the group limit is reached.
+size_t openEditorFilePreview(std::vector<EditorTab>& tabs, EditorTab target, DockLayout& dock, int preferred);
 void keepModifiedEditorTabs(std::vector<EditorTab>& tabs);
 // Preview tabs are session-local. Repair selection and groups after filtering.
 void saveEditorTabs(ProjectSession& state, const std::vector<EditorTab>& tabs, size_t active);

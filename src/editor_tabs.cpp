@@ -1,4 +1,5 @@
 #include "editor_tabs.h"
+#include "dock_layout.h"
 #include <algorithm>
 #include <set>
 
@@ -24,6 +25,16 @@ bool sameEditorTab(const EditorTab& left, const EditorTab& right) {
     return left.path.key() == right.path.key() && left.diffKind == right.diffKind && left.revision == right.revision &&
         (left.diffKind != GitDiffKind::Commit || left.diff == right.diff) &&
         left.allChanges == right.allChanges && left.gitRoot.key() == right.gitRoot.key();
+}
+size_t openEditorFilePreview(std::vector<EditorTab>& tabs, EditorTab target, DockLayout& dock, int preferred) {
+    const auto found = std::find_if(tabs.begin(), tabs.end(), [&](const EditorTab& tab) { return sameEditorTab(tab, target); });
+    if (found != tabs.end()) return openEditorPreview(tabs, std::move(target));
+    std::vector<int> terminals;
+    for (const auto& tab : tabs) if (tab.displayed && !tab.terminalId.empty()) terminals.push_back(tab.group);
+    target.group = dock.topGroup(preferred, terminals);
+    if (target.group < 0) target.group = dock.split(dock.topGroup(), DockSide::Top);
+    if (target.group < 0) return tabs.size();
+    return openEditorPreview(tabs, std::move(target));
 }
 size_t openEditorPreview(std::vector<EditorTab>& tabs, EditorTab target) {
     keepModifiedEditorTabs(tabs);

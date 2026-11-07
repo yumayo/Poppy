@@ -24,6 +24,8 @@ public:
     const std::vector<DockNode>& nodes() const { return nodes_; }
     DockNode* pane(int group);
     const DockNode* pane(int group) const;
+    // Prefer focus in the top row, then its leftmost eligible pane; -1 if all are excluded.
+    int topGroup(int preferred = -1, const std::vector<int>& excluded = {}) const;
     int split(int group, DockSide side);
     void retain(const std::vector<int>& groups);
     void resize(int node, int ratio);
