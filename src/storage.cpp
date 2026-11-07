@@ -181,11 +181,12 @@ Storage::Storage(fs::path directory) : impl_(std::make_unique<Impl>()) {
     schema(*impl_->app,
         "CREATE TABLE IF NOT EXISTS projects (path_key TEXT PRIMARY KEY, path TEXT NOT NULL, directory TEXT NOT NULL UNIQUE, kind INTEGER NOT NULL DEFAULT 0, distro TEXT NOT NULL DEFAULT '', user TEXT NOT NULL DEFAULT '', remote_root TEXT NOT NULL DEFAULT '');"
         "CREATE TABLE IF NOT EXISTS app (id INTEGER PRIMARY KEY CHECK(id=1), last_project TEXT NOT NULL, x INTEGER NOT NULL, y INTEGER NOT NULL,"
-        " width INTEGER NOT NULL, height INTEGER NOT NULL, positioned INTEGER NOT NULL, maximized INTEGER NOT NULL, project_list_width INTEGER NOT NULL DEFAULT 180);"
+        " width INTEGER NOT NULL, height INTEGER NOT NULL, positioned INTEGER NOT NULL, maximized INTEGER NOT NULL, project_list_width INTEGER NOT NULL DEFAULT 180, project_list_collapsed INTEGER NOT NULL DEFAULT 0);"
         "CREATE TABLE open_projects (path_key TEXT PRIMARY KEY, path TEXT NOT NULL, position INTEGER NOT NULL UNIQUE);", {
         "ALTER TABLE app ADD COLUMN project_list_width INTEGER NOT NULL DEFAULT 180;"
         "CREATE TABLE open_projects (path_key TEXT PRIMARY KEY, path TEXT NOT NULL, position INTEGER NOT NULL UNIQUE);"
-        "INSERT INTO open_projects SELECT COALESCE((SELECT path_key FROM projects WHERE path=last_project),lower(last_project)),last_project,0 FROM app WHERE last_project<>'';", appLocations});
+        "INSERT INTO open_projects SELECT COALESCE((SELECT path_key FROM projects WHERE path=last_project),lower(last_project)),last_project,0 FROM app WHERE last_project<>'';", appLocations,
+        "ALTER TABLE app ADD COLUMN project_list_collapsed INTEGER NOT NULL DEFAULT 0;"});
 }
 Storage::~Storage() = default;
 std::vector<std::string> Storage::projectHistory() {
@@ -197,12 +198,13 @@ std::vector<std::string> Storage::projectHistory() {
 AppSession Storage::loadApp() {
     AppSession state;
     Transaction snapshot(*impl_->app, false);
-    Statement row(*impl_->app, "SELECT last_project,x,y,width,height,positioned,maximized,project_list_width FROM app WHERE id=1");
+    Statement row(*impl_->app, "SELECT last_project,x,y,width,height,positioned,maximized,project_list_width,project_list_collapsed FROM app WHERE id=1");
     if (row.row()) {
         state.lastProject = row.text(0); state.x = bounded(row.number(1), -1000000, 1000000); state.y = bounded(row.number(2), -1000000, 1000000);
         state.width = bounded(row.number(3), 720, 30000); state.height = bounded(row.number(4), 480, 30000);
         state.positioned = row.number(5) != 0; state.maximized = row.number(6) != 0;
         state.projectListWidth = bounded(row.number(7), 100, 600);
+        state.projectListCollapsed = row.number(8) != 0;
     }
     Statement projects(*impl_->app, "SELECT path_key,path FROM open_projects ORDER BY position LIMIT 1000");
     while (projects.row()) { state.openProjectKeys.push_back(projects.text(0)); state.openProjects.push_back(projects.text(1)); }
@@ -212,9 +214,9 @@ AppSession Storage::loadApp() {
 void Storage::saveApp(const AppSession& state) {
     if (state.openProjects.size() > 1000 || (!state.openProjectKeys.empty() && state.openProjectKeys.size() != state.openProjects.size())) throw std::runtime_error("Invalid open project list");
     Transaction transaction(*impl_->app);
-    Statement row(*impl_->app, "INSERT OR REPLACE INTO app VALUES(1,?,?,?,?,?,?,?,?)");
+    Statement row(*impl_->app, "INSERT OR REPLACE INTO app VALUES(1,?,?,?,?,?,?,?,?,?)");
     row.text(1, state.lastProject); row.number(2, state.x); row.number(3, state.y);
-    row.number(4, state.width); row.number(5, state.height); row.number(6, state.positioned); row.number(7, state.maximized); row.number(8, state.projectListWidth); row.run();
+    row.number(4, state.width); row.number(5, state.height); row.number(6, state.positioned); row.number(7, state.maximized); row.number(8, state.projectListWidth); row.number(9, state.projectListCollapsed); row.run();
     impl_->app->exec("DELETE FROM open_projects");
     Statement project(*impl_->app, "INSERT INTO open_projects VALUES(?,?,?)");
     for (size_t i = 0; i < state.openProjects.size(); ++i) {

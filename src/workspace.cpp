@@ -36,7 +36,9 @@ constexpr int projectBorderWidth = 5;
 constexpr int projectCardBorderWidth = 2;
 constexpr int projectCardRadius = 6;
 constexpr int projectCardHeight = projectHeadingHeight + projectMessageLineHeight * projectMessageLines + 8;
-constexpr int projectRowHeight = projectCardHeight + projectCardGap;
+constexpr int expandedProjectRowHeight = projectCardHeight + projectCardGap;
+constexpr int collapsedProjectListWidth = 64;
+constexpr int collapsedProjectCardHeight = 56;
 constexpr int statusBarHeight = 26;
 fs::path stateDirectory() {
     const DWORD length = GetEnvironmentVariableW(L"APPDATA", nullptr, 0);
@@ -114,10 +116,15 @@ private:
     void scrollProjectDrag();
     void endProjectDrag(bool drop = false);
     void scrollProjects(UINT command);
+    void toggleProjectList();
+    int projectListWidth() const;
+    int projectRowHeight() const;
     int projectPage() const;
     int projectContentRight() const;
     RECT contentBounds() const;
     RECT addButtonBounds() const;
+    RECT collapseButtonBounds() const;
+    RECT aiStatusBounds(const RECT& card) const;
     size_t hit(POINT point) const;
     RECT row(size_t index) const;
     OpenProject* find(uint64_t id);
@@ -537,7 +544,7 @@ void Workspace::animateAiStatus() {
         for (size_t i = 0; i < projects_.size(); ++i) {
             const auto item = row(i);
             if (item.top < px(44) || item.top >= client.bottom || projects_[i].runtime->summary().state != AiState::Running) continue;
-            const RECT icon{item.left + px(4), item.top, item.left + px(30), item.top + px(projectHeadingHeight)};
+            const auto icon=aiStatusBounds(item);
             InvalidateRect(window_, &icon, FALSE); running = true;
         }
         if (!projects_.empty()) running = projects_[active_].runtime->animateAiStatus() || running;
@@ -547,13 +554,28 @@ void Workspace::animateAiStatus() {
     if (running && !aiAnimationTimer_) aiAnimationTimer_ = SetTimer(window_, aiAnimationTimerId, USER_TIMER_MINIMUM, nullptr);
     else if (!running && aiAnimationTimer_) { KillTimer(window_, aiAnimationTimer_); aiAnimationTimer_ = 0; }
 }
-RECT Workspace::addButtonBounds() const {return {px(session_.projectListWidth)-px(34),0,px(session_.projectListWidth),px(44)};}
+void Workspace::toggleProjectList() {
+    endProjectDrag();recent_.close();
+    session_.projectListCollapsed=!session_.projectListCollapsed;
+    // Keep the selected project visible when the row heights change.
+    scroll_=std::max(0,static_cast<int>(active_)-projectPage()+1);
+    appDirty_=true;appChanged_=GetTickCount64();
+    layout();
+}
+int Workspace::projectListWidth() const {return px(session_.projectListCollapsed?collapsedProjectListWidth:session_.projectListWidth);}
+int Workspace::projectRowHeight() const {return session_.projectListCollapsed?collapsedProjectCardHeight+projectCardGap:expandedProjectRowHeight;}
+RECT Workspace::addButtonBounds() const {return {projectListWidth()-px(session_.projectListCollapsed?32:34),0,projectListWidth(),px(44)};}
+RECT Workspace::collapseButtonBounds() const {return {0,0,px(32),px(44)};}
+RECT Workspace::aiStatusBounds(const RECT& card) const {
+    if(session_.projectListCollapsed)return {card.left,card.top+px(28),card.right,card.bottom-px(4)};
+    return {card.left+px(4),card.top,card.left+px(30),card.top+px(projectHeadingHeight)};
+}
 int Workspace::projectPage() const {
     const auto client=contentBounds();
-    return std::max(1,(static_cast<int>(client.bottom)-px(44))/px(projectRowHeight));
+    return std::max(1,(static_cast<int>(client.bottom)-px(44))/px(projectRowHeight()));
 }
 int Workspace::projectContentRight() const {
-    return px(session_.projectListWidth)-((GetWindowLongPtrW(projectScrollbar_,GWL_STYLE)&WS_VSCROLL)?GetSystemMetricsForDpi(SM_CXVSCROLL,dpi_):0);
+    return projectListWidth()-((GetWindowLongPtrW(projectScrollbar_,GWL_STYLE)&WS_VSCROLL)?GetSystemMetricsForDpi(SM_CXVSCROLL,dpi_):0);
 }
 RECT Workspace::contentBounds() const {
     RECT client{};GetClientRect(window_,&client);
@@ -572,13 +594,14 @@ void Workspace::scrollProjects(UINT command) {
     layout();
 }
 RECT Workspace::row(size_t index) const {
-    const int top=px(44)+(static_cast<int>(index)-scroll_)*px(projectRowHeight)+px(projectCardGap/2);
-    return {px(projectCardMargin),top,projectContentRight()-px(projectCardMargin),top+px(projectCardHeight)};
+    const int top=px(44)+(static_cast<int>(index)-scroll_)*px(projectRowHeight())+px(projectCardGap/2);
+    const int margin=px(session_.projectListCollapsed?4:projectCardMargin);
+    return {margin,top,projectContentRight()-margin,top+px(session_.projectListCollapsed?collapsedProjectCardHeight:projectCardHeight)};
 }
 size_t Workspace::hit(POINT point) const {
     const auto client=contentBounds();
     if(point.x<0||point.x>=projectContentRight()||point.y<px(44)||point.y>=client.bottom)return projects_.size();
-    const auto index=static_cast<size_t>(scroll_+(point.y-px(44))/px(projectRowHeight));
+    const auto index=static_cast<size_t>(scroll_+(point.y-px(44))/px(projectRowHeight()));
     if(index<projects_.size()){const auto card=row(index);if(PtInRect(&card,point))return index;}
     return projects_.size();
 }
@@ -594,7 +617,7 @@ void Workspace::updateProjectDrag(POINT point) {
     drag.position.reset();
     const auto client=contentBounds();
     if (point.x >= 0 && point.x < projectContentRight() && point.y >= px(44) && point.y < client.bottom) {
-        const auto position = static_cast<size_t>(scroll_+(point.y-px(44)+px(projectRowHeight)/2)/px(projectRowHeight));
+        const auto position = static_cast<size_t>(scroll_+(point.y-px(44)+px(projectRowHeight())/2)/px(projectRowHeight()));
         drag.position = std::min(position,projects_.size());
     }
     InvalidateRect(window_,nullptr,FALSE);
@@ -646,13 +669,13 @@ std::wstring Workspace::subtitle(size_t index) const {
 }
 void Workspace::layout(){
     if(!window_)return;
-    RECT r{};GetClientRect(window_,&r);const int left=px(session_.projectListWidth)+px(projectBorderWidth);
+    RECT r{};GetClientRect(window_,&r);const int left=projectListWidth()+px(projectBorderWidth);
     const int content=std::max(0L,r.bottom-px(statusBarHeight));
     const int page=projectPage();scroll_=std::clamp(scroll_,0,std::max(0,static_cast<int>(projects_.size())-page));
     SCROLLINFO info{sizeof(info),SIF_RANGE|SIF_PAGE|SIF_POS,0,std::max(0,static_cast<int>(projects_.size())-1),static_cast<UINT>(page),scroll_,0};
     SetScrollInfo(projectScrollbar_,SB_VERT,&info,FALSE);
     const int scrollbarWidth=GetSystemMetricsForDpi(SM_CXVSCROLL,dpi_);
-    SetWindowPos(projectScrollbar_,nullptr,px(session_.projectListWidth)-scrollbarWidth,px(44),scrollbarWidth,std::max(0,content-px(44)),
+    SetWindowPos(projectScrollbar_,nullptr,projectListWidth()-scrollbarWidth,px(44),scrollbarWidth,std::max(0,content-px(44)),
         SWP_NOZORDER|SWP_NOACTIVATE|SWP_NOREDRAW|((static_cast<int>(projects_.size())>page)?SWP_SHOWWINDOW:SWP_HIDEWINDOW));
     // Do not copy old Direct2D pixels while moving the project and its panes.
     // Repaint the complete layout after the new positions have been applied.
@@ -666,6 +689,11 @@ void Workspace::layout(){
     RedrawWindow(window_,nullptr,nullptr,RDW_INVALIDATE|RDW_ALLCHILDREN|RDW_UPDATENOW);
 }
 void Workspace::updateTools(){
+    TOOLINFOW collapseTip{};collapseTip.cbSize=sizeof(collapseTip);collapseTip.hwnd=window_;collapseTip.uId=static_cast<UINT_PTR>(-1);
+    SendMessageW(tooltips_,TTM_DELTOOLW,0,reinterpret_cast<LPARAM>(&collapseTip));
+    collapseTip.uFlags=TTF_SUBCLASS;collapseTip.rect=collapseButtonBounds();
+    collapseTip.lpszText=const_cast<wchar_t*>(session_.projectListCollapsed?L"Expand projects":L"Collapse projects");
+    SendMessageW(tooltips_,TTM_ADDTOOLW,0,reinterpret_cast<LPARAM>(&collapseTip));
     for(size_t i=0;i<=tools_;++i){TOOLINFOW tip{};tip.cbSize=sizeof(tip);tip.hwnd=window_;tip.uId=i;SendMessageW(tooltips_,TTM_DELTOOLW,0,reinterpret_cast<LPARAM>(&tip));}
     tools_=projects_.size();const auto client=contentBounds();
     TOOLINFOW addTip{};addTip.cbSize=sizeof(addTip);addTip.hwnd=window_;addTip.uId=0;addTip.uFlags=TTF_SUBCLASS;addTip.rect=addButtonBounds();addTip.lpszText=const_cast<wchar_t*>(L"Open folder (Ctrl+O)");SendMessageW(tooltips_,TTM_ADDTOOLW,0,reinterpret_cast<LPARAM>(&addTip));
@@ -674,18 +702,31 @@ void Workspace::updateTools(){
 }
 void Workspace::paint(){
     Renderer::Paint paint(renderer_,window_);if(!paint)return;const auto client=contentBounds();renderer_.fill(client,background);
-    const int width=px(session_.projectListWidth),borderWidth=px(projectBorderWidth);renderer_.fill({width,0,width+borderWidth,client.bottom},border);
+    const int width=projectListWidth(),borderWidth=px(projectBorderWidth);renderer_.fill({width,0,width+borderWidth,client.bottom},border);
     const int cardBorderWidth=px(projectCardBorderWidth),cardRadius=px(projectCardRadius);
     const auto addButton=addButtonBounds();
-    renderer_.label({px(12),0,addButton.left,px(44)},L"PROJECTS",foreground);
+    const auto collapseButton=collapseButtonBounds();
+    const int x=(collapseButton.left+collapseButton.right)/2,y=(collapseButton.top+collapseButton.bottom)/2;
+    const int direction=session_.projectListCollapsed?1:-1;
+    renderer_.line(x-direction*px(3),y-px(5),x+direction*px(3),y,foreground,static_cast<float>(px(2)));
+    renderer_.line(x+direction*px(3),y,x-direction*px(3),y+px(5),foreground,static_cast<float>(px(2)));
+    if(!session_.projectListCollapsed)renderer_.label({collapseButton.right+px(4),0,addButton.left,px(44)},L"PROJECTS",foreground);
     renderer_.label(addButton,L"+",accent,DT_CENTER|DT_VCENTER|DT_SINGLELINE);
     for(size_t i=0;i<projects_.size();++i){auto rect=row(i);if(rect.bottom<=px(44)||rect.top>=client.bottom)continue;
         const auto& project=projects_[i];const auto summary=project.runtime->summary();
         renderer_.fillRounded(rect,i==active_?accent:border,cardRadius);
         auto inside=rect;InflateRect(&inside,-cardBorderWidth,-cardBorderWidth);renderer_.fillRounded(inside,panel,cardRadius-cardBorderWidth);
         const int headingBottom=rect.top+px(projectHeadingHeight);
-        drawAiStatus(renderer_,{rect.left+px(4),rect.top,rect.left+px(30),headingBottom},summary.state,dpi_);
-        const auto secondary=subtitle(i);const auto title=project.path.filename().empty()?project.path.native():project.path.filename().native();
+        drawAiStatus(renderer_,aiStatusBounds(rect),summary.state,dpi_);
+        const auto title=project.path.filename().empty()?project.path.native():project.path.filename().native();
+        if(session_.projectListCollapsed){
+            // Retain both UTF-16 units for an initial outside the BMP.
+            const size_t length=title.size()>1&&title[0]>=0xd800&&title[0]<=0xdbff&&title[1]>=0xdc00&&title[1]<=0xdfff?2:1;
+            renderer_.label({rect.left+px(2),rect.top+px(4),rect.right-px(2),rect.top+px(28)},title.substr(0,length),project.missing?muted:foreground,DT_CENTER|DT_VCENTER|DT_SINGLELINE);
+            if(summary.unread)renderer_.fill({rect.right-px(7),rect.top+px(4),rect.right-px(3),rect.top+px(8)},accent);
+            continue;
+        }
+        const auto secondary=subtitle(i);
         renderer_.label({rect.left+px(32),rect.top,rect.right-px(22),rect.top+(secondary.empty()?px(projectHeadingHeight):px(27))},title,project.missing?muted:foreground);
         if(!secondary.empty())renderer_.label({rect.left+px(32),rect.top+px(24),rect.right-px(8),headingBottom},secondary,muted);
         renderer_.label({rect.left+px(32),headingBottom,rect.right-px(8),headingBottom+px(projectMessageLineHeight)*projectMessageLines},
@@ -695,7 +736,8 @@ void Workspace::paint(){
     }
     if(projectDrag_&&projectDrag_->active&&projectDrag_->position){
         const int y=std::clamp(static_cast<int>(row(*projectDrag_->position).top)-px(projectCardGap/2)-px(1),px(44),static_cast<int>(client.bottom)-px(2));
-        renderer_.fill({px(projectCardMargin),y,projectContentRight()-px(projectCardMargin),y+px(2)},accent);
+        const auto card=row(*projectDrag_->position);
+        renderer_.fill({card.left,y,card.right,y+px(2)},accent);
     }
     if(projects_.empty())renderer_.label({width+px(30),px(40),client.right-px(30),client.bottom},restoring_?L"Restoring projects…":L"Open a folder with Ctrl+O.",muted,DT_LEFT|DT_TOP|DT_WORDBREAK);
 }
@@ -734,18 +776,35 @@ case WM_SETFOCUS:if(closing_)return 0;if(!projects_.empty())projects_[active_].r
 case WM_XBUTTONDOWN:case WM_XBUTTONDBLCLK:navigate(GET_XBUTTON_WPARAM(a)==XBUTTON2);return TRUE;
 case WM_XBUTTONUP:return TRUE;
 case WM_APPCOMMAND:{const auto command=GET_APPCOMMAND_LPARAM(b);if(command==APPCOMMAND_BROWSER_BACKWARD||command==APPCOMMAND_BROWSER_FORWARD){navigate(command==APPCOMMAND_BROWSER_FORWARD);return TRUE;}break;}
-case WM_LBUTTONDOWN:{recent_.close();endProjectDrag();const POINT point{GET_X_LPARAM(b),GET_Y_LPARAM(b)};const auto addButton=addButtonBounds();const int width=px(session_.projectListWidth);if(point.x>=width&&point.x<width+px(projectBorderWidth)){dragging_=true;SetCapture(window_);}else if(PtInRect(&addButton,point))choose();else if(const auto index=hit(point);index<projects_.size()){select(index,point.x<row(index).left+px(30));projectDrag_=ProjectDrag{projects_[index].id,point,point,false,std::nullopt};SetCapture(window_);}return 0;}
+case WM_LBUTTONDOWN:{
+    recent_.close();endProjectDrag();const POINT point{GET_X_LPARAM(b),GET_Y_LPARAM(b)};
+    const auto addButton=addButtonBounds(),collapseButton=collapseButtonBounds();const int width=projectListWidth();
+    if(!session_.projectListCollapsed&&point.y<contentBounds().bottom&&point.x>=width&&point.x<width+px(projectBorderWidth)){dragging_=true;SetCapture(window_);}
+    else if(PtInRect(&collapseButton,point))toggleProjectList();
+    else if(PtInRect(&addButton,point))choose();
+    else if(const auto index=hit(point);index<projects_.size()){
+        const auto icon=aiStatusBounds(row(index));select(index,PtInRect(&icon,point));
+        projectDrag_=ProjectDrag{projects_[index].id,point,point,false,std::nullopt};SetCapture(window_);
+    }
+    return 0;
+}
 case WM_MOUSEMOVE:if(projectDrag_){updateProjectDrag({GET_X_LPARAM(b),GET_Y_LPARAM(b)});return 0;}if(dragging_){session_.projectListWidth=std::clamp(MulDiv(GET_X_LPARAM(b),96,dpi_),100,600);appDirty_=true;appChanged_=GetTickCount64();layout();}return 0;
 case WM_LBUTTONUP:if(projectDrag_&&projectDrag_->active)updateProjectDrag({GET_X_LPARAM(b),GET_Y_LPARAM(b)});endProjectDrag(true);dragging_=false;if(GetCapture()==window_)ReleaseCapture();return 0;
 case WM_CANCELMODE:endProjectDrag();dragging_=false;if(GetCapture()==window_)ReleaseCapture();return 0;
 case WM_CAPTURECHANGED:endProjectDrag();dragging_=false;return 0;
 case WM_KEYDOWN:if(a==VK_ESCAPE&&projectDrag_){endProjectDrag();return 0;}break;
 case WM_RBUTTONDOWN:endProjectDrag();return 0;
-case WM_MOUSEWHEEL:{if(GET_KEYSTATE_WPARAM(a)&MK_SHIFT)return 0;POINT point{GET_X_LPARAM(b),GET_Y_LPARAM(b)};ScreenToClient(window_,&point);if(point.x<px(session_.projectListWidth)&&point.y<contentBounds().bottom){wheel_+=GET_WHEEL_DELTA_WPARAM(a);scroll_-=wheel_/WHEEL_DELTA*3;wheel_%=WHEEL_DELTA;layout();if(projectDrag_)updateProjectDrag(point);}return 0;}
+case WM_MOUSEWHEEL:{if(GET_KEYSTATE_WPARAM(a)&MK_SHIFT)return 0;POINT point{GET_X_LPARAM(b),GET_Y_LPARAM(b)};ScreenToClient(window_,&point);if(point.x<projectListWidth()&&point.y<contentBounds().bottom){wheel_+=GET_WHEEL_DELTA_WPARAM(a);scroll_-=wheel_/WHEEL_DELTA*3;wheel_%=WHEEL_DELTA;layout();if(projectDrag_)updateProjectDrag(point);}return 0;}
 case WM_MOUSEHWHEEL:return 0;
 case WM_MBUTTONDOWN:close(hit({GET_X_LPARAM(b),GET_Y_LPARAM(b)}));return 0;
 case WM_CONTEXTMENU:{endProjectDrag();POINT point{GET_X_LPARAM(b),GET_Y_LPARAM(b)};auto local=point;ScreenToClient(window_,&local);if(local.y>=contentBounds().bottom)return 0;const auto index=hit(local);if(index>=projects_.size()){choose();return 0;}HMENU menu=CreatePopupMenu();AppendMenuW(menu,MF_STRING,1,L"Close project");if(projects_[index].path.wsl())AppendMenuW(menu,MF_STRING,2,L"Reconnect");const auto command=TrackPopupMenu(menu,TPM_RETURNCMD|TPM_RIGHTBUTTON,point.x,point.y,0,window_,nullptr);DestroyMenu(menu);if(command==1)close(index);else if(command==2){select(index);projects_[index].runtime->revalidate();}return 0;}
-case WM_SETCURSOR:{POINT point{};GetCursorPos(&point);ScreenToClient(window_,&point);if(point.y<contentBounds().bottom&&point.x>=px(session_.projectListWidth)&&point.x<px(session_.projectListWidth)+px(5)){SetCursor(LoadCursorW(nullptr,IDC_SIZEWE));return TRUE;}break;}
+case WM_SETCURSOR:{
+    POINT point{};GetCursorPos(&point);ScreenToClient(window_,&point);
+    if(!session_.projectListCollapsed&&point.y<contentBounds().bottom&&point.x>=projectListWidth()&&point.x<projectListWidth()+px(projectBorderWidth)){SetCursor(LoadCursorW(nullptr,IDC_SIZEWE));return TRUE;}
+    const auto collapseButton=collapseButtonBounds(),addButton=addButtonBounds();
+    if(PtInRect(&collapseButton,point)||PtInRect(&addButton,point)){SetCursor(LoadCursorW(nullptr,IDC_HAND));return TRUE;}
+    break;
+}
 case WM_NOTIFY:{const auto header=reinterpret_cast<NMHDR*>(b);if(header->hwndFrom==tooltips_&&header->code==TTN_GETDISPINFOW&&header->idFrom>0&&header->idFrom<=projects_.size()){const auto& project=projects_[header->idFrom-1];tipText_=project.path.native()+(project.path.wsl() ? L"\nWSL · "+wide(project.path.location().distro)+L" · "+project.runtime->connectionDescription() : L"")+project.runtime->description();reinterpret_cast<NMTTDISPINFOW*>(b)->lpszText=tipText_.data();}return 0;}
 case WM_COPYDATA:{
     const auto data=reinterpret_cast<COPYDATASTRUCT*>(b);

@@ -80,6 +80,7 @@ void roundTripAndIsolation() {
     state.expanded = {path, path + "\\src", path + "\\src\\日本語"}; state.selected = state.tabs.front().path;
     poppy::AppSession app;
     app.lastProject = path; app.openProjects = {path, "D:\\other"}; app.openProjectKeys = {key, "d:\\other"}; app.projectListWidth = 233; app.x = -1500; app.y = 120; app.width = 1200; app.height = 800; app.positioned = true; app.maximized = true;
+    app.projectListCollapsed = true;
     fs::path projectDirectory;
     {
         poppy::Storage storage(fixture.directory);
@@ -94,7 +95,7 @@ void roundTripAndIsolation() {
         poppy::Storage storage(fixture.directory);
         const auto savedApp = storage.loadApp();
         check(savedApp.lastProject == app.lastProject && savedApp.x == app.x && savedApp.y == app.y && savedApp.width == app.width &&
-              savedApp.height == app.height && savedApp.openProjects == app.openProjects && savedApp.openProjectKeys == app.openProjectKeys && savedApp.projectListWidth == app.projectListWidth && savedApp.positioned && savedApp.maximized, "App state did not survive reopening");
+              savedApp.height == app.height && savedApp.openProjects == app.openProjects && savedApp.openProjectKeys == app.openProjectKeys && savedApp.projectListWidth == app.projectListWidth && savedApp.projectListCollapsed == app.projectListCollapsed && savedApp.positioned && savedApp.maximized, "App state did not survive reopening");
         auto saved = storage.loadProject(key, path);
         check(saved && same(*saved, state), "Project state did not survive reopening");
         const std::string a = "d:\\a.b", b = "d:\\a-b";
@@ -113,6 +114,36 @@ void roundTripAndIsolation() {
         empty.diffInline = false; empty.gitTree = false;
         storage.saveProject(key, path, empty);
         check(same(*storage.loadProject(key, path), empty), "A project's layout was lost when no files were open");
+    }
+}
+void migrateProjectListState() {
+    Fixture fixture;
+    poppy::AppSession app;
+    app.lastProject = "C:\\project"; app.openProjects = {app.lastProject}; app.projectListWidth = 317;
+    {
+        poppy::Storage storage(fixture.directory);
+        check(!storage.loadApp().projectListCollapsed, "New workspaces should show the expanded project list");
+        storage.saveApp(app);
+    }
+    execute(fixture.directory / "storage.sql", "ALTER TABLE app DROP COLUMN project_list_collapsed; PRAGMA user_version=3;");
+    {
+        poppy::Storage storage(fixture.directory);
+        const auto migrated = storage.loadApp();
+        check(!migrated.projectListCollapsed && migrated.projectListWidth == app.projectListWidth &&
+              migrated.lastProject == app.lastProject && migrated.openProjects == app.openProjects,
+              "Project list migration changed the expanded width or open projects");
+        app.projectListCollapsed = true; storage.saveApp(app);
+    }
+    {
+        poppy::Storage storage(fixture.directory);
+        check(storage.loadApp().projectListCollapsed && storage.loadApp().projectListWidth == app.projectListWidth,
+              "Collapsing the project list lost the expanded width");
+        app.projectListCollapsed = false; storage.saveApp(app);
+    }
+    {
+        poppy::Storage storage(fixture.directory);
+        check(!storage.loadApp().projectListCollapsed && storage.loadApp().projectListWidth == app.projectListWidth,
+              "Expanding the project list was not saved");
     }
 }
 void atomicSave() {
@@ -248,7 +279,7 @@ void migrateWorkspaceAndTerminals() {
         "INSERT INTO projects VALUES('c:\\recent','C:\\recent','-c-recent'); PRAGMA user_version=1;");
     poppy::Storage storage(fixture.directory);
     const auto app = storage.loadApp();
-    check(app.openProjects == std::vector<std::string>{"C:\\selected"} && app.projectListWidth == 180 && app.x == 20, "App migration opened recent projects or lost placement");
+    check(app.openProjects == std::vector<std::string>{"C:\\selected"} && app.projectListWidth == 180 && !app.projectListCollapsed && app.x == 20, "App migration opened recent projects or lost placement");
     check(storage.projectHistory() == std::vector<std::string>{"C:\\recent"}, "Legacy closed project was missing from history");
     const std::string key = "c:\\terminals";
     poppy::ProjectSession original;
@@ -330,7 +361,7 @@ void schemaAndRegistry() {
         execute(appDb, R"(UPDATE projects SET directory='../../escape' WHERE path_key='c:\invalid')");
         rejects([&] { storage.projectDirectory("c:\\invalid", "c:\\invalid"); }, "An invalid registry path escaped the project directory");
     }
-    execute(appDb, "PRAGMA user_version=4");
+    execute(appDb, "PRAGMA user_version=5");
     rejects([&] { poppy::Storage storage(fixture.directory); }, "A newer app schema was overwritten");
 }
 void searchRoundTripAndMigration() {
@@ -414,7 +445,7 @@ void wslRoundTripAndMigration() {
         storage.saveProject("c:\\project", windows, local); oldDirectory = storage.projectDirectory("c:\\project",windows);
         execute(oldDirectory/"storage.sql","DROP TABLE connection; ALTER TABLE tabs DROP COLUMN file_wrap_offset; ALTER TABLE tabs DROP COLUMN diff_wrap_offset; ALTER TABLE git_comparisons DROP COLUMN repository; PRAGMA user_version=6;");
     }
-    execute(fixture.directory/"storage.sql","ALTER TABLE projects DROP COLUMN kind; ALTER TABLE projects DROP COLUMN distro; ALTER TABLE projects DROP COLUMN user; ALTER TABLE projects DROP COLUMN remote_root; PRAGMA user_version=2;");
+    execute(fixture.directory/"storage.sql","ALTER TABLE projects DROP COLUMN kind; ALTER TABLE projects DROP COLUMN distro; ALTER TABLE projects DROP COLUMN user; ALTER TABLE projects DROP COLUMN remote_root; ALTER TABLE app DROP COLUMN project_list_collapsed; PRAGMA user_version=2;");
     {
         poppy::Storage storage(fixture.directory);
         check(storage.projectDirectory("c:\\project",windows) == oldDirectory && storage.loadProject("c:\\project",windows)->sidebar == 301,"WSL migration changed an existing Windows project");
@@ -433,7 +464,7 @@ void wslRoundTripAndMigration() {
 }
 int main() {
     try {
-        roundTripAndIsolation(); atomicSave(); projectHistory(); migrateProjectLayout(); migrateGitLayout(); migratePinnedTabs(); migrateWorkspaceAndTerminals(); migrateSplitLayout(); migrateWrapping(); terminalShellMigration(); schemaAndRegistry(); searchRoundTripAndMigration(); gitComparisonRoundTrip(); wslRoundTripAndMigration();
+        roundTripAndIsolation(); migrateProjectListState(); atomicSave(); projectHistory(); migrateProjectLayout(); migrateGitLayout(); migratePinnedTabs(); migrateWorkspaceAndTerminals(); migrateSplitLayout(); migrateWrapping(); terminalShellMigration(); schemaAndRegistry(); searchRoundTripAndMigration(); gitComparisonRoundTrip(); wslRoundTripAndMigration();
         std::cout << "Storage tests passed\n";
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
 }

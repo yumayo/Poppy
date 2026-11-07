@@ -65,6 +65,7 @@ struct AppSession {
     std::string lastProject;
     std::vector<std::string> openProjects, openProjectKeys;
     int projectListWidth = 180;
+    bool projectListCollapsed = false;
     int x = 0, y = 0, width = 1180, height = 820;
     bool positioned = false, maximized = false;
 };

@@ -3511,6 +3511,7 @@ std::set<DWORD> childProcesses(DWORD parent) {
 void multiProjectTests(const fs::path& executable) {
     Fixture a, b, c;
     writeLines(a.root / L"a.txt", 200); writeLines(b.root / L"b.txt", 300); writeLines(c.root / L"c.txt", 400);
+    int expandedProjectLeft = 0;
     {
     Application app(executable, a.root);
     const auto treeA = app.tree(); const auto surfaceA = app.window;
@@ -3559,6 +3560,16 @@ void multiProjectTests(const fs::path& executable) {
     waitFor([&] { return send(treeA, treeGetCount) == 3; }, "An inactive project's directory changes were not applied");
     check(lastTextRow(viewerB) == 300 && app.window == surfaceB, "An inactive result changed the visible project");
     select(0);check(IsWindow(shell) && WaitForSingleObject(shellProcess, 0) == WAIT_TIMEOUT,"Switching destroyed a running terminal");
+    expandedProjectLeft=bounds(app.host,surfaceA).left;
+    click(app.host,px(16),px(22));
+    check(bounds(app.host,surfaceA).left==px(64)+px(5),"Collapsing PROJECTS did not expand the active project");
+    click(app.host,px(30),px(44+64+18));app.tree();checkStatusBar();
+    check(app.window==surfaceB,"The compact project list did not select the second project");
+    click(app.host,px(30),px(44+18));app.tree();checkStatusBar();
+    check(app.window==surfaceA&&nextItem(treeA,TreeRelation::Root)==rootA&&scrollInfo(viewerA).nPos==top&&
+          IsWindow(shell)&&WaitForSingleObject(shellProcess,0)==WAIT_TIMEOUT,"Collapsing PROJECTS lost a document or running terminal");
+    click(app.host,px(16),px(22));
+    check(bounds(app.host,surfaceA).left==expandedProjectLeft,"Expanding PROJECTS did not restore the previous width");
     LARGE_INTEGER frequency{}; QueryPerformanceFrequency(&frequency); double maximum = 0;
     for (int i = 0; i < 6; ++i) { LARGE_INTEGER start{}, end{}; QueryPerformanceCounter(&start); select(i % 2); QueryPerformanceCounter(&end); maximum = std::max(maximum, (end.QuadPart-start.QuadPart)*1000.0/frequency.QuadPart); }
     std::cout << "Retained project switch maximum: " << maximum << " ms\n";
@@ -3575,6 +3586,7 @@ void multiProjectTests(const fs::path& executable) {
     open(a.root);check(app.window==surfaceA,"Reopening a registered path duplicated the project");
     const auto oldB=surfaceB;const auto dpi=GetDpiForWindow(app.host);click(app.host,MulDiv(60,dpi,96),MulDiv(44+projectRowHeight+24,dpi,96),true);
     check(!IsWindow(oldB)&&IsWindow(surfaceA)&&IsWindow(shell) && WaitForSingleObject(shellProcess, 0) == WAIT_TIMEOUT,"Closing an inactive project affected another session");
+    click(app.host,px(16),px(22));
     CloseHandle(shellProcess);
     }
     {
@@ -3586,6 +3598,10 @@ void multiProjectTests(const fs::path& executable) {
         count = 0; for (HWND terminal = nullptr; (terminal = FindWindowExW(pane, terminal, L"PoppyTerminal", nullptr));) ++count;
         check(count == 2, "Restart lost terminal configuration");
         check(childProcesses(restored.process.dwProcessId).empty(), "Restoring terminal configuration automatically started a process");
+        const auto px=[dpi=GetDpiForWindow(restored.host)](int v){return MulDiv(v,dpi,96);};
+        check(bounds(restored.host,pane).left==px(64)+px(5),"Restart lost the collapsed PROJECTS state");
+        click(restored.host,px(16),px(22));
+        check(bounds(restored.host,pane).left==expandedProjectLeft,"Restart lost the expanded PROJECTS width");
     }
 }
 void recentProjectTests(const fs::path& executable) {
