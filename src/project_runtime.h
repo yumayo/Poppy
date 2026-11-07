@@ -7,11 +7,12 @@
 
 namespace poppy {
 class ShutdownDialog;
+class StatusBar;
 // A retained project surface owns its models, controls and independent workers.
 // Hiding the surface never tears down sessions or rebuilds the tree.
 class ProjectRuntime {
 public:
-    ProjectRuntime();
+    explicit ProjectRuntime(StatusBar& statusBar);
     ~ProjectRuntime();
     void create(HWND parent, HINSTANCE instance, AiEventQueue* hooks);
     void initialize(const ResourceId& path, const ProjectSession& state, bool saved);

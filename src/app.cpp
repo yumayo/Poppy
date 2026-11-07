@@ -294,6 +294,7 @@ std::shared_ptr<GitWorkspace> readGitWorkspace(ProjectProvider& provider, const 
 class ProjectRuntime::Impl {
     friend class ProjectRuntime;
 public:
+    explicit Impl(StatusBar& statusBar) : statusBar_(statusBar) {}
     bool key(const MSG& message);
 private:
     static LRESULT CALLBACK procedure(HWND, UINT, WPARAM, LPARAM);
@@ -410,13 +411,13 @@ private:
     HINSTANCE instance_ = nullptr;
     Tree explorer_, changes_;
     Renderer renderer_;
-    StatusBar statusBar_;
+    StatusBar& statusBar_;
     bool statusDirty_ = true;
     size_t partialFolders_ = 0;
     std::optional<WatchUsage> watchUsage_;
     ActivityButton explorerActivity_, gitActivity_, searchActivity_;
     UINT dpi_ = 96;
-    int sidebar_ = 245, terminalHeight_ = 260, footer_ = 26, splitter_ = 5;
+    int sidebar_ = 245, terminalHeight_ = 260, splitter_ = 5;
     int activityWidth_ = 48, sidebarHeader_ = 34, gitHeader_ = 180;
     RECT activityRect_{}, sidebarRect_{}, sidebarSplitter_{};
     int dragging_ = 0, dragOffset_ = 0;
@@ -717,7 +718,6 @@ void ProjectRuntime::Impl::create() {
     gitActivity_.clicked = [this] { selectSidebar(Sidebar::Git, true); };
     searchActivity_.clicked = [this] { selectSidebar(Sidebar::Search, true); };
     explorerActivity_.select(true);
-    statusBar_.create(window_, instance_);
     tooltips_ = CreateWindowExW(WS_EX_TOPMOST, TOOLTIPS_CLASSW, nullptr, WS_POPUP | TTS_ALWAYSTIP | TTS_NOPREFIX, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, window_, nullptr, instance_, nullptr);
     for (const auto button : {explorerButton_, gitButton_, searchButton_}) {
         TOOLINFOW tip{}; tip.cbSize = sizeof(tip); tip.uFlags = TTF_IDISHWND | TTF_SUBCLASS; tip.hwnd = window_; tip.uId = reinterpret_cast<UINT_PTR>(button);
@@ -848,11 +848,11 @@ void ProjectRuntime::Impl::dpi(UINT value) {
     dpi_ = value; renderer_.setDpi(dpi_);
     explorer_.setDpi(dpi_); changes_.setDpi(dpi_, 28);
     explorerActivity_.setDpi(dpi_); gitActivity_.setDpi(dpi_); searchActivity_.setDpi(dpi_); searchPane_.setDpi(dpi_);
-    footer_ = MulDiv(26, dpi_, 96); splitter_ = MulDiv(5, dpi_, 96);
+    splitter_ = MulDiv(5, dpi_, 96);
     activityWidth_ = MulDiv(48, dpi_, 96); sidebarHeader_ = MulDiv(34, dpi_, 96); gitHeader_ = MulDiv(180, dpi_, 96);
     gitCommit_.setDpi(dpi_);
     for (auto& view : viewers_) view.setDpi(dpi_);
-    terminal_.setDpi(dpi_); quickOpen_.setDpi(dpi_); comparePicker_.setDpi(dpi_); statusBar_.setDpi(dpi_); layout();
+    terminal_.setDpi(dpi_); quickOpen_.setDpi(dpi_); comparePicker_.setDpi(dpi_); layout();
 }
 void ProjectRuntime::Impl::layout(bool revealTab) {
     if (!tree_) return;
@@ -864,7 +864,7 @@ void ProjectRuntime::Impl::layout(bool revealTab) {
     const int sidebarLeft = sidebarOnRight ? activityLeft - side : activityWidth_;
     const int editorLeft = sidebarOnRight ? 0 : sidebarLeft + side + sidebarSplitter;
     const int editorRight = sidebarOnRight ? sidebarLeft - sidebarSplitter : width;
-    const int content = std::max(0, height - footer_);
+    const int content = height;
     activityRect_ = {activityLeft, 0, activityLeft + activityWidth_, content};
     sidebarRect_ = {sidebarLeft, 0, sidebarLeft + side, content};
     TOOLINFOW collapseTip{}; collapseTip.cbSize = sizeof(collapseTip); collapseTip.hwnd = window_; collapseTip.uId = 50;
@@ -942,7 +942,6 @@ void ProjectRuntime::Impl::layout(bool revealTab) {
     struct Placement { HWND window; int x, y, width, height, flags; };
     const int activityButtonLeft = activityLeft + (sidebarOnRight ? 1 : 0);
     std::vector<Placement> panes{
-        {statusBar_.window(), 0, std::max(0, height - footer_), width, footer_, SWP_SHOWWINDOW},
         {explorerButton_, activityButtonLeft, 0, activityWidth_ - 1, activityWidth_, SWP_SHOWWINDOW},
         {searchButton_, activityButtonLeft, activityWidth_, activityWidth_ - 1, activityWidth_, SWP_SHOWWINDOW},
         {gitButton_, activityButtonLeft, 2 * activityWidth_, activityWidth_ - 1, activityWidth_, SWP_SHOWWINDOW},
@@ -990,7 +989,7 @@ void ProjectRuntime::Impl::paint() {
     Renderer::Paint paint(renderer_, window_); if (!paint) return;
     auto& dc = renderer_;
     RECT r{}; GetClientRect(window_, &r);
-    dc.fill(r, border); dc.fill({0, r.bottom - footer_, r.right, r.bottom}, panel);
+    dc.fill(r, border);
     auto scaled = [&](int v) { return MulDiv(v, dpi_, 96); };
     dc.fill(activityRect_, background);
     const int activityBorder = sidebarOnRight ? activityRect_.left : activityRect_.right - 1;
@@ -1791,8 +1790,9 @@ void ProjectRuntime::Impl::revealInFileExplorer(ResourceId resource) {
         MessageBoxW(window_, (path + L"\n\n" + winError(static_cast<DWORD>(result))).c_str(), L"Poppy — Reveal in File Explorer", MB_OK | MB_ICONWARNING);
     }
 }
-void ProjectRuntime::Impl::status(std::wstring message) { status_ = std::move(message); statusBar_.message(status_); }
+void ProjectRuntime::Impl::status(std::wstring message) { status_ = std::move(message); if (active_) statusBar_.message(status_); }
 void ProjectRuntime::Impl::updateStatusBar() {
+    if (!active_) return;
     const std::wstring gitLabel = !git_ ? L"Git" : !git_->error.empty() ? L"Git unavailable" : git_->repositories.empty() ? L"No Git repository" : (git_->repositories.size() == 1 ? git_->repositories.front()->branch : std::to_wstring(git_->repositories.size()) + L" repositories") + L"  ·  " + groupedCount(git_->changed) + L" changed  ·  " + groupedCount(git_->untracked) + L" untracked";
     std::vector<LimitStatus> limits;
     if (!root_.empty()) {
@@ -2404,8 +2404,12 @@ ProjectSession ProjectRuntime::Impl::saveSession() {
 void ProjectRuntime::Impl::restoreProject(const ProjectSession& original) {
     ProjectSession state = original;
     RECT rect{}; GetClientRect(window_, &rect);
-    if (rect.bottom <= footer_) GetClientRect(GetParent(window_), &rect);
-    dock_ = restoreDockLayout(state, MulDiv(rect.bottom - footer_, 96, dpi_));
+    if (rect.bottom <= 0) {
+        GetClientRect(GetParent(window_), &rect);
+        RECT status{}; GetWindowRect(statusBar_.window(), &status);
+        rect.bottom = std::max(0L, rect.bottom - (status.bottom - status.top));
+    }
+    dock_ = restoreDockLayout(state, MulDiv(rect.bottom, 96, dpi_));
     for (const auto& node : dock_.nodes()) if (node.leaf()) ensureGroup(node.group);
     wslUid_ = state.wslUid;
     focusedPane_ = state.focusedPane == "branch" ? "git" : state.focusedPane;
@@ -3605,7 +3609,7 @@ bool ProjectRuntime::Impl::key(const MSG& message) {
 
     return false;
 }
-ProjectRuntime::ProjectRuntime() : impl_(std::make_unique<Impl>()) { impl_->owner_ = this; }
+ProjectRuntime::ProjectRuntime(StatusBar& statusBar) : impl_(std::make_unique<Impl>(statusBar)) { impl_->owner_ = this; }
 ProjectRuntime::~ProjectRuntime() {
     shutdown();
     if (impl_->window_ && IsWindow(impl_->window_)) DestroyWindow(impl_->window_);
@@ -3658,6 +3662,7 @@ void ProjectRuntime::activate(bool active) {
     }
     else {
         ShowWindow(window(), SW_SHOWNA); impl_->layout(false);
+        impl_->updateStatusBar();
         HWND focus = impl_->lastFocus_;
         if (!focus || !IsWindow(focus) || !IsWindowVisible(focus)) {
             focus = impl_->focusedPane_ == "terminal" && impl_->terminalVisible_ ? impl_->terminal_.window() : impl_->focusedPane_ == "explorer" && IsWindowVisible(impl_->tree_) ? impl_->tree_ : impl_->focusedPane_ == "git" && IsWindowVisible(impl_->gitTree_) ? impl_->gitTree_ : impl_->selectedWindow();

@@ -3514,6 +3514,17 @@ void multiProjectTests(const fs::path& executable) {
     {
     Application app(executable, a.root);
     const auto treeA = app.tree(); const auto surfaceA = app.window;
+    const auto statusBar = FindWindowExW(app.host, nullptr, L"PoppyStatusBar", nullptr);
+    const auto checkStatusBar = [&] {
+        RECT client{}; GetClientRect(app.host, &client);
+        const auto status = bounds(app.host, statusBar), project = bounds(app.host, app.window);
+        check(statusBar && IsWindowVisible(statusBar) && status.left == 0 && status.right == client.right &&
+            status.bottom == client.bottom && status.bottom - status.top == MulDiv(26, GetDpiForWindow(app.host), 96) &&
+            project.bottom == status.top, "Status bar did not span the workspace below PROJECTS and the active project");
+        check(!FindWindowExW(app.host, statusBar, L"PoppyStatusBar", nullptr) &&
+            !FindWindowExW(app.window, nullptr, L"PoppyStatusBar", nullptr), "Switching projects duplicated the status bar");
+    };
+    checkStatusBar();
     const auto viewerA = FindWindowExW(surfaceA, nullptr, L"PoppyViewer", nullptr);
     waitFor([&] { return nextItem(treeA, TreeRelation::Child, nextItem(treeA, TreeRelation::Root)) != 0; }, "Project A did not load");
     send(treeA, treeSelect, nextItem(treeA, TreeRelation::Child, nextItem(treeA, TreeRelation::Root))); waitLines(viewerA, 200); keepTab(app, 0);
@@ -3523,8 +3534,9 @@ void multiProjectTests(const fs::path& executable) {
         const auto text = path.native(); COPYDATASTRUCT data{0x50505901, static_cast<DWORD>((text.size()+1)*sizeof(wchar_t)), const_cast<wchar_t*>(text.c_str())};
         check(send(app.host, WM_COPYDATA, 0, reinterpret_cast<LPARAM>(&data)), "Could not add a second project");
         app.tree();
+        checkStatusBar();
     };
-    const auto select = [&](size_t index) { const UINT dpi=GetDpiForWindow(app.host);click(app.host,MulDiv(60,dpi,96),MulDiv(44+static_cast<int>(index)*projectRowHeight+24,dpi,96));app.tree(); };
+    const auto select = [&](size_t index) { const UINT dpi=GetDpiForWindow(app.host);click(app.host,MulDiv(60,dpi,96),MulDiv(44+static_cast<int>(index)*projectRowHeight+24,dpi,96));app.tree();checkStatusBar(); };
     open(b.root); const auto surfaceB = app.window; const auto treeB = app.tree();
     const auto viewerB = FindWindowExW(surfaceB, nullptr, L"PoppyViewer", nullptr);
     waitFor([&] { return nextItem(treeB, TreeRelation::Child, nextItem(treeB, TreeRelation::Root)) != 0; }, "Project B did not load");
@@ -3741,16 +3753,17 @@ void scrollingProjectDragTests(const fs::path& executable) {
     }
     const auto px=[dpi=GetDpiForWindow(app.host)](int value){return MulDiv(value,dpi,96);};
     check(SetWindowPos(app.host,nullptr,0,0,px(1000),px(480),SWP_NOMOVE|SWP_NOZORDER)!=FALSE,"Could not resize the project drag test");
-    RECT client{};GetClientRect(app.host,&client);POINT wheel{px(60),px(68)};ClientToScreen(app.host,&wheel);
-    const int page=(client.bottom-px(44))/px(projectRowHeight);
+    POINT wheel{px(60),px(68)};ClientToScreen(app.host,&wheel);
+    const auto status=bounds(app.host,FindWindowExW(app.host,nullptr,L"PoppyStatusBar",nullptr));
+    const int page=(status.top-px(44))/px(projectRowHeight);
     const auto barBounds=bounds(app.host,scrollbar);
-    check(IsWindowVisible(scrollbar)&&barBounds.top==px(44)&&barBounds.bottom==client.bottom&&
+    check(IsWindowVisible(scrollbar)&&barBounds.top==px(44)&&barBounds.bottom==status.top&&
         barBounds.right==px(180)&&barBounds.right-barBounds.left==GetSystemMetricsForDpi(SM_CXVSCROLL,GetDpiForWindow(app.host)),
         "Overflowing projects did not show a scrollbar beside the cards below the header");
     check(scrollInfo(scrollbar).nMax==11&&scrollInfo(scrollbar).nPage==static_cast<UINT>(page),"Project scrollbar range did not follow the viewport height");
     send(app.host,WM_MOUSEWHEEL,MAKEWPARAM(0,12000),MAKELPARAM(wheel.x,wheel.y));
     check(scrollInfo(scrollbar).nPos==0,"Project wheel scrolling did not update the scrollbar");
-    const POINT bottom{px(60),client.bottom-px(1)};
+    const POINT bottom{px(60),status.top-px(1)};
     send(app.host,WM_LBUTTONDOWN,MK_LBUTTON,MAKELPARAM(px(60),px(68)));
     send(app.host,WM_MOUSEMOVE,MK_LBUTTON,MAKELPARAM(bottom.x,bottom.y));
     for(int i=0;i<20;++i)send(app.host,WM_TIMER,1);
