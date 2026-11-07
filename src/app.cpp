@@ -366,7 +366,7 @@ private:
     bool canPasteImage(TreeItem item) const;
     void pasteImage(TreeItem item);
     wchar_t stateFor(const ResourceId& path) const;
-    void openFile(const ResourceId& path, bool diff = false);
+    void openFile(const ResourceId& path, bool diff = false, bool revealExplorer = true);
     void recordEditorNavigation();
     void openContentResult(const ContentMatch& match, const std::string& query, bool matchCase);
     void applyContentResult(size_t index);
@@ -381,7 +381,7 @@ private:
     void closeTabs(const std::vector<size_t>& indices);
     void toggleTabPin(size_t index);
     void tabMenu(POINT screen);
-    void loadTab(bool preserve = false, int group = -1);
+    void loadTab(bool preserve = false, int group = -1, bool revealExplorer = true);
     void refreshEditorGit(int group);
     void updateTabs(bool reveal = true);
     bool tabVisible(size_t index) const;
@@ -520,7 +520,8 @@ void ProjectRuntime::Impl::create() {
         pendingTreeSelection_.clear();
         pendingTreeSelections_.clear();
         pendingExplorerFile_.clear();
-        if (const auto n = node(item); n && !n->directory) openFile(n->path);
+        // Explorer already selected the row; keep it under the pointer.
+        if (const auto n = node(item); n && !n->directory) openFile(n->path, false, false);
     };
     explorer_.doubleClicked = [this](TreeItem item) {
         const auto n = node(item); if (!n || n->directory || n->path.empty()) return;
@@ -2797,17 +2798,20 @@ bool ProjectRuntime::Impl::confirmTab(size_t index) {
     const auto answer = MessageBoxW(window_, (L"Save changes to " + tabs_[index].path.filename().native() + L"?").c_str(), L"Poppy", MB_YESNOCANCEL | MB_ICONQUESTION);
     return answer == IDNO || (answer == IDYES && saveFile(index, true));
 }
-void ProjectRuntime::Impl::openFile(const ResourceId& path, bool diff) {
+void ProjectRuntime::Impl::openFile(const ResourceId& path, bool diff, bool revealExplorer) {
     if (path.empty()) { status(L"This filename cannot be represented as UTF-8 and cannot be opened or renamed."); return; }
     endTabDrag();
     const auto key = pathKey(path);
     const auto found = std::find_if(tabs_.begin(), tabs_.end(), [&](const Tab& tab) { return tab.diffKind == GitDiffKind::Automatic && pathKey(tab.path) == key; });
     size_t index = static_cast<size_t>(found - tabs_.begin());
-    if (found != tabs_.end() && index == activeTab_ && (!diff || found->diff)) { revealActiveFile(); updateTabs(); recordEditorNavigation(); return; }
+    if (found != tabs_.end() && index == activeTab_ && (!diff || found->diff)) {
+        if (revealExplorer) revealActiveFile();
+        updateTabs(); recordEditorNavigation(); return;
+    }
     saveTab();
     if (found == tabs_.end()) { Tab tab; tab.path = path; tab.diff = diff; tab.group = focusedGroup_; index = openEditorPreview(tabs_, std::move(tab)); }
     else if (diff) found->diff = true;
-    focusedGroup_ = tabs_[index].group; for (auto& tab : tabs_) if (tab.group == focusedGroup_) tab.displayed = false; tabs_[index].displayed = true; activeTab_ = index; layout(); loadTab();
+    focusedGroup_ = tabs_[index].group; for (auto& tab : tabs_) if (tab.group == focusedGroup_) tab.displayed = false; tabs_[index].displayed = true; activeTab_ = index; layout(); loadTab(false, focusedGroup_, revealExplorer);
     recordEditorNavigation();
 }
 void ProjectRuntime::Impl::openContentResult(const ContentMatch& match, const std::string& query, bool matchCase) {
@@ -2993,10 +2997,10 @@ void ProjectRuntime::Impl::tabMenu(POINT screen) {
         }
     }
 }
-void ProjectRuntime::Impl::loadTab(bool preserve, int group) {
+void ProjectRuntime::Impl::loadTab(bool preserve, int group, bool revealExplorer) {
     if (group < 0) group = focusedGroup_;
     ++serial_[group];
-    if (!preserve && group == focusedGroup_) revealActiveFile();
+    if (!preserve && group == focusedGroup_ && revealExplorer) revealActiveFile();
     waitingForGit_[group] = false;
     const size_t index = groupTab(group); if (index >= tabs_.size()) { viewers_[group].message(L"Select a file."); return; }
     preserve = preserve && viewers_[group].hasDocument();
@@ -3273,7 +3277,8 @@ void ProjectRuntime::Impl::refreshGit(bool rescan) {
             updateGitFiles();
             refreshBranches();
             for (int group = 0; group < groupCount(); ++group) {
-                if (waitingForGit_[group]) loadTab(false, group);
+                // Resuming a load must not restart a reveal cancelled in Explorer.
+                if (waitingForGit_[group]) loadTab(false, group, false);
                 else refreshEditorGit(group);
             }
             if (!result->error.empty()) status(L"Git: " + result->error);

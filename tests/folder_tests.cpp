@@ -2357,6 +2357,8 @@ void explorerActiveFileTests(const fs::path& executable) {
     writeLines(fixture.root / L"z nested" / L"inner" / L"second.txt", 201);
     for (int i = 0; i < 20; ++i) fs::create_directory(fixture.root / (L"b filler-" + std::to_wstring(i)));
     for (int i = 0; i < 40; ++i) writeFile(fixture.root / (L"filler-" + std::to_wstring(i) + L".txt"));
+    writeLines(fixture.root / L"filler-0.txt", 401);
+    writeLines(fixture.root / L"filler-1.txt", 501);
     writeLines(fixture.root / L"filler-9.txt", 301);
     Application app(executable, fixture.root); const auto tree = app.tree();
     const auto viewer = FindWindowExW(app.window, nullptr, L"PoppyViewer", nullptr);
@@ -2423,6 +2425,40 @@ void explorerActiveFileTests(const fs::path& executable) {
     // The final file stops at the end of the list instead of overscrolling.
     open(L"filler-9", 301); checkPosition();
     check(send(tree, treeGetRow, selection()) == scrollInfo(tree).nMax, "Bottom-edge fixture did not select the final row");
+    // Explicit Explorer clicks keep the row under the pointer, including
+    // new previews, already active files, kept tabs and existing inactive tabs.
+    const auto firstFile = nextItem(tree, TreeRelation::Next, secondFolder);
+    const auto secondFile = nextItem(tree, TreeRelation::Next, firstFile);
+    const auto clickFile = [&](TreeItem file, int lines, bool keep = false) {
+        send(tree, WM_VSCROLL, SB_TOP);
+        const int row = static_cast<int>(send(tree, treeGetRow, file));
+        for (int i = 0; i < row - 2; ++i) send(tree, WM_VSCROLL, SB_LINEDOWN);
+        const auto before = scrollInfo(tree);
+        const int offset = row - before.nPos;
+        check(before.nPos > before.nMin && before.nPos + static_cast<int>(before.nPage) <= before.nMax &&
+              offset >= 0 && offset < static_cast<int>(before.nPage) && offset != static_cast<int>(before.nPage) / 2,
+              "Explorer click fixture must be visible away from the center and scroll limits");
+        const auto left = scrollInfo(tree, SB_HORZ).nPos;
+        const int height = static_cast<int>(send(tree, treeGetRowHeight));
+        const int x = MulDiv(70, GetDpiForWindow(tree), 96), y = offset * height + height / 2;
+        click(tree, x, y);
+        if (keep) {
+            send(tree, WM_LBUTTONDBLCLK, MK_LBUTTON, MAKELPARAM(x, y));
+            send(tree, WM_LBUTTONUP, 0, MAKELPARAM(x, y));
+        }
+        waitLines(viewer, lines);
+        check(selection() == file && scrollInfo(tree).nPos == before.nPos && scrollInfo(tree, SB_HORZ).nPos == left,
+              "Explicitly opening a file in Explorer moved its scroll position or selection");
+    };
+    clickFile(firstFile, 401);
+    clickFile(firstFile, 401);
+    clickFile(firstFile, 401, true);
+    clickFile(secondFile, 501);
+    clickFile(firstFile, 401);
+    // The exception ends with the Explorer action: Ctrl+P still recenters an
+    // already active file, and switching to another tab still reveals it.
+    open(L"filler-0", 401); checkPosition();
+    clickTab(app, 0); waitLines(viewer, 101); checkSelected(firstFolder);
 }
 void fullSearchTests(const fs::path& executable) {
     Fixture fixture; fs::create_directory(fixture.root / L"ignored");
