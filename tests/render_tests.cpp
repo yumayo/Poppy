@@ -80,6 +80,53 @@ void continuousDraggedTab() {
     }
     check(!IsWindow(tabWindow), "Destroying a project left its dragged tab popup alive");
 }
+void terminalDropPreviewClipping() {
+    const auto instance = GetModuleHandleW(nullptr);
+    Terminal terminal;
+    const auto parent = CreateWindowExW(0, L"STATIC", L"Terminal drop test", WS_POPUP | WS_CLIPCHILDREN,
+        100, 100, 440, 300, nullptr, nullptr, instance, nullptr);
+    check(parent != nullptr, "Cannot create terminal drop test owner");
+    struct Owner { HWND window; ~Owner() { DestroyWindow(window); } } owner{parent};
+    terminal.create(parent, instance);
+    MoveWindow(terminal.window(), 20, 34, 400, 240, FALSE);
+    DropPreview destination; destination.create(parent, instance);
+    ShowWindow(parent, SW_SHOWNOACTIVATE);
+    RECT client{}; GetClientRect(terminal.window(), &client);
+    auto body = client;
+    MapWindowPoints(terminal.window(), parent, reinterpret_cast<POINT*>(&body), 2);
+    const LONG middleX = (body.left + body.right) / 2, middleY = (body.top + body.bottom) / 2;
+    const RECT previews[] = {
+        {body.left, body.top, body.right, middleY}, body,
+        {body.left, body.top, middleX, body.bottom},
+        {middleX, body.top, body.right, body.bottom},
+        {body.left, middleY, body.right, body.bottom},
+        {body.left, body.top, body.right, middleY}
+    };
+    const auto checkClipping = [&](RECT preview, bool visible) {
+        MapWindowPoints(parent, terminal.window(), reinterpret_cast<POINT*>(&preview), 2);
+        const auto dc = GetDC(terminal.window());
+        check(dc != nullptr, "Cannot inspect the terminal's visible drawing region");
+        struct Release { HWND window; HDC dc; ~Release() { ReleaseDC(window, dc); } } release{terminal.window(), dc};
+        for (int y = 1; y < 8; y += 2) for (int x = 1; x < 8; x += 2) {
+            const POINT point{client.right * x / 8, client.bottom * y / 8};
+            const bool covered = visible && PtInRect(&preview, point);
+            check((PtVisible(dc, point.x, point.y) != FALSE) == !covered,
+                "The terminal can draw over a drop preview or clips an uncovered area");
+        }
+    };
+    // Reproduce top -> center -> all edges, then repaint the terminal while
+    // the destination stays still. Visibility and bounds alone miss this bug.
+    for (const auto& preview : previews) {
+        destination.show(preview);
+        checkClipping(preview, true);
+        RedrawWindow(terminal.window(), nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW);
+        checkClipping(preview, true);
+        destination.show(preview);
+        checkClipping(preview, true);
+    }
+    destination.hide();
+    checkClipping(body, false);
+}
 void shutdownProgress() {
     const auto instance = GetModuleHandleW(nullptr);
     const auto parent = CreateWindowExW(0, L"STATIC", L"Shutdown test", WS_POPUP, 100, 100, 1040, 720, nullptr, nullptr, instance, nullptr);
@@ -2874,7 +2921,7 @@ int main(int argc, char** argv) {
             htmlPreviewRuntime();
             std::cout << "WebView2 runtime reuse tests passed\n";
         } else {
-            continuousDraggedTab();
+            continuousDraggedTab(); terminalDropPreviewClipping();
             shutdownProgress();
             persistentErrorPopup();
             editorBottomPadding(); editorTailFollowing();

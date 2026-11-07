@@ -23,7 +23,8 @@ Terminal::~Terminal() {
 void Terminal::create(HWND parent, HINSTANCE instance) {
     liveTerminals.push_back(this);
     WNDCLASSW cls{}; cls.lpfnWndProc = procedure; cls.hInstance = instance; cls.lpszClassName = L"PoppyTerminal"; cls.hCursor = LoadCursorW(nullptr, IDC_IBEAM); RegisterClassW(&cls);
-    window_ = CreateWindowExW(0, cls.lpszClassName, L"AI terminal", WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_VSCROLL, 0, 0, 0, 0, parent, nullptr, instance, this);
+    // Dock drop previews are siblings; terminal output must not paint over them.
+    window_ = CreateWindowExW(0, cls.lpszClassName, L"AI terminal", WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | WS_TABSTOP | WS_VSCROLL, 0, 0, 0, 0, parent, nullptr, instance, this);
     model_.reply = [this](std::string response) { send(std::move(response), false); };
     model_.notificationError = [this](std::string code) { if (notificationError) notificationError(code); };
     setDpi(GetDpiForWindow(parent));
