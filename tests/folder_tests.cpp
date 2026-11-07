@@ -3582,6 +3582,8 @@ void scrollingProjectDragTests(const fs::path& executable) {
     Fixture fixture;HWND surfaces[12]{};
     for(int i=0;i<12;++i){const auto path=fixture.root/std::to_wstring(i);fs::create_directory(path);writeFile(path/L"test.txt");}
     Application app(executable,fixture.root/L"0");app.tree();surfaces[0]=app.window;
+    const auto scrollbar=FindWindowExW(app.host,nullptr,L"PoppyProjectScrollbar",nullptr);
+    check(scrollbar&&!IsWindowVisible(scrollbar),"A fitting project list showed a scrollbar");
     for(int i=1;i<12;++i){
         const auto text=(fixture.root/std::to_wstring(i)).native();
         COPYDATASTRUCT data{0x50505901,static_cast<DWORD>((text.size()+1)*sizeof(wchar_t)),const_cast<wchar_t*>(text.c_str())};
@@ -3590,7 +3592,14 @@ void scrollingProjectDragTests(const fs::path& executable) {
     const auto px=[dpi=GetDpiForWindow(app.host)](int value){return MulDiv(value,dpi,96);};
     check(SetWindowPos(app.host,nullptr,0,0,px(1000),px(480),SWP_NOMOVE|SWP_NOZORDER)!=FALSE,"Could not resize the project drag test");
     RECT client{};GetClientRect(app.host,&client);POINT wheel{px(60),px(68)};ClientToScreen(app.host,&wheel);
+    const int page=(client.bottom-px(44))/px(projectRowHeight);
+    const auto barBounds=bounds(app.host,scrollbar);
+    check(IsWindowVisible(scrollbar)&&barBounds.top==px(44)&&barBounds.bottom==client.bottom&&
+        barBounds.right==px(180)&&barBounds.right-barBounds.left==GetSystemMetricsForDpi(SM_CXVSCROLL,GetDpiForWindow(app.host)),
+        "Overflowing projects did not show a scrollbar beside the cards below the header");
+    check(scrollInfo(scrollbar).nMax==11&&scrollInfo(scrollbar).nPage==static_cast<UINT>(page),"Project scrollbar range did not follow the viewport height");
     send(app.host,WM_MOUSEWHEEL,MAKEWPARAM(0,12000),MAKELPARAM(wheel.x,wheel.y));
+    check(scrollInfo(scrollbar).nPos==0,"Project wheel scrolling did not update the scrollbar");
     const POINT bottom{px(60),client.bottom-px(1)};
     send(app.host,WM_LBUTTONDOWN,MK_LBUTTON,MAKELPARAM(px(60),px(68)));
     send(app.host,WM_MOUSEMOVE,MK_LBUTTON,MAKELPARAM(bottom.x,bottom.y));
@@ -3600,13 +3609,44 @@ void scrollingProjectDragTests(const fs::path& executable) {
     send(app.host,WM_MOUSEWHEEL,MAKEWPARAM(0,12000),MAKELPARAM(wheel.x,wheel.y));
     click(app.host,px(60),px(68));app.tree();check(app.window==surfaces[1],"Auto-scroll did not move the first project to the end");
     send(app.host,WM_MOUSEWHEEL,MAKEWPARAM(0,-12000),MAKELPARAM(wheel.x,wheel.y));
-    const int page=(client.bottom-px(44))/px(projectRowHeight);
     const int lastY=px(44)+(page-1)*px(projectRowHeight)+px(24);
     send(app.host,WM_LBUTTONDOWN,MK_LBUTTON,MAKELPARAM(px(60),lastY));
     send(app.host,WM_MOUSEMOVE,MK_LBUTTON,MAKELPARAM(px(60),px(45)));
     for(int i=0;i<20;++i)send(app.host,WM_TIMER,1);
     send(app.host,WM_LBUTTONUP,0,MAKELPARAM(px(60),px(45)));
     click(app.host,px(60),px(68));app.tree();check(app.window==surfaces[0],"Auto-scroll did not move the last project to the start");
+
+    RECT bar{};GetClientRect(scrollbar,&bar);const int x=bar.right/2,arrow=bar.right;
+    click(scrollbar,x,bar.bottom-1);
+    check(scrollInfo(scrollbar).nPos==1,"Project scrollbar down arrow did not scroll one card");
+    click(scrollbar,x,1);
+    check(scrollInfo(scrollbar).nPos==0,"Project scrollbar up arrow did not return to the first card");
+    click(scrollbar,x,bar.bottom-arrow-1);
+    check(scrollInfo(scrollbar).nPos==page,"Project scrollbar track did not scroll one page");
+    click(scrollbar,x,arrow+1);
+    check(scrollInfo(scrollbar).nPos==0,"Project scrollbar track did not scroll back one page");
+    send(scrollbar,WM_LBUTTONDOWN,MK_LBUTTON,MAKELPARAM(x,arrow+1));
+    send(scrollbar,WM_MOUSEMOVE,MK_LBUTTON,MAKELPARAM(x,bar.bottom-arrow-1));
+    send(scrollbar,WM_LBUTTONUP,0,MAKELPARAM(x,bar.bottom-arrow-1));
+    check(scrollInfo(scrollbar).nPos==12-page,"Dragging the project scrollbar did not reach the last card");
+    send(scrollbar,WM_MOUSEWHEEL,MAKEWPARAM(0,WHEEL_DELTA),MAKELPARAM(wheel.x,wheel.y));
+    check(scrollInfo(scrollbar).nPos==std::max(0,12-page-3),"Wheel input over the project scrollbar did not scroll the cards");
+    app.tree();check(app.window==surfaces[0],"Using the project scrollbar changed the active project");
+    const int firstVisible=scrollInfo(scrollbar).nPos;
+    click(app.host,px(60),px(68));app.tree();
+    check(app.window==surfaces[firstVisible],"The project cards did not follow the scrollbar position");
+    for(const int index:{0,11}){
+        const auto text=(fixture.root/std::to_wstring(index)).native();
+        COPYDATASTRUCT data{0x50505901,static_cast<DWORD>((text.size()+1)*sizeof(wchar_t)),const_cast<wchar_t*>(text.c_str())};
+        check(send(app.host,WM_COPYDATA,0,reinterpret_cast<LPARAM>(&data)),"Could not select a project outside the viewport");app.tree();
+        check(app.window==surfaces[index]&&scrollInfo(scrollbar).nPos==(index?12-page:0),"Selecting a hidden project did not synchronize the scrollbar");
+    }
+    for(int remaining=12;remaining>page;--remaining){
+        send(scrollbar,WM_VSCROLL,SB_TOP);
+        click(app.host,px(60),px(68),true);app.tree();
+        check((IsWindowVisible(scrollbar)!=FALSE)==(remaining-1>page),"Closing projects did not update scrollbar visibility");
+    }
+    check(scrollInfo(scrollbar).nPos==0,"A fitting project list retained its old scroll position");
 }
 void terminalTitleTests(const fs::path& executable) {
     Fixture fixture; writeFile(fixture.root / L"test.txt");

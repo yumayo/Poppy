@@ -9,6 +9,7 @@
 #include "error_popup.h"
 #include "resource_ids.h"
 #include "launcher_api.h"
+#include "scrollbars.h"
 #include <commctrl.h>
 #include <dwmapi.h>
 #include <shlobj.h>
@@ -59,6 +60,7 @@ public:
     int run(HINSTANCE instance, int show, const StartupOptions& options, SingleInstance& singleInstance);
 private:
     static LRESULT CALLBACK procedure(HWND,UINT,WPARAM,LPARAM);
+    static LRESULT CALLBACK scrollbarProcedure(HWND,UINT,WPARAM,LPARAM);
     LRESULT handle(UINT,WPARAM,LPARAM);
     void create();
     void showInitialWindow();
@@ -89,17 +91,22 @@ private:
     void updateProjectDrag(POINT point);
     void scrollProjectDrag();
     void endProjectDrag(bool drop = false);
+    void scrollProjects(UINT command);
+    int projectPage() const;
+    int projectContentRight() const;
     RECT addButtonBounds() const;
     size_t hit(POINT point) const;
     RECT row(size_t index) const;
     OpenProject* find(uint64_t id);
     std::wstring subtitle(size_t index) const;
     void report(std::string error);
-    HWND window_ = nullptr, tooltips_ = nullptr;
+    HWND window_ = nullptr, tooltips_ = nullptr, projectScrollbar_ = nullptr;
     HINSTANCE instance_ = nullptr;
     SingleInstance* singleInstance_ = nullptr;
     // Present both indicator surfaces without serial waits for vertical sync.
     Renderer renderer_{D2D1_PRESENT_OPTIONS_IMMEDIATELY};
+    Renderer scrollbarRenderer_{D2D1_PRESENT_OPTIONS_IMMEDIATELY};
+    Scrollbars scrollbars_;
     QuickOpen recent_;
     ErrorPopup errors_;
     AiEventQueue events_{[this] { PostMessageW(window_, wmAiEvent, 0, 0); }};
@@ -168,7 +175,15 @@ int Workspace::run(HINSTANCE instance,int show,const StartupOptions& options,Sin
     return static_cast<int>(message.wParam);
 }
 void Workspace::create(){
-    dpi_=GetDpiForWindow(window_);renderer_.setDpi(dpi_);
+    dpi_=GetDpiForWindow(window_);renderer_.setDpi(dpi_);scrollbarRenderer_.setDpi(dpi_);
+    // Keep the themed client-area scrollbar separate from the main window's
+    // native title bar and resize borders.
+    WNDCLASSEXW scrollbarClass{};
+    scrollbarClass.cbSize=sizeof(scrollbarClass);scrollbarClass.lpfnWndProc=scrollbarProcedure;
+    scrollbarClass.hInstance=instance_;scrollbarClass.lpszClassName=L"PoppyProjectScrollbar";
+    scrollbarClass.hCursor=LoadCursorW(nullptr,IDC_ARROW);RegisterClassExW(&scrollbarClass);
+    projectScrollbar_=CreateWindowExW(0,scrollbarClass.lpszClassName,nullptr,WS_CHILD|WS_VSCROLL,0,0,0,0,window_,nullptr,instance_,this);
+    if(!projectScrollbar_)throw std::runtime_error("Cannot create project scrollbar");
     recent_.create(window_,instance_,QuickOpenMode::Projects);recent_.setDpi(dpi_);
     recent_.opened=[this](const ResourceId& path){open(path);};
     const BOOL dark=TRUE;DwmSetWindowAttribute(window_,20,&dark,sizeof(dark));
@@ -354,11 +369,11 @@ void Workspace::select(size_t index,bool attention){
     if(active_<projects_.size()&&active_!=index){auto& previous=projects_[active_];previous.runtime->activate(false);previous.dirty=true;previous.changedAt=GetTickCount64();}
     active_=index;projects_[index].used=GetTickCount64();
     for(size_t i=0;i<projects_.size();++i)if(i!=active_)ShowWindow(projects_[i].runtime->window(),SW_HIDE);
-    layout();projects_[active_].runtime->activate(true);if(attention)projects_[active_].runtime->focusAttention();
     const int count=std::max(1,static_cast<int>(projects_.size()));
     const auto rect=row(index);RECT client{};GetClientRect(window_,&client);
     if(rect.top<px(44))scroll_=std::min<int>(static_cast<int>(index),count-1);
-    else if(rect.bottom>client.bottom)scroll_=std::max(0,static_cast<int>(index)-(static_cast<int>(client.bottom)-px(44))/px(projectRowHeight)+1);
+    else if(rect.bottom>client.bottom)scroll_=std::max(0,static_cast<int>(index)-projectPage()+1);
+    layout();projects_[active_].runtime->activate(true);if(attention)projects_[active_].runtime->focusAttention();
     appDirty_=true;appChanged_=GetTickCount64();updateTools();InvalidateRect(window_,nullptr,FALSE);
     checkFolder(projects_[active_]);
     trimDocuments();
@@ -488,13 +503,31 @@ void Workspace::animateAiStatus() {
     else if (!running && aiAnimationTimer_) { KillTimer(window_, aiAnimationTimer_); aiAnimationTimer_ = 0; }
 }
 RECT Workspace::addButtonBounds() const {return {px(session_.projectListWidth)-px(34),0,px(session_.projectListWidth),px(44)};}
+int Workspace::projectPage() const {
+    RECT client{};GetClientRect(window_,&client);
+    return std::max(1,(static_cast<int>(client.bottom)-px(44))/px(projectRowHeight));
+}
+int Workspace::projectContentRight() const {
+    return px(session_.projectListWidth)-((GetWindowLongPtrW(projectScrollbar_,GWL_STYLE)&WS_VSCROLL)?GetSystemMetricsForDpi(SM_CXVSCROLL,dpi_):0);
+}
+void Workspace::scrollProjects(UINT command) {
+    SCROLLINFO info{sizeof(info),SIF_ALL,0,0,0,0,0};GetScrollInfo(projectScrollbar_,SB_VERT,&info);
+    switch(command){
+    case SB_LINEUP:--scroll_;break;case SB_LINEDOWN:++scroll_;break;
+    case SB_PAGEUP:scroll_-=projectPage();break;case SB_PAGEDOWN:scroll_+=projectPage();break;
+    case SB_THUMBTRACK:case SB_THUMBPOSITION:scroll_=scrollbars_.trackPosition(SB_VERT,info.nTrackPos);break;
+    case SB_TOP:scroll_=0;break;case SB_BOTTOM:scroll_=static_cast<int>(projects_.size());break;
+    default:return;
+    }
+    layout();
+}
 RECT Workspace::row(size_t index) const {
     const int top=px(44)+(static_cast<int>(index)-scroll_)*px(projectRowHeight)+px(projectCardGap/2);
-    return {px(projectCardMargin),top,px(session_.projectListWidth)-px(projectCardMargin),top+px(projectCardHeight)};
+    return {px(projectCardMargin),top,projectContentRight()-px(projectCardMargin),top+px(projectCardHeight)};
 }
 size_t Workspace::hit(POINT point) const {
     RECT client{};GetClientRect(window_,&client);
-    if(point.x<0||point.x>=px(session_.projectListWidth)||point.y<px(44)||point.y>=client.bottom)return projects_.size();
+    if(point.x<0||point.x>=projectContentRight()||point.y<px(44)||point.y>=client.bottom)return projects_.size();
     const auto index=static_cast<size_t>(scroll_+(point.y-px(44))/px(projectRowHeight));
     if(index<projects_.size()){const auto card=row(index);if(PtInRect(&card,point))return index;}
     return projects_.size();
@@ -510,7 +543,7 @@ void Workspace::updateProjectDrag(POINT point) {
     }
     drag.position.reset();
     RECT client{}; GetClientRect(window_,&client);
-    if (point.x >= 0 && point.x < px(session_.projectListWidth) && point.y >= px(44) && point.y < client.bottom) {
+    if (point.x >= 0 && point.x < projectContentRight() && point.y >= px(44) && point.y < client.bottom) {
         const auto position = static_cast<size_t>(scroll_+(point.y-px(44)+px(projectRowHeight)/2)/px(projectRowHeight));
         drag.position = std::min(position,projects_.size());
     }
@@ -520,8 +553,8 @@ void Workspace::scrollProjectDrag() {
     if (!projectDrag_ || !projectDrag_->active) return;
     const auto point = projectDrag_->point;
     RECT client{}; GetClientRect(window_,&client);
-    if (point.x < 0 || point.x >= px(session_.projectListWidth) || point.y < px(44) || point.y >= client.bottom) return;
-    const int page = std::max(1,(static_cast<int>(client.bottom)-px(44))/px(projectRowHeight));
+    if (point.x < 0 || point.x >= projectContentRight() || point.y < px(44) || point.y >= client.bottom) return;
+    const int page = projectPage();
     int next = scroll_;
     if (point.y < px(44+24)) --next;
     else if (point.y >= client.bottom-px(24)) ++next;
@@ -564,7 +597,12 @@ std::wstring Workspace::subtitle(size_t index) const {
 void Workspace::layout(){
     if(!window_)return;
     RECT r{};GetClientRect(window_,&r);const int left=px(session_.projectListWidth)+px(projectBorderWidth);
-    const int page=std::max(1,(static_cast<int>(r.bottom)-px(44))/px(projectRowHeight));scroll_=std::clamp(scroll_,0,std::max(0,static_cast<int>(projects_.size())-page));
+    const int page=projectPage();scroll_=std::clamp(scroll_,0,std::max(0,static_cast<int>(projects_.size())-page));
+    SCROLLINFO info{sizeof(info),SIF_RANGE|SIF_PAGE|SIF_POS,0,std::max(0,static_cast<int>(projects_.size())-1),static_cast<UINT>(page),scroll_,0};
+    SetScrollInfo(projectScrollbar_,SB_VERT,&info,FALSE);
+    const int scrollbarWidth=GetSystemMetricsForDpi(SM_CXVSCROLL,dpi_);
+    SetWindowPos(projectScrollbar_,nullptr,px(session_.projectListWidth)-scrollbarWidth,px(44),scrollbarWidth,std::max(0L,r.bottom-px(44)),
+        SWP_NOZORDER|SWP_NOACTIVATE|SWP_NOREDRAW|((static_cast<int>(projects_.size())>page)?SWP_SHOWWINDOW:SWP_HIDEWINDOW));
     // Do not copy old Direct2D pixels while moving the project and its panes.
     // Repaint the complete layout after the new positions have been applied.
     if(!projects_.empty())SetWindowPos(projects_[active_].runtime->window(),nullptr,left,0,std::max(0L,r.right-left),r.bottom,SWP_NOZORDER|SWP_NOACTIVATE|SWP_NOREDRAW|SWP_NOCOPYBITS);
@@ -604,16 +642,31 @@ void Workspace::paint(){
     }
     if(projectDrag_&&projectDrag_->active&&projectDrag_->position){
         const int y=std::clamp(static_cast<int>(row(*projectDrag_->position).top)-px(projectCardGap/2)-px(1),px(44),static_cast<int>(client.bottom)-px(2));
-        renderer_.fill({px(projectCardMargin),y,width-px(projectCardMargin),y+px(2)},accent);
+        renderer_.fill({px(projectCardMargin),y,projectContentRight()-px(projectCardMargin),y+px(2)},accent);
     }
     if(projects_.empty())renderer_.label({width+px(30),px(40),client.right-px(30),client.bottom},restoring_?L"Restoring projects…":L"Open a folder with Ctrl+O.",muted,DT_LEFT|DT_TOP|DT_WORDBREAK);
 }
 void Workspace::report(std::string error){storageError_=wide(error);if(!closing_&&!initialShowPending_)MessageBoxW(window_,(L"Could not read or save state.\n\n"+storageError_).c_str(),L"Poppy",MB_OK|MB_ICONWARNING);}
 LRESULT CALLBACK Workspace::procedure(HWND w,UINT m,WPARAM a,LPARAM b){auto self=reinterpret_cast<Workspace*>(GetWindowLongPtrW(w,GWLP_USERDATA));if(m==WM_NCCREATE){self=static_cast<Workspace*>(reinterpret_cast<CREATESTRUCTW*>(b)->lpCreateParams);self->window_=w;SetWindowLongPtrW(w,GWLP_USERDATA,reinterpret_cast<LONG_PTR>(self));}return self?self->handle(m,a,b):DefWindowProcW(w,m,a,b);}
+LRESULT CALLBACK Workspace::scrollbarProcedure(HWND window,UINT message,WPARAM a,LPARAM b){
+    auto self=reinterpret_cast<Workspace*>(GetWindowLongPtrW(window,GWLP_USERDATA));
+    if(message==WM_NCCREATE){self=static_cast<Workspace*>(reinterpret_cast<CREATESTRUCTW*>(b)->lpCreateParams);SetWindowLongPtrW(window,GWLP_USERDATA,reinterpret_cast<LONG_PTR>(self));}
+    if(self){
+        LRESULT result=0;if(self->scrollbars_.handle(window,message,a,b,result))return result;
+        switch(message){
+        case WM_PAINT:{Renderer::Paint paint(self->scrollbarRenderer_,window);if(paint)self->scrollbars_.paint(window,self->scrollbarRenderer_,background);return 0;}
+        case WM_ERASEBKGND:return 1;
+        case WM_VSCROLL:self->scrollProjects(LOWORD(a));return 0;
+        case WM_MOUSEWHEEL:return SendMessageW(self->window_,message,a,b);
+        case WM_CONTEXTMENU:case WM_MOUSEHWHEEL:return 0;
+        }
+    }
+    return DefWindowProcW(window,message,a,b);
+}
 LRESULT Workspace::handle(UINT m,WPARAM a,LPARAM b){switch(m){
 case WM_CREATE:create();return 0;case WM_PAINT:paint();return 0;case WM_ERASEBKGND:return 1;case WM_SIZE:endProjectDrag();layout();if(!restoring_){appDirty_=true;appChanged_=GetTickCount64();}return 0;
 case WM_GETMINMAXINFO:reinterpret_cast<MINMAXINFO*>(b)->ptMinTrackSize={px(900),px(480)};return 0;
-case WM_DPICHANGED:{endProjectDrag();dpi_=HIWORD(a);renderer_.setDpi(dpi_);recent_.setDpi(dpi_);errors_.setDpi(dpi_);for(auto& project:projects_)project.runtime->setDpi(dpi_);const auto rect=reinterpret_cast<RECT*>(b);SetWindowPos(window_,nullptr,rect->left,rect->top,rect->right-rect->left,rect->bottom-rect->top,SWP_NOZORDER|SWP_NOACTIVATE);layout();return 0;}
+case WM_DPICHANGED:{endProjectDrag();dpi_=HIWORD(a);renderer_.setDpi(dpi_);scrollbarRenderer_.setDpi(dpi_);recent_.setDpi(dpi_);errors_.setDpi(dpi_);for(auto& project:projects_)project.runtime->setDpi(dpi_);const auto rect=reinterpret_cast<RECT*>(b);SetWindowPos(window_,nullptr,rect->left,rect->top,rect->right-rect->left,rect->bottom-rect->top,SWP_NOZORDER|SWP_NOACTIVATE);layout();return 0;}
 case WM_MOVE: errors_.layout(); return 0;
 case wmWork:if(!closing_&&storageWorker_)storageWorker_->dispatch();return 0;
 case wmStartup:applyStartupRequests();return 0;
