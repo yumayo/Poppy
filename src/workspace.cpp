@@ -625,7 +625,7 @@ void Workspace::paint(){
     const int cardBorderWidth=px(projectCardBorderWidth),cardRadius=px(projectCardRadius);
     const auto addButton=addButtonBounds();
     renderer_.label({px(12),0,addButton.left,px(44)},L"PROJECTS",foreground);
-    renderer_.fill(addButton,panel);renderer_.label(addButton,L"+",accent,DT_CENTER|DT_VCENTER|DT_SINGLELINE);
+    renderer_.label(addButton,L"+",accent,DT_CENTER|DT_VCENTER|DT_SINGLELINE);
     for(size_t i=0;i<projects_.size();++i){auto rect=row(i);if(rect.bottom<=px(44)||rect.top>=client.bottom)continue;
         const auto& project=projects_[i];const auto summary=project.runtime->summary();
         renderer_.fillRounded(rect,i==active_?accent:border,cardRadius);
