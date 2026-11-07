@@ -50,7 +50,6 @@ void ActivityButton::paint() {
         const int width = MulDiv(3, dpi_, 96), left = sidebarOnRight ? rect.right - width : 0;
         renderer_.fill({left, MulDiv(8, dpi_, 96), left + width, rect.bottom - MulDiv(8, dpi_, 96)}, accent);
     }
-    if (enabled && GetFocus() == window_) { RECT focus = rect; InflateRect(&focus, -4, -4); renderer_.outline(focus, muted); }
 }
 LRESULT CALLBACK ActivityButton::procedure(HWND w, UINT m, WPARAM a, LPARAM b) {
     auto* self = reinterpret_cast<ActivityButton*>(GetWindowLongPtrW(w, GWLP_USERDATA));
