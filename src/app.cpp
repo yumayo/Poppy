@@ -22,6 +22,7 @@
 #include "explorer_clipboard_paths.h"
 #include "status_bar.h"
 #include "editor_tabs.h"
+#include "tab_layout.h"
 #include <commctrl.h>
 #include <dwmapi.h>
 #include <shobjidl.h>
@@ -96,7 +97,24 @@ std::wstring tabTitle(const Tab& tab) {
     return title + (tab.diff ? L" (diff)" : L"");
 }
 struct TabDrop { size_t position; RECT marker; int group = 0; DockSide side = DockSide::Center; bool inStrip = false; };
-struct EditorGroup { RECT tabs{}, body{}, tools{}, add{}, dropdown{}; int tabRight = 0; std::vector<size_t> indices, starts; size_t firstRow = 0, rows = 0; bool overflow() const { return starts.size() > rows; } };
+struct EditorGroup {
+    RECT tabs{}, body{}, tools{}, add{}, dropdown{}, paging{};
+    std::vector<size_t> indices, starts;
+    size_t firstRow = 0, rows = 0;
+    bool overflow() const { return starts.size() > rows; }
+    LONG tabRight(LONG y) const {
+        LONG right = tabs.right;
+        for (const auto& rect : {tools, add, dropdown, paging})
+            if (y >= rect.top && y < rect.bottom && rect.right > rect.left) right = std::min(right, rect.left);
+        return right;
+    }
+    RECT pageButton(bool next) const {
+        auto rect = paging;
+        const LONG middle = rect.left + (rect.right - rect.left) / 2;
+        if (next) rect.left = middle; else rect.right = middle;
+        return rect;
+    }
+};
 struct TabDrag {
     size_t index;
     POINT origin, point;
@@ -865,7 +883,7 @@ void ProjectRuntime::Impl::layout(bool revealTab) {
     const int rowHeight = MulDiv(34, dpi_, 96);
     tabRects_.assign(tabs_.size(), RECT{});
     for (auto& pane : editorGroups_) {
-        pane.tabs = {}; pane.body = {}; pane.tools = {}; pane.add = {}; pane.dropdown = {};
+        pane.tabs = {}; pane.body = {}; pane.tools = {}; pane.add = {}; pane.dropdown = {}; pane.paging = {};
         pane.indices.clear(); pane.starts.clear(); pane.rows = 0;
     }
     for (const auto& placement : dockGeometry_.panes) {
@@ -880,37 +898,34 @@ void ProjectRuntime::Impl::layout(bool revealTab) {
         const int modeWidth = selected < tabs_.size() && tabs_[selected].diff ? 136 : htmlTab(group) ? 160 : 0;
         const int addWidth = std::min(MulDiv(58, dpi_, 96), std::max(0, edge - start));
         const int toolsWidth = std::min(MulDiv(modeWidth, dpi_, 96), std::max(0, edge - start - addWidth) / 2);
-        pane.tabRight = edge - toolsWidth - addWidth;
-        pane.tools = {pane.tabRight, area.top, edge - addWidth, area.top + (toolsWidth ? rowHeight : 0)};
+        pane.tools = {edge - toolsWidth - addWidth, area.top, edge - addWidth, area.top + (toolsWidth ? rowHeight : 0)};
         const int dropdown = std::min(MulDiv(24, dpi_, 96), addWidth);
         pane.add = {edge - addWidth, area.top, edge - dropdown, std::min(area.bottom, area.top + rowHeight)};
         pane.dropdown = {edge - dropdown, area.top, edge, pane.add.bottom};
-        const auto wrap = [&](int available) {
-            pane.starts.clear(); int x = start, row = -1;
-            for (size_t j = 0; j < pane.indices.size(); ++j) {
-                const size_t i = pane.indices[j]; const auto& tab = tabs_[i];
-                const auto title = titleFor(tab);
-                // Editing a preview switches its title from italic to normal
-                // without laying out the tabs again. Reserve both font styles
-                // and the modified marker from the start, even for clean tabs.
-                const int titleWidth = std::max(renderer_.textWidth(title), renderer_.textWidth(title, true));
-                const int width = std::min(std::max(0, available), titleWidth + MulDiv(tab.terminalId.empty() ? 52 : 78, dpi_, 96));
-                if (!j || tab.pinned != tabs_[pane.indices[j - 1]].pinned || (x > start && x + width > start + available)) { pane.starts.push_back(j); x = start; ++row; }
-                tabRects_[i] = {x, area.top + row * rowHeight, x + width, area.top + (row + 1) * rowHeight}; x += width;
-            }
-            pane.rows = std::min(maxRows, pane.starts.size());
-        };
-        wrap(pane.tabRight - start); if (pane.overflow()) wrap(std::max(0, pane.tabRight - start - MulDiv(56, dpi_, 96)));
-        pane.firstRow = std::min(pane.firstRow, pane.starts.size() - pane.rows);
+        std::vector<TabSize> sizes;
+        for (const auto i : pane.indices) {
+            const auto& tab = tabs_[i];
+            const auto title = titleFor(tab);
+            // Reserve both title styles and the modified marker from the start.
+            const int titleWidth = std::max(renderer_.textWidth(title), renderer_.textWidth(title, true));
+            sizes.push_back({titleWidth + MulDiv(tab.terminalId.empty() ? 52 : 78, dpi_, 96), tab.pinned});
+        }
         const auto found = std::find(pane.indices.begin(), pane.indices.end(), selected);
-        if (revealTab && found != pane.indices.end()) {
-            const auto row = static_cast<size_t>(std::upper_bound(pane.starts.begin(), pane.starts.end(), static_cast<size_t>(found - pane.indices.begin())) - pane.starts.begin() - 1);
-            if (row < pane.firstRow) pane.firstRow = row;
-            else if (row >= pane.firstRow + pane.rows) pane.firstRow = row - pane.rows + 1;
+        const auto layout = layoutTabs(sizes, edge - start, pane.tabRight(area.top) - start, MulDiv(56, dpi_, 96), maxRows,
+            pane.firstRow, revealTab ? static_cast<size_t>(found - pane.indices.begin()) : sizes.size());
+        pane.starts = layout.starts; pane.rows = layout.rows; pane.firstRow = layout.firstRow;
+        for (size_t j = 0; j < pane.indices.size(); ++j) {
+            const auto& tab = layout.tabs[j];
+            const int top = area.top + (static_cast<int>(tab.row) - static_cast<int>(pane.firstRow)) * rowHeight;
+            tabRects_[pane.indices[j]] = {start + tab.left, top, start + tab.right, top + rowHeight};
         }
         pane.tabs.bottom = std::min(area.bottom, area.top + static_cast<int>(std::max<size_t>(1, pane.rows)) * rowHeight);
         pane.body = {start, pane.tabs.bottom, edge, area.bottom};
-        for (const auto i : pane.indices) OffsetRect(&tabRects_[i], 0, -static_cast<int>(pane.firstRow) * rowHeight);
+        if (pane.overflow()) {
+            const int top = pane.tabs.top + static_cast<int>(pane.rows - 1) * rowHeight;
+            const LONG right = pane.tabRight(top);
+            pane.paging = {std::max<LONG>(start, right - MulDiv(56, dpi_, 96)), top, right, pane.tabs.bottom};
+        }
     }
     updateTabs(false);
 
@@ -1041,9 +1056,8 @@ void ProjectRuntime::Impl::paint() {
                     DT_CENTER | DT_VCENTER | DT_SINGLELINE);
             }
             if (pane.overflow()) {
-                const int edge = pane.tabRight, button = scaled(28), top = pane.tabs.bottom - scaled(34);
-                dc.label({edge - 2 * button, top, edge - button, pane.tabs.bottom}, L"‹", pane.firstRow ? foreground : muted, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-                dc.label({edge - button, top, edge, pane.tabs.bottom}, L"›", pane.firstRow + pane.rows < pane.starts.size() ? foreground : muted, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+                dc.label(pane.pageButton(false), L"‹", pane.firstRow ? foreground : muted, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+                dc.label(pane.pageButton(true), L"›", pane.firstRow + pane.rows < pane.starts.size() ? foreground : muted, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
             }
             for (size_t row = 1; row <= pane.rows; ++row) { const int bottom = pane.tabs.top + static_cast<int>(row) * scaled(34); dc.fill({pane.tabs.left, bottom - 1, pane.tabs.right, bottom}, border); }
         }
@@ -2600,10 +2614,11 @@ std::optional<TabDrop> ProjectRuntime::Impl::tabDropAt(POINT point) const {
         const int group = placement.group;
         const auto& pane = editorGroups_[group];
         if (PtInRect(&pane.tabs, point)) {
-            if (point.x >= pane.tabRight) return std::nullopt;
+            const auto right = pane.tabRight(point.y);
+            if (point.x >= right) return std::nullopt;
             const int stroke = std::max(2, MulDiv(3, dpi_, 96)), inset = MulDiv(3, dpi_, 96);
             const auto target = [&](size_t position, const RECT& rect, LONG x) {
-                const LONG left = std::clamp<LONG>(x - stroke / 2, pane.tabs.left, std::max<LONG>(pane.tabs.left, pane.tabRight - stroke));
+                const LONG left = std::clamp<LONG>(x - stroke / 2, pane.tabs.left, std::max<LONG>(pane.tabs.left, right - stroke));
                 return TabDrop{position, {left, rect.top + inset, left + stroke, rect.bottom - inset}, group, DockSide::Center, true};
             };
             std::optional<TabDrop> result;
@@ -2655,10 +2670,10 @@ void ProjectRuntime::Impl::scrollTabDrag() {
     if (!tabDrag_ || !tabDrag_->active) return;
     for (auto& pane : editorGroups_) {
         const auto point = tabDrag_->point;
-        if (!pane.overflow() || !PtInRect(&pane.tabs, point) || point.x >= pane.tabRight || point.y < pane.tabs.bottom - MulDiv(34, dpi_, 96)) continue;
-        const int button = MulDiv(28, dpi_, 96);
-        if (point.x >= pane.tabRight - button && pane.firstRow + pane.rows < pane.starts.size()) ++pane.firstRow;
-        else if (point.x >= pane.tabRight - 2 * button && point.x < pane.tabRight - button && pane.firstRow) --pane.firstRow;
+        if (!pane.overflow() || !PtInRect(&pane.paging, point)) continue;
+        const auto next = pane.pageButton(true);
+        if (PtInRect(&next, point) && pane.firstRow + pane.rows < pane.starts.size()) ++pane.firstRow;
+        else if (point.x < next.left && pane.firstRow) --pane.firstRow;
         else return;
         layout(false); return;
     }
@@ -3426,10 +3441,10 @@ LRESULT ProjectRuntime::Impl::handle(UINT m, WPARAM a, LPARAM b) {
                     tabDrag_ = TabDrag{index, point, point, rect, false, std::nullopt};
                     SetCapture(window_);
                 }
-            } else for (auto& pane : editorGroups_) if (pane.overflow() && PtInRect(&pane.tabs, point) && point.x < pane.tabRight && point.y >= pane.tabs.bottom - MulDiv(34, dpi_, 96)) {
-                const int button = MulDiv(28, dpi_, 96);
-                if (point.x >= pane.tabRight - button && pane.firstRow + pane.rows < pane.starts.size()) ++pane.firstRow;
-                else if (point.x >= pane.tabRight - 2 * button && point.x < pane.tabRight - button && pane.firstRow) --pane.firstRow;
+            } else for (auto& pane : editorGroups_) if (pane.overflow() && PtInRect(&pane.paging, point)) {
+                const auto next = pane.pageButton(true);
+                if (PtInRect(&next, point) && pane.firstRow + pane.rows < pane.starts.size()) ++pane.firstRow;
+                else if (point.x < next.left && pane.firstRow) --pane.firstRow;
                 layout(false);
             }
             return 0;
