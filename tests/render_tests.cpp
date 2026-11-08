@@ -1627,6 +1627,17 @@ int terminalImeFixture(const char* eventName) {
         if (i && WaitForSingleObject(next.value, 10000) != WAIT_OBJECT_0) return 1;
         std::cout << frames[i] << "\x1b]0;Poppy IME frame " << i << '\a' << std::flush;
     }
+    if (WaitForSingleObject(next.value, 10000) != WAIT_OBJECT_0) return 1;
+    const auto input = GetStdHandle(STD_INPUT_HANDLE);
+    if (!GetConsoleMode(input, &mode) || !SetConsoleMode(input, mode & ~(ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT | ENABLE_PROCESSED_INPUT))) return 1;
+    std::cout << "\x1b[2J\x1b[3;1H> input\x1b[3;4H\x1b]0;Poppy IME frame 5\a" << std::flush;
+    char character = 0; DWORD count = 0;
+    if (!ReadFile(input, &character, 1, &count, nullptr) || count != 1 || character != 'X') return 1;
+    // Deliberately hold echo until the UI has begun the next composition.
+    if (WaitForSingleObject(next.value, 10000) != WAIT_OBJECT_0) return 1;
+    std::cout << "\x1b[3;4H\x1b[1@X\x1b]0;Poppy IME frame 6\a" << std::flush;
+    if (WaitForSingleObject(next.value, 10000) != WAIT_OBJECT_0) return 1;
+    std::cout << "\x1b[6;1Hfooter\x1b]0;Poppy IME frame 7\a" << std::flush;
     return WaitForSingleObject(next.value, 10000) == WAIT_OBJECT_0 ? 0 : 1;
 }
 void terminalImeOutput() {
@@ -1689,6 +1700,18 @@ void terminalImeOutput() {
     SetEvent(next.value); waitFrame(4); SetFocus(window); const auto refocused = caret();
     check(refocused.top == footer.top && refocused.left != footer.left,
         "Focus loss retained an obsolete terminal composition origin");
+    SetEvent(next.value); waitFrame(5); const auto beforeEcho = caret();
+    // Ordinary text and IME results share Terminal::send's echo tracking.
+    SendMessageW(window, WM_CHAR, 'X', 0);
+    SendMessageW(window, WM_IME_STARTCOMPOSITION, 0, 0);
+    const auto pending = caret();
+    check(EqualRect(&beforeEcho, &pending), "Pending input captured an unrelated terminal cursor");
+    SetEvent(next.value); waitFrame(6); const auto afterEcho = caret();
+    check(afterEcho.left > beforeEcho.left && afterEcho.top == beforeEcho.top,
+        "A fast next composition pinned its native caret and candidates before the accepted input was echoed");
+    SetEvent(next.value); waitFrame(7); const auto stable = caret();
+    check(EqualRect(&afterEcho, &stable), "Redrawing output moved the next composition after its input echo");
+    SendMessageW(window, WM_IME_ENDCOMPOSITION, 0, 0);
     SetEvent(next.value); terminal.stop();
 }
 void editorWordSelection() {

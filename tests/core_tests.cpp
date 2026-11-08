@@ -559,8 +559,122 @@ void terminalPreeditOutputTests() {
     check(edge.update(wrapped, 1, 2) && edge.preedit(text).cells.empty(),
         "an anchored composition was drawn over scrollback");
 }
+void terminalPreeditCommitTests() {
+    TerminalModel model(24, 6); TerminalDisplay display;
+    model.feed("\x1b[3;1H> abcdef\x1b[6;1Hstatus\x1b[3;6H");
+    display.update(model, 0, 0, true); display.beginPreedit();
+    display.inputSent(u"日本"); display.endPreedit();
+    // The next WM_IME_STARTCOMPOSITION can precede even the first echo byte.
+    display.beginPreedit();
+    const CompositionText next{u"語", {}, 1};
+    model.feed("\x1b[?25l\x1b[Hworking"); display.changed(); display.update(model, 0, 1); display.beginPreedit();
+    check(display.inputCursorX() == 5 && display.inputCursorY() == 2,
+        "an unrelated redraw captured the next composition while committed echo was pending");
+    model.feed("\x1b[3;6H\x1b[4@日"); display.changed(); display.update(model, 0, 2); display.beginPreedit();
+    check(display.inputCursorX() == 5, "partial echo prematurely fixed the next composition position");
+    model.feed("本\x1b[6;1Hfooter"); display.changed(); display.update(model, 0, 3); display.beginPreedit();
+    check(display.inputCursorX() == 5 && display.inputCursorY() == 2,
+        "complete echoed text captured a temporary footer cursor");
+    model.feed("\x1b[3;10H\x1b[?25h"); display.changed(); display.update(model, 0, 4); display.beginPreedit();
+    auto preview = display.preedit(next);
+    check(display.inputCursorX() == 9 && display.inputCursorY() == 2 &&
+        preview.composition.glyphs.front().column == 9 && preview.composition.glyphs.front().row == 2 &&
+        preview.cells[2][11].ch == U'd', "a fast second composition retained the cursor from before the committed echo");
+    model.feed("\x1b[Hbusy\x1b[6;1Hfooter"); display.changed(); display.update(model, 0, 5); display.beginPreedit();
+    check(display.inputCursorX() == 9 && display.inputCursorY() == 2,
+        "redraws moved the second composition after its committed echo was acknowledged");
+
+    // Result and continued preedit can share a WM_IME_COMPOSITION, without END/START.
+    model.feed("\x1b[3;10H"); display.changed(); display.update(model, 0, 6);
+    display.inputSent(u"語"); display.beginPreedit();
+    model.feed("\x1b[?2026h\x1b[2@語"); display.changed();
+    check(!display.update(model, 0, 7), "a pending commit exposed incomplete synchronized output");
+    model.feed("\x1b[?2026l"); display.changed(); display.update(model, 0, 8); display.beginPreedit();
+    check(display.inputCursorX() == 11 && display.inputCursorY() == 2,
+        "continued preedit did not move past a partially committed result");
+
+    TerminalModel moved(16, 5); TerminalDisplay relocated;
+    moved.feed("\x1b[3;1H> abc\x1b[3;4H"); relocated.update(moved, 0, 0, true); relocated.beginPreedit();
+    relocated.inputSent(u"日"); relocated.endPreedit(); relocated.beginPreedit();
+    moved.feed("\x1b[5;1Hxxx日"); relocated.changed(); relocated.update(moved, 0, 1); relocated.beginPreedit();
+    check(relocated.inputCursorY() == 2, "matching footer text without the input prefix acknowledged a pending commit");
+    moved.feed("\x1b[2;1H> a日bc\x1b[2;6H"); relocated.changed(); relocated.update(moved, 0, 2); relocated.beginPreedit();
+    check(relocated.inputCursorX() == 5 && relocated.inputCursorY() == 1,
+        "a prompt moved by TUI reflow retained its previous composition row");
+
+    for (const auto& committed : {std::u16string(u"日"), std::u16string(u"😀ｱ"), std::u16string(u"ｱ")}) {
+        TerminalModel wrapped(5, 3); TerminalDisplay edge;
+        wrapped.feed("abcd"); edge.update(wrapped, 0, 0, true); edge.beginPreedit();
+        edge.inputSent(committed); edge.endPreedit(); edge.beginPreedit();
+        std::string echo;
+        for (const auto& glyph : CompositionText{committed, {}, committed.size()}.layout(5, 4).glyphs) appendUtf8(echo, glyph.character);
+        wrapped.feed(echo); edge.changed(); edge.update(wrapped, 0, 1); edge.beginPreedit();
+        const auto layout = CompositionText{committed, {}, committed.size()}.layout(5, 4);
+        preview = edge.preedit(next);
+        check(preview.composition.glyphs.front().column == layout.endColumn && preview.composition.glyphs.front().row == layout.endRow,
+            "the next composition lost wide wrapping, surrogate pairs or delayed autowrap after commit");
+    }
+
+    TerminalModel scrolled(4, 2); TerminalDisplay bottom;
+    scrolled.feed("top\r\nabc"); bottom.update(scrolled, 0, 0, true); bottom.beginPreedit();
+    bottom.inputSent(u"日本"); bottom.endPreedit(); bottom.beginPreedit();
+    scrolled.feed("日本"); bottom.changed(); bottom.update(scrolled, 0, 1); bottom.beginPreedit();
+    preview = bottom.preedit({u"X", {}, 1});
+    check(preview.composition.glyphs.front().column == 0 && preview.composition.glyphs.front().row == 1,
+        "echo scrolling left the next composition at an obsolete viewport row");
+
+    TerminalModel rapid(16, 3); TerminalDisplay successive;
+    rapid.feed("> "); successive.update(rapid, 0, 0, true);
+    for (const auto* committed : {u"日", u"本"}) {
+        successive.beginPreedit(); successive.inputSent(committed); successive.endPreedit();
+    }
+    successive.beginPreedit(); rapid.feed("日本"); successive.changed(); successive.update(rapid, 0, 1); successive.beginPreedit();
+    check(successive.preedit(next).composition.glyphs.front().column == 6,
+        "multiple commits before echo reused an earlier insertion point");
+    successive.inputSent(u" "); successive.endPreedit(); successive.beginPreedit();
+    rapid.feed(" "); successive.changed(); successive.update(rapid, 0, 2); successive.beginPreedit();
+    check(successive.inputCursorX() == 7, "ordinary input between compositions retained an earlier pending echo");
+    successive.inputSent(u"語"); successive.inputSent(u"\x1b[D");
+    rapid.feed("\x1b[3;1Hnew"); successive.changed(); successive.update(rapid, 0, 3); successive.beginPreedit();
+    rapid.feed("\x1b[Hother"); successive.changed(); successive.update(rapid, 0, 4); successive.beginPreedit();
+    check(successive.inputCursorX() == 3 && successive.inputCursorY() == 2,
+        "an editing command retained an obsolete expected echo");
+    successive.endPreedit();
+    successive.inputSent(u"語"); successive.cancelPreedit();
+    rapid.feed("\x1b[3;1Hnew"); successive.changed(); successive.update(rapid, 0, 2); successive.beginPreedit();
+    rapid.feed("\x1b[Hother"); successive.changed(); successive.update(rapid, 0, 3); successive.beginPreedit();
+    check(successive.inputCursorX() == 3 && successive.inputCursorY() == 2,
+        "cancellation or focus loss retained a pending commit");
+    for (const auto* reset : {"\x1b" "c", "\x1b[?1049h"}) {
+        successive.inputSent(u"日"); rapid.feed(reset); successive.changed(); successive.update(rapid, 0, 4); successive.beginPreedit();
+        rapid.feed("\x1b[3;1HX"); successive.changed(); successive.update(rapid, 0, 5); successive.beginPreedit();
+        check(successive.inputCursorX() == 0 && successive.inputCursorY() == 0,
+            "a reset or buffer switch retained a pending commit");
+    }
+}
+void terminalPreeditHorizontalBorderTests() {
+    for (const auto* border : {"--------", "────────", "━━━━━━━━", "┌──────┐", "╭──────╮", "========"}) {
+        TerminalModel model(8, 6); TerminalDisplay display;
+        // Some full-width TUI redraws link rules and input with automatic wrap.
+        model.feed(std::string(border) + "abcdefgh" + border + "footer\x1b[2;4H");
+        display.update(model, 0, 0, true); display.beginPreedit();
+        for (const auto& text : {CompositionText{u"日", {}, 1}, CompositionText{u"日本語日本語", {}, 6}, CompositionText{u"ｱ", {}, 1}}) {
+            const auto preview = display.preedit(text);
+            check(preview.firstRow == 1 && preview.lastRow == 1 && preview.composition.caretRow == 1,
+                "a wrapped horizontal rule was included in the IME input block");
+            for (const int y : {0, 2, 3}) for (int x = 0; x < model.columns(); ++x) {
+                const auto& original = display.row(y)[x]; const auto& actual = preview.cells[y][x];
+                check(actual.ch == original.ch && actual.fg == original.fg && actual.bg == original.bg && actual.continuation == original.continuation,
+                    "IME growth or conversion moved a horizontal rule or its following output");
+            }
+            check(line(model, 1) == "abcdefgh", "a bounded IME preview changed terminal contents");
+        }
+        check(display.preedit({}).cells.empty() && line(display, 2) == border,
+            "cancelling composition did not preserve a horizontal rule");
+    }
+}
 }
 int main() {
-    try { textTests(); terminalTests(); terminalTitleTests(); terminalNotificationErrorTests(); terminalDisplayTests(); terminalInputTests(); terminalScrollTests(); terminalCopyTests(); terminalSelectionScrollTests(); terminalPreeditTests(); terminalWrapMetadataTests(); terminalPreeditOutputTests(); std::cout << "Text and terminal core tests passed.\n"; return EXIT_SUCCESS; }
+    try { textTests(); terminalTests(); terminalTitleTests(); terminalNotificationErrorTests(); terminalDisplayTests(); terminalInputTests(); terminalScrollTests(); terminalCopyTests(); terminalSelectionScrollTests(); terminalPreeditTests(); terminalWrapMetadataTests(); terminalPreeditOutputTests(); terminalPreeditCommitTests(); terminalPreeditHorizontalBorderTests(); std::cout << "Text and terminal core tests passed.\n"; return EXIT_SUCCESS; }
     catch (const std::exception& error) { std::cerr << error.what() << '\n'; return EXIT_FAILURE; }
 }

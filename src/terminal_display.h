@@ -32,6 +32,9 @@ public:
     // Keep composition at its insertion point while output moves the VT cursor.
     void beginPreedit();
     void endPreedit() { preeditCursor_.reset(); }
+    // Reacquire the insertion point after the terminal echoes accepted input.
+    void inputSent(std::u16string text);
+    void cancelPreedit() { endPreedit(); pendingCommit_.reset(); }
     int inputCursorX() const { return preeditCursor_ ? preeditCursor_->x : cursorX_; }
     int inputCursorY() const { return preeditCursor_ ? preeditCursor_->y : cursorY_; }
     TerminalPreedit preedit(const CompositionText& text) const;
@@ -50,6 +53,9 @@ private:
     std::vector<int> wrapped_;
     struct Cursor { int x, y; bool wrap; };
     std::optional<Cursor> preeditCursor_;
+    struct Commit { std::u16string text; int column; int64_t row; std::u32string prefix; };
+    std::optional<Commit> pendingCommit_;
+    bool commitPresented() const;
     int columns_ = 0, cursorX_ = 0, cursorY_ = 0;
     size_t scroll_ = 0;
     int64_t firstRow_ = 0, anchor_ = -1, caret_ = -1;

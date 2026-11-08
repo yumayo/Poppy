@@ -147,7 +147,7 @@ void Terminal::completeStart() {
 void Terminal::stop(ShutdownDialog* progress) {
     stopSelection();
     ime_.cancel(window_);
-    display_.endPreedit();
+    display_.cancelPreedit();
     stopping_ = true; condition_.notify_all();
     // Preparation owns the relay and process handles until its thread exits.
     const auto joinLaunch = [this] { launcher_.join(); launchReady_ = {}; };
@@ -187,9 +187,11 @@ void Terminal::detach(ShutdownDialog* progress) {
 }
 void Terminal::send(std::string text, bool userInput) {
     if ((!launching_ && !running()) || text.empty()) return;
+    const auto input = userInput ? wide(text) : std::wstring{};
     { std::lock_guard<std::mutex> lock(mutex_); if (writeBytes_ + text.size() > 1024 * 1024) { MessageBeep(MB_ICONWARNING); return; } writeBytes_ += text.size(); writes_.push_back(std::move(text)); }
     condition_.notify_all();
     if (userInput) {
+        display_.inputSent(std::u16string(input.begin(), input.end()));
         stopSelection();
         const bool selected = hasSelection();
         scroll_ = 0; display_.clearSelection();
@@ -442,12 +444,12 @@ LRESULT Terminal::handle(UINT m, WPARAM a, LPARAM b) {
         if (a == selectionTimer) scrollSelection();
         else if (a == 2) pump();
         return 0;
-    case WM_DESTROY: stopSelection(); ime_.clear(); display_.endPreedit(); if (GetFocus() == window_) DestroyCaret(); return 0;
-    case WM_SHOWWINDOW: if (!a) { stopSelection(); ime_.cancel(window_); display_.endPreedit(); } break;
+    case WM_DESTROY: stopSelection(); ime_.clear(); display_.cancelPreedit(); if (GetFocus() == window_) DestroyCaret(); return 0;
+    case WM_SHOWWINDOW: if (!a) { stopSelection(); ime_.cancel(window_); display_.cancelPreedit(); } break;
     case WM_GETDLGCODE: return DLGC_WANTALLKEYS;
     case WM_COPY: copy(); return 0;
     case WM_SETFOCUS: imePosition(); if (focused) focused(); InvalidateRect(window_, nullptr, FALSE); return 0;
-    case WM_KILLFOCUS: stopSelection(); ime_.clear(); display_.endPreedit(); highSurrogate_ = 0; DestroyCaret(); InvalidateRect(window_, nullptr, FALSE); return 0;
+    case WM_KILLFOCUS: stopSelection(); ime_.clear(); display_.cancelPreedit(); highSurrogate_ = 0; DestroyCaret(); InvalidateRect(window_, nullptr, FALSE); return 0;
     case WM_SETCURSOR:
         if (LOWORD(b) == HTCLIENT) {
             POINT cursor{}; GetCursorPos(&cursor); ScreenToClient(window_, &cursor);
@@ -457,7 +459,7 @@ LRESULT Terminal::handle(UINT m, WPARAM a, LPARAM b) {
         break;
     case WM_LBUTTONDOWN:
         SetFocus(window_);
-        ime_.cancel(window_); imePosition();
+        ime_.cancel(window_); display_.cancelPreedit(); imePosition();
         if (!started_) { start(); InvalidateRect(window_, nullptr, FALSE); return 0; }
         selectionPoint_ = {GET_X_LPARAM(b), GET_Y_LPARAM(b)};
         display_.beginSelection(point(selectionPoint_.x, selectionPoint_.y));
@@ -555,8 +557,9 @@ LRESULT Terminal::handle(UINT m, WPARAM a, LPARAM b) {
     case WM_IME_SETCONTEXT: case WM_INPUTLANGCHANGE: case WM_IME_NOTIFY:
     case WM_IME_STARTCOMPOSITION: case WM_IME_ENDCOMPOSITION: case WM_IME_COMPOSITION:
         if (m == WM_IME_STARTCOMPOSITION) { stopSelection(); display_.endPreedit(); display_.clearSelection(); if (scroll_) scroll(0); }
+        if (m == WM_IME_COMPOSITION && !b) display_.cancelPreedit();
         return ime_.handle(window_, m, a, b, [this] { imePosition(); },
-            [this](std::wstring text) { display_.endPreedit(); send(utf8(text)); });
+            [this](std::wstring text) { send(utf8(text)); });
     default: break;
     }
     return DefWindowProcW(window_, m, a, b);

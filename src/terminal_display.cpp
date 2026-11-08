@@ -8,6 +8,17 @@ bool verticalBorder(char32_t ch) {
     return ch == U'│' || ch == U'┃' || ch == U'┆' || ch == U'┇' || ch == U'┊' || ch == U'┋' ||
         ch == U'╎' || ch == U'╏' || ch == U'║' || (ch >= U'├' && ch <= U'┫');
 }
+bool horizontalBorder(const std::vector<Cell>& row) {
+    int strokes = 0;
+    for (const auto& cell : row) {
+        const auto ch = cell.ch;
+        if (ch == U'-' || ch == U'_' || ch == U'=' || ch == U'─' || ch == U'━' ||
+            (ch >= U'┄' && ch <= U'┅') || (ch >= U'┈' && ch <= U'┉') || ch == U'╌' || ch == U'╍' || ch == U'═') ++strokes;
+        else if (ch != U' ' && !(ch >= U'┌' && ch <= U'╋') && !(ch >= U'╔' && ch <= U'╬') &&
+            !(ch >= U'╭' && ch <= U'╰') && !verticalBorder(ch)) return false;
+    }
+    return strokes >= 3;
+}
 bool emptyRow(const std::vector<Cell>& row) {
     return std::all_of(row.begin(), row.end(), [](const Cell& cell) {
         return cell.ch == U' ' && !cell.continuation && cell.bg == background;
@@ -27,7 +38,7 @@ bool TerminalDisplay::update(TerminalModel& model, size_t scroll, uint64_t now, 
     synchronizing_ = false;
     if (!dirty_ && !force && !scrollChanged) return false;
 
-    if (generation_ != model.generation() || columns_ != model.columns() || rows() != model.rows()) endPreedit();
+    if (generation_ != model.generation() || columns_ != model.columns() || rows() != model.rows()) cancelPreedit();
     if (generation_ != model.generation() ||
         (anchor_ >= 0 && std::min(anchor_, caret_) < model.firstRow() * model.columns())) clearSelection();
     generation_ = model.generation();
@@ -42,6 +53,7 @@ bool TerminalDisplay::update(TerminalModel& model, size_t scroll, uint64_t now, 
     continuesAbove_ = scroll_ < model.historySize() && model.wrappedLength(0, scroll_ + 1) != 0;
     cursorX_ = model.cursorX(); cursorY_ = model.cursorY(); cursorVisible_ = model.cursorVisible();
     wrapPending_ = model.wrapPending();
+    if (pendingCommit_ && commitPresented()) { pendingCommit_.reset(); endPreedit(); }
     dirty_ = false;
     return true;
 }
@@ -65,12 +77,59 @@ std::string TerminalDisplay::linkAt(int column, int y) const {
     return terminalLinkAt(text, position);
 }
 void TerminalDisplay::beginPreedit() {
-    if (!preeditCursor_ && !scroll_ && rows()) preeditCursor_ = Cursor{cursorX_, cursorY_, wrapPending_};
+    if (preeditCursor_ || scroll_ || !rows()) return;
+    // While echo is pending, retain the last input location rather than an
+    // unrelated redraw cursor. update() releases it once the new input lands.
+    if (pendingCommit_ && pendingCommit_->row >= firstRow_ && pendingCommit_->row < firstRow_ + rows())
+        preeditCursor_ = Cursor{std::min(pendingCommit_->column, columns_ - 1),
+            static_cast<int>(pendingCommit_->row - firstRow_), pendingCommit_->column == columns_};
+    else preeditCursor_ = Cursor{cursorX_, cursorY_, wrapPending_};
+}
+void TerminalDisplay::inputSent(std::u16string text) {
+    // Editing commands and line submission invalidate the expected echo. Bound
+    // tracking to a screenful even for non-echoing or reformatting applications.
+    if (std::any_of(text.begin(), text.end(), [](char16_t ch) { return ch < 32 || ch == 127; }) ||
+        text.size() + (pendingCommit_ ? pendingCommit_->text.size() : 0) > static_cast<size_t>(columns_ * rows() * 2)) {
+        cancelPreedit(); return;
+    }
+    if (!text.empty() && !scroll_ && rows()) {
+        if (pendingCommit_) pendingCommit_->text += text;
+        else {
+            const int y = inputCursorY();
+            int column = (preeditCursor_ ? preeditCursor_->wrap : wrapPending_) ? columns_ : inputCursorX();
+            if (column < columns_ && row(y)[column].continuation) --column;
+            std::u32string prefix;
+            for (int x = 0; x < column; ++x) prefix += row(y)[x].ch;
+            pendingCommit_ = Commit{std::move(text), column, firstRow_ + y, std::move(prefix)};
+        }
+    }
+    endPreedit();
+}
+bool TerminalDisplay::commitPresented() const {
+    if (scroll_) return false;
+    const auto& pending = *pendingCommit_;
+    const auto layout = CompositionText{pending.text, {}, pending.text.size()}.layout(columns_, pending.column);
+    // Output can arrive in multiple chunks or redraw unrelated rows first. A
+    // changed cursor alone is not evidence that the input has been processed.
+    if (layout.endColumn != (wrapPending_ ? 0 : cursorX_)) return false;
+    // A growing TUI input area may move the whole prompt vertically. Match the
+    // echo and its original prefix at the new cursor, not only at the old row.
+    const int first = cursorY_ + (wrapPending_ ? 1 : 0) - layout.endRow;
+    if (first >= 0) for (size_t x = 0; x < pending.prefix.size(); ++x)
+        if (row(first)[x].ch != pending.prefix[x]) return false;
+    bool visible = false;
+    for (const auto& glyph : layout.glyphs) {
+        const int y = first + glyph.row;
+        if (y < 0) continue; // Echo may have scrolled the beginning into history.
+        if (y >= rows() || row(static_cast<int>(y))[glyph.column].ch != glyph.character) return false;
+        visible = true;
+    }
+    return visible;
 }
 TerminalPreedit TerminalDisplay::preedit(const CompositionText& text) const {
     TerminalPreedit result;
     const int cursorY = inputCursorY();
-    if (text.text.empty() || scroll_ || columns_ < 2 || cursorY < 0 || cursorY >= rows()) return result;
+    if (text.text.empty() || scroll_ || columns_ < 2 || cursorY < 0 || cursorY >= rows() || horizontalBorder(row(cursorY))) return result;
 
     int column = (preeditCursor_ ? preeditCursor_->wrap : wrapPending_) ? columns_ : inputCursorX();
     // A cursor-addressing sequence may land inside a wide glyph.
@@ -82,8 +141,8 @@ TerminalPreedit TerminalDisplay::preedit(const CompositionText& text) const {
     const bool framed = left > 0 || right < columns_;
     int first = cursorY, last = cursorY;
     if (!framed) {
-        while (first > 0 && wrapped_[first - 1]) --first;
-        while (last + 1 < rows() && wrapped_[last]) ++last;
+        while (first > 0 && wrapped_[first - 1] && !horizontalBorder(row(first - 1))) --first;
+        while (last + 1 < rows() && wrapped_[last] && !horizontalBorder(row(last + 1))) ++last;
     }
     int available = last;
     // Only automatic continuations and unused rows belong to this preview.
