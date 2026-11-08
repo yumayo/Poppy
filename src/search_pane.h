@@ -15,7 +15,7 @@ public:
     void setDpi(UINT dpi);
     void setContext(const ResourceId& root, std::shared_ptr<ProjectProvider> provider);
     void active(bool visible);
-    void focus() { input_.show(); }
+    void focus(const std::optional<std::wstring>& seed = {}) { input_.show(seed); }
     void refresh();
     void cancel();
     void stop(ShutdownDialog* progress = nullptr);

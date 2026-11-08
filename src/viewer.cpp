@@ -409,15 +409,18 @@ void Viewer::cut() {
 void Viewer::findLayout() {
     if (findBar_.window()) findBar_.layout(0, Scrollbars::contentRect(window_).right, header_);
 }
+std::optional<std::wstring> Viewer::searchSeed() const {
+    if (!document_ || html_.active() || anchor_ == caret_) return {};
+    const size_t begin = std::min(anchor_, caret_), end = std::max(anchor_, caret_);
+    if (end - begin > 2048) return {};
+    const auto selected = diff_ ? diff_->selectedText(after_, begin, end, inlineView_) : document_->text.substr(begin, end - begin);
+    if (selected.empty() || selected.find_first_of("\r\n") != std::string::npos) return {};
+    return wide(selected);
+}
 void Viewer::find() {
     if (!document_) return;
+    const auto seed = searchSeed();
     if (html_.active()) setHtmlPreview(false);
-    std::optional<std::wstring> seed;
-    if (anchor_ != caret_) {
-        const size_t begin = std::min(anchor_, caret_), length = std::max(anchor_, caret_) - begin;
-        const auto selected = std::string_view(document_->text).substr(begin, length);
-        if (length <= 2048 && selected.find_first_of("\r\n") == std::string_view::npos) seed = wide(selected);
-    }
     findBar_.show(seed); scrollbars(); findLayout(); requestFind();
     InvalidateRect(window_, nullptr, FALSE);
 }

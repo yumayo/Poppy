@@ -306,7 +306,7 @@ private:
     void dpi(UINT value);
     void layout(bool revealTab = true);
     void paint();
-    void selectSidebar(Sidebar sidebar, bool toggle = false);
+    void selectSidebar(Sidebar sidebar, bool toggle = false, const std::optional<std::wstring>& seed = {});
     RECT collapseButton() const;
     void collapseSidebar();
     RECT gitViewButton(bool tree) const;
@@ -1094,14 +1094,14 @@ void ProjectRuntime::Impl::paint() {
         }
     }
 }
-void ProjectRuntime::Impl::selectSidebar(Sidebar sidebar, bool toggle) {
+void ProjectRuntime::Impl::selectSidebar(Sidebar sidebar, bool toggle, const std::optional<std::wstring>& seed) {
     sidebarVisible_ = !toggle || !sidebarVisible_ || activeSidebar_ != sidebar;
     activeSidebar_ = sidebar; layout();
     explorerActivity_.select(sidebarVisible_ && sidebar == Sidebar::Explorer); gitActivity_.select(sidebarVisible_ && sidebar == Sidebar::Git);
     searchActivity_.select(sidebarVisible_ && sidebar == Sidebar::Search); searchPane_.active(sidebarVisible_ && sidebar == Sidebar::Search && active_);
     if (owner_ && owner_->changed) owner_->changed();
     if (!sidebarVisible_) { SetFocus(selectedWindow()); return; }
-    if (sidebar == Sidebar::Search) { searchPane_.focus(); return; }
+    if (sidebar == Sidebar::Search) { searchPane_.focus(seed); return; }
     if (sidebar == Sidebar::Git) refreshGit();
     if (sidebar == Sidebar::Explorer) explorer_.showSelection();
     SetFocus(sidebar == Sidebar::Explorer ? (IsWindowVisible(tree_) ? tree_ : explorerButton_) : (IsWindowVisible(gitTree_) ? gitTree_ : gitButton_));
@@ -3706,7 +3706,10 @@ bool ProjectRuntime::Impl::key(const MSG& message) {
         const bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
         const bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
         if (key && ctrl && !shift && !(GetKeyState(VK_MENU) & 0x8000) && message.wParam == 'N') { newFile(); return true; }
-        if (key && ctrl && shift && !(GetKeyState(VK_MENU) & 0x8000) && message.wParam == 'F') { quickOpen_.close(); selectSidebar(Sidebar::Search); return true; }
+        if (key && ctrl && shift && !(GetKeyState(VK_MENU) & 0x8000) && message.wParam == 'F') {
+            const auto seed = message.hwnd == viewer().window() || IsChild(viewer().window(), message.hwnd) ? viewer().searchSeed() : std::nullopt;
+            quickOpen_.close(); selectSidebar(Sidebar::Search, false, seed); return true;
+        }
         if (key && ctrl && !shift && !(GetKeyState(VK_MENU) & 0x8000) && message.wParam == 'P') { comparePicker_.close(); quickOpen_.show(); return true; }
         if (key && ctrl && shift && !(GetKeyState(VK_MENU) & 0x8000) && message.wParam == 'P') {
             comparePicker_.close();

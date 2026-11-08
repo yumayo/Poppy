@@ -44,6 +44,7 @@ public:
     void restore(const State& state);
     size_t documentBytes() const;
     bool hasDocument() const { return document_ != nullptr || image_ != nullptr; }
+    std::optional<std::wstring> searchSeed() const;
     void find();
     void findNext(bool backwards = false);
     bool findKey(const MSG& message);
