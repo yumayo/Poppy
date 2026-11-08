@@ -787,7 +787,7 @@ case WM_LBUTTONDOWN:{
     else if(PtInRect(&addButton,point))choose();
     else if(const auto index=hit(point);index<projects_.size()){
         const auto icon=aiStatusBounds(row(index));const bool attention=!session_.projectListCollapsed&&PtInRect(&icon,point);
-        const bool toggleOnClick=session_.projectListCollapsed||(index==active_&&!attention);
+        const bool toggleOnClick=index==active_&&!attention;
         select(index,attention);
         projectDrag_=ProjectDrag{projects_[index].id,point,point,false,std::nullopt,toggleOnClick};SetCapture(window_);
     }
