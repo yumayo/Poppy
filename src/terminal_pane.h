@@ -18,6 +18,7 @@ struct TerminalSession {
     std::string notificationId;
     std::wstring notificationError;
     std::set<std::string> reportedErrors;
+    bool hostStatusReceived = false;
     AiStatus ai;
     std::wstring wslTool;
 };

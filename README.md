@@ -481,7 +481,7 @@ Windows Terminal相当の互換性はまだありません。結合文字・ZWJ�
 
 ## 検証と計測
 
-`tests/terminal_snapshot_tests.cpp`は、分割UTF-8・VTシーケンスの途中を含む画面状態の復元、両画面、履歴上限、不正データの拒否を検証します。Windows用の`poppy_terminal_host_tests`は、旧UIプロセスの終了後の再接続、再起動中の出力とAI通知、シェルのcwd・環境変数、通常終了時の子孫プロセス・通知リレーの終了、UI異常終了時の後片付け、起動失敗後の再試行を検証します。Windows実機では`ctest --test-dir out -C Release -R "poppy_terminal_host_tests|poppy_single_instance_tests" --output-on-failure`で実行できます。
+`tests/terminal_snapshot_tests.cpp`は、分割UTF-8・VTシーケンスの途中を含む画面状態の復元、両画面、履歴上限、不正データの拒否を検証します。Windows用の`poppy_terminal_host_tests`は、旧UIプロセスの終了後の再接続、再起動中の出力とAI通知、シェルのcwd・環境変数、通常終了時の子孫プロセス・通知リレーの終了、UI異常終了時の後片付け、起動失敗後の再試行を検証します。WSLの停止状態からの起動を模した6秒の応答遅延、通知リレーの再試行とヘルパーの再送、起動済みソケットの引き継ぎ、再試行の上限、不正な応答の拒否も対象です。Windows実機では`ctest --test-dir out -C Release -R "poppy_terminal_host_tests|poppy_single_instance_tests" --output-on-failure`で実行できます。
 
 Windows用の`tests/process_lifetime_tests.cpp`では、ジョブ内の親・孫プロセスの終了待ち、親が先に終了した場合、タイムアウト、ファイルロックの解放、別ジョブの保持を検証します。`tests/render_tests.cpp`では実際のConPTY経由でも終了後に孫プロセスのロックが解放され、別ターミナルが生存することを確認します。Linuxではクロスコンパイルのみで、Windows上での実行確認は別途必要です。`tests/hook_relay_tests.py`はWSL側の子孫プロセスとロックの解放、コンテナの所有判定と停止完了待ち、Docker照会失敗時に終了を確定しないことを実ヘルパーとDockerモックで検証します。
 

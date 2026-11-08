@@ -19,6 +19,8 @@ aicontainer claude
 
 PoppyはターミナルごとのUnixソケットをシェル起動前に開き、そのパスを`AICONTAINER_EVENT_SOCKET`へ自動設定します。WindowsプロジェクトのPowerShell・Git Bashでも、既定のWSL内にソケットを用意し、手入力の`wsl`へ`WSLENV`で引き継ぎます。Git Bashのパス変換でLinux側の`/tmp/poppy-events-…/events.sock`がWindowsの一時フォルダーへ書き換わらないよう、`MSYS2_ENV_CONV_EXCL`へこの変数だけを追加します。既存の除外設定は保持します。更新した`aicontainer`はこのソケットだけをコンテナの`/tmp/aicontainer-events.sock`へマウントし、hookへ引き継ぎます。`.aicontainer`への追加、起動プロファイル、ai-containerリポジトリのパス指定は不要です。この変更だけならDockerイメージの再ビルドも不要です。
 
+WSLが停止している場合は、WSL自体の起動を含めて通知リレーの応答を最大60秒待ちます。応答前にプロセスが終了した場合は、0.5秒・1秒の間隔を置いて合計3回まで起動を試し、各回でヘルパーを送り直します。起動中のプロセスはそのまま待ち、通知先が確定してからシェルを起動します。この待ち時間はバックグラウンドで処理します。起動に失敗した場合は起動エラーを表示し、同じ失敗に切断エラーを重ねて表示しません。
+
 PowerShell経由でも、対象リリースの`PoppyApp.dll`と同じ場所に`wsl/`フォルダーを配置してください。Poppy更新後はWSLターミナルも開き直します。ai-container側をコピーして利用している場合は、そのコピーも更新してください。Dockerデーモンは、起動元のWSLと同じソケットの実体を参照できる必要があります。リモートDockerへの転送は対象外です。
 
 WSLプロジェクトでは「＋」の右クリックにある`New Codex (ai-container)` / `New Claude Code (ai-container)`でも起動できます。WSLユーザーのBash起動設定から`aicontainer`を読み込み、通常と同じコンテナを起動します。WindowsプロジェクトではPowerShellから`wsl`へ入り、上記の`aicontainer`コマンドを使ってください。

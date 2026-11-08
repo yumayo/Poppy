@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <fstream>
 #include <iostream>
+#include <iterator>
 #include <memory>
 
 using namespace poppy;
@@ -14,6 +15,11 @@ std::string identity() {
     return wsl::sha256(std::string_view(reinterpret_cast<const char*>(&guid), sizeof(guid))).substr(0, 32);
 }
 fs::path executable() { return applicationDirectory() / L"poppy_terminal_host_tests.exe"; }
+std::string contents(const fs::path& path) {
+    std::ifstream file(path, std::ios::binary);
+    return std::string(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
+}
+unsigned setting(const fs::path& root, const char* name) { unsigned result = 0; std::ifstream(root / name) >> result; return result; }
 void output(HANDLE handle, std::string_view bytes) {
     while (!bytes.empty()) { DWORD count = 0; check(WriteFile(handle, bytes.data(), static_cast<DWORD>(bytes.size()), &count, nullptr) && count, "Cannot write fixture output"); bytes.remove_prefix(count); }
 }
@@ -33,6 +39,8 @@ int lockFixture(const fs::path& root) {
     Sleep(INFINITE); return 0;
 }
 int shellFixture(const fs::path& root) {
+    wchar_t socket[108]{}; GetEnvironmentVariableW(L"AICONTAINER_EVENT_SOCKET", socket, 108);
+    std::ofstream(root / "shell.socket") << utf8(socket);
     Handle lock(CreateFileW((root / L"conversation.lock").c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, 0, nullptr));
     check(static_cast<bool>(lock), "Cannot acquire shell lock");
     auto leaf = child({executable().native(), L"--lock", root.native()});
@@ -68,8 +76,22 @@ int shellFixture(const fs::path& root) {
     stopping = true; background.join(); return 0;
 }
 int relayFixture(const fs::path& root) {
+    const auto attempt = setting(root, "relay.attempts") + 1;
+    std::ofstream(root / "relay.attempts") << attempt;
+    Sleep(setting(root, "relay.delay"));
+    const auto expected = contents(root / "relay.input");
+    std::string input;
+    while (input.size() < expected.size()) {
+        char buffer[4096]; DWORD count = 0;
+        check(ReadFile(GetStdHandle(STD_INPUT_HANDLE), buffer, static_cast<DWORD>(std::min<size_t>(sizeof(buffer), expected.size() - input.size())), &count, nullptr) && count,
+            "Relay did not receive the complete helper upload");
+        input.append(buffer, count);
+    }
+    check(input == expected, "Retry corrupted the helper upload");
+    if (attempt <= setting(root, "relay.failures")) return 3;
     const auto out = GetStdHandle(STD_OUTPUT_HANDLE);
     const auto send = [&](const wsl::Message& message) { output(out, wsl::encodeFrame({1, wsl::encodeMessage(message)})); };
+    if (fs::exists(root / "relay.invalid")) { send({{"socket", "/invalid"}}); return 0; }
     send({{"socket", "/tmp/poppy-events-terminal-host-test"}});
     std::atomic<bool> stopping{false};
     NativeThread events([&] {
@@ -164,6 +186,48 @@ void failedLaunch() {
     try { client.close(); } catch (const std::exception&) { }
     auto initial = client.start(session, fixture.launch(false)); check(initial.snapshot, "Failed startup prevented retry"); client.close();
 }
+void coldRelayStartup() {
+    Fixture fixture; TerminalHostClient client; auto launch = fixture.launch(); launch.requireEvents = false;
+    // Simulate a stopped WSL distribution. The helper upload must tolerate a
+    // blocked pipe until boot finishes, and the shell must inherit its socket.
+    std::ofstream(fixture.root / "relay.delay") << 6000;
+    launch.eventInput = std::string(128 * 1024, 'x'); launch.eventInput[123] = '\0';
+    std::ofstream(fixture.root / "relay.input", std::ios::binary).write(launch.eventInput.data(), static_cast<std::streamsize>(launch.eventInput.size()));
+    const auto started = GetTickCount64();
+    const auto initial = client.start(identity(), launch);
+    check(GetTickCount64() - started >= 6000, "Startup did not wait for the cold relay");
+    check(initial.running && initial.relay && initial.relayError.empty(), "Cold startup fell back to a shell without notifications");
+    wait([&] { return contents(fixture.root / "shell.socket") == "/tmp/poppy-events-terminal-host-test"; }, "Shell did not inherit the ready relay socket");
+    check(setting(fixture.root, "relay.attempts") == 1, "Cold startup restarted a relay that was still booting");
+    client.close();
+    check(fs::exists(fixture.root / "relay.stopped"), "Cold relay was not cleaned up");
+}
+void retryRelayStartup() {
+    Fixture fixture; TerminalHostClient client; auto launch = fixture.launch();
+    std::ofstream(fixture.root / "relay.failures") << 2;
+    launch.eventInput = std::string(128 * 1024, 'r'); launch.eventInput[321] = '\0';
+    std::ofstream(fixture.root / "relay.input", std::ios::binary).write(launch.eventInput.data(), static_cast<std::streamsize>(launch.eventInput.size()));
+    const auto initial = client.start(identity(), launch);
+    check(initial.running && initial.relay && initial.relayError.empty(), "Transient relay exits prevented startup");
+    check(setting(fixture.root, "relay.attempts") == 3, "Transient startup did not retry up to a successful handshake");
+    wait([&] { return contents(fixture.root / "shell.socket") == "/tmp/poppy-events-terminal-host-test"; }, "Retried relay socket was not passed to the shell");
+    client.close();
+    check(fs::exists(fixture.root / "relay.stopped"), "Retried relay was not cleaned up");
+}
+void rejectedRelayStartup() {
+    for (const bool required : {false, true}) for (const bool invalid : {false, true}) {
+        Fixture fixture; TerminalHostClient client; auto launch = fixture.launch(); launch.requireEvents = required;
+        if (invalid) std::ofstream(fixture.root / "relay.invalid") << "invalid";
+        else std::ofstream(fixture.root / "relay.failures") << 10;
+        TerminalHostUpdate initial; bool rejected = false;
+        try { initial = client.start(identity(), launch); } catch (const std::exception&) { rejected = true; }
+        check(rejected == required, "Relay failure did not respect whether notifications are required");
+        check(setting(fixture.root, "relay.attempts") == (invalid ? 1u : 3u), "Invalid handshake was retried or startup retries were unbounded");
+        if (required) check(!fs::exists(fixture.root / "shell.socket"), "Shell started before its required relay was ready");
+        else check(initial.running && !initial.relay && !initial.relayError.empty(), "Optional relay failure lost the shell or its diagnostic");
+        try { client.close(); } catch (const std::exception&) { check(required, "Optional relay failure prevented cleanup"); }
+    }
+}
 }
 int wmain(int argc, wchar_t** argv) {
     try {
@@ -171,6 +235,7 @@ int wmain(int argc, wchar_t** argv) {
         if (argc == 3 && std::wstring(argv[1]) == L"--lock") return lockFixture(argv[2]);
         if (argc == 3 && std::wstring(argv[1]) == L"--relay") return relayFixture(argv[2]);
         if (argc == 4) return controller(utf8(argv[2]), argv[3], std::wstring(argv[1]) == L"--crash");
-        restartAcrossProcesses(); crashedOwner(); failedLaunch(); std::cout << "Terminal host tests passed\n"; return 0;
+        restartAcrossProcesses(); crashedOwner(); failedLaunch(); coldRelayStartup(); retryRelayStartup(); rejectedRelayStartup();
+        std::cout << "Terminal host tests passed\n"; return 0;
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
 }

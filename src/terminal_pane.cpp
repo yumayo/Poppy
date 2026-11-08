@@ -53,10 +53,12 @@ void TerminalPane::add(SavedTerminal configuration, bool reconnect) {
         }
     };
     session->terminal->connected = [this,ptr] {
+        ptr->hostStatusReceived = false;
         if (events_ && ptr->notificationId.empty()) { ptr->notificationId = newSessionId(); events_->add(ptr->notificationId); }
         if (changed) changed();
     };
     session->terminal->hostStatus = [this,ptr](const TerminalHostUpdate& update) {
+        ptr->hostStatusReceived = true;
         if (!update.status.empty() && events_ && !ptr->notificationId.empty()) events_->publish(ptr->notificationId, false, update.status);
         if (!update.relayError.empty()) {
             ptr->notificationError = wide(update.relayError);
@@ -123,7 +125,8 @@ void TerminalPane::reportError(TerminalSession& session, const std::string& code
             (code == "terminal-start-failed" ? L"ターミナル起動エラー · " : L"AI通知エラー · ") + sessionName(session), message);
 }
 void TerminalPane::pollNotifications() {
-    for (auto& session : sessions_) if (session->terminal->running() && !session->notificationId.empty() && !session->terminal->relayRunning())
+    for (auto& session : sessions_) if (session->terminal->running() && session->hostStatusReceived &&
+            !session->notificationId.empty() && session->notificationError.empty() && !session->terminal->relayRunning())
         reportError(*session, "relay-disconnected", L"AI通知リレーとの接続が切れました。このターミナルのAI状態を更新できません。"
             L"\n\nPoppyのターミナルを開き直し、その中からAIコンテナを起動し直してください。");
 }

@@ -3,8 +3,29 @@
 #include <stdexcept>
 
 namespace poppy {
+namespace {
+class RelayExited : public std::runtime_error {
+public:
+    RelayExited() : std::runtime_error("WSL notification relay exited before becoming ready") {}
+};
+}
 std::string HookPipe::start(const std::vector<std::wstring>& command, std::function<void(const wsl::Message&)> receive, std::string input) {
     stop();
+    // wsl.exe also boots the VM/distribution on a cold start. Keep waiting for
+    // that process instead of repeatedly interrupting a slow but healthy boot.
+    const auto deadline = GetTickCount64() + 60000;
+    for (unsigned attempt = 0;; ++attempt) {
+        try { return startAttempt(command, receive, input, deadline); }
+        catch (const RelayExited&) {
+            const auto now = GetTickCount64();
+            const DWORD delay = attempt == 0 ? 500 : 1000;
+            if (attempt >= 2 || now >= deadline || deadline - now <= delay) throw;
+            Sleep(delay);
+        }
+    }
+}
+std::string HookPipe::startAttempt(const std::vector<std::wstring>& command, std::function<void(const wsl::Message&)> receive,
+        const std::string& input, ULONGLONG deadline) {
     try {
         if (command.empty()) throw std::runtime_error("WSL notifications are unavailable");
         SECURITY_ATTRIBUTES sa{sizeof(sa), nullptr, TRUE}; HANDLE read = nullptr, write = nullptr;
@@ -32,7 +53,9 @@ std::string HookPipe::start(const std::vector<std::wstring>& command, std::funct
         if (ResumeThread(thread.value) == static_cast<DWORD>(-1)) { job_.stop(); throw std::runtime_error("Cannot resume WSL notifications"); }
         childInput.reset(); childOutput.reset();
         stopping_ = false;
-        if (!input.empty()) uploader_.start([this, bytes = std::move(input)] {
+        // Every attempt needs the complete helper upload, including after a
+        // previous wsl.exe consumed some or all of it before exiting.
+        if (!input.empty()) uploader_.start([this, bytes = input] {
             size_t offset = 0;
             while (offset < bytes.size() && !stopping_) {
                 DWORD count = 0;
@@ -41,12 +64,12 @@ std::string HookPipe::start(const std::vector<std::wstring>& command, std::funct
             }
         });
         wsl::FrameReader frames; std::string socket;
-        const auto deadline = GetTickCount64() + 5000;
         while (socket.empty()) {
+            if (GetTickCount64() >= deadline) throw std::runtime_error("WSL notification relay timed out while starting WSL (60 seconds)");
             DWORD available = 0, count = 0; char bytes[4096];
-            if (!PeekNamedPipe(output_.value, nullptr, 0, nullptr, &available, nullptr)) throw std::runtime_error("WSL notification relay exited");
+            if (!PeekNamedPipe(output_.value, nullptr, 0, nullptr, &available, nullptr)) { frames.finish(); throw RelayExited(); }
             if (available) {
-                if (!ReadFile(output_.value, bytes, std::min<DWORD>(available, sizeof(bytes)), &count, nullptr) || !count) throw std::runtime_error("WSL notification handshake failed");
+                if (!ReadFile(output_.value, bytes, std::min<DWORD>(available, sizeof(bytes)), &count, nullptr) || !count) { frames.finish(); throw RelayExited(); }
                 frames.feed(std::string_view(bytes, count), [&](wsl::Frame frame) {
                     if (frame.kind != 1) throw std::runtime_error("Invalid notification handshake");
                     const auto message = wsl::decodeMessage(frame.payload);
@@ -56,7 +79,10 @@ std::string HookPipe::start(const std::vector<std::wstring>& command, std::funct
                     } else receive(message);
                 });
             } else {
-                if (GetTickCount64() >= deadline || WaitForSingleObject(process_.value, 15) == WAIT_OBJECT_0) throw std::runtime_error("WSL notification relay did not start");
+                if (WaitForSingleObject(process_.value, 15) == WAIT_OBJECT_0) {
+                    // A final handshake may have arrived after the first peek.
+                    if (!PeekNamedPipe(output_.value, nullptr, 0, nullptr, &available, nullptr) || !available) { frames.finish(); throw RelayExited(); }
+                }
             }
         }
         stopping_ = false; running_ = true; ready_ = true;

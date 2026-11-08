@@ -12,6 +12,8 @@ public:
     bool stop();
     bool running() const { return running_; }
 private:
+    std::string startAttempt(const std::vector<std::wstring>& command, std::function<void(const wsl::Message&)> receive,
+        const std::string& input, ULONGLONG deadline);
     Handle process_, input_, output_;
     ProcessJob job_;
     NativeThread reader_, uploader_;
