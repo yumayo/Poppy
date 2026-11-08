@@ -19,7 +19,8 @@ public:
     bool dirty() const { return document.text != savedText_; }
     void initialize(std::string bytes);
     void saved(std::string bytes, std::string text);
-    bool replace(size_t begin, size_t end, std::string text);
+    // A live cell editor may update the same range as one undo operation.
+    bool replace(size_t begin, size_t end, std::string text, bool joinPrevious = false);
     // With no selection, cut the logical line, including its following newline.
     // At EOF, remove the preceding newline without copying it.
     struct CutRange { size_t begin, end; std::string text; };

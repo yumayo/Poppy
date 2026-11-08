@@ -121,7 +121,7 @@ bool EditBuffer::moveLines(size_t& anchor, size_t& caret, bool down) {
     caret = movedPosition(caret, caretRow, caretColumn);
     return true;
 }
-bool EditBuffer::replace(size_t begin, size_t end, std::string text) {
+bool EditBuffer::replace(size_t begin, size_t end, std::string text, bool joinPrevious) {
     if (begin > end || end > document.text.size() || document.text.size() - (end - begin) + text.size() > maxFileBytes) return false;
     const auto boundary = [&](size_t p) { return p == document.text.size() || (static_cast<unsigned char>(document.text[p]) & 0xc0) != 0x80; };
     if (!boundary(begin) || !boundary(end)) return false;
@@ -133,9 +133,18 @@ bool EditBuffer::replace(size_t begin, size_t end, std::string text) {
     const auto removed = document.text.substr(begin, end - begin);
     if (removed == text) return true;
     if (std::count(document.text.begin(), document.text.end(), '\n') - std::count(removed.begin(), removed.end(), '\n') + std::count(text.begin(), text.end(), '\n') >= 1000000) return false;
-    redo_.clear(); undo_.push_back({begin, removed, std::move(text)});
-    const auto& change = undo_.back(); historyBytes_ += change.before.size() + change.after.size();
-    document.text.replace(begin, end - begin, change.after); ++revision; indexDocument(document);
+    redo_.clear();
+    if (joinPrevious && !undo_.empty() && begin >= undo_.back().begin && end - undo_.back().begin <= undo_.back().after.size()) {
+        auto& change = undo_.back();
+        historyBytes_ -= change.after.size();
+        change.after.replace(begin - change.begin, end - begin, text); historyBytes_ += change.after.size();
+        document.text.replace(begin, end - begin, text);
+    } else {
+        undo_.push_back({begin, removed, std::move(text)});
+        historyBytes_ += undo_.back().before.size() + undo_.back().after.size();
+        document.text.replace(begin, end - begin, undo_.back().after);
+    }
+    ++revision; indexDocument(document);
     while (undo_.size() > 1 && (historyBytes_ > maxFileBytes || undo_.size() > 1000)) { historyBytes_ -= undo_.front().before.size() + undo_.front().after.size(); undo_.pop_front(); }
     return true;
 }

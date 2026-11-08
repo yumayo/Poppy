@@ -395,6 +395,7 @@ private:
     bool tabOverflow() const { return editorGroups_[focusedGroup_].overflow(); }
     RECT tabBounds(size_t index) const;
     bool htmlTab(int group) const;
+    bool csvTab(int group) const;
     RECT editorModeButton(int group, bool second) const;
     bool selectEditorMode(POINT point);
     size_t tabAt(POINT point) const;
@@ -918,7 +919,7 @@ void ProjectRuntime::Impl::layout(bool revealTab) {
         for (size_t i = 0; i < tabs_.size(); ++i) if (tabs_[i].group == group) pane.indices.push_back(i);
         pane.tabs = {start, area.top, edge, area.top};
         const auto selected = groupTab(group);
-        const int modeWidth = selected < tabs_.size() && tabs_[selected].diff ? 136 : htmlTab(group) ? 160 : 0;
+        const int modeWidth = selected < tabs_.size() && tabs_[selected].diff ? 136 : (htmlTab(group) || csvTab(group)) ? 160 : 0;
         const bool terminal = selected < tabs_.size() && !tabs_[selected].terminalId.empty();
         const int addWidth = terminal ? std::min(MulDiv(58, dpi_, 96), std::max(0, edge - start)) : 0;
         const int toolsWidth = std::min(MulDiv(modeWidth, dpi_, 96), std::max(0, edge - start - addWidth) / 2);
@@ -1079,11 +1080,12 @@ void ProjectRuntime::Impl::paint() {
             dc.label(pane.add, L"+", foreground, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
             dc.label(pane.dropdown, L"⌄", muted, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
             const bool html = htmlTab(group);
-            const bool secondSelected = html ? viewers_[group].htmlPreview() : viewers_[group].diffInline();
+            const bool csv = csvTab(group);
+            const bool secondSelected = html ? viewers_[group].htmlPreview() : csv ? viewers_[group].csvTable() : viewers_[group].diffInline();
             for (const bool second : {false, true}) {
                 const auto button = editorModeButton(group, second);
                 dc.fill(button, second == secondSelected ? rgb(50, 70, 94) : background);
-                dc.label(button, html ? (second ? L"Preview" : L"Source") : (second ? L"Inline" : L"Split"), second == secondSelected ? foreground : muted,
+                dc.label(button, html || csv ? (second ? (csv ? L"Table" : L"Preview") : L"Source") : (second ? L"Inline" : L"Split"), second == secondSelected ? foreground : muted,
                     DT_CENTER | DT_VCENTER | DT_SINGLELINE);
             }
             if (pane.overflow()) {
@@ -2640,6 +2642,10 @@ bool ProjectRuntime::Impl::htmlTab(int group) const {
     const auto index = groupTab(group);
     return index < tabs_.size() && tabs_[index].terminalId.empty() && !tabs_[index].diff && tabs_[index].diffKind != GitDiffKind::Commit && isHtmlExtension(tabs_[index].path.extension().native());
 }
+bool ProjectRuntime::Impl::csvTab(int group) const {
+    const auto index = groupTab(group);
+    return index < tabs_.size() && tabs_[index].terminalId.empty() && !tabs_[index].diff && tabs_[index].diffKind != GitDiffKind::Commit && isCsvExtension(tabs_[index].path.extension().native());
+}
 RECT ProjectRuntime::Impl::editorModeButton(int group, bool second) const {
     auto rect = editorGroups_[group].tools;
     const auto middle = rect.left + (rect.right - rect.left) / 2;
@@ -2651,6 +2657,7 @@ bool ProjectRuntime::Impl::selectEditorMode(POINT point) {
         const auto button = editorModeButton(group, second);
         if (!PtInRect(&button, point)) continue;
         if (htmlTab(group)) viewers_[group].setHtmlPreview(second);
+        else if (csvTab(group)) viewers_[group].setCsvTable(second);
         else viewers_[group].setDiffLayout(second);
         SetFocus(viewers_[group].window());
         return true;

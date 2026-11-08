@@ -9,6 +9,7 @@
 #include "text_layout.h"
 #include "editor_scroll.h"
 #include "html_preview.h"
+#include "csv_view.h"
 #include <memory>
 
 namespace poppy {
@@ -52,6 +53,9 @@ public:
     bool htmlAvailable() const { return htmlAllowed_ && document_ && !diff_ && isHtmlExtension(path_.extension().native()); }
     void setHtmlPreview(bool enabled);
     bool htmlPreview() const { return html_.active(); }
+    bool csvAvailable() const { return !textOnly_ && htmlAllowed_ && document_ && !diff_ && isCsvExtension(path_.extension().native()); }
+    void setCsvTable(bool enabled);
+    bool csvTable() const { return csv_.active(); }
     HWND window() const { return window_; }
 private:
     static LRESULT CALLBACK procedure(HWND, UINT, WPARAM, LPARAM);
@@ -97,6 +101,7 @@ private:
     FileDropTarget* fileDropTarget_ = nullptr;
     Renderer renderer_;
     HtmlPreview html_;
+    CsvView csv_;
     ImeComposition ime_;
     FindBar findBar_;
     TextSearch search_;

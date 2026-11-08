@@ -20,6 +20,14 @@ void Viewer::create(HWND parent, HINSTANCE instance, bool textOnly) {
     cls.style = CS_DBLCLKS;
     RegisterClassW(&cls);
     window_ = CreateWindowExW(0, cls.lpszClassName, L"Code viewer", WS_CHILD | WS_VISIBLE | WS_CLIPCHILDREN | WS_VSCROLL | WS_HSCROLL | WS_TABSTOP, 0, 0, 0, 0, parent, nullptr, instance, this);
+    csv_.attach(window_, renderer_, scrollbars_);
+    csv_.changed = [this] {
+        layoutDirty_ = true; updateGitLines();
+        if (changed) changed();
+        if (statusChanged) statusChanged();
+    };
+    csv_.save = [this] { if (save) save(); };
+    csv_.statusChanged = [this] { if (statusChanged) statusChanged(); };
     findBar_.create(window_, instance);
     findBar_.changed = [this] { requestFind(); };
     findBar_.navigate = [this](bool backwards) { findNext(backwards); };
@@ -48,17 +56,20 @@ void Viewer::setDpi(UINT dpi) {
     cellWidth_ = renderer_.cellWidth(); cellHeight_ = renderer_.textHeight() + MulDiv(3, dpi, 96);
     header_ = MulDiv(34, dpi, 96); gutter_ = MulDiv(textOnly_ ? 12 : 70, dpi, 96);
     findBar_.setDpi(dpi);
+    csv_.setDpi(dpi);
     scrollbars(); findLayout(); htmlLayout(); caretPosition(); InvalidateRect(window_, nullptr, FALSE);
 }
 void Viewer::show(std::shared_ptr<const Document> d, const ResourceId& path, bool preserve, bool allowHtml) {
     const bool preview = preserve && path_ == path && htmlAvailable() ? html_.active() : true;
+    const bool table = preserve && path_ == path && csvAvailable() ? csv_.active() : true;
+    const auto previous = preserve && document_ ? std::optional<State>(state()) : std::nullopt;
+    csv_.hide(!preserve || path_ != path);
     html_.hide();
     htmlAllowed_ = allowHtml;
     stopLoading();
     stopSelection();
     ime_.cancel(window_);
     image_.reset(); renderer_.setImage({});
-    const auto previous = preserve && document_ ? std::optional<State>(state()) : std::nullopt;
     edit_.reset(); diffBefore_.reset(); gitBefore_.reset(); gitChangedLines_ = {}; gitChangeRanges_ = {}; highSurrogate_ = 0;
     diffLayout_ = {}; layoutDirty_ = true; caretTrailing_ = false;
     diff_.reset(); diffChangeRanges_ = {}; document_ = std::move(d); path_ = path; message_.clear();
@@ -67,6 +78,8 @@ void Viewer::show(std::shared_ptr<const Document> d, const ResourceId& path, boo
     scrollbars(); findLayout(); requestFind(false, false, false); caretPosition(); InvalidateRect(window_, nullptr, FALSE);
     if (previous) restore(*previous);
     if (preview) setHtmlPreview(true);
+    if (table) setCsvTable(true);
+    if (previous && csv_.active()) restore(*previous);
     if (statusChanged) statusChanged();
 }
 void Viewer::showRevision(std::shared_ptr<const Document> d, const DiffDocument& changes, const ResourceId& path, bool preserve) {
@@ -81,6 +94,7 @@ void Viewer::edit(std::shared_ptr<EditBuffer> buffer, const ResourceId& path, bo
     const auto before = edit_ == buffer && path_ == path ? gitBefore_ : nullptr;
     show(std::shared_ptr<const Document>(buffer, &buffer->document), path, preserve);
     edit_ = std::move(buffer); caretPosition();
+    if (csv_.active()) csv_.buffer(edit_);
     setGitBase(before);
 }
 void Viewer::setGitBase(std::shared_ptr<const Document> before) {
@@ -92,6 +106,7 @@ void Viewer::updateGitLines() {
     gitChangedLines_ = gitBefore_ && document_ && !diff_ ? changedWorkingLines(*gitBefore_, *document_, &gitChangeRanges_) : std::vector<bool>{};
 }
 void Viewer::showDiff(std::shared_ptr<const DiffDocument> d, const ResourceId& path, bool preserve) {
+    csv_.hide(true);
     html_.hide();
     stopLoading();
     stopSelection();
@@ -121,6 +136,11 @@ void Viewer::editDiff(std::shared_ptr<EditBuffer> buffer, std::shared_ptr<const 
 }
 void Viewer::refreshBuffer(bool externalUpdate) {
     if (!edit_) return;
+    if (csv_.active()) {
+        csv_.refresh(); updateGitLines(); layoutDirty_ = true;
+        if (statusChanged) statusChanged();
+        return;
+    }
     // The shared document has already changed; use the previous layout's
     // range, including padding, before rebuilding wrapped rows.
     const bool followTail = externalUpdate && !diff_ && !html_.active() &&
@@ -141,6 +161,7 @@ void Viewer::refreshBuffer(bool externalUpdate) {
     layoutDirty_ = true; requestFind(false, false, false); scrollbars(followTail); caretPosition(); InvalidateRect(window_, nullptr, FALSE);
 }
 void Viewer::message(const std::wstring& text, const ResourceId& path) {
+    csv_.hide(true);
     html_.hide();
     stopLoading();
     stopSelection();
@@ -188,15 +209,31 @@ void Viewer::setHtmlPreview(bool enabled) {
     if (!enabled) SetFocus(window_);
     if (statusChanged) statusChanged();
 }
+void Viewer::setCsvTable(bool enabled) {
+    if (!csvAvailable() || enabled == csv_.active()) return;
+    const auto previous = state();
+    stopSelection(); ime_.cancel(window_); findBar_.close();
+    if (enabled) {
+        csv_.show(document_, true); csv_.buffer(edit_); csv_.restore(previous);
+        KillTimer(window_, caretTimer); caretVisible_ = false;
+    } else {
+        csv_.hide(); layoutDirty_ = true;
+        auto source = previous; source.left = 0;
+        scrollbars(); restore(source);
+    }
+    InvalidateRect(window_, nullptr, FALSE);
+    if (statusChanged) statusChanged();
+}
 std::wstring Viewer::textStatus() const {
     if (image_) return std::to_wstring(image_->width) + L" × " + std::to_wstring(image_->height) + L" px";
     // A Git patch does not describe the source files' encoding or line endings.
     if (!document_ || diff_) return {};
     const auto newline = document_->text.find('\n');
     const bool crlf = newline != std::string::npos && newline > 0 && document_->text[newline - 1] == '\r';
-    return wide(document_->encoding) + (crlf ? L"  ·  CRLF" : L"  ·  LF");
+    return (csv_.active() ? csv_.status() + L"  ·  " : L"") + wide(document_->encoding) + (crlf ? L"  ·  CRLF" : L"  ·  LF");
 }
 Viewer::State Viewer::state() const {
+    if (csv_.active()) return csv_.state();
     if (wrapping() && diff_ && diffLayout_.rows()) {
         const auto display = diffLayout_.row(static_cast<size_t>(top_));
         const auto change = diff_->displayRow(display.row, inlineView_);
@@ -229,6 +266,7 @@ void Viewer::restoreTop(const State& state) {
 }
 void Viewer::restore(const State& state) {
     if (!document_) return;
+    if (csv_.active()) { csv_.restore(state); return; }
     restoreTop(state);
     caretTrailing_ = false;
     left_ = state.left; after_ = state.after;
@@ -268,6 +306,7 @@ RECT Viewer::contentRect() const {
 int Viewer::visibleRows() const { const auto r = contentRect(); return std::max(1, (static_cast<int>(r.bottom) - contentTop()) / cellHeight_); }
 void Viewer::scrollbars(bool followTail) {
     if (!window_) return;
+    if (csv_.active()) { csv_.layout(); return; }
     if (html_.active()) {
         SCROLLINFO info{sizeof(info), SIF_RANGE | SIF_PAGE | SIF_POS, 0, 0, 1, 0, 0};
         SetScrollInfo(window_, SB_VERT, &info, FALSE); SetScrollInfo(window_, SB_HORZ, &info, FALSE);
@@ -410,6 +449,7 @@ void Viewer::findLayout() {
     if (findBar_.window()) findBar_.layout(0, Scrollbars::contentRect(window_).right, header_);
 }
 std::optional<std::wstring> Viewer::searchSeed() const {
+    if (csv_.active()) return csv_.searchSeed();
     if (!document_ || html_.active() || anchor_ == caret_) return {};
     const size_t begin = std::min(anchor_, caret_), end = std::max(anchor_, caret_);
     if (end - begin > 2048) return {};
@@ -420,6 +460,7 @@ std::optional<std::wstring> Viewer::searchSeed() const {
 void Viewer::find() {
     if (!document_) return;
     const auto seed = searchSeed();
+    if (csv_.active()) setCsvTable(false);
     if (html_.active()) setHtmlPreview(false);
     findBar_.show(seed); scrollbars(); findLayout(); requestFind();
     InvalidateRect(window_, nullptr, FALSE);
@@ -431,6 +472,7 @@ void Viewer::findNext(bool backwards) {
 }
 bool Viewer::findKey(const MSG& message) {
     if (html_.active()) return false;
+    if (csv_.active() && csv_.composing() && message.hwnd == window_) return false;
     if (ime_.active() && message.hwnd == window_) return false;
     if (message.message != WM_KEYDOWN || !document_) return false;
     const bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0, shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
@@ -480,6 +522,7 @@ bool Viewer::selectSearch(size_t begin, size_t end, const std::string& query, bo
     const auto match = pattern.next(text, cursor, text.size());
     if (!match || match->begin != 0 || match->end != text.size()) return false;
     if (html_.active()) setHtmlPreview(false);
+    if (csv_.active()) setCsvTable(false);
     revealFind_ = false; revealRange({begin, end}); return true;
 }
 void Viewer::revealRange(TextMatch match) {
@@ -537,6 +580,7 @@ RECT Viewer::inputRect() const {
     return {textGutter() + (splitDiff() ? rect.right / 2 + 1 : 0), contentTop() + (stickyFile() ? cellHeight_ : 0), rect.right, rect.bottom};
 }
 void Viewer::caretPosition(bool reveal) {
+    if (csv_.active()) return;
     size_t anchor = 0, caret = 0;
     if (!editSelection(anchor, caret)) {
         KillTimer(window_, caretTimer); caretVisible_ = false;
@@ -565,7 +609,7 @@ void Viewer::caretPosition(bool reveal) {
     }
 }
 bool Viewer::editSelection(size_t& anchor, size_t& caret) const {
-    if (!edit_ || html_.active()) return false;
+    if (!edit_ || html_.active() || csv_.active()) return false;
     if (!diff_) { anchor = anchor_; caret = caret_; return true; }
     if (!after_) return false;
     const auto first = diff_->workingOffset(anchor_), last = diff_->workingOffset(caret_);
@@ -679,6 +723,7 @@ void Viewer::paintGitMarks() {
     renderer_.fill(static_cast<float>(left), static_cast<float>(mask.top), static_cast<float>(r.right), static_cast<float>(mask.bottom), background);
 }
 void Viewer::paint() {
+    if (csv_.active()) { csv_.paint(); return; }
     Renderer::Paint paint(renderer_, window_); if (!paint) return;
     auto& dc = renderer_; dc.font(Renderer::Font::Ui);
     const auto r = contentRect();
@@ -814,6 +859,8 @@ LRESULT Viewer::handle(UINT m, WPARAM a, LPARAM b) {
     if (html_.active() && (m == WM_MOUSEWHEEL || m == WM_MOUSEHWHEEL || m == WM_VSCROLL || m == WM_HSCROLL)) return 0;
     LRESULT result = 0;
     if (scrollbars_.handle(window_, m, a, b, result)) return result;
+    if (csv_.active() && m == WM_KEYDOWN && findKey(MSG{window_, m, a, b, 0, {0, 0}})) return 0;
+    if (csv_.active() && csv_.handle(m, a, b, result)) return result;
     switch (m) {
     case WM_PAINT: paint(); return 0;
     case WM_ERASEBKGND: return 1;
@@ -966,6 +1013,7 @@ LRESULT Viewer::handle(UINT m, WPARAM a, LPARAM b) {
 
 size_t poppy::Viewer::documentBytes() const {
     size_t bytes = textLayout_.bytes() + diffLayout_.bytes() + (document_ ? document_->text.capacity() + document_->lines.capacity() * sizeof(uint32_t) + document_->states.capacity() * sizeof(LexState) : 0);
+    bytes += csv_.bytes();
     bytes += gitChangedLines_.capacity() / 8;
     bytes += gitChangeRanges_.capacity() * sizeof(LineChange);
     bytes += diffChangeRanges_.capacity() * sizeof(DiffChange);

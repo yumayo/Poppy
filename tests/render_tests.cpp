@@ -804,6 +804,77 @@ void cellPositions() {
             check(actual.pixel(x, y) == expected.pixel(x, y), "Recreating the render target changed the drawing");
     }
 }
+void csvTables() {
+    Viewer viewer;
+    const auto instance = GetModuleHandleW(nullptr);
+    const auto parent = CreateWindowExW(0, L"STATIC", L"CSV table test", WS_POPUP | WS_CLIPCHILDREN,
+        0, 0, 1600, 1000, nullptr, nullptr, instance, nullptr);
+    check(parent != nullptr, "Cannot create CSV table test owner");
+    struct Owner { HWND window; ~Owner() { DestroyWindow(window); } } owner{parent};
+    viewer.create(parent, instance); const auto window = viewer.window();
+    ShowWindow(parent, SW_SHOWNOACTIVATE);
+    BYTE originalKeys[256]{}; GetKeyboardState(originalKeys);
+    struct Keys { BYTE* value; ~Keys() { SetKeyboardState(value); } } keys{originalKeys};
+    const auto key = [&](WPARAM code, bool ctrl = false, bool shift = false) {
+        BYTE state[256]{}; state[VK_CONTROL] = ctrl ? 0x80 : 0; state[VK_SHIFT] = shift ? 0x80 : 0;
+        SetKeyboardState(state); SendMessageW(window, WM_KEYDOWN, code, 0); SetKeyboardState(originalKeys);
+    };
+    const auto type = [&](const std::wstring& text) { for (const auto ch : text) SendMessageW(window, WM_CHAR, ch, 0); };
+    for (const auto dpi : {96u, 144u, 192u}) {
+        const auto px = [&](int value) { return MulDiv(value, dpi, 96); };
+        viewer.setDpi(dpi); Renderer metrics; metrics.setDpi(dpi);
+        MoveWindow(window, 0, 0, px(700), px(400), FALSE);
+        const int rowHeight = std::max(px(28), metrics.textHeight() + px(8));
+        const auto point = [&](int row, int column) { return MAKELPARAM(px(52 + column * 160 + 20), px(34) + rowHeight * (row + 1) + rowHeight / 2); };
+        const auto click = [&](int row, int column) { SendMessageW(window, WM_LBUTTONDOWN, MK_LBUTTON, point(row, column)); SendMessageW(window, WM_LBUTTONUP, 0, point(row, column)); };
+        auto buffer = std::make_shared<EditBuffer>();
+        const std::string source = u8"name,qty,note\r\n豆腐,001,\"a,b\"\r\n豆,002,\"multi\r\nline\"\r\n";
+        buffer->document.text = source; indexDocument(buffer->document); buffer->initialize(source);
+        viewer.edit(buffer, L"table.CSV"); SetFocus(window);
+        check(viewer.csvAvailable() && viewer.csvTable() && !buffer->dirty(), "CSV did not open as an unchanged table");
+        check(viewer.textStatus().find(L"3 rows × 3 columns") != std::wstring::npos, "Multiline CSV has incorrect table dimensions");
+        click(1, 1); check(viewer.state().caret == source.find("001"), "CSV cell hit testing did not follow DPI");
+        key(VK_F2); key('A', true); type(L"1,2"); key(VK_RETURN);
+        check(buffer->document.text == u8"name,qty,note\r\n豆腐,\"1,2\",\"a,b\"\r\n豆,002,\"multi\r\nline\"\r\n", "Cell editing failed to quote the value or changed unrelated cells");
+        check(viewer.textStatus().find(L"B3") == 0, "Enter did not advance one CSV cell");
+        key('Z', true); check(buffer->document.text == source && !buffer->dirty(), "Undo did not restore a complete cell edit");
+        key('Y', true); check(buffer->dirty(), "Cannot redo a cell edit");
+        click(1, 1); key(VK_F2); key('A', true); type(L"cancelled"); key(VK_ESCAPE);
+        check(buffer->document.text.find("\"1,2\"") != std::string::npos, "Escape did not cancel the current cell edit");
+        CsvTable table; check(table.parse(buffer->document.text), "Cell editing broke CSV syntax");
+        viewer.restore({0, 0, table.offset({1, 0}), table.offset({2, 1})}); key('C', true);
+        check(clipboardText(window) == L"豆腐\t1,2\r\n豆\t002", "CSV range copy is not Excel-compatible TSV");
+        viewer.restore({}); check(copyText(window, L"A\tB\r\nC\t\"line1\r\nline2\""), "Cannot set Excel clipboard fixture"); key('V', true);
+        check(table.parse(buffer->document.text) && table.value(buffer->document.text, {0, 0}) == "A" && table.value(buffer->document.text, {1, 1}) == "line1\r\nline2", "Rectangular Excel paste lost a multiline cell");
+        key(VK_DELETE);
+        check(table.parse(buffer->document.text) && table.value(buffer->document.text, {0, 0}).empty() && table.value(buffer->document.text, {1, 1}).empty(), "Delete did not clear the selected rectangle");
+        click(0, 0); type(L"saved"); std::string saved;
+        viewer.save = [&] { saved = buffer->document.text; }; key('S', true); viewer.save = {};
+        check(saved.find("saved") == 0, "Saving omitted an active cell edit");
+        viewer.setCsvTable(false); check(!viewer.csvTable() && viewer.buffer() == buffer, "Source mode lost the shared edit buffer");
+        viewer.edit(buffer, L"table.CSV", true); check(!viewer.csvTable(), "CSV reload lost Source mode");
+        viewer.setCsvTable(true); viewer.edit(buffer, L"table.CSV", true); check(viewer.csvTable(), "CSV reload lost Table mode");
+        viewer.restore({});
+        SCROLLINFO before{sizeof(before), SIF_ALL, 0, 0, 0, 0, 0}; GetScrollInfo(window, SB_HORZ, &before);
+        const auto edge = MAKELPARAM(px(212), px(40));
+        SendMessageW(window, WM_LBUTTONDOWN, MK_LBUTTON, edge);
+        SendMessageW(window, WM_MOUSEMOVE, MK_LBUTTON, MAKELPARAM(px(292), px(40)));
+        SendMessageW(window, WM_LBUTTONUP, 0, MAKELPARAM(px(292), px(40)));
+        SCROLLINFO after{sizeof(after), SIF_ALL, 0, 0, 0, 0, 0}; GetScrollInfo(window, SB_HORZ, &after);
+        check(after.nMax == before.nMax + px(80), "CSV column resizing did not update the horizontal range");
+        RedrawWindow(window, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW);
+        viewer.find(); check(!viewer.csvTable(), "CSV search did not switch to searchable source");
+        const auto find = FindWindowExW(window, nullptr, L"PoppyFindBar", nullptr); SendMessageW(find, WM_KEYDOWN, VK_ESCAPE, 0);
+        viewer.setCsvTable(true); const auto selected = buffer->document.text.find("saved");
+        check(viewer.selectSearch(selected, selected + 5, "saved", true) && !viewer.csvTable(), "Project search did not reveal CSV source");
+        auto readonly = std::make_shared<Document>(buffer->document); viewer.show(readonly, L"readonly.csv");
+        const auto unchanged = readonly->text; type(L"ignored"); key(VK_DELETE); check(readonly->text == unchanged, "Read-only CSV was edited");
+        auto invalid = std::make_shared<Document>(); invalid->text = "\"unclosed"; indexDocument(*invalid); viewer.show(invalid, L"invalid.csv");
+        check(viewer.csvTable() && viewer.textStatus().find(L"Invalid CSV") == 0, "Invalid CSV did not expose a recoverable table error");
+        viewer.setCsvTable(false); check(!viewer.csvTable(), "Invalid CSV could not switch to Source");
+        viewer.show(readonly, L"ordinary.txt"); check(!viewer.csvAvailable() && !viewer.csvTable(), "CSV mode leaked into a text file");
+    }
+}
 void htmlPreviewSwitching() {
     Viewer viewer;
     const auto instance = GetModuleHandleW(nullptr);
@@ -3103,7 +3174,7 @@ int main(int argc, char** argv) {
             shutdownProgress();
             persistentErrorPopup();
             editorBottomPadding(); editorTailFollowing();
-            htmlPreviewSwitching();
+            csvTables(); htmlPreviewSwitching();
             terminalAsyncStartup(); terminalProcessShutdown(); terminalImeOutput();
             statusBarLimits(); treeMultipleSelection(); commitMessagePopup(); inlineTreeInput(); inlineTreeCreation(); gitCommitInput(); cellPositions(); colorsAndClipping(); imagePreviews(); fractionalMarkers(); smoothIcons(); windowTargets(); editableDiff(); editorCaret(); delayedLoadingMessages(); imeCellRendering(); imeTerminalInsertion(); imeUiRendering(); imePositions(); editorWordSelection(); editorWordMovement(); editorWordDeletion(); editorLineShortcuts(); editorWrapping(); diffWrapping(); documentFind(); horizontalWheelScrolling(); continuousViewerScrolling(); selectionAutoScrolling(); terminalGitBashSocketEnvironment(); terminalSelectionAutoScrolling(); themedScrollbars(); quickOpenStability();
             std::cout << "Direct2D rendering tests passed\n";
