@@ -83,9 +83,11 @@ using Tab = EditorTab;
 std::wstring tabKey(const Tab& tab) {
     if (!tab.terminalId.empty()) return L"terminal:" + wide(tab.terminalId);
     return pathKey(tab.path) + L"\n" + std::to_wstring(static_cast<int>(tab.diffKind)) + L"\n" + wide(tab.revision) +
-        (tab.diffKind == GitDiffKind::Commit && !tab.diff ? L"\nrevision" : L"") + (tab.allChanges ? L"\nall" : L"") + (tab.gitRoot.empty() ? L"" : L"\n" + pathKey(tab.gitRoot));
+        (tab.diffKind == GitDiffKind::Commit && !tab.diff ? L"\nrevision" : L"") + (tab.allChanges ? L"\nall" : L"") + (tab.gitRoot.empty() ? L"" : L"\n" + pathKey(tab.gitRoot)) +
+        (tab.comparePath.empty() ? L"" : L"\nfile:" + pathKey(tab.comparePath));
 }
 std::wstring tabTitle(const Tab& tab) {
+    if (!tab.comparePath.empty()) return tab.comparePath.filename().native() + L" ↔ " + tab.path.filename().native() + L" (diff)";
     auto title = tab.allChanges ? L"All Changes · " + tab.path.filename().native() : tab.path.filename().native();
     if (tab.diffKind == GitDiffKind::Compare) {
         const auto start = tab.revision.find(".."), end = tab.revision.find_first_not_of('.', start);
@@ -326,6 +328,7 @@ private:
     std::wstring repositoryLabel(const ResourceId& root) const;
     void refreshBranches();
     void chooseComparison(TreeItem item, std::optional<QuickOpenItem> source = {});
+    void chooseFileComparison();
     void clearComparison(TreeItem item);
     void requestComparison(TreeItem item, bool open = true);
     void requestHistory(TreeItem item, bool more = false);
@@ -749,6 +752,7 @@ void ProjectRuntime::Impl::create() {
     comparePicker_.create(window_, instance_, QuickOpenMode::Picker);
     quickOpen_.updated = [this] { statusDirty_ = true; };
     quickOpen_.opened = [this](const ResourceId& path) { openFile(path); SetFocus(selectedWindow()); };
+    quickOpen_.commanded = [this](const QuickOpenItem& command) { if (command.id == "compare-active-file") chooseFileComparison(); };
     searchPane_.create(window_, instance_);
     searchPane_.opened = [this](const ContentMatch& match, const std::string& query, bool matchCase) { openContentResult(match, query, matchCase); };
     searchPane_.exit = [this] { SetFocus(selectedWindow()); };
@@ -1576,6 +1580,22 @@ void ProjectRuntime::Impl::chooseComparison(TreeItem item, std::optional<QuickOp
     };
     comparePicker_.show();
 }
+void ProjectRuntime::Impl::chooseFileComparison() {
+    saveTab();
+    if (activeTab_ >= tabs_.size() || !tabs_[activeTab_].terminalId.empty() || tabs_[activeTab_].diff || !tabs_[activeTab_].buffer) return;
+    const auto path = tabs_[activeTab_].path; const auto generation = generation_;
+    quickOpen_.chooseFile(L"Compare " + path.filename().native() + L" with ...", path, [this, path, generation](const ResourceId& comparison) {
+        if (generation != generation_ || pathKey(path) == pathKey(comparison) || !root_.contains(comparison)) return;
+        endTabDrag(); saveTab();
+        Tab target; target.path = path; target.comparePath = comparison; target.diff = true;
+        const auto index = openEditorFilePreview(tabs_, std::move(target), dock_, focusedGroup_);
+        if (index >= tabs_.size()) { status(L"Cannot open diff: too many tab groups."); return; }
+        focusedGroup_ = tabs_[index].group;
+        for (auto& tab : tabs_) if (tab.group == focusedGroup_) tab.displayed = false;
+        tabs_[index].displayed = true; activeTab_ = index; layout(); loadTab(); SetFocus(selectedWindow());
+        recordEditorNavigation();
+    });
+}
 void ProjectRuntime::Impl::clearComparison(TreeItem item) {
     const auto node = historyNode(item); if (!node || node->kind != HistoryKind::Compare) return;
     comparePicker_.close(false);
@@ -2220,6 +2240,7 @@ void ProjectRuntime::Impl::applyRelocation(const ResourceId& source, const Resou
         if (refreshView && moving && node(parent)) requestDirectory(parent);
     }
     for (auto& tab : tabs_) {
+        tab.comparePath = relocateResource(tab.comparePath, source, destination);
         const auto gitRoot = relocateResource(tab.gitRoot, source, destination);
         const bool repositoryMoved = pathKey(gitRoot) != pathKey(tab.gitRoot);
         tab.gitRoot = gitRoot;
@@ -2231,6 +2252,7 @@ void ProjectRuntime::Impl::applyRelocation(const ResourceId& source, const Resou
     }
     for (const auto& weak : navigationTabs_) if (const auto entry = weak.lock()) {
         auto& tab = entry->tab;
+        tab.comparePath = relocateResource(tab.comparePath, source, destination);
         const auto gitRoot = relocateResource(tab.gitRoot, source, destination);
         const bool repositoryMoved = pathKey(gitRoot) != pathKey(tab.gitRoot);
         tab.gitRoot = gitRoot;
@@ -2359,10 +2381,11 @@ void ProjectRuntime::Impl::connectRemote() {
                 expandedPaths_ = std::move(expanded); expandedPaths_[pathKey(root_)] = root_;
                 pendingTreeSelection_ = relocateResource(pendingTreeSelection_, previous, root_);
                 pendingExplorerFile_ = relocateResource(pendingExplorerFile_, previous, root_);
-                for (auto& tab : tabs_) { tab.path = relocateResource(tab.path, previous, root_); tab.gitRoot = relocateResource(tab.gitRoot, previous, root_); }
+                for (auto& tab : tabs_) { tab.path = relocateResource(tab.path, previous, root_); tab.gitRoot = relocateResource(tab.gitRoot, previous, root_); tab.comparePath = relocateResource(tab.comparePath, previous, root_); }
                 for (const auto& weak : navigationTabs_) if (const auto entry = weak.lock()) {
                     entry->tab.path = relocateResource(entry->tab.path, previous, root_);
                     entry->tab.gitRoot = relocateResource(entry->tab.gitRoot, previous, root_);
+                    entry->tab.comparePath = relocateResource(entry->tab.comparePath, previous, root_);
                 }
                 for (const auto& pair : nodes_) if (auto n = node(pair.second)) { n->path = relocateResource(n->path, previous, root_); n->loading = false; updateLabel(pair.second); }
                 terminal_.relocate(previous, root_); terminal_.setDirectory(root_); quickOpen_.setRoot(root_); searchPane_.setContext(root_, provider_);
@@ -2436,6 +2459,7 @@ void ProjectRuntime::Impl::restoreProject(const ProjectSession& original) {
         const auto path = root_.at(saved.path);
         if (!path.is_absolute()) continue;
         Tab target{path, saved.diff, saved.fileView, saved.diffView, saved.pinned, {}, saved.group, saved.displayed, saved.diffKind, saved.revision, saved.allChanges, {}, {}, false, saved.gitRoot.empty() ? ResourceId{} : root_.at(saved.gitRoot), {}, false, {}, {}};
+        if (!saved.comparePath.empty()) { target.comparePath = root_.at(saved.comparePath); target.diff = true; }
         const auto duplicate = std::find_if(tabs_.begin(), tabs_.end(), [&](const Tab& tab) { return tabKey(tab) == tabKey(target); });
         if (duplicate != tabs_.end()) continue;
         if (i <= state.activeTab) activeTab_ = tabs_.size();
@@ -2767,7 +2791,7 @@ std::shared_ptr<EditBuffer> ProjectRuntime::Impl::shareBuffer(const ResourceId& 
         *buffer = std::move(*loaded);
         for (auto& view : viewers_) if (view.buffer() == buffer) view.refreshBuffer(true);
     }
-    if (buffer) for (auto& tab : tabs_) if (tab.path == path && !tab.allChanges && (tab.diffKind == GitDiffKind::Automatic || tab.diffKind == GitDiffKind::Changes)) tab.buffer = buffer;
+    if (buffer) for (auto& tab : tabs_) if (tab.path == path && tab.comparePath.empty() && !tab.allChanges && (tab.diffKind == GitDiffKind::Automatic || tab.diffKind == GitDiffKind::Changes)) tab.buffer = buffer;
     keepModifiedEditorTabs(tabs_);
     return buffer;
 }
@@ -2812,7 +2836,7 @@ void ProjectRuntime::Impl::openFile(const ResourceId& path, bool diff, bool reve
     if (path.empty()) { status(L"This filename cannot be represented as UTF-8 and cannot be opened or renamed."); return; }
     endTabDrag();
     const auto key = pathKey(path);
-    const auto found = std::find_if(tabs_.begin(), tabs_.end(), [&](const Tab& tab) { return tab.diffKind == GitDiffKind::Automatic && pathKey(tab.path) == key; });
+    const auto found = std::find_if(tabs_.begin(), tabs_.end(), [&](const Tab& tab) { return tab.comparePath.empty() && tab.diffKind == GitDiffKind::Automatic && pathKey(tab.path) == key; });
     size_t index = static_cast<size_t>(found - tabs_.begin());
     if (found != tabs_.end() && index == activeTab_ && (!diff || found->diff)) {
         if (revealExplorer) revealActiveFile();
@@ -2829,7 +2853,7 @@ void ProjectRuntime::Impl::openContentResult(const ContentMatch& match, const st
     const auto path = (root_ / std::string_view(match.relative)).lexically_normal();
     if (!root_.contains(path)) { status(L"Invalid search result path."); return; }
     endTabDrag(); saveTab();
-    auto found = std::find_if(tabs_.begin(), tabs_.end(), [&](const Tab& tab) { return tab.diffKind == GitDiffKind::Automatic && tab.path == path; });
+    auto found = std::find_if(tabs_.begin(), tabs_.end(), [&](const Tab& tab) { return tab.comparePath.empty() && tab.diffKind == GitDiffKind::Automatic && tab.path == path; });
     size_t index = static_cast<size_t>(found - tabs_.begin());
     if (found == tabs_.end()) { Tab tab; tab.path = path; index = openEditorFilePreview(tabs_, std::move(tab), dock_, focusedGroup_); }
     if (index >= tabs_.size()) { status(L"Cannot open file: too many tab groups."); return; }
@@ -3020,6 +3044,33 @@ void ProjectRuntime::Impl::loadTab(bool preserve, int group, bool revealExplorer
     const auto& tab = tabs_[index];
     if (!tab.terminalId.empty()) { viewers_[group].message(L""); return; }
     const auto path = tab.path;
+    if (!tab.comparePath.empty()) {
+        const auto comparison = tab.comparePath;
+        if (root_.wsl() && !connected_) { viewers_[group].message(L"WSL disconnected. Press F5 to reconnect.", path); return; }
+        const auto snapshot = [this](const ResourceId& file) -> std::shared_ptr<const Document> {
+            for (const auto& tab : tabs_) if (tab.path == file && tab.buffer && (tab.buffer->dirty() || tab.buffer->saving))
+                return std::make_shared<Document>(tab.buffer->document);
+            return {};
+        };
+        const auto before = snapshot(comparison), after = snapshot(path);
+        const auto state = tab.diffView; const auto serial = serial_[group], generation = generation_;
+        if (!preserve) viewers_[group].loading(L"Loading file comparison…", path);
+        worker_->submit(L"file:" + std::to_wstring(group), [this, group, path, comparison, before, after, state, serial, generation, preserve] {
+            const auto left = before ? nullptr : readDocument(*provider_, comparison);
+            const auto right = after ? nullptr : readDocument(*provider_, path);
+            const auto leftDocument = before ? before : left->document, rightDocument = after ? after : right->document;
+            const auto error = !leftDocument ? comparison.filename().native() + L": " + (left->error.empty() ? L"Only text files can be compared." : left->error) :
+                !rightDocument ? path.filename().native() + L": " + (right->error.empty() ? L"Only text files can be compared." : right->error) : std::wstring{};
+            auto document = error.empty() ? std::make_shared<DiffDocument>(workingDiff(*leftDocument, *rightDocument)) : nullptr;
+            worker_->complete([this, group, path, document, error, state, serial, generation, preserve] {
+                if (generation != generation_ || serial != serial_[group]) return;
+                if (!error.empty()) { viewers_[group].message(error, path); status(L"File comparison unavailable"); return; }
+                viewers_[group].showDiff(document, path, preserve); if (!preserve) viewers_[group].restore(state);
+                status(L"File comparison · READ ONLY · F7: split / inline");
+            });
+        });
+        return;
+    }
     if (!tab.allChanges && (tab.diffKind == GitDiffKind::Automatic || tab.diffKind == GitDiffKind::Changes)) shareBuffer(path);
     const auto state = tab.diff ? tab.diffView : tab.fileView;
     const auto serial = serial_[group], generation = generation_;
@@ -3238,6 +3289,7 @@ void ProjectRuntime::Impl::refreshEditorGit(int group) {
 void ProjectRuntime::Impl::showDiff() {
     if (activeTab_ >= tabs_.size() || !tabs_[activeTab_].terminalId.empty()) { status(L"Select a file to view its Git diff."); return; }
     auto& tab = tabs_[activeTab_];
+    if (!tab.comparePath.empty()) { const auto path = tab.path; openFile(path); return; }
     if (tab.diffKind != GitDiffKind::Automatic) {
         if (!tab.allChanges && tab.diffKind != GitDiffKind::Commit && tab.diffKind != GitDiffKind::Compare) { const auto path = tab.path; openFile(path); }
         else status(L"This Git comparison is read only. F7: split / inline.");
@@ -3318,7 +3370,7 @@ void ProjectRuntime::Impl::refresh(bool force) {
         }
     }
     refreshGit(files);
-    const bool showingGitChanges = std::any_of(tabs_.begin(), tabs_.end(), [](const Tab& tab) { return tab.displayed && tab.diff && tab.diffKind != GitDiffKind::Commit && tab.diffKind != GitDiffKind::Compare; });
+    const bool showingGitChanges = std::any_of(tabs_.begin(), tabs_.end(), [](const Tab& tab) { return tab.displayed && tab.diff && tab.comparePath.empty() && tab.diffKind != GitDiffKind::Commit && tab.diffKind != GitDiffKind::Compare; });
     if (!tabs_.empty() && (force || fileDirty_ || showingGitChanges)) {
         if (!IsWindowVisible(window_) && !viewer().hasDocument()) { fileDirty_ = true; return; }
         saveTab(); loadGroups(true);
@@ -3353,7 +3405,7 @@ void ProjectRuntime::Impl::pollWatch() {
                 dirty_ = true; filesDirty_ |= changes.files; lastEvent_ = now;
                 fileDirty_ |= changes.allContent;
                 for (const auto& path : changes.contentPaths) for (const auto& tab : tabs_)
-                    if (tab.displayed && path.contains(tab.path)) fileDirty_ = true;
+                    if (tab.displayed && (path.contains(tab.path) || path.contains(tab.comparePath))) fileDirty_ = true;
             }
         }
     }
@@ -3368,7 +3420,7 @@ void ProjectRuntime::Impl::pollWatch() {
             relevant |= change.relevant; filesDirty_ |= change.files;
             if (change.content && !tabs_.empty()) {
                 const auto changed = pathKey(root_ / name), selected = pathKey(selectedPath());
-                if (changed == selected || selected.rfind(changed + L"\\", 0) == 0 || std::any_of(tabs_.begin(), tabs_.end(), [&](const Tab& tab) { return tab.displayed && changed == pathKey(tab.path); })) fileDirty_ = true;
+                if (changed == selected || selected.rfind(changed + L"\\", 0) == 0 || std::any_of(tabs_.begin(), tabs_.end(), [&](const Tab& tab) { return tab.displayed && (changed == pathKey(tab.path) || changed == pathKey(tab.comparePath)); })) fileDirty_ = true;
             }
             if (!info->NextEntryOffset) break;
             offset += info->NextEntryOffset;
@@ -3583,6 +3635,13 @@ bool ProjectRuntime::Impl::key(const MSG& message) {
         if (key && ctrl && !shift && !(GetKeyState(VK_MENU) & 0x8000) && message.wParam == 'N') { newFile(); return true; }
         if (key && ctrl && shift && !(GetKeyState(VK_MENU) & 0x8000) && message.wParam == 'F') { quickOpen_.close(); selectSidebar(Sidebar::Search); return true; }
         if (key && ctrl && !shift && !(GetKeyState(VK_MENU) & 0x8000) && message.wParam == 'P') { comparePicker_.close(); quickOpen_.show(); return true; }
+        if (key && ctrl && shift && !(GetKeyState(VK_MENU) & 0x8000) && message.wParam == 'P') {
+            comparePicker_.close();
+            std::vector<QuickOpenItem> commands;
+            if (activeTab_ < tabs_.size() && tabs_[activeTab_].terminalId.empty() && !tabs_[activeTab_].diff && tabs_[activeTab_].buffer)
+                commands.push_back({"compare-active-file", L"Compare Active File With ...", tabs_[activeTab_].path.filename().native()});
+            quickOpen_.showCommands(std::move(commands)); return true;
+        }
         if (key && ctrl && message.wParam == 'O') { quickOpen_.close(); chooseFolder(); return true; }
         if ((quickOpen_.visible() || comparePicker_.visible()) && key) return false;
         const bool searchFocus = message.hwnd == searchPane_.window() || IsChild(searchPane_.window(), message.hwnd);

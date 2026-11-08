@@ -18,6 +18,8 @@ public:
     void setProjects(std::vector<ResourceId> projects);
     void setPicker(std::wstring title, std::function<std::vector<QuickOpenItem>(const std::string&, const std::atomic<bool>*)> search);
     void show();
+    void showCommands(std::vector<QuickOpenItem> commands);
+    void chooseFile(std::wstring title, const ResourceId& exclude, std::function<void(const ResourceId&)> picked);
     void close(bool restoreFocus = true);
     void layout();
     void refresh();
@@ -28,10 +30,12 @@ public:
     bool indexing() const { return indexing_; }
     std::function<void(const ResourceId&)> opened;
     std::function<void(const QuickOpenItem&)> picked;
+    std::function<void(const QuickOpenItem&)> commanded;
     std::function<void()> updated;
 private:
     static LRESULT CALLBACK procedure(HWND, UINT, WPARAM, LPARAM);
     LRESULT handle(UINT, WPARAM, LPARAM);
+    void showPopup();
     void paint();
     void request();
     void changed();
@@ -45,6 +49,7 @@ private:
     size_t next(size_t position) const;
     int px(int value) const { return MulDiv(value, dpi_, 96); }
     int rows() const;
+    size_t itemCount() const { return result_.matches.size() + commandMatches_.size(); }
     HWND window_ = nullptr, previousFocus_ = nullptr;
     Renderer renderer_;
     InputLine line_;
@@ -55,8 +60,13 @@ private:
     ResourceId root_;
     bool projectMode_ = false;
     bool pickerMode_ = false;
+    bool commandMode_ = false;
     std::wstring pickerTitle_;
     std::vector<QuickOpenItem> pickerItems_;
+    std::vector<QuickOpenItem> commands_, commandMatches_;
+    std::wstring fileTitle_;
+    ResourceId excludedFile_;
+    std::function<void(const ResourceId&)> filePicked_;
     std::function<std::vector<QuickOpenItem>(const std::string&, const std::atomic<bool>*)> pickerSearch_;
     std::vector<ResourceId> projects_;
     std::shared_ptr<ProjectProvider> provider_;

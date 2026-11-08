@@ -116,6 +116,23 @@ void editorTabTests() {
         revisions.tabs[1].diffKind == GitDiffKind::Commit && revisions.tabs[1].revision == "abc123",
         "Saving tabs lost the distinction between a historical file and its diff");
 
+    // File comparisons have distinct identities and never own editable buffers.
+    tabs.clear();
+    auto fileComparison = target("active.cpp"); fileComparison.diff = true;
+    fileComparison.comparePath = target("left.cpp").path;
+    openEditorPreview(tabs, target("active.cpp")); tabs[0].buffer = buffer; tabs[0].preview = false;
+    check(openEditorPreview(tabs, fileComparison) == 1 && !tabs[1].buffer,
+          "A read-only file comparison reused the editable tab or its buffer");
+    tabs[1].preview = false; tabs[1].diffView.top = 12;
+    fileComparison.comparePath = target("other.cpp").path;
+    check(openEditorPreview(tabs, fileComparison) == 2, "Different file comparison targets reused the same tab");
+    fileComparison.comparePath = target("left.cpp").path;
+    check(openEditorPreview(tabs, fileComparison) == 1 && tabs[1].diffView.top == 12,
+          "Reopening a file comparison lost its view state");
+    ProjectSession comparisons; saveEditorTabs(comparisons, tabs, 1);
+    check(comparisons.tabs.size() == 2 && comparisons.tabs[1].comparePath == fileComparison.comparePath.u8string(),
+          "Saving permanent file comparisons lost the comparison path");
+
     // Clean file/diff transitions also share Undo history before replacement.
     tabs.clear(); openEditorPreview(tabs, target("clean.cpp")); tabs[0].buffer = buffer;
     openEditorPreview(tabs, target("clean.cpp", 0, GitDiffKind::Changes));

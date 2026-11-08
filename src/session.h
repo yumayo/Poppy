@@ -26,6 +26,7 @@ struct SavedTab {
     std::string revision = {};
     bool allChanges = false;
     std::string gitRoot = {};
+    std::string comparePath = {};
 };
 struct SavedTerminal {
     std::string id = "shell-1", name = "Shell", directory;

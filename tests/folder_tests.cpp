@@ -2433,6 +2433,71 @@ void quickOpenTests(const fs::path& executable) {
     click(app.window, px(12), px(22));
     check(!IsWindowVisible(palette), "Clicking outside quick open did not close it");
 }
+void fileComparisonTests(const fs::path& executable) {
+    Fixture fixture;
+    { std::ofstream file(fixture.root / L"active.txt", std::ios::binary); file << "active\n"; }
+    { std::ofstream file(fixture.root / L"比較.txt", std::ios::binary); file << "target\n"; }
+    Application app(executable, fixture.root); app.tree();
+    const auto viewer = FindWindowExW(app.window, nullptr, L"PoppyViewer", nullptr);
+    const auto palette = FindWindowExW(app.window, nullptr, L"PoppyQuickOpen", nullptr);
+    const auto key = [&](WPARAM value, bool ctrl = false) {
+        check(AttachThreadInput(GetCurrentThreadId(), app.process.dwThreadId, TRUE) != FALSE, "Cannot attach file comparison input");
+        BYTE previous[256]{}, keys[256]{}; GetKeyboardState(previous);
+        if (ctrl) keys[VK_CONTROL] = keys[VK_LCONTROL] = 0x80;
+        SetFocus(viewer); SetKeyboardState(keys); send(viewer, WM_KEYDOWN, value); SetKeyboardState(previous);
+        AttachThreadInput(GetCurrentThreadId(), app.process.dwThreadId, FALSE);
+    };
+    const auto text = [&] {
+        key('A', true); key('C', true);
+        if (!OpenClipboard(app.host)) return std::wstring{};
+        const auto value = GetClipboardData(CF_UNICODETEXT);
+        const auto data = value ? static_cast<const wchar_t*>(GlobalLock(value)) : nullptr;
+        const std::wstring result = data ? data : L"";
+        if (data) GlobalUnlock(value);
+        CloseClipboard(); return result;
+    };
+    const auto show = [&] {
+        controlShortcut(app, viewer, 'P', [&] { return IsWindowVisible(palette); }, "Ctrl+P did not open file search");
+    };
+    const auto type = [&](const std::wstring& query) { for (const auto ch : query) send(palette, WM_CHAR, ch); };
+    const auto accept = [&] {
+        waitFor([&] { send(palette, WM_KEYDOWN, VK_RETURN); return !IsWindowVisible(palette); }, "File comparison did not accept a matching file");
+    };
+    const auto open = [&](const std::wstring& query, const std::wstring& expected) {
+        show(); type(query); accept(); waitFor([&] { return text() == expected; }, "File comparison fixture did not load");
+    };
+    open(L"比較.txt", L"target\n"); key(VK_HOME, true); send(viewer, WM_CHAR, 'L');
+    open(L"active.txt", L"active\n"); key(VK_HOME, true); send(viewer, WM_CHAR, 'R');
+    const auto compare = [&] {
+        controlShortcut(app, viewer, 'P', [&] { return IsWindowVisible(palette); }, "Ctrl+Shift+P did not open commands", true);
+        wchar_t caption[256]{}; GetWindowTextW(palette, caption, 256);
+        check(std::wstring(caption) == L"Command palette", "Ctrl+Shift+P opened file search instead of commands");
+        type(L"Compare");
+        waitFor([&] {
+            send(palette, WM_KEYDOWN, VK_RETURN);
+            wchar_t title[256]{}; GetWindowTextW(palette, title, 256);
+            return IsWindowVisible(palette) && std::wstring(title) == L"Compare active.txt with ...";
+        }, "Compare Active File With did not ask for a target");
+    };
+    compare(); send(palette, WM_KEYDOWN, VK_ESCAPE);
+    check(!IsWindowVisible(palette) && text() == L"Ractive\n", "Cancelling file comparison changed the active editor");
+    compare(); type(L"比較.txt"); accept();
+    const auto hasBoth = [&] { const auto value = text(); return value.find(L"Ltarget") != value.npos && value.find(L"Ractive") != value.npos; };
+    waitFor(hasBoth, "A file comparison without Git lost unsaved content from either file");
+    check(visibleTabCount(app) == 3, "A file comparison replaced an unsaved editor");
+    send(viewer, WM_CHAR, '!');
+    check(hasBoth() && readText(fixture.root / L"active.txt") == "active\n" && readText(fixture.root / L"比較.txt") == "target\n",
+          "A read-only comparison changed a file or its unsaved contents");
+    send(app.window, WM_KEYDOWN, VK_F7);
+    waitFor([&] { const auto value = text(); return value.find(L"Ltarget") != value.npos && value.find(L"Ractive") == value.npos; },
+            "F7 did not switch file comparisons to split view");
+    send(app.window, WM_KEYDOWN, VK_F7); waitFor(hasBoth, "F7 did not restore inline file comparison");
+    send(app.window, WM_KEYDOWN, VK_F6);
+    waitFor([&] { return text() == L"Ractive\n"; }, "F6 did not return to the original unsaved file");
+    key('Z', true); clickTab(app, 0);
+    waitFor([&] { return text() == L"Ltarget\n"; }, "File comparison lost the target's editor");
+    key('Z', true);
+}
 void explorerActiveFileTests(const fs::path& executable) {
     Fixture fixture;
     fs::create_directories(fixture.root / L"a nested" / L"inner");
@@ -4132,7 +4197,7 @@ int wmain(int argc, wchar_t** argv) {
         if (argc == 3) { Fixture appData; AppDataEnvironment environment(appData.root); fileDockPlacementTests(fs::absolute(argv[1])); dockLayoutTests(fs::absolute(argv[1])); return 0; }
         for (const auto test : {folderTests, explorerSortTests, sidebarTests, treeInteractionTests, collapseAllSidebarTests, navigationHistoryTests, previewTabTests, explorerPreviewTabTests, previewTabSplitTests, fileDockPlacementTests, tabTests, rapidTabMiddleClickTests, pinnedTabTests,
                 tabCopyPathTests, bulkTabCloseTests, bulkTabSaveTests, bulkTabSplitTests, explorerActiveFileTests, htmlTabToolsTests, editorTailTests,
-                tabDragTests, wrappingTabDragTests, wrappingTabTests, renameTests, explorerMoveTests, explorerDeleteTests, explorerDeleteConfirmationTests, explorerMultipleSelectionTests, crossProjectFolderCopyTests, createItemTests, newFileShortcutTests, pasteImageTests, splitPaneTests, dockLayoutTests, quickOpenTests, fullSearchTests, searchRetentionTests, gitSidebarTests, gitIgnoredExplorerTests, gitAutoRefreshTests, editableGitDiffTests, branchSidebarTests, comparisonSidebarTests, multiRepositoryTests, sessionTests, multiProjectTests, recentProjectTests, projectDragTests, scrollingProjectDragTests, terminalTitleTests, terminalShellTests, terminalShortcutTests, terminalBackspaceTests}) {
+                tabDragTests, wrappingTabDragTests, wrappingTabTests, renameTests, explorerMoveTests, explorerDeleteTests, explorerDeleteConfirmationTests, explorerMultipleSelectionTests, crossProjectFolderCopyTests, createItemTests, newFileShortcutTests, pasteImageTests, splitPaneTests, dockLayoutTests, quickOpenTests, fileComparisonTests, fullSearchTests, searchRetentionTests, gitSidebarTests, gitIgnoredExplorerTests, gitAutoRefreshTests, editableGitDiffTests, branchSidebarTests, comparisonSidebarTests, multiRepositoryTests, sessionTests, multiProjectTests, recentProjectTests, projectDragTests, scrollingProjectDragTests, terminalTitleTests, terminalShellTests, terminalShortcutTests, terminalBackspaceTests}) {
             Fixture appData; AppDataEnvironment environment(appData.root);
             test(fs::absolute(argv[1]));
         }

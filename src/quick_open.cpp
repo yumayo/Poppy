@@ -59,6 +59,17 @@ void QuickOpen::setPicker(std::wstring title, std::function<std::vector<QuickOpe
     SetWindowTextW(window_, pickerTitle_.c_str());
 }
 void QuickOpen::show() {
+    if (commandMode_ || filePicked_) close();
+    showPopup();
+}
+void QuickOpen::showCommands(std::vector<QuickOpenItem> commands) {
+    if (!commandMode_) close();
+    commandMode_ = true; commands_ = std::move(commands);
+    SetWindowTextW(window_, L"Command palette");
+    if (visible_) request();
+    showPopup();
+}
+void QuickOpen::showPopup() {
     if (visible_) { ime_.cancel(window_); SetFocus(window_); anchor_ = 0; caret_ = query_.size(); caretChanged(); return; }
     previousFocus_ = GetFocus(); query_.clear(); caret_ = anchor_ = 0; line_.reset();
     selected_ = first_ = 0; wheel_ = 0; highSurrogate_ = 0; result_ = {}; visible_ = true;
@@ -66,11 +77,18 @@ void QuickOpen::show() {
     SetWindowPos(window_, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
     ShowWindow(window_, SW_SHOW); SetFocus(window_);
 }
+void QuickOpen::chooseFile(std::wstring title, const ResourceId& exclude, std::function<void(const ResourceId&)> picked) {
+    close(false); fileTitle_ = std::move(title); excludedFile_ = exclude; filePicked_ = std::move(picked);
+    SetWindowTextW(window_, fileTitle_.c_str()); showPopup();
+}
 void QuickOpen::close(bool restoreFocus) {
     if (!visible_) return;
     visible_ = false; ++revision_;
     if (worker_) worker_->cancelPending();
-    result_ = {}; pickerItems_.clear(); loading_ = false;
+    result_ = {}; pickerItems_.clear(); commandMatches_.clear(); loading_ = false;
+    commandMode_ = false; commands_.clear();
+    fileTitle_.clear(); excludedFile_ = {}; filePicked_ = {};
+    if (!projectMode_ && !pickerMode_) SetWindowTextW(window_, L"Go to file");
     ime_.cancel(window_); highSurrogate_ = 0;
     ShowWindow(window_, SW_HIDE);
     if (restoreFocus && IsWindow(previousFocus_) && IsWindowVisible(previousFocus_)) SetFocus(previousFocus_);
@@ -137,10 +155,24 @@ void QuickOpen::request() {
         selected_ = first_ = 0; layout(); return;
     }
     const auto revision = ++revision_; worker_->cancelPending();
+    if (commandMode_) {
+        auto query = utf8(!query_.empty() && query_.front() == L'>' ? query_.substr(1) : query_);
+        query.erase(0, query.find_first_not_of(' '));
+        result_ = {}; commandMatches_.clear(); loading_ = false;
+        for (const auto& command : commands_)
+            if (fileSearchScore(utf8(command.label), query) >= 0) commandMatches_.push_back(command);
+        selected_ = first_ = 0; layout(); return;
+    }
+    const auto query = utf8(query_);
     loading_ = !root_.empty();
-    const auto index = index_; const auto query = utf8(query_);
+    const auto index = index_; const auto root = root_; const auto excluded = excludedFile_.key();
+    const auto filter = [root, excluded](FileSearchResult& result) {
+        if (!excluded.empty()) result.matches.erase(std::remove_if(result.matches.begin(), result.matches.end(),
+            [&](const FileMatch& match) { return (root / std::string_view(match.exactRelative)).key() == excluded; }), result.matches.end());
+    };
     if (!index || query.empty()) {
         result_ = index ? searchFiles(*index, query) : FileSearchResult{};
+        filter(result_);
         if (index) loading_ = false;
         selected_ = first_ = 0;
         layout(); return;
@@ -148,10 +180,11 @@ void QuickOpen::request() {
     // Keep the last completed list until its replacement is ready. accept()
     // blocks activation while loading, so an old match cannot be opened.
     InvalidateRect(window_, nullptr, FALSE);
-    worker_->submit(L"files", [this, revision, index, query] {
+    worker_->submit(L"files", [this, revision, index, query, filter] {
         auto result = std::make_shared<FileSearchResult>();
         try { *result = searchFiles(*index, query, [this, revision] { return revision_.load() != revision; }); }
         catch (const std::exception& error) { result->error = error.what(); }
+        filter(*result);
         if (revision_.load() != revision) return;
         worker_->complete([this, revision, result] {
             if (!visible_ || revision_.load() != revision) return;
@@ -182,7 +215,14 @@ void QuickOpen::replace(std::wstring text) {
     query_.replace(begin, end - begin, text); caret_ = anchor_ = begin + text.size(); changed();
 }
 void QuickOpen::accept() {
-    if (loading_ || selected_ >= result_.matches.size()) return;
+    if (loading_ || selected_ >= itemCount()) return;
+    if (selected_ >= result_.matches.size()) {
+        const auto item = commandMatches_[selected_ - result_.matches.size()];
+        const auto accepted = commanded; const auto focus = previousFocus_;
+        close(false); if (accepted) accepted(item);
+        if (visible_) previousFocus_ = focus;
+        return;
+    }
     if (pickerMode_) {
         const auto item = pickerItems_[selected_];
         // A picker callback may replace itself to open the next selection step.
@@ -193,11 +233,12 @@ void QuickOpen::accept() {
     }
     const auto& saved = result_.matches[selected_].exactRelative;
     const auto path = projectMode_ ? ResourceId::parse(saved) : root_ / std::string_view(saved);
-    close(false); if (opened) opened(path);
+    const auto accepted = filePicked_ ? filePicked_ : opened;
+    close(false); if (accepted) accepted(path);
 }
 void QuickOpen::move(int delta) {
-    if (loading_ || result_.matches.empty()) return;
-    selected_ = static_cast<size_t>(std::clamp(static_cast<int>(selected_) + delta, 0, static_cast<int>(result_.matches.size()) - 1));
+    if (loading_ || !itemCount()) return;
+    selected_ = static_cast<size_t>(std::clamp(static_cast<int>(selected_) + delta, 0, static_cast<int>(itemCount()) - 1));
     layout();
 }
 RECT QuickOpen::inputBounds() const {
@@ -217,31 +258,33 @@ void QuickOpen::paint() {
     RECT rect{}; GetClientRect(window_, &rect);
     renderer_.fill(rect, panel); renderer_.outline({0, 0, rect.right - 1, rect.bottom - 1}, border);
     renderer_.fill({1, 1, rect.right - 1, px(2)}, accent);
-    renderer_.label({px(16), px(6), rect.right - px(16), px(34)}, pickerMode_ ? pickerTitle_ : projectMode_ ? L"Recent projects" : L"Go to file", foreground);
+    renderer_.label({px(16), px(6), rect.right - px(16), px(34)}, pickerMode_ ? pickerTitle_ : projectMode_ ? L"Recent projects" : commandMode_ ? L"Command palette" : filePicked_ ? fileTitle_ : L"Go to file", foreground);
     const RECT input{px(16), px(38), rect.right - px(16), px(76)};
     renderer_.fill(input, background); renderer_.outline(input, accent);
     if (query_.empty() && ime_.text().text.empty())
-        renderer_.label(inputBounds(), pickerMode_ ? L"Search branches, tags, commit IDs or messages" : projectMode_ ? L"Search projects by name or path" : L"Search files by name or path", muted, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        renderer_.label(inputBounds(), pickerMode_ ? L"Search branches, tags, commit IDs or messages" : projectMode_ ? L"Search projects by name or path" : commandMode_ ? L"Search commands" : L"Search files by name or path", muted, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
     line_.draw(renderer_, foreground, RGB(57, 75, 89), GetFocus() == window_);
-    const int count = std::min(rows(), static_cast<int>(result_.matches.size() - std::min(first_, result_.matches.size())));
+    const int count = std::min(rows(), static_cast<int>(itemCount() - std::min(first_, itemCount())));
     for (int row = 0; row < count; ++row) {
-        const auto index = first_ + row; const auto& match = result_.matches[index];
+        const auto index = first_ + row;
         const int top = px(86 + row * 44);
         if (index == selected_) renderer_.fill({px(8), top, rect.right - px(8), top + px(44)}, RGB(43, 55, 66));
-        if (pickerMode_) {
-            renderer_.label({px(20), top, rect.right - px(20), top + px(23)}, pickerItems_[index].label, foreground);
-            renderer_.label({px(20), top + px(23), rect.right - px(20), top + px(43)}, pickerItems_[index].description, muted);
+        if (pickerMode_ || index >= result_.matches.size()) {
+            const auto& item = pickerMode_ ? pickerItems_[index] : commandMatches_[index - result_.matches.size()];
+            renderer_.label({px(20), top, rect.right - px(20), top + px(23)}, item.label, foreground);
+            renderer_.label({px(20), top + px(23), rect.right - px(20), top + px(43)}, item.description, muted);
         } else {
+            const auto& match = result_.matches[index];
             const auto path = projectMode_ ? ResourceId::parse(match.exactRelative) : root_.at(match.exactRelative);
             renderer_.label({px(20), top, rect.right - px(20), top + px(23)}, path.filename().empty() ? path.native() : path.filename().native(), foreground);
             renderer_.label({px(20), top + px(23), rect.right - px(20), top + px(43)}, projectMode_ ? projectDescription(path) : wide(match.exactRelative), muted, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_PATH_ELLIPSIS);
         }
     }
-    if (result_.matches.empty()) {
-        const auto message = pickerMode_ ? (loading_ ? L"Searching Git references…" : !result_.error.empty() ? L"Cannot search Git references. Press F5 to retry." : L"No matching branches, tags or commits.") : projectMode_ ? (projects_.empty() ? L"No recent projects. Open a folder with Ctrl+O." : L"No matching projects.") : root_.empty() ? L"Open a folder with Ctrl+O to search files." : !index_ ? L"Loading file list…" : loading_ ? L"Searching…" : !result_.error.empty() ? L"Cannot search this folder. Press F5 to retry." : L"No matching files.";
+    if (!itemCount()) {
+        const auto message = pickerMode_ ? (loading_ ? L"Searching Git references…" : !result_.error.empty() ? L"Cannot search Git references. Press F5 to retry." : L"No matching branches, tags or commits.") : projectMode_ ? (projects_.empty() ? L"No recent projects. Open a folder with Ctrl+O." : L"No matching projects.") : commandMode_ ? (commands_.empty() ? L"Open a text file to compare." : L"No matching commands.") : root_.empty() ? L"Open a folder with Ctrl+O to search files." : !index_ ? L"Loading file list…" : loading_ ? L"Searching…" : !result_.error.empty() ? L"Cannot search this folder. Press F5 to retry." : L"No matching files.";
         renderer_.label({px(20), px(86), rect.right - px(20), px(130)}, message, muted);
     }
-    const std::wstring hint = indexing_ ? L"Updating file list…" : !result_.error.empty() ? wide(result_.error) + L" · F5: retry" : result_.resultsLimited ? L"Top 100 matches · Type to narrow the results" : L"↑↓ Select    Enter Open    Esc Close";
+    const std::wstring hint = commandMode_ ? L"↑↓ Select    Enter Run    Esc Close" : indexing_ ? L"Updating file list…" : !result_.error.empty() ? wide(result_.error) + L" · F5: retry" : result_.resultsLimited ? L"Top 100 matches · Type to narrow the results" : L"↑↓ Select    Enter Open    Esc Close";
     renderer_.label({px(16), rect.bottom - px(28), rect.right - px(16), rect.bottom}, hint, muted);
 }
 LRESULT CALLBACK QuickOpen::procedure(HWND window, UINT message, WPARAM a, LPARAM b) {
@@ -306,7 +349,7 @@ LRESULT QuickOpen::handle(UINT message, WPARAM a, LPARAM b) {
             caret_ = position; if (!(GetKeyState(VK_SHIFT) & 0x8000)) anchor_ = caret_; caretChanged();
         } else if (y >= px(86) && y < px(86 + rows() * 44)) {
             const auto index = first_ + (y - px(86)) / px(44);
-            if (index < result_.matches.size()) { selected_ = index; accept(); }
+            if (index < itemCount()) { selected_ = index; accept(); }
         }
         return 0;
     }

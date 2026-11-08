@@ -2946,7 +2946,7 @@ void quickOpenStability() {
         fs::path root = fs::temp_directory_path() / (L"Poppy popup test " + std::to_wstring(GetCurrentProcessId()) + L" " + std::to_wstring(GetTickCount64()));
         Files() {
             check(fs::create_directory(root), "Could not create popup test files");
-            for (const auto name : {L"alpha.txt", L"beta.txt", L"gamma.txt"}) {
+            for (const auto name : {L"alpha.txt", L"beta.txt", L"compare.txt", L"gamma.txt"}) {
                 std::ofstream file(root / name); file << "test\n";
                 check(file.good(), "Could not write a popup test file");
             }
@@ -2990,6 +2990,38 @@ void quickOpenStability() {
     observed.allowClose = true;
     check(accept() && opened == files.root / L"beta.txt", "Quick open lost keyboard selection after clearing the query");
     check(!observed.geometryChanges && !observed.unexpectedHides, "Typing or completing a search resized or hid quick open");
+
+    const std::vector<QuickOpenItem> commands{{"compare", L"Compare Active File With ...", L"alpha.txt"}};
+    std::string command;
+    fs::path compared;
+    palette.commanded = [&](const QuickOpenItem& item) {
+        command = item.id;
+        palette.chooseFile(L"Compare alpha.txt with ...", files.root / L"alpha.txt",
+            [&](const ResourceId& file) { compared = file.local(); });
+    };
+    const auto type = [&](const std::wstring& query) {
+        for (const auto ch : query) SendMessageW(palette.window(), WM_CHAR, ch, 0);
+    };
+    palette.showCommands(commands); type(L"Compare");
+    check(!accept() && command == "compare" && palette.visible(), "A command did not advance to file selection");
+    type(L"alpha");
+    const auto excluded = observed.completions;
+    wait([&] { return observed.completions > excluded; });
+    check(!accept() && compared.empty(), "File selection included the active file");
+    SendMessageW(palette.window(), WM_KEYDOWN, VK_ESCAPE, 0);
+    palette.show(); type(L"beta"); wait(accept);
+    check(opened == files.root / L"beta.txt" && compared.empty(), "Cancelling file selection affected the next normal file open");
+
+    command.clear(); palette.showCommands(commands); type(L"Compare Active File With");
+    wait([&] { accept(); return command == "compare"; });
+    type(L"gamma"); wait(accept);
+    check(compared == files.root / L"gamma.txt", "A command's file selection used the normal open callback");
+
+    command.clear(); palette.showCommands(commands); type(L">Compare"); type(L"z");
+    check(!accept() && command.empty(), "Enter ran an outdated command after the query changed");
+    palette.show(); type(L"Compare"); wait(accept);
+    check(opened == files.root / L"compare.txt" && command.empty(), "Switching to file search retained command results");
+    palette.close();
 }
 }
 int main(int argc, char** argv) {

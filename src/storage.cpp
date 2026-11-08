@@ -18,6 +18,8 @@ constexpr const char* dockViews =
     "CREATE TABLE IF NOT EXISTS dock_layout (id INTEGER PRIMARY KEY CHECK(id=1), layout TEXT NOT NULL);";
 constexpr const char* terminalHosts =
     "CREATE TABLE IF NOT EXISTS terminal_hosts (terminal_id TEXT PRIMARY KEY, host_session TEXT NOT NULL);";
+constexpr const char* fileComparisons =
+    "CREATE TABLE IF NOT EXISTS file_comparisons (position INTEGER PRIMARY KEY, path TEXT NOT NULL);";
 constexpr const char* projectViews =
     "CREATE TABLE view_state (id INTEGER PRIMARY KEY CHECK(id=1), explorer_top INTEGER NOT NULL, explorer_left INTEGER NOT NULL,"
     " git_top INTEGER NOT NULL, git_left INTEGER NOT NULL, first_tab_row INTEGER NOT NULL, git_selected TEXT NOT NULL, focused_pane TEXT NOT NULL, active_terminal TEXT NOT NULL);"
@@ -161,7 +163,7 @@ void projectSchema(Database& db) {
         "CREATE TABLE IF NOT EXISTS tabs (position INTEGER PRIMARY KEY, path TEXT NOT NULL, diff INTEGER NOT NULL,"
         " file_top INTEGER NOT NULL, file_left INTEGER NOT NULL, file_anchor INTEGER NOT NULL, file_caret INTEGER NOT NULL, file_after INTEGER NOT NULL,"
         " diff_top INTEGER NOT NULL, diff_left INTEGER NOT NULL, diff_anchor INTEGER NOT NULL, diff_caret INTEGER NOT NULL, diff_after INTEGER NOT NULL, pinned INTEGER NOT NULL);"
-        "CREATE TABLE IF NOT EXISTS expanded (path TEXT PRIMARY KEY);") + projectViews + splitViews + projectConnection + gitComparisons + wrappedViews + wrappedDiffViews + comparisonRepositories + terminalShells + contentSearchState + dockViews + terminalHosts).c_str(), {
+        "CREATE TABLE IF NOT EXISTS expanded (path TEXT PRIMARY KEY);") + projectViews + splitViews + projectConnection + gitComparisons + wrappedViews + wrappedDiffViews + comparisonRepositories + terminalShells + contentSearchState + dockViews + terminalHosts + fileComparisons).c_str(), {
         "ALTER TABLE session ADD COLUMN diff_inline INTEGER NOT NULL DEFAULT 0;"
         "UPDATE session SET diff_inline=COALESCE((SELECT diff_inline FROM tabs WHERE diff<>0"
         " ORDER BY (position=(SELECT active_tab FROM session WHERE id=1)) DESC,position LIMIT 1),0);"
@@ -170,7 +172,7 @@ void projectSchema(Database& db) {
         "ALTER TABLE tabs DROP COLUMN file_inline;"
         "ALTER TABLE tabs DROP COLUMN diff_inline;",
         "ALTER TABLE session ADD COLUMN git_tree INTEGER NOT NULL DEFAULT 0;",
-        "ALTER TABLE tabs ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0;", projectViews, splitViews, projectConnection, gitComparisons, wrappedViews, wrappedDiffViews, comparisonRepositories, terminalShells, contentSearchState, dockViews, terminalHosts});
+        "ALTER TABLE tabs ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0;", projectViews, splitViews, projectConnection, gitComparisons, wrappedViews, wrappedDiffViews, comparisonRepositories, terminalShells, contentSearchState, dockViews, terminalHosts, fileComparisons});
 }
 }
 struct Storage::Impl {
@@ -319,6 +321,11 @@ std::optional<ProjectSession> Storage::loadProject(const std::string& key, const
         tab.revision = comparisons.text(2); tab.allChanges = comparisons.number(3) != 0; tab.gitRoot = comparisons.text(6);
         tab.group = bounded(comparisons.number(4), 0, DockLayout::maxGroups - 1); tab.displayed = comparisons.number(5) != 0;
     }
+    Statement files(db, "SELECT position,path FROM file_comparisons");
+    while (files.row()) {
+        const auto index = files.number(0);
+        if (index >= 0 && static_cast<size_t>(index) < state.tabs.size()) state.tabs[static_cast<size_t>(index)].comparePath = files.text(1);
+    }
     Statement terminalGroups(db, "SELECT terminal_id,pane,displayed FROM terminal_groups");
     while (terminalGroups.row()) for (auto& terminal : state.terminals) if (terminal.id == terminalGroups.text(0)) { terminal.group = bounded(terminalGroups.number(1), 0, DockLayout::maxGroups - 1); terminal.displayed = terminalGroups.number(2) != 0; break; }
     Statement search(db, "SELECT query,match_case,respect_ignore,status,selected,top,visible FROM search_state WHERE id=1");
@@ -393,6 +400,11 @@ void Storage::saveProject(const std::string& key, const std::string& path, const
         const auto& tab = state.tabs[i];
         comparison.number(1, static_cast<sqlite3_int64>(i)); comparison.number(2, static_cast<int>(tab.diffKind)); comparison.text(3, tab.revision);
         comparison.number(4, tab.allChanges); comparison.number(5, tab.group); comparison.number(6, tab.displayed); comparison.text(7, tab.gitRoot); comparison.run(); comparison.reset();
+    }
+    db.exec("DELETE FROM file_comparisons");
+    Statement files(db, "INSERT INTO file_comparisons VALUES(?,?)");
+    for (size_t i = 0; i < state.tabs.size(); ++i) if (!state.tabs[i].comparePath.empty()) {
+        files.number(1, static_cast<sqlite3_int64>(i)); files.text(2, state.tabs[i].comparePath); files.run(); files.reset();
     }
     Statement terminalGroups(db, "INSERT INTO terminal_groups VALUES(?,?,?)");
     for (const auto& terminal : state.terminals) { terminalGroups.text(1, terminal.id); terminalGroups.number(2, terminal.group); terminalGroups.number(3, terminal.displayed); terminalGroups.run(); terminalGroups.reset(); }

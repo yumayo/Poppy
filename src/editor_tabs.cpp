@@ -24,7 +24,7 @@ void keepModifiedEditorTabs(std::vector<EditorTab>& tabs) {
 bool sameEditorTab(const EditorTab& left, const EditorTab& right) {
     return left.path.key() == right.path.key() && left.diffKind == right.diffKind && left.revision == right.revision &&
         (left.diffKind != GitDiffKind::Commit || left.diff == right.diff) &&
-        left.allChanges == right.allChanges && left.gitRoot.key() == right.gitRoot.key();
+        left.allChanges == right.allChanges && left.gitRoot.key() == right.gitRoot.key() && left.comparePath.key() == right.comparePath.key();
 }
 size_t openEditorFilePreview(std::vector<EditorTab>& tabs, EditorTab target, DockLayout& dock, int preferred) {
     const auto found = std::find_if(tabs.begin(), tabs.end(), [&](const EditorTab& tab) { return sameEditorTab(tab, target); });
@@ -44,7 +44,7 @@ size_t openEditorPreview(std::vector<EditorTab>& tabs, EditorTab target) {
     if (found != tabs.end()) return static_cast<size_t>(found - tabs.begin());
     target.preview = true;
     // Preserve the shared working buffer when switching between file and diff.
-    if (!target.allChanges && (target.diffKind == GitDiffKind::Automatic || target.diffKind == GitDiffKind::Changes)) {
+    if (target.comparePath.empty() && !target.allChanges && (target.diffKind == GitDiffKind::Automatic || target.diffKind == GitDiffKind::Changes)) {
         for (const auto& tab : tabs) if (tab.path.key() == target.path.key() && tab.buffer) { target.buffer = tab.buffer; break; }
     }
     if (target.pinned || (target.buffer && (target.buffer->dirty() || target.buffer->saving))) target.preview = false;
@@ -63,7 +63,7 @@ void saveEditorTabs(ProjectSession& state, const std::vector<EditorTab>& tabs, s
         if (!tab.terminalId.empty()) continue;
         if (tab.preview && !tab.pinned && (!tab.buffer || (!tab.buffer->dirty() && !tab.buffer->saving))) continue;
         state.tabs.push_back({tab.path.u8string(), tab.diff, tab.fileView, tab.diffView, tab.pinned, tab.group,
-            tab.displayed, tab.diffKind, tab.revision, tab.allChanges, tab.gitRoot.u8string()});
+            tab.displayed, tab.diffKind, tab.revision, tab.allChanges, tab.gitRoot.u8string(), tab.comparePath.u8string()});
     }
     if (state.dockLayout.empty() && std::none_of(state.tabs.begin(), state.tabs.end(), [](const SavedTab& tab) { return tab.group == 0; })) {
         for (auto& tab : state.tabs) tab.group = 0;

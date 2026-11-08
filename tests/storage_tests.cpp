@@ -50,7 +50,7 @@ bool same(const poppy::ProjectSession& a, const poppy::ProjectSession& b) {
         a.focusedPane != b.focusedPane || a.activeTerminal != b.activeTerminal || a.collapsedGit != b.collapsedGit || a.terminals.size() != b.terminals.size()) return false;
     for (size_t i = 0; i < a.tabs.size(); ++i) {
         const auto& x = a.tabs[i]; const auto& y = b.tabs[i];
-        if (x.path != y.path || x.diff != y.diff || x.pinned != y.pinned || x.group != y.group || x.displayed != y.displayed || x.diffKind != y.diffKind || x.revision != y.revision || x.allChanges != y.allChanges || x.gitRoot != y.gitRoot || !same(x.fileView, y.fileView) || !same(x.diffView, y.diffView)) return false;
+        if (x.path != y.path || x.diff != y.diff || x.pinned != y.pinned || x.group != y.group || x.displayed != y.displayed || x.diffKind != y.diffKind || x.revision != y.revision || x.allChanges != y.allChanges || x.gitRoot != y.gitRoot || x.comparePath != y.comparePath || !same(x.fileView, y.fileView) || !same(x.diffView, y.diffView)) return false;
     }
     for (size_t i = 0; i < a.terminals.size(); ++i) { const auto& x = a.terminals[i]; const auto& y = b.terminals[i]; if (x.id != y.id || x.name != y.name || x.directory != y.directory || x.group != y.group || x.displayed != y.displayed || x.shell != y.shell || x.hostSession != y.hostSession) return false; }
     return true;
@@ -355,7 +355,7 @@ void schemaAndRegistry() {
     {
         poppy::Storage storage(fixture.directory);
         const auto projectDb = storage.projectDirectory("c:\\future", "c:\\future") / "storage.sql";
-        execute(projectDb, "PRAGMA user_version=16");
+        execute(projectDb, "PRAGMA user_version=17");
         rejects([&] { storage.loadProject("c:\\future", "c:\\future"); }, "A newer project schema was overwritten");
         storage.projectDirectory("c:\\invalid", "c:\\invalid");
         execute(appDb, R"(UPDATE projects SET directory='../../escape' WHERE path_key='c:\invalid')");
@@ -426,6 +426,27 @@ void searchRoundTripAndMigration() {
     reopened.saveProject(linux.key(), linux.serialized(), state);
     check(same(*reopened.loadProject(linux.key(), linux.serialized()), state), "A new empty search retained old rows");
 }
+void fileComparisonRoundTrip() {
+    Fixture fixture; poppy::Storage storage(fixture.directory);
+    const auto root = poppy::ResourceId::wsl("Ubuntu", "/project/日本語");
+    const auto key = root.key(), path = root.serialized();
+    poppy::ProjectSession state;
+    poppy::SavedTab file; file.path = (root / std::string_view("active.txt")).u8string(); file.displayed = true;
+    state.tabs.push_back(file);
+    for (const auto* name : {"left.txt", "other.txt"}) {
+        auto comparison = file; comparison.diff = true; comparison.comparePath = (root / std::string_view(name)).u8string();
+        comparison.group = 1; comparison.displayed = false; comparison.diffView = {12, 3, 2, 4, true};
+        state.tabs.push_back(comparison);
+    }
+    state.tabs.back().displayed = true; state.activeTab = 2;
+    storage.saveProject(key, path, state);
+    check(same(*storage.loadProject(key, path), state), "File comparisons lost their target paths, positions or selection");
+    state.tabs.resize(1); state.activeTab = 0;
+    storage.saveProject(key, path, state);
+    check(same(*storage.loadProject(key, path), state), "Closed file comparisons were retained");
+    execute(storage.projectDirectory(key, path) / "storage.sql", "DROP TABLE file_comparisons; PRAGMA user_version=15;");
+    check(same(*storage.loadProject(key, path), state), "File comparison migration changed existing tabs");
+}
 void gitComparisonRoundTrip() {
     Fixture fixture; poppy::Storage storage(fixture.directory);
     const std::string key = "c:/git-comparisons";
@@ -483,7 +504,7 @@ void wslRoundTripAndMigration() {
 }
 int main() {
     try {
-        roundTripAndIsolation(); migrateProjectListState(); atomicSave(); projectHistory(); migrateProjectLayout(); migrateGitLayout(); migratePinnedTabs(); migrateWorkspaceAndTerminals(); migrateSplitLayout(); migrateWrapping(); terminalShellMigration(); terminalHostMigration(); schemaAndRegistry(); searchRoundTripAndMigration(); gitComparisonRoundTrip(); wslRoundTripAndMigration();
+        roundTripAndIsolation(); migrateProjectListState(); atomicSave(); projectHistory(); migrateProjectLayout(); migrateGitLayout(); migratePinnedTabs(); migrateWorkspaceAndTerminals(); migrateSplitLayout(); migrateWrapping(); terminalShellMigration(); terminalHostMigration(); schemaAndRegistry(); searchRoundTripAndMigration(); fileComparisonRoundTrip(); gitComparisonRoundTrip(); wslRoundTripAndMigration();
         std::cout << "Storage tests passed\n";
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
 }

@@ -21,6 +21,8 @@ struct EditorTab {
     std::shared_ptr<EditorNavigation> navigation = {};
     // Terminal sessions share the same tab strip and docking groups.
     std::string terminalId;
+    // A file comparison shows this file on the left and path on the right.
+    ResourceId comparePath = {};
 };
 
 // History retains metadata only, including previews replaced by another file.
