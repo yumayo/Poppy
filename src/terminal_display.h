@@ -2,6 +2,7 @@
 #include "composition.h"
 #include "terminal_model.h"
 #include <cstdint>
+#include <optional>
 #include <utility>
 
 namespace poppy {
@@ -28,6 +29,11 @@ public:
     int cursorY() const { return cursorY_; }
     bool cursorVisible() const { return cursorVisible_ && !scroll_; }
     std::string linkAt(int column, int row) const;
+    // Keep composition at its insertion point while output moves the VT cursor.
+    void beginPreedit();
+    void endPreedit() { preeditCursor_.reset(); }
+    int inputCursorX() const { return preeditCursor_ ? preeditCursor_->x : cursorX_; }
+    int inputCursorY() const { return preeditCursor_ ? preeditCursor_->y : cursorY_; }
     TerminalPreedit preedit(const CompositionText& text) const;
     // Selection endpoints are cell boundaries; the end is exclusive.
     std::pair<int, int> selectionRange(int anchor, int caret) const;
@@ -42,6 +48,8 @@ public:
 private:
     std::vector<std::vector<Cell>> cells_;
     std::vector<int> wrapped_;
+    struct Cursor { int x, y; bool wrap; };
+    std::optional<Cursor> preeditCursor_;
     int columns_ = 0, cursorX_ = 0, cursorY_ = 0;
     size_t scroll_ = 0;
     int64_t firstRow_ = 0, anchor_ = -1, caret_ = -1;

@@ -503,8 +503,64 @@ void terminalWrapMetadataTests() {
     model.feed("\x1b" "c");
     check(!model.wrappedLength(0) && !model.wrapPending(), "reset clears wrap metadata");
 }
+void terminalPreeditOutputTests() {
+    TerminalModel model(24, 6); TerminalDisplay display;
+    model.feed("\x1b[3;1H> abcdef\x1b[6;1Hstatus\x1b[3;6H");
+    display.update(model, 0, 0, true); display.beginPreedit();
+    const CompositionText text{u"日本", {}, 2};
+    for (const auto* output : {"\x1b[?25l\x1b[Hworking", "\x1b[6;1Hfooter\x1b[?25h", "\x1b[3;6H"}) {
+        model.feed(output); display.changed();
+        check(display.update(model, 0, 1), "output remains immediate during IME composition");
+        display.beginPreedit(); // Position/candidate notifications must not recapture the VT cursor.
+        const auto preview = display.preedit(text);
+        check(display.inputCursorX() == 5 && display.inputCursorY() == 2 &&
+            preview.composition.caretColumn == 9 && preview.composition.caretRow == 2,
+            "redrawing the top, footer or prompt moved the IME insertion point");
+        check(preview.composition.glyphs.front().column == 5 && preview.composition.glyphs.front().row == 2 &&
+            preview.cells[2][9].ch == U'd' && line(model, 2) == "> abcdef",
+            "output moved preedit text or changed the terminal's input contents");
+    }
+    check(line(display, 0) == "working" && line(display, 5) == "footer",
+        "holding the IME insertion point froze terminal output");
+    auto preview = display.preedit({u"日", {}, 0});
+    check(preview.composition.caretColumn == 5 && preview.composition.caretRow == 2 && preview.cells[2][7].ch == U'd',
+        "changing conversion length or its cursor lost the original insertion point");
+    model.feed("\x1b[3;6HXYZ\x1b[6;2H"); display.changed(); display.update(model, 0, 2);
+    preview = display.preedit(text);
+    check(preview.cells[2][9].ch == U'X' && preview.cells[2][10].ch == U'Y',
+        "the anchored preview did not use fresh terminal contents");
+    display.endPreedit();
+    check(display.inputCursorX() == 1 && display.inputCursorY() == 5 && display.preedit({}).cells.empty(),
+        "ending or cancelling composition retained the old insertion point");
+    display.beginPreedit(); preview = display.preedit(text);
+    check(preview.composition.caretColumn == 5 && preview.composition.caretRow == 5,
+        "the next composition did not capture the new insertion point");
+
+    model.feed("\x1b[?2026h\x1b[Hsync"); display.changed();
+    check(!display.update(model, 0, 3), "composition released an incomplete synchronized frame");
+    model.feed("\x1b[?2026l"); display.changed();
+    check(display.update(model, 0, 4) && display.inputCursorY() == 5 && display.preedit(text).composition.caretRow == 5,
+        "a completed synchronized frame moved active composition");
+    model.resize(8, 2); display.changed(); display.update(model, 0, 5);
+    check(display.inputCursorX() == model.cursorX() && display.inputCursorY() == model.cursorY() &&
+        display.preedit(text).composition.caretRow < 2, "resizing reused obsolete composition coordinates");
+    display.beginPreedit(); model.feed("\x1b[?1049hALT"); display.changed(); display.update(model, 0, 6);
+    check(display.inputCursorX() == 3 && display.inputCursorY() == 0,
+        "switching terminal buffers retained the previous composition origin");
+    display.beginPreedit(); model.feed("\x1b" "c"); display.changed(); display.update(model, 0, 7);
+    check(!display.inputCursorX() && !display.inputCursorY(), "terminal reset retained the previous composition origin");
+
+    TerminalModel wrapped(4, 3); TerminalDisplay edge;
+    wrapped.feed("old\r\n\r\n\r\n\x1b[2J\x1b[Habcd"); edge.update(wrapped, 0, 0, true); edge.beginPreedit();
+    wrapped.feed("\x1b[3;1H!"); edge.changed(); edge.update(wrapped, 0, 1);
+    preview = edge.preedit({u"日", {}, 1});
+    check(preview.composition.glyphs.front().column == 0 && preview.composition.glyphs.front().row == 1,
+        "output lost the delayed wrap at the composition insertion point");
+    check(edge.update(wrapped, 1, 2) && edge.preedit(text).cells.empty(),
+        "an anchored composition was drawn over scrollback");
+}
 }
 int main() {
-    try { textTests(); terminalTests(); terminalTitleTests(); terminalNotificationErrorTests(); terminalDisplayTests(); terminalInputTests(); terminalScrollTests(); terminalCopyTests(); terminalSelectionScrollTests(); terminalPreeditTests(); terminalWrapMetadataTests(); std::cout << "Text and terminal core tests passed.\n"; return EXIT_SUCCESS; }
+    try { textTests(); terminalTests(); terminalTitleTests(); terminalNotificationErrorTests(); terminalDisplayTests(); terminalInputTests(); terminalScrollTests(); terminalCopyTests(); terminalSelectionScrollTests(); terminalPreeditTests(); terminalWrapMetadataTests(); terminalPreeditOutputTests(); std::cout << "Text and terminal core tests passed.\n"; return EXIT_SUCCESS; }
     catch (const std::exception& error) { std::cerr << error.what() << '\n'; return EXIT_FAILURE; }
 }

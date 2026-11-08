@@ -27,6 +27,7 @@ bool TerminalDisplay::update(TerminalModel& model, size_t scroll, uint64_t now, 
     synchronizing_ = false;
     if (!dirty_ && !force && !scrollChanged) return false;
 
+    if (generation_ != model.generation() || columns_ != model.columns() || rows() != model.rows()) endPreedit();
     if (generation_ != model.generation() ||
         (anchor_ >= 0 && std::min(anchor_, caret_) < model.firstRow() * model.columns())) clearSelection();
     generation_ = model.generation();
@@ -63,19 +64,23 @@ std::string TerminalDisplay::linkAt(int column, int y) const {
     }
     return terminalLinkAt(text, position);
 }
+void TerminalDisplay::beginPreedit() {
+    if (!preeditCursor_ && !scroll_ && rows()) preeditCursor_ = Cursor{cursorX_, cursorY_, wrapPending_};
+}
 TerminalPreedit TerminalDisplay::preedit(const CompositionText& text) const {
     TerminalPreedit result;
-    if (text.text.empty() || scroll_ || columns_ < 2 || cursorY_ < 0 || cursorY_ >= rows()) return result;
+    const int cursorY = inputCursorY();
+    if (text.text.empty() || scroll_ || columns_ < 2 || cursorY < 0 || cursorY >= rows()) return result;
 
-    int column = wrapPending_ ? columns_ : cursorX_;
+    int column = (preeditCursor_ ? preeditCursor_->wrap : wrapPending_) ? columns_ : inputCursorX();
     // A cursor-addressing sequence may land inside a wide glyph.
-    if (column < columns_ && row(cursorY_)[column].continuation) --column;
+    if (column < columns_ && row(cursorY)[column].continuation) --column;
     int left = 0, right = columns_;
-    for (int x = 0; x < column; ++x) if (verticalBorder(row(cursorY_)[x].ch)) left = x + 1;
-    for (int x = column; x < columns_; ++x) if (verticalBorder(row(cursorY_)[x].ch)) { right = x; break; }
+    for (int x = 0; x < column; ++x) if (verticalBorder(row(cursorY)[x].ch)) left = x + 1;
+    for (int x = column; x < columns_; ++x) if (verticalBorder(row(cursorY)[x].ch)) { right = x; break; }
     if (right - left < 2) return result;
     const bool framed = left > 0 || right < columns_;
-    int first = cursorY_, last = cursorY_;
+    int first = cursorY, last = cursorY;
     if (!framed) {
         while (first > 0 && wrapped_[first - 1]) --first;
         while (last + 1 < rows() && wrapped_[last]) ++last;
@@ -86,11 +91,11 @@ TerminalPreedit TerminalDisplay::preedit(const CompositionText& text) const {
     if (!framed) while (available + 1 < rows() && emptyRow(row(available + 1))) ++available;
 
     const int width = right - left;
-    auto layout = text.layout(width, (cursorY_ - first) * width + column - left);
+    auto layout = text.layout(width, (cursorY - first) * width + column - left);
     const int offset = std::max(0, layout.caretRow - (available - first));
     result.cells = cells_;
     result.left = left; result.right = right; result.firstRow = first; result.lastRow = available;
-    result.compositionBackground = row(cursorY_)[std::min(column, right - 1)].bg;
+    result.compositionBackground = row(cursorY)[std::min(column, right - 1)].bg;
     for (int y = first; y <= available; ++y) {
         Cell blank; blank.bg = row(y)[left].bg;
         std::fill(result.cells[y].begin() + left, result.cells[y].begin() + right, blank);
@@ -98,20 +103,20 @@ TerminalPreedit TerminalDisplay::preedit(const CompositionText& text) const {
 
     // Retain the input before the insertion point. When space is exhausted,
     // pan only this logical input block to keep the IME cursor visible.
-    for (int y = first; y <= cursorY_; ++y) {
+    for (int y = first; y <= cursorY; ++y) {
         const int destination = y - offset;
         if (destination < first || destination > available) continue;
-        const int end = y == cursorY_ ? column : (wrapped_[y] ? wrapped_[y] : right);
+        const int end = y == cursorY ? column : (wrapped_[y] ? wrapped_[y] : right);
         std::copy(row(y).begin() + left, row(y).begin() + end, result.cells[destination].begin() + left);
     }
 
     // Shift whole glyphs after the *end* of preedit, independently of the IME
     // cursor or the active conversion clause. Preserve terminal colors.
     int targetRow = first + layout.endRow - offset, targetColumn = left + layout.endColumn;
-    for (int y = cursorY_; y <= last; ++y) {
+    for (int y = cursorY; y <= last; ++y) {
         int end = y < last ? wrapped_[y] : right;
         if (y == last) while (end > left && row(y)[end - 1].ch == U' ' && !row(y)[end - 1].continuation) --end;
-        for (int x = y == cursorY_ ? column : left; x < end; ++x) {
+        for (int x = y == cursorY ? column : left; x < end; ++x) {
             const auto& cell = row(y)[x];
             if (cell.continuation) continue;
             const int advance = std::max(1, cellWidth(cell.ch));

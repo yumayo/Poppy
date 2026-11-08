@@ -1611,6 +1611,86 @@ void imePositions() {
     check(GetGUIThreadInfo(GetCurrentThreadId(), &info) && info.hwndCaret == nullptr,
         "Leaving an input retained its native IME caret");
 }
+int terminalImeFixture(const char* eventName) {
+    Handle next(OpenEventW(SYNCHRONIZE, FALSE, wide(eventName).c_str()));
+    const auto output = GetStdHandle(STD_OUTPUT_HANDLE);
+    DWORD mode = 0;
+    if (!next || !GetConsoleMode(output, &mode) || !SetConsoleMode(output, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING)) return 1;
+    const char* frames[] = {
+        "\x1b[2J\x1b[Hheader\x1b[3;1H> input\x1b[6;1Hstatus\x1b[3;4H\x1b[?25h",
+        "\x1b[?25l\x1b[Hworking",
+        "\x1b[6;1Hfooter\x1b[?25h",
+        "\x1b[3;4H",
+        "\x1b[6;2H"
+    };
+    for (size_t i = 0; i < std::size(frames); ++i) {
+        if (i && WaitForSingleObject(next.value, 10000) != WAIT_OBJECT_0) return 1;
+        std::cout << frames[i] << "\x1b]0;Poppy IME frame " << i << '\a' << std::flush;
+    }
+    return WaitForSingleObject(next.value, 10000) == WAIT_OBJECT_0 ? 0 : 1;
+}
+void terminalImeOutput() {
+    const auto instance = GetModuleHandleW(nullptr);
+    const auto parent = CreateWindowExW(0, L"STATIC", L"Terminal IME output test", WS_POPUP | WS_CLIPCHILDREN,
+        0, 0, 640, 360, nullptr, nullptr, instance, nullptr);
+    check(parent != nullptr, "Cannot create the terminal IME output window");
+    struct WindowOwner { HWND value; ~WindowOwner() { DestroyWindow(value); } } owner{parent};
+    const auto eventName = L"Local\\PoppyImeOutput-" + std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(GetTickCount64());
+    Handle next(CreateEventW(nullptr, FALSE, FALSE, eventName.c_str()));
+    check(static_cast<bool>(next), "Cannot create the terminal IME output gate");
+    std::wstring executable(32768, L'\0');
+    const auto count = GetModuleFileNameW(nullptr, executable.data(), static_cast<DWORD>(executable.size()));
+    check(count && count < executable.size(), "Cannot locate the terminal IME fixture"); executable.resize(count);
+    Terminal terminal; terminal.create(parent, instance); terminal.setDpi(96);
+    const auto window = terminal.window(); MoveWindow(window, 0, 0, 640, 360, FALSE); ShowWindow(parent, SW_SHOWNOACTIVATE);
+    struct ContextOwner {
+        HWND window; HIMC value = ImmCreateContext(), previous = nullptr;
+        ~ContextOwner() { ImmAssociateContext(window, previous); if (value) ImmDestroyContext(value); }
+    } context{window};
+    check(context.value != nullptr, "Cannot create the terminal IME context");
+    context.previous = ImmAssociateContext(window, context.value);
+    terminal.setDirectory(fs::temp_directory_path()); terminal.setCommand({executable, L"--terminal-ime-fixture", eventName});
+    check(terminal.launch(), "Cannot launch the terminal IME fixture");
+    const auto waitFrame = [&](int frame) {
+        const auto start = GetTickCount64();
+        while (terminal.title() != "Poppy IME frame " + std::to_string(frame)) {
+            MSG message{};
+            while (PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE)) { TranslateMessage(&message); DispatchMessageW(&message); }
+            Terminal::pump();
+            check(GetTickCount64() - start < 10000, "The terminal IME fixture did not produce its frame");
+            MsgWaitForMultipleObjects(0, nullptr, FALSE, 10, QS_ALLINPUT);
+        }
+    };
+    const auto caret = [&] {
+        GUITHREADINFO info{}; info.cbSize = sizeof(info);
+        check(GetFocus() == window && GetGUIThreadInfo(GetCurrentThreadId(), &info) && info.hwndCaret == window,
+            "Terminal output moved keyboard focus or destroyed the IME caret");
+        CANDIDATEFORM candidate{};
+        check(ImmGetCandidateWindow(context.value, 0, &candidate) && candidate.ptCurrentPos.x == info.rcCaret.left &&
+            candidate.ptCurrentPos.y == info.rcCaret.bottom, "Terminal output detached candidates from the IME caret");
+        return info.rcCaret;
+    };
+    waitFrame(0); SetFocus(window); const auto origin = caret();
+    SendMessageW(window, WM_IME_STARTCOMPOSITION, 0, 0);
+    for (int frame : {1, 2}) {
+        SetEvent(next.value); waitFrame(frame);
+        SendMessageW(window, WM_IME_NOTIFY, IMN_CHANGECANDIDATE, 1);
+        const auto current = caret();
+        check(EqualRect(&origin, &current), "A top/footer redraw moved active terminal composition or its candidates");
+    }
+    SendMessageW(window, WM_IME_ENDCOMPOSITION, 0, 0); const auto footer = caret();
+    check(footer.top != origin.top, "Ending terminal composition did not release its insertion point");
+    SendMessageW(window, WM_IME_STARTCOMPOSITION, 0, 0);
+    SetEvent(next.value); waitFrame(3); const auto held = caret();
+    check(EqualRect(&footer, &held), "The next composition did not hold its own insertion point");
+    SendMessageW(window, WM_IME_COMPOSITION, 0, 0); const auto cancelled = caret();
+    check(EqualRect(&origin, &cancelled), "Cancelling terminal composition did not resume cursor tracking");
+    SendMessageW(window, WM_IME_STARTCOMPOSITION, 0, 0); SetFocus(parent);
+    SetEvent(next.value); waitFrame(4); SetFocus(window); const auto refocused = caret();
+    check(refocused.top == footer.top && refocused.left != footer.left,
+        "Focus loss retained an obsolete terminal composition origin");
+    SetEvent(next.value); terminal.stop();
+}
 void editorWordSelection() {
     Viewer viewer;
     const auto instance = GetModuleHandleW(nullptr);
@@ -2913,6 +2993,7 @@ void quickOpenStability() {
 }
 }
 int main(int argc, char** argv) {
+    if (argc == 3 && std::string_view(argv[1]) == "--terminal-ime-fixture") return terminalImeFixture(argv[2]);
     const HRESULT com = OleInitialize(nullptr);
     int result = 0;
     try {
@@ -2926,7 +3007,7 @@ int main(int argc, char** argv) {
             persistentErrorPopup();
             editorBottomPadding(); editorTailFollowing();
             htmlPreviewSwitching();
-            terminalAsyncStartup(); terminalProcessShutdown();
+            terminalAsyncStartup(); terminalProcessShutdown(); terminalImeOutput();
             statusBarLimits(); treeMultipleSelection(); commitMessagePopup(); inlineTreeInput(); inlineTreeCreation(); gitCommitInput(); cellPositions(); colorsAndClipping(); imagePreviews(); fractionalMarkers(); smoothIcons(); windowTargets(); editableDiff(); editorCaret(); delayedLoadingMessages(); imeCellRendering(); imeTerminalInsertion(); imeUiRendering(); imePositions(); editorWordSelection(); editorWordMovement(); editorWordDeletion(); editorLineShortcuts(); editorWrapping(); diffWrapping(); documentFind(); horizontalWheelScrolling(); continuousViewerScrolling(); selectionAutoScrolling(); terminalGitBashSocketEnvironment(); terminalSelectionAutoScrolling(); themedScrollbars(); quickOpenStability();
             std::cout << "Direct2D rendering tests passed\n";
         }
