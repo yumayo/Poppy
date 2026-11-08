@@ -10,6 +10,24 @@ std::optional<std::wstring> editorTabPathText(const EditorTab& tab, const Resour
     if (path.empty()) return std::nullopt;
     return path.make_preferred().native();
 }
+ResourceId restoreEditorTabPath(std::string_view saved, const ResourceId& root) {
+    if (root.wsl() && !saved.empty() && saved.front() == '/' && saved.substr(0, 2) != "//")
+        return root.at(std::string(saved));
+    const auto path = ResourceId::parse(saved);
+    return path.wsl() || path.is_absolute() ? path : root.at(std::string(saved));
+}
+size_t openEditorDroppedFile(std::vector<EditorTab>& tabs, const ResourceId& path, int group) {
+    keepModifiedEditorTabs(tabs);
+    EditorTab target; target.path = path; target.group = group;
+    const auto found = std::find_if(tabs.begin(), tabs.end(), [&](const EditorTab& tab) { return sameEditorTab(tab, target); });
+    if (found != tabs.end()) {
+        found->preview = false; found->diff = false;
+        return static_cast<size_t>(found - tabs.begin());
+    }
+    for (const auto& tab : tabs) if (tab.path.key() == path.key() && tab.buffer) { target.buffer = tab.buffer; break; }
+    tabs.push_back(std::move(target));
+    return tabs.size() - 1;
+}
 void rememberEditorTab(EditorTab& tab) {
     if (!tab.navigation) tab.navigation = std::make_shared<EditorNavigation>();
     auto& saved = tab.navigation->tab;

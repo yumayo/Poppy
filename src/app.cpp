@@ -20,6 +20,7 @@
 #include "explorer_history.h"
 #include "explorer_clipboard.h"
 #include "explorer_clipboard_paths.h"
+#include "file_drop.h"
 #include "status_bar.h"
 #include "editor_tabs.h"
 #include "tab_layout.h"
@@ -371,6 +372,8 @@ private:
     void pasteImage(TreeItem item);
     wchar_t stateFor(const ResourceId& path) const;
     void openFile(const ResourceId& path, bool diff = false, bool revealExplorer = true);
+    bool hoverFileDrop(POINT screen);
+    void dropFiles(const std::vector<std::wstring>& files);
     void recordEditorNavigation();
     void openContentResult(const ContentMatch& match, const std::string& query, bool matchCase);
     void applyContentResult(size_t index);
@@ -492,6 +495,8 @@ private:
     size_t activeTab_ = 0, tabTools_ = 0;
 
     std::optional<TabDrag> tabDrag_;
+    FileDropTarget* fileDropTarget_ = nullptr;
+    int fileDropGroup_ = -1;
     TreeItem rootItem_ = 0;
     uint64_t generation_ = 0, nextId_ = 1;
     std::deque<uint64_t> serial_, editorGitSerial_;
@@ -500,6 +505,8 @@ private:
     bool gitScanDirty_ = true;
     uint64_t gitScanRevision_ = 0;
     std::shared_ptr<ProjectProvider> provider_;
+    std::shared_ptr<ProjectProvider> localProvider_ = createProjectProvider({});
+    std::shared_ptr<ProjectProvider> fileProvider(const ResourceId& path) const { return path.wsl() ? provider_ : localProvider_; }
     bool connecting_ = false, connected_ = false, active_ = false;
     bool watchLimited_ = false;
     void connectRemote();
@@ -768,6 +775,13 @@ void ProjectRuntime::Impl::create() {
         SetWindowLongPtrW(pane, GWL_STYLE, GetWindowLongPtrW(pane, GWL_STYLE) | WS_CLIPSIBLINGS);
     const BOOL dark = TRUE; DwmSetWindowAttribute(window_, 20, &dark, sizeof(dark));
     dpi(GetDpiForWindow(window_));
+    auto* target = new FileDropTarget(
+        [this](POINT screen, const std::vector<std::wstring>&) { return hoverFileDrop(screen); },
+        [this] { fileDropGroup_ = -1; },
+        [this](const std::vector<std::wstring>& files) { dropFiles(files); });
+    const auto result = RegisterDragDrop(window_, target);
+    if (FAILED(result)) { target->Release(); throw std::runtime_error("Cannot register editor file drops (HRESULT " + std::to_string(static_cast<unsigned long>(result)) + ")."); }
+    fileDropTarget_ = target;
 }
 void ProjectRuntime::Impl::ensureGroup(int target) {
     while (groupCount() <= target) {
@@ -2456,10 +2470,10 @@ void ProjectRuntime::Impl::restoreProject(const ProjectSession& original) {
     pendingTreeSelection_ = root_.at(state.selected);
     for (size_t i = 0; i < state.tabs.size(); ++i) {
         const auto& saved = state.tabs[i];
-        const auto path = root_.at(saved.path);
+        const auto path = restoreEditorTabPath(saved.path, root_);
         if (!path.is_absolute()) continue;
         Tab target{path, saved.diff, saved.fileView, saved.diffView, saved.pinned, {}, saved.group, saved.displayed, saved.diffKind, saved.revision, saved.allChanges, {}, {}, false, saved.gitRoot.empty() ? ResourceId{} : root_.at(saved.gitRoot), {}, false, {}, {}};
-        if (!saved.comparePath.empty()) { target.comparePath = root_.at(saved.comparePath); target.diff = true; }
+        if (!saved.comparePath.empty()) { target.comparePath = restoreEditorTabPath(saved.comparePath, root_); target.diff = true; }
         const auto duplicate = std::find_if(tabs_.begin(), tabs_.end(), [&](const Tab& tab) { return tabKey(tab) == tabKey(target); });
         if (duplicate != tabs_.end()) continue;
         if (i <= state.activeTab) activeTab_ = tabs_.size();
@@ -2807,11 +2821,11 @@ bool ProjectRuntime::Impl::saveFile(size_t index, bool wait) {
     if (wait && buffer->saving) { worker_->drain(); worker_->dispatch(); }
     if (!buffer->dirty()) return true;
     if (buffer->saving) return false;
-    if (root_.wsl() && (!connected_ || provider_->state() != ConnectionState::Ready)) { status(L"Reconnect WSL before saving. Your edits have been kept."); return false; }
+    if (path.wsl() && (!connected_ || provider_->state() != ConnectionState::Ready)) { status(L"Reconnect WSL before saving. Your edits have been kept."); return false; }
     const auto bytes = buffer->encoded(), text = buffer->document.text, baseline = buffer->baseline;
     buffer->saving = true;
-    worker_->submit(L"save:" + pathKey(path), [this, path, buffer, bytes, text, baseline, version = buffer->fileVersion] {
-        const auto result = provider_->saveFile(path, bytes, version, baseline);
+    worker_->submit(L"save:" + pathKey(path), [this, path, buffer, bytes, text, baseline, version = buffer->fileVersion, provider = fileProvider(path)] {
+        const auto result = provider->saveFile(path, bytes, version, baseline);
         const auto error = result.error;
         worker_->complete([this, path, buffer, bytes, text, error, version = result.version] {
             buffer->saving = false;
@@ -2831,6 +2845,53 @@ bool ProjectRuntime::Impl::confirmTab(size_t index) {
     if (!buffer->dirty()) return true;
     const auto answer = MessageBoxW(window_, (L"Save changes to " + tabs_[index].path.filename().native() + L"?").c_str(), L"Poppy", MB_YESNOCANCEL | MB_ICONQUESTION);
     return answer == IDNO || (answer == IDYES && saveFile(index, true));
+}
+bool ProjectRuntime::Impl::hoverFileDrop(POINT screen) {
+    fileDropGroup_ = -1;
+    if (root_.empty() || !active_) return false;
+    ScreenToClient(window_, &screen);
+    for (const auto& pane : dockGeometry_.panes) {
+        const auto& group = editorGroups_[pane.group];
+        const auto index = groupTab(pane.group);
+        if (PtInRect(&group.tabs, screen) ||
+            (PtInRect(&group.body, screen) && (index >= tabs_.size() || tabs_[index].terminalId.empty()))) {
+            fileDropGroup_ = pane.group; return true;
+        }
+    }
+    return false;
+}
+void ProjectRuntime::Impl::dropFiles(const std::vector<std::wstring>& files) {
+    if (fileDropGroup_ < 0 || files.empty()) return;
+    const int group = fileDropGroup_;
+    // Checking Shell paths can touch a network share; keep that work off the UI thread.
+    worker_->submit(L"file-drop:" + std::to_wstring(nextId_++), [this, files, group] {
+        std::vector<ResourceId> paths;
+        for (const auto& file : files) {
+            const auto attributes = GetFileAttributesW(file.c_str());
+            if (attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
+            paths.emplace_back(fs::path(file).lexically_normal());
+        }
+        worker_->complete([this, paths = std::move(paths), group] {
+            if (paths.empty()) { status(L"Drop files onto the editor to open them. Folders cannot be opened as tabs."); return; }
+            endTabDrag(); saveTab();
+            const int destination = dock_.pane(group) ? group : dock_.topGroup();
+            std::set<int> changed;
+            for (auto path : paths) {
+                // Reuse project tabs when File Explorer supplies a WSL UNC alias.
+                const auto projectPath = explorerClipboardPath(path.native(), root_);
+                if (root_.contains(projectPath)) path = projectPath;
+                const auto index = openEditorDroppedFile(tabs_, path, destination);
+                focusedGroup_ = tabs_[index].group;
+                for (auto& tab : tabs_) if (tab.group == focusedGroup_) tab.displayed = false;
+                tabs_[index].displayed = true; activeTab_ = index; changed.insert(focusedGroup_);
+            }
+            layout();
+            for (const int target : changed) loadTab(false, target);
+            if (active_) SetFocus(selectedWindow());
+            recordEditorNavigation();
+            if (owner_ && owner_->changed) owner_->changed();
+        });
+    });
 }
 void ProjectRuntime::Impl::openFile(const ResourceId& path, bool diff, bool revealExplorer) {
     if (path.empty()) { status(L"This filename cannot be represented as UTF-8 and cannot be opened or renamed."); return; }
@@ -3046,7 +3107,7 @@ void ProjectRuntime::Impl::loadTab(bool preserve, int group, bool revealExplorer
     const auto path = tab.path;
     if (!tab.comparePath.empty()) {
         const auto comparison = tab.comparePath;
-        if (root_.wsl() && !connected_) { viewers_[group].message(L"WSL disconnected. Press F5 to reconnect.", path); return; }
+        if ((path.wsl() || comparison.wsl()) && !connected_) { viewers_[group].message(L"WSL disconnected. Press F5 to reconnect.", path); return; }
         const auto snapshot = [this](const ResourceId& file) -> std::shared_ptr<const Document> {
             for (const auto& tab : tabs_) if (tab.path == file && tab.buffer && (tab.buffer->dirty() || tab.buffer->saving))
                 return std::make_shared<Document>(tab.buffer->document);
@@ -3055,9 +3116,9 @@ void ProjectRuntime::Impl::loadTab(bool preserve, int group, bool revealExplorer
         const auto before = snapshot(comparison), after = snapshot(path);
         const auto state = tab.diffView; const auto serial = serial_[group], generation = generation_;
         if (!preserve) viewers_[group].loading(L"Loading file comparison…", path);
-        worker_->submit(L"file:" + std::to_wstring(group), [this, group, path, comparison, before, after, state, serial, generation, preserve] {
-            const auto left = before ? nullptr : readDocument(*provider_, comparison);
-            const auto right = after ? nullptr : readDocument(*provider_, path);
+        worker_->submit(L"file:" + std::to_wstring(group), [this, group, path, comparison, before, after, state, serial, generation, preserve, leftProvider = fileProvider(comparison), rightProvider = fileProvider(path)] {
+            const auto left = before ? nullptr : readDocument(*leftProvider, comparison);
+            const auto right = after ? nullptr : readDocument(*rightProvider, path);
             const auto leftDocument = before ? before : left->document, rightDocument = after ? after : right->document;
             const auto error = !leftDocument ? comparison.filename().native() + L": " + (left->error.empty() ? L"Only text files can be compared." : left->error) :
                 !rightDocument ? path.filename().native() + L": " + (right->error.empty() ? L"Only text files can be compared." : right->error) : std::wstring{};
@@ -3083,13 +3144,13 @@ void ProjectRuntime::Impl::loadTab(bool preserve, int group, bool revealExplorer
         viewers_[group].editDiff(tab.buffer, tab.diffBefore, path, preserve); if (!preserve) viewers_[group].restore(state);
         preserve = true;
     }
-    if (root_.wsl() && !connected_) { if (!viewers_[group].hasDocument()) viewers_[group].message(connecting_ ? L"Connecting to WSL…" : L"WSL disconnected. Press F5 to reconnect.", path); return; }
+    if (path.wsl() && !connected_) { if (!viewers_[group].hasDocument()) viewers_[group].message(connecting_ ? L"Connecting to WSL…" : L"WSL disconnected. Press F5 to reconnect.", path); return; }
     // Retain only tab metadata and view positions; reload the active document.
     if (!preserve) viewers_[group].loading(tab.diff ? L"Loading Git diff…" : L"Loading…", path);
     status((tab.diff ? L"Git diff: " : L"") + path.filename().native());
     if (!tab.diff && tab.diffKind != GitDiffKind::Commit && tab.diffKind != GitDiffKind::Compare) {
-        worker_->submit(L"file:" + std::to_wstring(group), [this, group, path, serial, generation, preserve, state] {
-            auto result = readDocument(*provider_, path);
+        worker_->submit(L"file:" + std::to_wstring(group), [this, group, path, serial, generation, preserve, state, provider = fileProvider(path)] {
+            auto result = readDocument(*provider, path);
             worker_->complete([this, group, result, path, serial, generation, preserve, state] {
                 if (generation != generation_ || serial != serial_[group]) return;
                 if (viewers_[group].buffer() && (viewers_[group].buffer()->dirty() || viewers_[group].buffer()->saving)) return;
@@ -3356,7 +3417,16 @@ void ProjectRuntime::Impl::refreshGit(bool rescan) {
 }
 void ProjectRuntime::Impl::refresh(bool force) {
     if (root_.empty()) return;
-    if (root_.wsl() && (!connected_ || provider_->state() != ConnectionState::Ready)) { if (force) connectRemote(); return; }
+    if (root_.wsl() && (!connected_ || provider_->state() != ConnectionState::Ready)) {
+        if (force) {
+            connectRemote(); saveTab();
+            for (int group = 0; group < groupCount(); ++group) {
+                const auto index = groupTab(group);
+                if (index < tabs_.size() && tabs_[index].terminalId.empty() && !tabs_[index].path.wsl()) loadTab(true, group);
+            }
+        }
+        return;
+    }
     const bool files = force || filesDirty_;
     if (files) quickOpen_.refresh();
     filesDirty_ = false;
@@ -3610,6 +3680,7 @@ LRESULT ProjectRuntime::Impl::handle(UINT m, WPARAM a, LPARAM b) {
     }
     case WM_CLOSE: return 0;
     case WM_DESTROY:
+        if (fileDropTarget_) { RevokeDragDrop(window_); fileDropTarget_->Release(); fileDropTarget_ = nullptr; }
         KillTimer(window_, timerId); stopWatch(); quickOpen_.stop(); comparePicker_.stop(); searchPane_.stop(); if (gitWorker_) gitWorker_->stop(); stopExplorerHistory(); if (worker_) worker_->stop(); terminal_.stop(); explorer_.clear(); changes_.clear();
         return 0;
     default: break;

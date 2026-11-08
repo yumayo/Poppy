@@ -161,11 +161,68 @@ void editorTabTests() {
     saveEditorTabs(session, tabs, 0);
     check(session.tabs.size() == 2, "Snapshot filtering dropped a saving buffer");
 }
+void droppedFileTests() {
+    using namespace poppy;
+    const ResourceId root = std::filesystem::temp_directory_path() / "project";
+    const ResourceId first = root.parent_path() / std::filesystem::u8path("外部 CSV/first.csv");
+    const ResourceId second = root.parent_path() / std::string_view("second.csv");
+    std::vector<EditorTab> tabs(1);
+    tabs[0].path = root / std::string_view("preview.cpp"); tabs[0].preview = true;
+    const auto index = openEditorDroppedFile(tabs, first, 2);
+    check(index == 1 && tabs.size() == 2 && !tabs[index].preview && tabs[index].group == 2 && tabs[index].path == first &&
+          tabs[0].preview, "A file drop replaced the existing preview or ignored its destination pane");
+    tabs[index].fileView.top = 41; tabs[index].pinned = true;
+    auto buffer = std::make_shared<EditBuffer>(); buffer->document.text = "name,value\n";
+    indexDocument(buffer->document); buffer->initialize("name,value\n"); buffer->replace(0, 0, "!"); tabs[index].buffer = buffer;
+    openEditorDroppedFile(tabs, second, 2);
+    check(tabs.size() == 3 && tabs[1].path == first && tabs[2].path == second && !tabs[2].preview,
+          "Dropping multiple files discarded an earlier file");
+    check(openEditorDroppedFile(tabs, first, 0) == index && tabs.size() == 3 && tabs[index].group == 2 &&
+          tabs[index].fileView.top == 41 && tabs[index].pinned && tabs[index].buffer == buffer && buffer->dirty(),
+          "Dropping an open file duplicated or moved it, or lost unsaved text or view state");
+    tabs[2].displayed = true;
+    ProjectSession session; saveEditorTabs(session, tabs, 2);
+    check(session.tabs.size() == 2 && restoreEditorTabPath(session.tabs[0].path, root) == first &&
+          restoreEditorTabPath(session.tabs[1].path, root) == second,
+          "Dropped external files did not survive saving and restoring tabs");
+
+    // A drop opens the working file even when its automatic diff is selected.
+    tabs.clear(); EditorTab diff; diff.path = first; diff.diff = true; diff.preview = true; diff.buffer = buffer;
+    tabs.push_back(diff);
+    check(openEditorDroppedFile(tabs, first, 0) == 0 && !tabs[0].diff && !tabs[0].preview && tabs[0].buffer == buffer,
+          "Dropping a file with an open automatic diff did not reveal its working text");
+    tabs[0].diffKind = GitDiffKind::Changes;
+    check(openEditorDroppedFile(tabs, first, 1) == 1 && tabs[1].buffer == buffer && !tabs[1].diff,
+          "Opening a dropped file from a Git diff lost the shared working buffer");
+
+    const auto wsl = ResourceId::wsl("Ubuntu", "/home/user/project", "user");
+    const auto legacy = wsl.at("/home/user/日本語/file.csv");
+    check(restoreEditorTabPath(legacy.u8string(), wsl) == legacy &&
+          restoreEditorTabPath(legacy.serialized(), wsl) == legacy,
+          "Restoring dropped files changed existing WSL session paths or their user");
+    tabs.clear();
+    const auto upper = wsl.at("/outside/A.csv"), lower = wsl.at("/outside/a.csv");
+    openEditorDroppedFile(tabs, upper, 0); openEditorDroppedFile(tabs, lower, 0);
+    check(tabs.size() == 2, "Dropped WSL files lost their case-sensitive identity");
+#ifdef _WIN32
+    const ResourceId local = L"D:\\外部 CSV\\file.csv";
+    check(restoreEditorTabPath(local.u8string(), wsl) == local &&
+          restoreEditorTabPath("\\\\server\\share\\file.csv", wsl) == ResourceId(L"\\\\server\\share\\file.csv"),
+          "A Windows drive or UNC path was restored as a Linux path in a WSL project");
+    tabs.clear(); openEditorDroppedFile(tabs, local, 0);
+    check(openEditorDroppedFile(tabs, ResourceId(L"d:\\外部 CSV\\FILE.csv"), 1) == 0 && tabs.size() == 1,
+          "Dropping a Windows path with different case duplicated the tab");
+    ProjectSession mixed; saveEditorTabs(mixed, tabs, 0);
+    check(restoreEditorTabPath(mixed.tabs[0].path, wsl) == local,
+          "Saving and restoring a Windows file in a WSL project changed its filesystem");
+#endif
+}
 }
 int main() {
     try {
         editorTabPathTests();
         editorTabTests();
+        droppedFileTests();
         using poppy::projectDirectoryName;
         check(projectDirectoryName("D:\\repository\\yumayo\\PoppyWorktrees\\PoppyDirect2D") ==
               "-d-repository-yumayo-poppyworktrees-poppydirect2d", "Windows project directory format changed");

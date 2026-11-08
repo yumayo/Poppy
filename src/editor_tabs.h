@@ -34,6 +34,11 @@ void rememberEditorTab(EditorTab& tab);
 bool sameEditorTab(const EditorTab& left, const EditorTab& right);
 // Aggregate tabs have no single file path. Relative paths use the project root.
 std::optional<std::wstring> editorTabPathText(const EditorTab& tab, const ResourceId& root, bool relative);
+// Legacy WSL sessions store Linux paths; dropped Windows files keep absolute Shell paths.
+ResourceId restoreEditorTabPath(std::string_view saved, const ResourceId& root);
+
+// Explicit file drops add permanent tabs and keep existing tabs in their panes.
+size_t openEditorDroppedFile(std::vector<EditorTab>& tabs, const ResourceId& path, int group);
 
 // Reuse an existing tab, or replace the clean preview in the target group.
 size_t openEditorPreview(std::vector<EditorTab>& tabs, EditorTab target);
