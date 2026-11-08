@@ -749,8 +749,16 @@ void fileDockPlacementTests(const fs::path& executable) {
     check(!IsWindowVisible(shell) && visibleTabCount(app) == 3, "Reopening a lower file moved or duplicated its tab");
     while (visibleTabCount(app)) clickTab(app, 0, false, true);
     check(IsWindowVisible(shell), "Closing all files also hid the remaining terminal");
-    open(b, 300);
-    check(visibleTabCount(app) == 1, "Opening a file after closing all files created extra tabs");
+    const auto single = bounds(app.window, shell);
+    send(tree, treeSelect, b); waitLines(lower, 300);
+    const auto fileBounds = bounds(app.window, lower);
+    check(IsWindowVisible(lower) && !IsWindowVisible(shell) && EqualRect(&single, &fileBounds) &&
+          visibleTabCount(app) == 1 && dockTabCount(app) == 2,
+          "Opening a file in the sole terminal dock split the layout or replaced a tab");
+    clickTerminalTab(app, shell);
+    const auto terminalBounds = bounds(app.window, shell);
+    check(IsWindowVisible(shell) && !IsWindowVisible(lower) && EqualRect(&single, &terminalBounds),
+          "The terminal tab did not retain the sole dock after opening a file");
 }
 void htmlTabToolsTests(const fs::path& executable) {
     Fixture fixture;

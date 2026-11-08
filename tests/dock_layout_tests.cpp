@@ -153,16 +153,35 @@ void terminalFileDestination() {
     check(tabs[index].group == right && dock.nodes().size() == 3, "A top terminal was replaced despite an eligible pane beside it");
     // After closing all files, the terminal can be the only surviving pane.
     tabs.resize(1); dock.retain({0});
+    const auto single = dock.save();
     const auto opened = openEditorFilePreview(tabs, file, dock, 0);
-    const int upper = tabs[opened].group;
-    const auto geometry = dock.arrange({0, 0, 1000, 800}, 5);
-    check(upper != 0 && find(geometry, upper).rect.bottom < find(geometry, 0).rect.top && tabs[0].displayed,
-          "Opening a file in a terminal-only layout did not create a pane above the terminal");
-    tabs[opened].group = 0; tabs[opened].preview = false; dock.retain({0});
+    check(tabs.size() == 2 && tabs[opened].group == 0 && tabs[opened].preview && dock.save() == single &&
+          tabs[0].terminalId == "shell-1" && tabs[0].displayed,
+          "Opening a file in a single dock split the layout or replaced its terminal tab");
+    file.path = ResourceId::wsl("Ubuntu", "/project/next.txt");
+    check(openEditorFilePreview(tabs, file, dock, 0) == opened && tabs.size() == 2 && dock.save() == single && tabs[0].terminalId == "shell-1",
+          "Opening another file did not reuse the preview beside the terminal");
+    tabs[opened].preview = false;
     const auto before = dock.save();
     check(openEditorFilePreview(tabs, file, dock, 0) == opened && dock.save() == before,
           "Selecting an existing file beside a terminal created an empty pane");
     tabs.resize(1);
+    const int lower = dock.split(0, DockSide::Bottom);
+    EditorTab lowerTerminal; lowerTerminal.terminalId = "shell-2"; lowerTerminal.group = lower; lowerTerminal.displayed = true;
+    tabs.push_back(lowerTerminal);
+    const auto splitFile = openEditorFilePreview(tabs, file, dock, lower);
+    const int upper = tabs[splitFile].group;
+    const auto geometry = dock.arrange({0, 0, 1000, 800}, 5);
+    check(upper != 0 && upper != lower && find(geometry, upper).rect.bottom < find(geometry, 0).rect.top && tabs[0].displayed && tabs[1].displayed,
+          "Opening a file among multiple terminal docks did not create a pane above the top terminal");
+    // A surviving dock need not have group ID zero, including after restoration.
+    tabs.resize(1); tabs[0].group = lower; dock.retain({lower});
+    const auto remaining = dock.save(); DockLayout restored;
+    check(restored.restore(remaining), "Could not restore the sole remaining terminal dock");
+    const auto restoredFile = openEditorFilePreview(tabs, file, restored, 0);
+    check(tabs[restoredFile].group == lower && restored.save() == remaining && tabs[0].terminalId == "shell-1",
+          "Opening a file split a sole restored terminal dock with a nonzero group ID");
+    tabs.resize(1); tabs[0].group = 0;
     std::string full = "1 ";
     for (int group = 0; group < DockLayout::maxGroups - 1; ++group) full += "H 500 L " + std::to_string(group) + " \"\" 0 ";
     full += "L " + std::to_string(DockLayout::maxGroups - 1) + " \"\" 0 ";

@@ -32,7 +32,7 @@ size_t openEditorFilePreview(std::vector<EditorTab>& tabs, EditorTab target, Doc
     std::vector<int> terminals;
     for (const auto& tab : tabs) if (tab.displayed && !tab.terminalId.empty()) terminals.push_back(tab.group);
     target.group = dock.topGroup(preferred, terminals);
-    if (target.group < 0) target.group = dock.split(dock.topGroup(), DockSide::Top);
+    if (target.group < 0) target.group = dock.nodes().size() == 1 ? dock.topGroup() : dock.split(dock.topGroup(), DockSide::Top);
     if (target.group < 0) return tabs.size();
     return openEditorPreview(tabs, std::move(target));
 }

@@ -37,7 +37,8 @@ std::optional<std::wstring> editorTabPathText(const EditorTab& tab, const Resour
 
 // Reuse an existing tab, or replace the clean preview in the target group.
 size_t openEditorPreview(std::vector<EditorTab>& tabs, EditorTab target);
-// New file tabs use the top row, creating a pane above terminals when necessary.
+// New file tabs use the top row, sharing a sole pane with terminal tabs.
+// With multiple panes, create a pane above terminals when necessary.
 // Existing tabs keep their placement. Returns tabs.size() if the group limit is reached.
 size_t openEditorFilePreview(std::vector<EditorTab>& tabs, EditorTab target, DockLayout& dock, int preferred);
 void keepModifiedEditorTabs(std::vector<EditorTab>& tabs);
