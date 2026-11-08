@@ -12,11 +12,14 @@
 #include <memory>
 
 namespace poppy {
+class FileDropTarget;
 class Viewer {
 public:
     using State = ViewState;
     // Text-only popups omit line numbers and display complete wrapped lines.
     void create(HWND parent, HINSTANCE instance, bool textOnly = false);
+    // Register on the body window as well as the project's tab strip.
+    void setFileDropTarget(FileDropTarget* target);
     void setDpi(UINT dpi);
     void show(std::shared_ptr<const Document> document, const ResourceId& path, bool preserve = false, bool allowHtml = true);
     void showRevision(std::shared_ptr<const Document> document, const DiffDocument& changes, const ResourceId& path, bool preserve = false);
@@ -90,6 +93,7 @@ private:
     int contentTop() const { return findBar_.visible() ? header_ : 0; }
     size_t rowCount() const { return diff_ ? wrapping() ? diffLayout_.rows() : diff_->rowCount(inlineView_) : wrapping() ? textLayout_.rows() : document_->lines.size(); }
     HWND window_ = nullptr;
+    FileDropTarget* fileDropTarget_ = nullptr;
     Renderer renderer_;
     HtmlPreview html_;
     ImeComposition ime_;

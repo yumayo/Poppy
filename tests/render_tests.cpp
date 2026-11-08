@@ -1,6 +1,7 @@
 #include "scrollbars.h"
 #include "quick_open.h"
 #include "viewer.h"
+#include "file_drop.h"
 #include "terminal.h"
 #include "terminal_profile.h"
 #include "status_bar.h"
@@ -21,6 +22,47 @@ using namespace poppy;
 namespace {
 void check(bool condition, const char* message) {
     if (!condition) throw std::runtime_error(message);
+}
+void editorBodyFileDrops() {
+    const auto instance = GetModuleHandleW(nullptr);
+    const auto parent = CreateWindowExW(0, L"STATIC", L"Editor file drop test", WS_POPUP | WS_CLIPCHILDREN,
+        100, 100, 640, 400, nullptr, nullptr, instance, nullptr);
+    check(parent != nullptr, "Cannot create the editor file drop owner");
+    auto* target = new FileDropTarget({}, {}, {});
+    Viewer viewer, split;
+    struct Owner {
+        HWND window; FileDropTarget* target;
+        ~Owner() { DestroyWindow(window); target->Release(); }
+    } owner{parent, target};
+    const auto registered = [&](HWND window) {
+        const auto result = RegisterDragDrop(window, target);
+        if (SUCCEEDED(result)) RevokeDragDrop(window);
+        check(result == DRAGDROP_E_ALREADYREGISTERED, "The editor body has no registered file drop target");
+    };
+    viewer.create(parent, instance); viewer.setFileDropTarget(target);
+    MoveWindow(viewer.window(), 0, 34, 320, 366, FALSE);
+    registered(viewer.window()); // Empty editor, without a file selected.
+    viewer.setFileDropTarget(target); registered(viewer.window());
+    auto buffer = std::make_shared<EditBuffer>(); buffer->document.text = "name,value\nfirst,123\n";
+    indexDocument(buffer->document); buffer->initialize(buffer->document.text);
+    viewer.edit(buffer, L"C:\\outside\\sample.csv"); registered(viewer.window());
+    auto before = std::make_shared<Document>(); before->text = "name,value\n"; indexDocument(*before);
+    viewer.editDiff(buffer, before, L"C:\\outside\\sample.csv"); registered(viewer.window());
+    auto image = std::make_shared<ImagePreview>();
+    image->width = image->height = 1; image->pixels = {0, 0, 0, 255};
+    viewer.showImage(image, L"C:\\outside\\sample.png"); registered(viewer.window());
+    viewer.message(L"Select a file."); registered(viewer.window());
+    // New split panes share the same handler but register their own body windows.
+    split.create(parent, instance); split.setFileDropTarget(target);
+    MoveWindow(split.window(), 320, 34, 320, 366, FALSE);
+    registered(split.window()); registered(viewer.window());
+    viewer.setFileDropTarget(nullptr);
+    check(RegisterDragDrop(viewer.window(), target) == S_OK, "Detaching the editor body did not revoke its drop target");
+    RevokeDragDrop(viewer.window());
+    viewer.setFileDropTarget(target);
+    const auto body = viewer.window(); DestroyWindow(body);
+    registered(split.window()); // Destroying one body must retain the other registration.
+    check(!IsWindow(body), "The editor body did not close");
 }
 void continuousDraggedTab() {
     const auto instance = GetModuleHandleW(nullptr);
@@ -3057,7 +3099,7 @@ int main(int argc, char** argv) {
             htmlPreviewRuntime();
             std::cout << "WebView2 runtime reuse tests passed\n";
         } else {
-            continuousDraggedTab(); terminalDropPreviewClipping();
+            editorBodyFileDrops(); continuousDraggedTab(); terminalDropPreviewClipping();
             shutdownProgress();
             persistentErrorPopup();
             editorBottomPadding(); editorTailFollowing();

@@ -1,10 +1,12 @@
 #include "viewer.h"
+#include "file_drop.h"
 #include "selection_scroll.h"
 #include "change_marks.h"
 #include <algorithm>
 #include <array>
 #include <chrono>
 #include <limits>
+#include <stdexcept>
 #include <imm.h>
 
 namespace poppy {
@@ -29,6 +31,16 @@ void Viewer::create(HWND parent, HINSTANCE instance, bool textOnly) {
     html_.changed = [this] { InvalidateRect(window_, nullptr, FALSE); };
     html_.focused = [this] { if (focused) focused(); };
     setDpi(GetDpiForWindow(parent));
+}
+void Viewer::setFileDropTarget(FileDropTarget* target) {
+    if (target == fileDropTarget_) return;
+    if (fileDropTarget_) {
+        RevokeDragDrop(window_); fileDropTarget_->Release(); fileDropTarget_ = nullptr;
+    }
+    if (!target) return;
+    const auto result = RegisterDragDrop(window_, target);
+    if (FAILED(result)) throw std::runtime_error("Cannot register editor body file drops (HRESULT " + std::to_string(static_cast<unsigned long>(result)) + ").");
+    target->AddRef(); fileDropTarget_ = target;
 }
 void Viewer::setDpi(UINT dpi) {
     dpi_ = dpi;
@@ -826,7 +838,7 @@ LRESULT Viewer::handle(UINT m, WPARAM a, LPARAM b) {
             caretVisible_ = !caretVisible_; InvalidateRect(window_, nullptr, FALSE);
         }
         return 0;
-    case WM_DESTROY: html_.close(); stopLoading(); stopSelection(); ime_.clear(); KillTimer(window_, caretTimer); KillTimer(window_, findTimer); return 0;
+    case WM_DESTROY: setFileDropTarget(nullptr); html_.close(); stopLoading(); stopSelection(); ime_.clear(); KillTimer(window_, caretTimer); KillTimer(window_, findTimer); return 0;
     case WM_SHOWWINDOW: if (!a) { stopSelection(); ime_.cancel(window_); } break;
     case WM_SETCURSOR:
         if (image_ && LOWORD(b) == HTCLIENT) { SetCursor(LoadCursorW(nullptr, IDC_ARROW)); return TRUE; }

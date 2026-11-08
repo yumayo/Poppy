@@ -782,6 +782,7 @@ void ProjectRuntime::Impl::create() {
     const auto result = RegisterDragDrop(window_, target);
     if (FAILED(result)) { target->Release(); throw std::runtime_error("Cannot register editor file drops (HRESULT " + std::to_string(static_cast<unsigned long>(result)) + ")."); }
     fileDropTarget_ = target;
+    for (auto& view : viewers_) view.setFileDropTarget(fileDropTarget_);
 }
 void ProjectRuntime::Impl::ensureGroup(int target) {
     while (groupCount() <= target) {
@@ -789,6 +790,7 @@ void ProjectRuntime::Impl::ensureGroup(int target) {
         viewers_.emplace_back(); editorGroups_.emplace_back();
         waitingForGit_.push_back(false); serial_.push_back(0); editorGitSerial_.push_back(0);
         auto& view = viewers_[group]; view.create(window_, instance_); view.setDpi(dpi_);
+        view.setFileDropTarget(fileDropTarget_);
         if (group) view.setDiffLayout(viewers_[0].diffInline());
         SetWindowLongPtrW(view.window(), GWL_STYLE, GetWindowLongPtrW(view.window(), GWL_STYLE) | WS_CLIPSIBLINGS);
         view.changed = [this, group] {
