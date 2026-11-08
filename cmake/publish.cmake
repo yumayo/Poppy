@@ -1,11 +1,11 @@
 cmake_minimum_required(VERSION 3.20)
 
-foreach(required OUTPUT_DIR LAUNCHER_FILE APP_FILE WEBVIEW2_DIR WEBVIEW2_LOADER AI_DIR)
+foreach(required OUTPUT_DIR LAUNCHER_FILE APP_FILE TERMINAL_HOST WEBVIEW2_DIR WEBVIEW2_LOADER AI_DIR)
   if(NOT DEFINED ${required} OR "${${required}}" STREQUAL "")
     message(FATAL_ERROR "${required} is required")
   endif()
 endforeach()
-foreach(input "${LAUNCHER_FILE}" "${APP_FILE}" "${WEBVIEW2_LOADER}"
+foreach(input "${LAUNCHER_FILE}" "${APP_FILE}" "${TERMINAL_HOST}" "${WEBVIEW2_LOADER}"
     "${WEBVIEW2_DIR}/LICENSE.txt" "${WEBVIEW2_DIR}/NOTICE.txt" "${AI_DIR}/README.md")
   if(NOT EXISTS "${input}")
     message(FATAL_ERROR "Release input is missing: ${input}")
@@ -34,6 +34,7 @@ string(RANDOM LENGTH 16 ALPHABET 0123456789abcdef nonce)
 set(stage "${OUTPUT_DIR}/releases/.staging-${nonce}")
 file(MAKE_DIRECTORY "${stage}")
 configure_file("${APP_FILE}" "${stage}/PoppyApp.dll" COPYONLY)
+configure_file("${TERMINAL_HOST}" "${stage}/PoppyTerminalHost.exe" COPYONLY)
 configure_file("${WEBVIEW2_LOADER}" "${stage}/WebView2Loader.dll" COPYONLY)
 configure_file("${WEBVIEW2_DIR}/LICENSE.txt" "${stage}/WebView2-LICENSE.txt" COPYONLY)
 configure_file("${WEBVIEW2_DIR}/NOTICE.txt" "${stage}/WebView2-NOTICE.txt" COPYONLY)

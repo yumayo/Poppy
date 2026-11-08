@@ -2,7 +2,6 @@
 #include "terminal.h"
 #include "tree_input.h"
 #include "ai_status_win.h"
-#include "hook_pipe.h"
 #include "session.h"
 #include "project_provider.h"
 #include <memory>
@@ -13,15 +12,13 @@ namespace poppy {
 class ShutdownDialog;
 // Each session retains its ConPTY, VT model and view while other tabs are shown.
 struct TerminalSession {
-    ~TerminalSession() { if (terminal) { terminal->stop(); terminal->starting = {}; terminal->ended = {}; terminal->stopping = {}; } }
+    ~TerminalSession() { if (terminal) { terminal->stop(); terminal->starting = {}; terminal->ended = {}; terminal->stopping = {}; terminal->shutdownFailed = {}; } }
     SavedTerminal configuration;
     std::unique_ptr<Terminal> terminal;
-    HookPipe events;
     std::string notificationId;
     std::wstring notificationError;
     std::set<std::string> reportedErrors;
     AiStatus ai;
-    std::string wslToken;
     std::wstring wslTool;
 };
 class TerminalPane {
@@ -46,6 +43,7 @@ public:
     AiSummary summary() const;
     std::wstring description() const;
     void stop(ShutdownDialog* progress = nullptr);
+    void detach(ShutdownDialog* progress = nullptr);
     bool key(const MSG& message);
     bool contains(HWND window) const;
     size_t dockCount() const { return sessions_.size(); }
@@ -70,7 +68,7 @@ private:
     LRESULT handle(UINT, WPARAM, LPARAM);
     TerminalSession& active() { return *sessions_[active_]; }
     const TerminalSession& active() const { return *sessions_[active_]; }
-    void add(SavedTerminal configuration = {});
+    void add(SavedTerminal configuration = {}, bool reconnect = false);
     void select(size_t index);
     void close(size_t index);
     void menu(size_t index, POINT point);
@@ -109,7 +107,6 @@ private:
     size_t active_ = 0;
     TerminalShell defaultShell_ = TerminalShell::PowerShell;
     AiEventQueue* events_ = nullptr;
-    ShutdownDialog* shutdownProgress_ = nullptr;
     std::wstring tooltipText_;
 };
 }

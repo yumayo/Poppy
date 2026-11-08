@@ -5,6 +5,7 @@ set(output "${TEST_ROOT}/live with spaces")
 file(MAKE_DIRECTORY "${input}/webview" "${input}/ai/scripts")
 file(WRITE "${input}/Poppy.exe" "launcher-v1")
 file(WRITE "${input}/PoppyApp.dll" "app-v1")
+file(WRITE "${input}/PoppyTerminalHost.exe" "terminal-host-v1")
 file(WRITE "${input}/webview/WebView2Loader.dll" "loader-v1")
 file(WRITE "${input}/webview/LICENSE.txt" "license")
 file(WRITE "${input}/webview/NOTICE.txt" "notice")
@@ -16,6 +17,7 @@ file(WRITE "${input}/poppy-wsl-helper" "helper-v1")
 function(publish destination expected_success)
   execute_process(COMMAND "${CMAKE_COMMAND}"
     "-DOUTPUT_DIR=${destination}" "-DLAUNCHER_FILE=${input}/Poppy.exe" "-DAPP_FILE=${input}/PoppyApp.dll"
+    "-DTERMINAL_HOST=${input}/PoppyTerminalHost.exe"
     "-DWEBVIEW2_DIR=${input}/webview" "-DWEBVIEW2_LOADER=${input}/webview/WebView2Loader.dll"
     "-DAI_DIR=${input}/ai" "-DWSL_HELPER=${input}/poppy-wsl-helper"
     -P "${POPPY_SOURCE_DIR}/cmake/publish.cmake"
@@ -47,6 +49,7 @@ current_release(first)
 expect_file("${output}/Poppy.exe" "launcher-v1")
 expect_file("${output}/launcher-abi.txt" "1\n")
 expect_file("${first}/PoppyApp.dll" "app-v1")
+expect_file("${first}/PoppyTerminalHost.exe" "terminal-host-v1")
 expect_file("${first}/WebView2Loader.dll" "loader-v1")
 expect_file("${first}/WebView2-LICENSE.txt" "license")
 expect_file("${first}/WebView2-NOTICE.txt" "notice")
@@ -121,6 +124,21 @@ if(fifth STREQUAL fourth)
 endif()
 expect_file("${fifth}/WebView2Loader.dll" "loader-v3")
 expect_file("${fourth}/WebView2Loader.dll" "loader-v2")
+
+# Terminal hosts belong to their immutable release and affect its hash.
+file(WRITE "${input}/PoppyTerminalHost.exe" "terminal-host-v2")
+publish("${output}" TRUE)
+current_release(sixth)
+if(sixth STREQUAL fifth)
+  message(FATAL_ERROR "A terminal-host-only update did not switch releases")
+endif()
+expect_file("${sixth}/PoppyTerminalHost.exe" "terminal-host-v2")
+expect_file("${fifth}/PoppyTerminalHost.exe" "terminal-host-v1")
+file(READ "${output}/current.txt" complete_id)
+file(REMOVE "${input}/PoppyTerminalHost.exe")
+publish("${output}" FALSE)
+expect_file("${output}/current.txt" "${complete_id}")
+file(WRITE "${input}/PoppyTerminalHost.exe" "terminal-host-v1")
 
 # Reusing a damaged content-addressed release must fail without selecting it.
 file(READ "${output}/current.txt" last_id)

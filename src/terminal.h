@@ -1,14 +1,13 @@
 #pragma once
 #include "scrollbars.h"
 #include "terminal_display.h"
+#include "terminal_host.h"
 
 namespace poppy {
 class ShutdownDialog;
 class Terminal {
 public:
-    struct LaunchOptions {
-        std::vector<std::wstring> command;
-        std::vector<std::pair<std::wstring, std::wstring>> environment;
+    struct LaunchOptions : TerminalHostLaunch {
         // Readiness runs on the UI thread; failure cleanup runs on the worker.
         std::function<void()> ready, failed;
     };
@@ -24,22 +23,29 @@ public:
     void setDisplayDirectory(std::wstring label) { displayDirectory_ = std::move(label); }
     // Returns whether the launch request was accepted. Completion is asynchronous.
     bool launch() { return start(); }
+    void setSessionIdentity(std::string id) { sessionId_ = std::move(id); }
+    void reconnect() { start(true); }
+    void detach(ShutdownDialog* progress = nullptr);
     void stop(ShutdownDialog* progress = nullptr);
     void setEnvironment(std::vector<std::pair<std::wstring, std::wstring>> values) { environment_ = std::move(values); }
     std::function<StartupTask()> starting;
     std::function<void()> ended, focused, stopping;
+    std::function<void()> connected;
+    std::function<void(const TerminalHostUpdate&)> hostStatus;
     std::function<void()> titleChanged;
     std::function<void(const std::string&)> notificationError;
     std::function<void(const std::wstring&)> launchFailed;
+    std::function<void(const std::wstring&)> shutdownFailed;
     const std::string& title() const { return model_.title(); }
     HWND window() const { return window_; }
     bool launching() const { return launching_; }
-    bool running() const { return !launching_ && process_ && WaitForSingleObject(process_.value, 0) == WAIT_TIMEOUT; }
+    bool running() const { return !launching_ && running_; }
+    bool relayRunning() const { return relayRunning_; }
 private:
     static LRESULT CALLBACK procedure(HWND, UINT, WPARAM, LPARAM);
     LRESULT handle(UINT, WPARAM, LPARAM);
-    bool start();
-    void startProcess(const fs::path& directory, const LaunchOptions& options, int columns, int rows, HWND target);
+    bool start(bool reconnect = false);
+    void readHost(HWND target);
     void completeStart();
     void stopProcesses();
     void send(std::string text, bool userInput = true);
@@ -66,23 +72,28 @@ private:
     std::vector<std::pair<std::wstring, std::wstring>> environment_;
     TerminalModel model_;
     TerminalDisplay display_;
-    HPCON console_ = nullptr;
-    Handle input_, output_, process_;
-    ProcessJob job_;
+    TerminalHostClient host_;
+    std::string sessionId_;
     std::vector<std::wstring> command_;
     std::atomic<bool> stopping_{false};
-    NativeThread launcher_, reader_, writer_;
+    NativeThread launcher_, reader_;
     bool launching_ = false;
     std::atomic<bool> launchFinished_{false};
     std::function<void()> launchReady_;
     std::wstring launchError_;
+    std::wstring shutdownError_;
     std::mutex mutex_;
     std::condition_variable condition_;
-    std::string received_;
+    std::deque<TerminalHostUpdate> received_;
+    size_t receivedBytes_ = 0;
     std::deque<std::string> writes_;
     size_t writeBytes_ = 0;
     bool notified_ = false, started_ = false, endedNotified_ = false, continuationPosted_ = false;
     bool resizePending_ = false;
+    bool hostFound_ = false;
+    bool sizeKnown_ = false, restored_ = false;
+    std::atomic<bool> preserve_{false};
+    std::atomic<bool> running_{false}, relayRunning_{false};
     int requestedColumns_ = 80, requestedRows_ = 24;
     std::wstring error_;
     size_t scroll_ = 0;

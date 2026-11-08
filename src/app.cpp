@@ -3620,7 +3620,7 @@ void ProjectRuntime::create(HWND parent, HINSTANCE instance, AiEventQueue* hooks
     impl_->window_ = CreateWindowExW(0, cls.lpszClassName, L"Project", WS_CHILD | WS_CLIPCHILDREN | WS_CLIPSIBLINGS, 0, 0, 0, 0, parent, nullptr, instance, impl_.get());
     impl_->terminal_.connect(hooks);
 }
-void ProjectRuntime::shutdown(ShutdownDialog* progress) {
+void ProjectRuntime::shutdown(ShutdownDialog* progress, bool preserveTerminals) {
     if (progress) progress->detail(L"Stopping file watchers and search tasks…");
     impl_->stopWatch(progress); impl_->quickOpen_.stop(progress); impl_->comparePicker_.stop(progress); impl_->searchPane_.stop(progress);
     if (progress) progress->detail(L"Stopping Git tasks…");
@@ -3632,7 +3632,7 @@ void ProjectRuntime::shutdown(ShutdownDialog* progress) {
     if (impl_->worker_) {
         if (progress) progress->wait([this] { impl_->worker_->stop(); }); else impl_->worker_->stop();
     }
-    impl_->terminal_.stop(progress);
+    if (preserveTerminals) impl_->terminal_.detach(progress); else impl_->terminal_.stop(progress);
 }
 void ProjectRuntime::disconnect(ShutdownDialog* progress) {
     if (!impl_->provider_) return;

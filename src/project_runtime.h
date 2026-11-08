@@ -17,7 +17,7 @@ public:
     void create(HWND parent, HINSTANCE instance, AiEventQueue* hooks);
     void initialize(const ResourceId& path, const ProjectSession& state, bool saved);
     void activate(bool active);
-    void shutdown(ShutdownDialog* progress = nullptr);
+    void shutdown(ShutdownDialog* progress = nullptr, bool preserveTerminals = false);
     // Call only after every project has stopped using shared WSL connections.
     void disconnect(ShutdownDialog* progress = nullptr);
     bool canClose();

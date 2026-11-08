@@ -1,5 +1,4 @@
 #include "hook_pipe.h"
-#include "project_provider.h"
 #include <algorithm>
 #include <stdexcept>
 
@@ -25,7 +24,8 @@ std::string HookPipe::start(const std::vector<std::wstring>& command, std::funct
         startup.StartupInfo.hStdInput = childInput.value; startup.StartupInfo.hStdOutput = childOutput.value; startup.StartupInfo.hStdError = diagnostics.value; startup.lpAttributeList = list;
         if (!job_.create()) throw std::runtime_error("Cannot track notification process");
         auto arguments = processCommandLine(command); PROCESS_INFORMATION pi{};
-        const auto directory = windowsProcessDirectory();
+        wchar_t system[MAX_PATH]{}; GetSystemDirectoryW(system, MAX_PATH);
+        const fs::path directory(system);
         if (!CreateProcessW(command.front().c_str(), arguments.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW | CREATE_SUSPENDED | EXTENDED_STARTUPINFO_PRESENT, nullptr, directory.c_str(), &startup.StartupInfo, &pi)) throw std::runtime_error("Cannot start WSL notifications");
         process_.reset(pi.hProcess); Handle thread(pi.hThread);
         if (!AssignProcessToJobObject(job_.handle(), process_.value)) { TerminateProcess(process_.value, 1); WaitForSingleObject(process_.value, INFINITE); process_.reset(); throw std::runtime_error("Cannot track WSL notifications"); }
@@ -48,18 +48,20 @@ std::string HookPipe::start(const std::vector<std::wstring>& command, std::funct
             if (available) {
                 if (!ReadFile(output_.value, bytes, std::min<DWORD>(available, sizeof(bytes)), &count, nullptr) || !count) throw std::runtime_error("WSL notification handshake failed");
                 frames.feed(std::string_view(bytes, count), [&](wsl::Frame frame) {
-                    if (frame.kind != 1 || !socket.empty()) throw std::runtime_error("Invalid notification handshake");
-                    const auto message = wsl::decodeMessage(frame.payload); socket = wsl::field(message, "socket");
-                    if (message.size() != 1 || socket.rfind("/tmp/poppy-events-", 0) != 0 || socket.size() >= 108 || socket.find('\0') != socket.npos) throw std::runtime_error("Invalid notification socket");
+                    if (frame.kind != 1) throw std::runtime_error("Invalid notification handshake");
+                    const auto message = wsl::decodeMessage(frame.payload);
+                    if (socket.empty()) {
+                        socket = wsl::field(message, "socket");
+                        if (message.size() != 1 || socket.rfind("/tmp/poppy-events-", 0) != 0 || socket.size() >= 108 || socket.find('\0') != socket.npos) throw std::runtime_error("Invalid notification socket");
+                    } else receive(message);
                 });
             } else {
                 if (GetTickCount64() >= deadline || WaitForSingleObject(process_.value, 15) == WAIT_OBJECT_0) throw std::runtime_error("WSL notification relay did not start");
             }
         }
         stopping_ = false; running_ = true; ready_ = true;
-        reader_.start([this, receive = std::move(receive)] {
+        reader_.start([this, receive = std::move(receive), stream = std::move(frames)]() mutable {
             try {
-                wsl::FrameReader stream;
                 while (!stopping_) {
                     char bytes[4096]; DWORD count = 0, available = 0;
                     if (!PeekNamedPipe(output_.value, nullptr, 0, nullptr, &available, nullptr)) { stream.finish(); break; }

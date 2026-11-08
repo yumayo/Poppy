@@ -20,6 +20,9 @@ public:
     TerminalModel(int columns = 80, int rows = 24);
     void feed(std::string_view bytes);
     void resize(int columns, int rows);
+    // Includes parser continuation, both screens and bounded scrollback.
+    std::string snapshot() const;
+    static TerminalModel fromSnapshot(std::string_view bytes);
     const std::vector<Cell>& row(int y, size_t scroll = 0) const;
     size_t historySize() const { return alternate_ ? 0 : history_.size(); }
     // Stable row coordinates even when the bounded history drops old lines.

@@ -17,13 +17,16 @@ void TerminalPane::create(HWND parent,HINSTANCE instance, bool docked) {
     preview_.create(window_, instance_);
     add(); setDpi(GetDpiForWindow(parent));
 }
-void TerminalPane::add(SavedTerminal configuration) {
+void TerminalPane::add(SavedTerminal configuration, bool reconnect) {
+    const bool hadHost = validNotificationId(configuration.hostSession) && std::none_of(sessions_.begin(), sessions_.end(), [&](const auto& s) { return s->configuration.hostSession == configuration.hostSession; });
+    if (!hadHost) configuration.hostSession = newSessionId();
     if (sessions_.size() >= 100) return;
     if (configuration.id.empty() || std::any_of(sessions_.begin(),sessions_.end(),[&](const auto& s){return s->configuration.id==configuration.id;})) configuration.id = newSessionId();
     if (configuration.name.empty()) configuration.name = "Shell";
     if (configuration.directory.empty()) configuration.directory = directory_.u8string();
     auto session = std::make_unique<TerminalSession>(); session->configuration = std::move(configuration);
     session->terminal = std::make_unique<Terminal>(); session->terminal->create(dockParent_ ? dockParent_ : window_,instance_);
+    session->terminal->setSessionIdentity(session->configuration.hostSession);
     session->terminal->setDpi(dpi_); session->terminal->setDirectory(directory_.wsl() ? windowsProcessDirectory() : fs::u8path(session->configuration.directory));
     if (directory_.wsl()) session->terminal->setDisplayDirectory(wide(session->configuration.directory) + L" · WSL · " + wide(directory_.location().distro));
     auto ptr = session.get();
@@ -38,6 +41,9 @@ void TerminalPane::add(SavedTerminal configuration) {
         reportError(*ptr, "terminal-start-failed", L"ターミナルまたはAI通知リレーを起動できませんでした。\n\n" + message +
             L"\n\nWSLと同梱のwsl/poppy-wsl-helperを確認し、ターミナルを開き直してください。");
     };
+    session->terminal->shutdownFailed = [this,ptr](const std::wstring& message) {
+        if (error) error(ptr->configuration.id + ":terminal-stop-failed", L"ターミナル終了エラー · " + sessionName(*ptr), message);
+    };
     session->terminal->titleChanged = [this] { layout(); };
     session->terminal->focused = [this, ptr] {
         const auto found = std::find_if(sessions_.begin(), sessions_.end(), [ptr](const auto& s) { return s.get() == ptr; });
@@ -46,84 +52,46 @@ void TerminalPane::add(SavedTerminal configuration) {
             if (activated) activated(ptr->configuration.id);
         }
     };
+    session->terminal->connected = [this,ptr] {
+        if (events_ && ptr->notificationId.empty()) { ptr->notificationId = newSessionId(); events_->add(ptr->notificationId); }
+        if (changed) changed();
+    };
+    session->terminal->hostStatus = [this,ptr](const TerminalHostUpdate& update) {
+        if (!update.status.empty() && events_ && !ptr->notificationId.empty()) events_->publish(ptr->notificationId, false, update.status);
+        if (!update.relayError.empty()) {
+            ptr->notificationError = wide(update.relayError);
+            reportError(*ptr, "relay-start-failed", L"AI通知またはターミナルホストとの接続を確認してください。\n\n" + ptr->notificationError);
+        }
+    };
     session->terminal->starting = [this,ptr]() -> Terminal::StartupTask {
         ptr->ai = {}; ptr->notificationError.clear(); ptr->reportedErrors.clear();
         const auto directory = directory_.at(ptr->configuration.directory);
-        const auto provider = provider_;
-        const auto shell = ptr->configuration.shell;
-        const auto tool = ptr->wslTool;
-        ptr->wslToken = directory.wsl() ? newSessionId() : std::string{};
-        const auto token = ptr->wslToken;
-        if (events_) {
-            ptr->notificationId = newSessionId(); events_->add(ptr->notificationId);
-        }
+        const auto provider = provider_; const auto shell = ptr->configuration.shell; const auto tool = ptr->wslTool;
+        const auto token = directory.wsl() ? newSessionId() : std::string{};
         if (changed) changed();
-        const auto id = ptr->notificationId; const auto hooks = events_;
-        return [this, ptr, directory, provider, shell, tool, token, id, hooks] {
+        return [directory, provider, shell, tool, token] {
             Terminal::LaunchOptions options;
+            options.environment.emplace_back(L"AICONTAINER_EVENT_SOCKET", L"");
             if (directory.wsl()) {
                 if (!provider) throw std::runtime_error("Reconnect the WSL project before starting a terminal");
                 options.command = provider->terminalCommand(directory, token, tool);
+                options.stopCommand = provider->terminalStopCommand(token);
+                options.eventCommand = provider->terminalEventsCommand();
+                options.requireEvents = true;
             } else {
                 wchar_t system[MAX_PATH]{}; GetSystemDirectoryW(system, MAX_PATH);
                 options.command = terminalShellCommand(shell, system);
-            }
-            std::string eventSocket;
-            std::wstring notificationError;
-            if (hooks) {
-                try {
-                    auto launch = directory.wsl() ? WslEventLaunch{provider->terminalEventsCommand(), {}} : defaultWslTerminalEvents();
-                    eventSocket = ptr->events.start(launch.command, [hooks, id](const wsl::Message& message) {
-                        const auto kind = wsl::field(message, "type");
-                        if (message.size() == 2 && (kind == "status" || kind == "activity")) hooks->publish(id, kind == "activity", wsl::field(message, "body"));
-                    }, std::move(launch.input));
-                } catch (const std::exception& failure) {
-                    if (directory.wsl()) throw;
-                    // A missing WSL installation must not prevent a Windows shell.
-                    notificationError = wide(failure.what());
+                try { auto launch = defaultWslTerminalEvents(); options.eventCommand = std::move(launch.command); options.eventInput = std::move(launch.input); }
+                catch (...) { /* A Windows shell remains usable without WSL. */ }
+                if (shell == TerminalShell::GitBash) {
+                    options.environment.emplace_back(L"CHERE_INVOKING", L"1");
+                    options.environment.emplace_back(L"MSYSTEM", L"MINGW64");
                 }
             }
-            options.environment = {{L"AICONTAINER_EVENT_SOCKET", wide(eventSocket)}};
-            if (!directory.wsl() && shell == TerminalShell::GitBash) {
-                // Git's login profile otherwise changes to HOME and uses MSYS mode.
-                options.environment.emplace_back(L"CHERE_INVOKING", L"1");
-                options.environment.emplace_back(L"MSYSTEM", L"MINGW64");
-            }
-            options.ready = [this, ptr, hooks, id, notificationError = std::move(notificationError)] {
-                ptr->notificationError = notificationError;
-                if (hooks && !notificationError.empty()) { hooks->remove(id); ptr->notificationId.clear(); }
-                if (!notificationError.empty()) reportError(*ptr, "relay-start-failed", L"AI通知リレーを起動できませんでした。\n\n" + notificationError +
-                    L"\n\nWSLと同梱のwsl/poppy-wsl-helperを確認し、Poppyのターミナルを開き直してください。");
-                if (changed) changed();
-            };
-            options.failed = [ptr] { ptr->events.stop(); };
             return options;
         };
     };
-    session->terminal->stopping = [this, ptr] {
-        // Stop Docker-owned AI processes before their WSL/Windows launchers.
-        bool cleaned = false;
-        const auto stopRelay = [&] { cleaned = ptr->events.stop(); };
-        if (shutdownProgress_) {
-            shutdownProgress_->detail(L"Stopping Docker containers and WSL processes · " + sessionName(*ptr));
-            shutdownProgress_->wait(stopRelay);
-        } else stopRelay();
-        if (!ptr->wslToken.empty()) {
-            const auto token = std::exchange(ptr->wslToken, {}); const bool running = ptr->terminal->running();
-            bool stopped = true;
-            if (!cleaned && provider_) {
-                const auto stopRemote = [&] { stopped = provider_->stopTerminal(token); };
-                if (shutdownProgress_) {
-                    shutdownProgress_->detail(L"Stopping WSL child processes · " + sessionName(*ptr));
-                    shutdownProgress_->wait(stopRemote);
-                } else stopRemote();
-            }
-            if (!stopped && running) MessageBoxW(shutdownProgress_ ? shutdownProgress_->window() : GetAncestor(window_, GA_ROOT), L"Could not confirm that this WSL terminal's child processes have exited. Check the processes in this distribution.", L"Poppy — WSL cleanup unconfirmed", MB_OK | MB_ICONWARNING);
-        }
-        if (shutdownProgress_) shutdownProgress_->detail(L"Stopping terminal processes · " + sessionName(*ptr));
-    };
     session->terminal->ended = [this,ptr] {
-        ptr->events.stop();
         const bool registered = !ptr->notificationId.empty();
         if (events_ && registered) events_->remove(ptr->notificationId);
         ptr->notificationId.clear();
@@ -131,6 +99,7 @@ void TerminalPane::add(SavedTerminal configuration) {
         if (registered) { InvalidateRect(window_, nullptr, FALSE); if (changed) changed(); }
     };
     sessions_.push_back(std::move(session)); select(sessions_.size()-1);
+    if (reconnect && hadHost) ptr->terminal->reconnect();
 }
 bool TerminalPane::contains(HWND window) const {
     if (window == window_ || IsChild(window_, window) || window == rename_) return true;
@@ -154,7 +123,7 @@ void TerminalPane::reportError(TerminalSession& session, const std::string& code
             (code == "terminal-start-failed" ? L"ターミナル起動エラー · " : L"AI通知エラー · ") + sessionName(session), message);
 }
 void TerminalPane::pollNotifications() {
-    for (auto& session : sessions_) if (session->terminal->running() && !session->notificationId.empty() && !session->events.running())
+    for (auto& session : sessions_) if (session->terminal->running() && !session->notificationId.empty() && !session->terminal->relayRunning())
         reportError(*session, "relay-disconnected", L"AI通知リレーとの接続が切れました。このターミナルのAI状態を更新できません。"
             L"\n\nPoppyのターミナルを開き直し、その中からAIコンテナを起動し直してください。");
 }
@@ -179,7 +148,7 @@ void TerminalPane::relocate(const ResourceId& source, const ResourceId& destinat
 void TerminalPane::restore(const ProjectSession& state) {
     defaultShell_ = state.defaultShell;
     finishRename(false); endDrag(); ratio_ = state.terminalRatio; stop(); for(auto& s:sessions_) DestroyWindow(s->terminal->window()); sessions_.clear();
-    for(const auto& saved:state.terminals) add(saved);
+    for(const auto& saved:state.terminals) add(saved, true);
     if(sessions_.empty()) add({"", "Shell", directory_.u8string(), 0, false, defaultShell_});
     for (size_t i = 0; i < state.terminals.size() && i < sessions_.size(); ++i) { sessions_[i]->configuration.displayed = state.terminals[i].displayed; sessions_[i]->configuration.group = state.terminals[i].group; }
     const auto found=std::find_if(sessions_.begin(),sessions_.end(),[&](const auto& s){return s->configuration.id==state.activeTerminal;});
@@ -238,7 +207,7 @@ std::wstring TerminalPane::description() const {
         text+=L"\n"+sessionName(*s)+L": "+wide(aiStateName(s->ai.state));
         if(s->ai.changedAt) text+=L" · "+std::to_wstring((GetTickCount64()-s->ai.changedAt)/1000)+L"s ago";
         if (s->terminal->running() && !s->notificationError.empty()) text += L" · notifications unavailable: " + s->notificationError;
-        else if (s->terminal->running() && !s->notificationId.empty() && !s->events.running()) text += L" · notification relay disconnected";
+        else if (s->terminal->running() && !s->notificationId.empty() && !s->terminal->relayRunning()) text += L" · notification relay disconnected";
         text+=s->notificationId.empty()?L" · not connected":s->ai.hookObserved?L" · hook / confirmed":L" · awaiting hook";
         if(!s->ai.activity.empty())text+=L"\n  "+wide(s->ai.activity);
     }
@@ -261,14 +230,16 @@ void TerminalPane::close(size_t index) {
     if(sessions_.empty())add({"", "Shell", directory_.u8string(), closedGroup, false, defaultShell_}); else select(std::min(active_,sessions_.size()-1));
 }
 void TerminalPane::stop(ShutdownDialog* progress) {
-    shutdownProgress_ = progress;
-    try {
-        for (size_t i = 0; i < sessions_.size(); ++i) {
-            if (progress) progress->detail(L"Stopping terminal " + std::to_wstring(i+1) + L" / " + std::to_wstring(sessions_.size()) + L" · " + sessionName(*sessions_[i]));
-            sessions_[i]->terminal->stop(progress);
-        }
-    } catch (...) { shutdownProgress_ = nullptr; throw; }
-    shutdownProgress_ = nullptr;
+    for (size_t i = 0; i < sessions_.size(); ++i) {
+        if (progress) progress->detail(L"Stopping terminal " + std::to_wstring(i+1) + L" / " + std::to_wstring(sessions_.size()) + L" · " + sessionName(*sessions_[i]));
+        sessions_[i]->terminal->stop(progress);
+    }
+}
+void TerminalPane::detach(ShutdownDialog* progress) {
+    for (const auto& session : sessions_) {
+        if (progress) progress->detail(L"Keeping terminal for restart · " + sessionName(*session));
+        session->terminal->detach(progress);
+    }
 }
 size_t TerminalPane::groupTab(int group) const {
     for (size_t i = 0; i < sessions_.size(); ++i) if (sessions_[i]->configuration.group == group && sessions_[i]->configuration.displayed) return i;

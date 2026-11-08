@@ -52,7 +52,7 @@ bool same(const poppy::ProjectSession& a, const poppy::ProjectSession& b) {
         const auto& x = a.tabs[i]; const auto& y = b.tabs[i];
         if (x.path != y.path || x.diff != y.diff || x.pinned != y.pinned || x.group != y.group || x.displayed != y.displayed || x.diffKind != y.diffKind || x.revision != y.revision || x.allChanges != y.allChanges || x.gitRoot != y.gitRoot || !same(x.fileView, y.fileView) || !same(x.diffView, y.diffView)) return false;
     }
-    for (size_t i = 0; i < a.terminals.size(); ++i) { const auto& x = a.terminals[i]; const auto& y = b.terminals[i]; if (x.id != y.id || x.name != y.name || x.directory != y.directory || x.group != y.group || x.displayed != y.displayed || x.shell != y.shell) return false; }
+    for (size_t i = 0; i < a.terminals.size(); ++i) { const auto& x = a.terminals[i]; const auto& y = b.terminals[i]; if (x.id != y.id || x.name != y.name || x.directory != y.directory || x.group != y.group || x.displayed != y.displayed || x.shell != y.shell || x.hostSession != y.hostSession) return false; }
     return true;
 }
 void roundTripAndIsolation() {
@@ -355,7 +355,7 @@ void schemaAndRegistry() {
     {
         poppy::Storage storage(fixture.directory);
         const auto projectDb = storage.projectDirectory("c:\\future", "c:\\future") / "storage.sql";
-        execute(projectDb, "PRAGMA user_version=14");
+        execute(projectDb, "PRAGMA user_version=16");
         rejects([&] { storage.loadProject("c:\\future", "c:\\future"); }, "A newer project schema was overwritten");
         storage.projectDirectory("c:\\invalid", "c:\\invalid");
         execute(appDb, R"(UPDATE projects SET directory='../../escape' WHERE path_key='c:\invalid')");
@@ -363,6 +363,25 @@ void schemaAndRegistry() {
     }
     execute(appDb, "PRAGMA user_version=5");
     rejects([&] { poppy::Storage storage(fixture.directory); }, "A newer app schema was overwritten");
+}
+void terminalHostMigration() {
+    Fixture fixture; poppy::Storage storage(fixture.directory); const std::string key = "c:/terminal restart";
+    poppy::ProjectSession state; state.terminals[0].directory = key;
+    storage.saveProject(key, key, state);
+    const auto db = storage.projectDirectory(key, key) / "storage.sql";
+    execute(db, "DROP TABLE terminal_hosts; PRAGMA user_version=14;");
+    check(same(*storage.loadProject(key, key), state), "Terminal host migration changed existing tabs");
+    state.terminals[0].hostSession = "0123456789abcdef0123456789abcdef";
+    storage.saveProject(key, key, state);
+    {
+        poppy::Storage reopened(fixture.directory);
+        check(same(*reopened.loadProject(key, key), state), "Terminal identity did not survive reopening the workspace");
+    }
+    auto invalid = state; invalid.terminals[0].hostSession = "../invalid-pipe";
+    rejects([&] { storage.saveProject(key, key, invalid); }, "Invalid terminal host identity was saved");
+    check(same(*storage.loadProject(key, key), state), "A failed terminal save replaced the reconnect identity");
+    execute(db, "UPDATE terminal_hosts SET host_session='invalid';"); state.terminals[0].hostSession.clear();
+    check(same(*storage.loadProject(key, key), state), "Invalid saved terminal host identity was reused");
 }
 void searchRoundTripAndMigration() {
     Fixture fixture;
@@ -464,7 +483,7 @@ void wslRoundTripAndMigration() {
 }
 int main() {
     try {
-        roundTripAndIsolation(); migrateProjectListState(); atomicSave(); projectHistory(); migrateProjectLayout(); migrateGitLayout(); migratePinnedTabs(); migrateWorkspaceAndTerminals(); migrateSplitLayout(); migrateWrapping(); terminalShellMigration(); schemaAndRegistry(); searchRoundTripAndMigration(); gitComparisonRoundTrip(); wslRoundTripAndMigration();
+        roundTripAndIsolation(); migrateProjectListState(); atomicSave(); projectHistory(); migrateProjectLayout(); migrateGitLayout(); migratePinnedTabs(); migrateWorkspaceAndTerminals(); migrateSplitLayout(); migrateWrapping(); terminalShellMigration(); terminalHostMigration(); schemaAndRegistry(); searchRoundTripAndMigration(); gitComparisonRoundTrip(); wslRoundTripAndMigration();
         std::cout << "Storage tests passed\n";
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
 }

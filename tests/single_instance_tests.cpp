@@ -203,6 +203,14 @@ void restartUpdate(const fs::path& executable, Fixture& fixture) {
     const auto host = waitProject(app, first, 1);
     { Application second(installation / "Poppy.exe", {L"--project", last.native()}); second.exited(); }
     waitProject(app, last, 2);
+    auto terminal = FindWindowExW(activeSurface(host), nullptr, L"PoppyTerminal", nullptr);
+    check(terminal != nullptr, "Restart fixture has no terminal");
+    SendMessageW(terminal, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(10, 10));
+    for (const auto c : std::wstring(L"$poppyRestartValue='kept'; $Host.UI.RawUI.WindowTitle='Poppy restart '+$PID\r")) SendMessageW(terminal, WM_CHAR, c, 0);
+    std::wstring terminalTitle;
+    waitFor([&] { wchar_t text[256]{}; GetWindowTextW(terminal, text, 256); terminalTitle = text; return terminalTitle.rfind(L"Poppy restart ", 0) == 0; }, "Terminal did not prepare its restart state");
+    const auto shellPid = static_cast<DWORD>(std::stoul(terminalTitle.substr(14)));
+    poppy::Handle shell(OpenProcess(SYNCHRONIZE, FALSE, shellPid)); check(static_cast<bool>(shell), "Cannot monitor restart terminal shell");
     const auto button = processWindow(app.process.dwProcessId, L"PoppyUpdateTitleButton");
     check(button && !IsWindowVisible(button), "Restart was visible without a new release");
     const auto aligned = [&] {
@@ -248,6 +256,11 @@ void restartUpdate(const fs::path& executable, Fixture& fixture) {
     }, "Restart did not open a replacement workspace");
     Application restarted(replacement);
     waitProject(restarted, last, 2);
+    waitFor([&] { terminal = FindWindowExW(activeSurface(restarted.window()), nullptr, L"PoppyTerminal", terminalTitle.c_str()); return terminal != nullptr; }, "Restart lost the terminal title or live session");
+    check(WaitForSingleObject(shell.value, 0) == WAIT_TIMEOUT, "Restart terminated the original shell");
+    for (const auto c : std::wstring(L"$Host.UI.RawUI.WindowTitle='Poppy kept '+$PID+' '+$poppyRestartValue\r")) SendMessageW(terminal, WM_CHAR, c, 0);
+    const auto preserved = L"Poppy kept " + std::to_wstring(shellPid) + L" kept";
+    waitFor([&] { wchar_t text[256]{}; GetWindowTextW(terminal, text, 256); return std::wstring(text) == preserved; }, "Reconnected shell lost its process or local variables");
     poppy::Handle modules(CreateToolhelp32Snapshot(TH32CS_SNAPMODULE, replacement));
     check(static_cast<bool>(modules), "Cannot inspect the restarted application modules");
     MODULEENTRY32W module{}; module.dwSize = sizeof(module);
@@ -258,6 +271,8 @@ void restartUpdate(const fs::path& executable, Fixture& fixture) {
         "Restart did not load the newly published DLL");
     const auto restartedButton = processWindow(replacement, L"PoppyUpdateTitleButton");
     check(restartedButton && !IsWindowVisible(restartedButton), "Restart did not load the newly published release");
+    PostMessageW(restarted.window(), WM_CLOSE, 0, 0); restarted.exited();
+    check(WaitForSingleObject(shell.value, 0) == WAIT_OBJECT_0, "Normal close left the reconnected terminal alive");
 }
 }
 int wmain(int argc, wchar_t** argv) {

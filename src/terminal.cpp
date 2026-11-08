@@ -6,6 +6,7 @@
 #include <shellapi.h>
 #include <algorithm>
 #include <cstdlib>
+#include <chrono>
 #include <map>
 #include <stdexcept>
 
@@ -25,7 +26,6 @@ void Terminal::create(HWND parent, HINSTANCE instance) {
     WNDCLASSW cls{}; cls.lpfnWndProc = procedure; cls.hInstance = instance; cls.lpszClassName = L"PoppyTerminal"; cls.hCursor = LoadCursorW(nullptr, IDC_IBEAM); RegisterClassW(&cls);
     // Dock drop previews are siblings; terminal output must not paint over them.
     window_ = CreateWindowExW(0, cls.lpszClassName, L"AI terminal", WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | WS_TABSTOP | WS_VSCROLL, 0, 0, 0, 0, parent, nullptr, instance, this);
-    model_.reply = [this](std::string response) { send(std::move(response), false); };
     model_.notificationError = [this](std::string code) { if (notificationError) notificationError(code); };
     setDpi(GetDpiForWindow(parent));
 }
@@ -37,36 +37,56 @@ void Terminal::setDpi(UINT dpi) {
 void Terminal::setDirectory(const fs::path& directory) {
     if (!started_ && !launching_) { directory_ = directory; error_.clear(); InvalidateRect(window_, nullptr, FALSE); }
 }
-bool Terminal::start() {
+bool Terminal::start(bool reconnect) {
     if (launching_ || running()) return true;
     stop();
     StartupTask prepare;
-    try { if (starting) prepare = starting(); }
+    try { if (!reconnect && starting) prepare = starting(); }
     catch (const std::exception& failure) { error_ = wide(failure.what()); stop(); if (launchFailed) launchFailed(error_); return false; }
-    error_.clear(); model_ = TerminalModel(model_.columns(), model_.rows()); model_.reply = [this](std::string s) { send(std::move(s), false); };
+    error_.clear(); model_ = TerminalModel(model_.columns(), model_.rows());
+    // The host answers terminal queries even while no UI is connected.
     model_.notificationError = [this](std::string code) { if (notificationError) notificationError(code); };
-    scroll_ = 0; display_.clearSelection();
+    scroll_ = 0; restored_ = false; display_.clearSelection();
     endedNotified_ = false;
     display_ = TerminalDisplay{}; display_.update(model_, scroll_, GetTickCount64(), true);
     scrollbars(); imePosition();
     if (titleChanged) titleChanged();
-    stopping_ = false; launchFinished_ = false; launching_ = true; launchError_.clear();
+    if (sessionId_.empty()) {
+        GUID guid{}; if (FAILED(CoCreateGuid(&guid))) { error_ = L"Cannot allocate terminal identity"; return false; }
+        constexpr char hex[] = "0123456789abcdef";
+        for (size_t i = 0; i < sizeof(guid); ++i) { const auto byte = reinterpret_cast<const unsigned char*>(&guid)[i]; sessionId_ += hex[byte >> 4]; sessionId_ += hex[byte & 15]; }
+    }
+    stopping_ = false; preserve_ = false; hostFound_ = false; launchFinished_ = false; launching_ = true; launchError_.clear();
     try {
-        launcher_.start([this, prepare = std::move(prepare), directory = directory_, command = command_, environment = environment_,
+        launcher_.start([this, reconnect, prepare = std::move(prepare), directory = directory_, command = command_, environment = environment_,
                          columns = model_.columns(), rows = model_.rows(), target = window_]() mutable {
             LaunchOptions options;
             try {
-                std::error_code directoryError;
-                if (directory.empty() || !fs::is_directory(directory, directoryError)) throw std::runtime_error("Project folder is missing. Restore the folder before starting a shell.");
-                options = prepare ? prepare() : LaunchOptions{std::move(command), std::move(environment), {}, {}};
-                if (!stopping_) startProcess(directory, options, columns, rows, target);
-                if (!stopping_) launchReady_ = std::move(options.ready);
-                else { if (options.failed) options.failed(); stopProcesses(); }
+                TerminalHostUpdate initial;
+                if (reconnect) hostFound_ = host_.attach(sessionId_, initial);
+                else {
+                    std::error_code directoryError;
+                    if (directory.empty() || !fs::is_directory(directory, directoryError)) throw std::runtime_error("Project folder is missing. Restore the folder before starting a shell.");
+                    if (prepare) options = prepare();
+                    else { options.command = std::move(command); options.environment = std::move(environment); }
+                    options.directory = directory; options.columns = columns; options.rows = rows;
+                    if (!stopping_) { initial = host_.start(sessionId_, options); hostFound_ = true; }
+                }
+                if (!stopping_ && hostFound_) {
+                    running_ = initial.running; relayRunning_ = initial.relay;
+                    { std::lock_guard<std::mutex> lock(mutex_); receivedBytes_ += initial.data.size(); received_.push_back(std::move(initial)); }
+                    launchReady_ = std::move(options.ready);
+                    reader_.start([this, target] { readHost(target); });
+                } else {
+                    if (options.failed) options.failed();
+                    // A launch already accepted by the host can be retained for Restart.
+                    if (!preserve_) host_.close();
+                }
             } catch (const std::exception& failure) {
                 launchError_ = wide(failure.what());
                 stopping_ = true; condition_.notify_all();
                 if (options.failed) options.failed();
-                stopProcesses();
+                try { host_.close(); } catch (...) { }
             }
             launchFinished_ = true;
             PostMessageW(target, wmTerminal, 0, 0);
@@ -76,109 +96,46 @@ bool Terminal::start() {
     }
     InvalidateRect(window_, nullptr, FALSE); return true;
 }
-void Terminal::startProcess(const fs::path& directory, const LaunchOptions& options, int columns, int rows, HWND target) {
-    const auto fail = [](std::wstring message) { throw std::runtime_error(utf8(message)); };
-    HANDLE read = nullptr, write = nullptr;
-    if (!CreatePipe(&read, &write, nullptr, 0)) fail(winError());
-    Handle childInput(read); input_.reset(write);
-    if (!CreatePipe(&read, &write, nullptr, 0)) fail(winError());
-    output_.reset(read); Handle childOutput(write);
-    const HRESULT hr = CreatePseudoConsole({static_cast<SHORT>(columns), static_cast<SHORT>(rows)}, childInput.value, childOutput.value, 0, &console_);
-    if (FAILED(hr)) fail(L"ConPTY could not start (HRESULT " + std::to_wstring(static_cast<unsigned long>(hr)) + L").");
-    childInput.reset(); childOutput.reset();
-    // Read concurrently even during creation/teardown, as ClosePseudoConsole can emit output.
-    reader_.start([this, target] {
-        char buffer[8192]; DWORD count = 0;
-        while (ReadFile(output_.value, buffer, sizeof(buffer), &count, nullptr) && count) {
-            std::unique_lock<std::mutex> lock(mutex_);
-            condition_.wait(lock, [&] { return stopping_ || received_.size() + count <= 256 * 1024; });
-            if (!stopping_) {
-                received_.append(buffer, count);
+void Terminal::readHost(HWND target) {
+    try {
+        while (!stopping_) {
+            std::deque<std::string> writes; bool changeSize = false; int columns = 0, rows = 0;
+            {
+                std::unique_lock<std::mutex> lock(mutex_);
+                condition_.wait_for(lock, std::chrono::milliseconds(10), [this] { return stopping_ || (receivedBytes_ <= 512 * 1024 && (resizePending_ || !writes_.empty())); });
+                if (stopping_) return;
+                if (receivedBytes_ > 512 * 1024) continue;
+                writes.swap(writes_); writeBytes_ = 0;
+                changeSize = std::exchange(resizePending_, false); columns = requestedColumns_; rows = requestedRows_;
+            }
+            if (changeSize) host_.resize(columns, rows);
+            for (const auto& text : writes) host_.input(text);
+            auto update = host_.poll();
+            const bool stateChanged = running_.exchange(update.running) != update.running;
+            const bool relayChanged = relayRunning_.exchange(update.relay) != update.relay;
+            const bool changed = !update.data.empty() || !update.status.empty() || !update.diagnostic.empty() || !update.relayError.empty();
+            if (changed) {
+                std::lock_guard<std::mutex> lock(mutex_); receivedBytes_ += update.data.size(); received_.push_back(std::move(update));
                 if (!notified_) { notified_ = true; PostMessageW(target, wmTerminal, 0, 0); }
-            }
+            } else if (stateChanged || relayChanged) PostMessageW(target, wmTerminal, 0, 0);
         }
+    } catch (const std::exception& failure) {
+        running_ = false; relayRunning_ = false;
+        TerminalHostUpdate update; update.relayError = failure.what();
+        { std::lock_guard<std::mutex> lock(mutex_); received_.push_back(std::move(update)); }
         PostMessageW(target, wmTerminal, 0, 0);
-    });
-    SIZE_T size = 0; InitializeProcThreadAttributeList(nullptr, 1, 0, &size);
-    std::vector<unsigned char> storage(size); auto attributes = reinterpret_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(storage.data());
-    if (!InitializeProcThreadAttributeList(attributes, 1, 0, &size)) fail(winError());
-    struct Delete { LPPROC_THREAD_ATTRIBUTE_LIST value; ~Delete() { DeleteProcThreadAttributeList(value); } } cleanup{attributes};
-    if (!UpdateProcThreadAttribute(attributes, 0, PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, console_, sizeof(console_), nullptr, nullptr)) fail(winError());
-    STARTUPINFOEXW si{}; si.StartupInfo.cb = sizeof(si); si.lpAttributeList = attributes;
-    wchar_t system[MAX_PATH]{}; GetSystemDirectoryW(system, MAX_PATH);
-    const auto args = options.command.empty() ? terminalShellCommand(TerminalShell::PowerShell, system) : options.command;
-    const auto& shell = args.front();
-    std::wstring command = processCommandLine(args);
-    if (!job_.create()) fail(winError());
-    PROCESS_INFORMATION pi{};
-    struct Less { bool operator()(const std::wstring& a, const std::wstring& b) const { return CompareStringOrdinal(a.c_str(), -1, b.c_str(), -1, TRUE) == CSTR_LESS_THAN; } };
-    std::map<std::wstring, std::wstring, Less> inherited;
-    if (auto block = GetEnvironmentStringsW()) {
-        for (auto entry = block; *entry; entry += wcslen(entry)+1) {
-            const std::wstring value(entry); const auto split = value.find(L'=', value.front() == L'=' ? 1 : 0);
-            if (split != std::wstring::npos) inherited[value.substr(0,split)] = value.substr(split+1);
-        }
-        FreeEnvironmentStringsW(block);
     }
-    for (const auto& value : options.environment) inherited[value.first] = value.second;
-    // Replace the socket entry so its Linux path is passed without translation.
-    const auto previous = inherited[L"WSLENV"]; std::wstring wslenv;
-    for (size_t p = 0; p < previous.size();) {
-        const auto end = previous.find(L':', p);
-        const auto token = previous.substr(p, end == std::wstring::npos ? end : end-p);
-        const auto name = token.substr(0, token.find(L'/'));
-        if (name != L"AICONTAINER_EVENT_SOCKET" && !token.empty()) {
-            if (!wslenv.empty()) wslenv += L':';
-            wslenv += token;
-        }
-        if (end == std::wstring::npos) break;
-        p = end + 1;
-    }
-    if (!inherited[L"AICONTAINER_EVENT_SOCKET"].empty()) {
-        if (!wslenv.empty()) wslenv += L':';
-        wslenv += L"AICONTAINER_EVENT_SOCKET/u";
-        // Git Bash converts environment paths before launching native children
-        // such as wsl.exe, before WSLENV can forward the Linux socket path.
-        auto& excluded = inherited[L"MSYS2_ENV_CONV_EXCL"];
-        if (excluded != L"*") {
-            if (!excluded.empty() && excluded.back() != L';') excluded += L';';
-            excluded += L"AICONTAINER_EVENT_SOCKET";
-        }
-    }
-    inherited[L"WSLENV"] = std::move(wslenv);
-    std::vector<wchar_t> environment;
-    for (const auto& value : inherited) { const auto entry = value.first + L"=" + value.second; environment.insert(environment.end(),entry.begin(),entry.end()); environment.push_back(0); }
-    environment.push_back(0);
-    const BOOL ok = CreateProcessW(shell.c_str(), command.data(), nullptr, nullptr, FALSE, CREATE_UNICODE_ENVIRONMENT | CREATE_SUSPENDED | EXTENDED_STARTUPINFO_PRESENT, environment.data(), directory.c_str(), &si.StartupInfo, &pi);
-    if (!ok) fail(L"Could not start " + shell + L": " + winError());
-    process_.reset(pi.hProcess); Handle thread(pi.hThread);
-    if (!AssignProcessToJobObject(job_.handle(), process_.value)) { const auto error = winError(); TerminateProcess(process_.value, 1); WaitForSingleObject(process_.value, INFINITE); fail(error); }
-    writer_.start([this] {
-        for (;;) {
-            std::string text; bool changeSize = false; COORD size{};
-            { std::unique_lock<std::mutex> lock(mutex_); condition_.wait(lock, [&] { return stopping_ || resizePending_ || !writes_.empty(); }); if (stopping_) return;
-              if (resizePending_) { changeSize = true; size = {static_cast<SHORT>(requestedColumns_), static_cast<SHORT>(requestedRows_)}; resizePending_ = false; }
-              if (!writes_.empty()) { text = std::move(writes_.front()); writes_.pop_front(); writeBytes_ -= text.size(); } }
-            if (changeSize) ResizePseudoConsole(console_, size);
-            size_t offset = 0;
-            while (offset < text.size() && !stopping_) {
-                DWORD countWritten = 0;
-                if (!WriteFile(input_.value, text.data() + offset, static_cast<DWORD>(text.size() - offset), &countWritten, nullptr) || !countWritten) return;
-                offset += countWritten;
-            }
-        }
-    });
-    if (!stopping_ && ResumeThread(thread.value) == static_cast<DWORD>(-1)) fail(winError());
 }
 void Terminal::completeStart() {
     if (!launching_ || !launchFinished_) return;
     launcher_.join(); launching_ = false;
     error_ = std::move(launchError_);
     if (error_.empty()) {
-        started_ = true;
+        started_ = hostFound_;
+        if (started_ && connected) connected();
         if (launchReady_) { auto ready = std::move(launchReady_); ready(); }
         // Layout and DPI may have changed while ConPTY was being created.
-        { std::lock_guard<std::mutex> lock(mutex_); requestedColumns_ = model_.columns(); requestedRows_ = model_.rows(); resizePending_ = true; }
+        { std::lock_guard<std::mutex> lock(mutex_); resizePending_ = started_ && sizeKnown_; }
         condition_.notify_all();
     } else {
         // Remove notification registrations and remote tokens after a failed launch.
@@ -199,24 +156,33 @@ void Terminal::stop(ShutdownDialog* progress) {
     if (ended) ended();
     if (window_) KillTimer(window_, 2);
     if (progress) progress->wait([this] { stopProcesses(); }); else stopProcesses();
+    if (!shutdownError_.empty() && shutdownFailed) shutdownFailed(std::exchange(shutdownError_, {}));
     started_ = false;
-    { std::lock_guard<std::mutex> lock(mutex_); received_.clear(); writes_.clear(); writeBytes_ = 0; notified_ = resizePending_ = false; }
+    { std::lock_guard<std::mutex> lock(mutex_); received_.clear(); receivedBytes_ = 0; writes_.clear(); writeBytes_ = 0; notified_ = resizePending_ = false; }
     continuationPosted_ = false;
     display_.update(model_, scroll_, GetTickCount64(), true);
     scrollbars();
 }
 void Terminal::stopProcesses() {
     stopping_ = true; condition_.notify_all();
-    job_.stop(0);
-    if (writer_.joinable()) {
-        // Repeat cancellation to cover a stop arriving just before WriteFile begins.
-        while (WaitForSingleObject(writer_.native_handle(), 0) == WAIT_TIMEOUT) { CancelSynchronousIo(writer_.native_handle()); WaitForSingleObject(writer_.native_handle(), 10); }
-        writer_.join();
+    reader_.join();
+    shutdownError_.clear();
+    try {
+        if (preserve_ && host_.connected()) {
+            // Retain keystrokes accepted immediately before Restart as well.
+            std::deque<std::string> writes;
+            { std::lock_guard<std::mutex> lock(mutex_); writes.swap(writes_); writeBytes_ = 0; }
+            for (const auto& text : writes) host_.input(text);
+        }
     }
-    // The reader keeps draining while ConPTY sends its final output.
-    if (console_) { ClosePseudoConsole(console_); console_ = nullptr; }
-    if (reader_.joinable()) { CancelSynchronousIo(reader_.native_handle()); reader_.join(); }
-    input_.reset(); output_.reset(); process_.reset();
+    catch (const std::exception& failure) { shutdownError_ = wide(failure.what()); }
+    try { host_.close(preserve_, scroll_); }
+    catch (const std::exception& failure) { if (shutdownError_.empty()) shutdownError_ = wide(failure.what()); }
+    running_ = false; relayRunning_ = false;
+}
+void Terminal::detach(ShutdownDialog* progress) {
+    preserve_ = true;
+    stop(progress);
 }
 void Terminal::send(std::string text, bool userInput) {
     if ((!launching_ && !running()) || text.empty()) return;
@@ -233,16 +199,29 @@ void Terminal::send(std::string text, bool userInput) {
     }
 }
 bool Terminal::receive() {
-    std::string text;
+    // Register notification routing and apply readiness on the UI first.
+    if (launching_) return false;
+    TerminalHostUpdate update;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        const size_t count = std::min<size_t>(received_.size(), 8192);
-        text.assign(received_.data(), count); received_.erase(0, count);
+        if (received_.empty()) return false;
+        auto& first = received_.front();
+        if (!first.snapshot && first.data.size() > 8192) {
+            update.data = first.data.substr(0, 8192); first.data.erase(0, 8192); receivedBytes_ -= 8192;
+        } else { receivedBytes_ -= first.data.size(); update = std::move(first); received_.pop_front(); }
     }
-    if (text.empty()) return false;
     condition_.notify_all();
     const auto previousTitle = model_.title();
-    model_.feed(text); scroll_ = std::min(scroll_, model_.historySize());
+    if (update.snapshot) {
+        try { model_ = TerminalModel::fromSnapshot(update.data); }
+        catch (const std::exception& failure) { error_ = wide(failure.what()); stop(); if (launchFailed) launchFailed(error_); return false; }
+        model_.notificationError = [this](std::string code) { if (notificationError) notificationError(code); };
+        if (!restored_) scroll_ = update.scroll;
+        restored_ = true; display_.clearSelection();
+    } else model_.feed(update.data);
+    scroll_ = std::min(scroll_, model_.historySize());
+    if (hostStatus) hostStatus(update);
+    if (!update.diagnostic.empty() && notificationError) notificationError(update.diagnostic);
     if (model_.title() != previousTitle && titleChanged) titleChanged();
     display_.changed();
     return true;
@@ -309,19 +288,24 @@ void Terminal::resize() {
     if (rect.right < cellWidth_ * 2 || rect.bottom <= 0) return;
     const int columns = std::clamp((static_cast<int>(rect.right) - 12) / cellWidth_, 2, 500);
     const int rows = std::clamp((static_cast<int>(rect.bottom) - 8) / cellHeight_, 1, 200);
-    if (columns == model_.columns() && rows == model_.rows()) return;
+    { std::lock_guard<std::mutex> lock(mutex_);
+      sizeKnown_ = true;
+      if (columns == requestedColumns_ && rows == requestedRows_ && (launching_ || !started_ || (columns == model_.columns() && rows == model_.rows()))) return;
+      requestedColumns_ = columns; requestedRows_ = rows; }
     stopSelection();
-    model_.resize(columns, rows); scroll_ = 0; display_.clearSelection();
+    if (!launching_ && !started_) model_.resize(columns, rows);
+    if (!started_) scroll_ = 0;
+    display_.clearSelection();
     scrollbars();
     display_.changed();
-    if (!launching_ && console_) {
+    if (launching_ || started_) {
         { std::lock_guard<std::mutex> lock(mutex_); requestedColumns_ = columns; requestedRows_ = rows; resizePending_ = true; }
         condition_.notify_all();
     }
     else display_.update(model_, scroll_, GetTickCount64(), true);
     imePosition();
     InvalidateRect(window_, nullptr, FALSE);
-    if (!launching_ && console_) pump();
+    if (!launching_ && started_) pump();
 }
 void Terminal::scrollbars() {
     if (!window_) return;

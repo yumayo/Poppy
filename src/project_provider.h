@@ -52,6 +52,7 @@ public:
     virtual std::string identity() const { return {}; }
     virtual std::vector<std::wstring> terminalCommand(const ResourceId&, const std::string&, const std::wstring& = {}) const { return {}; }
     virtual std::vector<std::wstring> terminalEventsCommand() const { return {}; }
+    virtual std::vector<std::wstring> terminalStopCommand(const std::string&) const { return {}; }
     virtual bool stopTerminal(const std::string&) const { return true; }
 };
 std::shared_ptr<ProjectProvider> createProjectProvider(const ResourceId& root);

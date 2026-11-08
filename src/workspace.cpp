@@ -480,7 +480,7 @@ void Workspace::finishClose(){
         const auto& path=projects_[i].path;
         const auto name=path.filename().empty()?path.native():path.filename().native();
         if(progress)progress->stage(ShutdownDialog::Stage::Stopping,L"Project "+std::to_wstring(i+1)+L" / "+std::to_wstring(projects_.size())+L" · "+name);
-        projects_[i].runtime->shutdown(progress.get());
+        projects_[i].runtime->shutdown(progress.get(),restartRequested_);
     }
     if(progress){progress->stage(ShutdownDialog::Stage::Finishing);progress->detail(L"Closing WSL connections and releasing project resources…");}
     for(auto& project:projects_)project.runtime->disconnect(progress.get());
@@ -874,7 +874,7 @@ extern "C" __declspec(dllexport) int WINAPI PoppyMainV1(HINSTANCE instance,int s
                 restart=workspace.restartRequested();
             }else result=0;
         }
-        // Release the instance lock after saving and stopping all project resources,
+        // Release the instance lock after saving and detaching/stopping resources,
         // so the new launcher can own the workspace instead of forwarding back to us.
         if(restart)poppy::restartApplication();
     }catch(const std::exception& error){MessageBoxW(nullptr,poppy::wide(error.what()).c_str(),L"Poppy",MB_OK|MB_ICONERROR);}
