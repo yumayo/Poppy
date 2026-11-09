@@ -726,7 +726,6 @@ void Workspace::paint(){
             // Retain both UTF-16 units for an initial outside the BMP.
             const size_t length=title.size()>1&&title[0]>=0xd800&&title[0]<=0xdbff&&title[1]>=0xdc00&&title[1]<=0xdfff?2:1;
             renderer_.label({rect.left+px(2),rect.top+px(4),rect.right-px(2),rect.top+px(28)},title.substr(0,length),project.missing?muted:foreground,DT_CENTER|DT_VCENTER|DT_SINGLELINE);
-            if(summary.unread)renderer_.fill({rect.right-px(7),rect.top+px(4),rect.right-px(3),rect.top+px(8)},accent);
             continue;
         }
         const auto secondary=subtitle(i);
@@ -734,7 +733,6 @@ void Workspace::paint(){
         if(!secondary.empty())renderer_.label({rect.left+px(32),rect.top+px(24),rect.right-px(8),headingBottom},secondary,muted);
         renderer_.label({rect.left+px(32),headingBottom,rect.right-px(8),headingBottom+px(projectMessageLineHeight)*projectMessageLines},
             wide(summary.activity),muted,DT_LEFT|DT_TOP|DT_WORDBREAK|DT_END_ELLIPSIS,false,px(projectMessageLineHeight));
-        if(summary.unread)renderer_.fill({rect.right-px(12),rect.top+px(10),rect.right-px(7),rect.top+px(15)},accent);
         const auto running=summary.counts[static_cast<size_t>(AiState::Running)];if(running&&summary.state!=AiState::Running)renderer_.label({rect.right-px(24),rect.top+px(22),rect.right-px(3),headingBottom},std::to_wstring(running),accent);
     }
     if(projectDrag_&&projectDrag_->active&&projectDrag_->position){

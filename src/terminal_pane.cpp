@@ -330,7 +330,6 @@ void TerminalPane::paint(){
         drawAiStatus(renderer_,{rect.left,0,rect.left+unit,header_},sessions_[i]->ai.state,dpi_);
         renderer_.label({rect.left+unit,0,rect.right-unit,header_},sessionName(*sessions_[i]),foreground);
         renderer_.label({rect.right-unit,0,rect.right,header_},L"×",muted,DT_CENTER|DT_VCENTER|DT_SINGLELINE);
-        if(sessions_[i]->ai.unread)renderer_.fill({rect.left+unit-4,4,rect.left+unit,8},accent);
     }
     for (int group = 0; group < 2; ++group) if (groupTab(group) < sessions_.size()) {
         const auto button = addButtonBounds(group, false), dropdown = addButtonBounds(group, true);
