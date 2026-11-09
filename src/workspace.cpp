@@ -27,7 +27,7 @@ namespace poppy {
 namespace {
 constexpr UINT wmStartup = WM_APP + 22;
 constexpr UINT_PTR aiAnimationTimerId = 2;
-constexpr int projectHeadingHeight = 48;
+constexpr int projectHeadingHeight = 40;
 constexpr int projectMessageLineHeight = 18;
 constexpr int projectMessageLines = 3;
 constexpr int projectCardMargin = 8;
@@ -729,11 +729,22 @@ void Workspace::paint(){
             continue;
         }
         const auto secondary=subtitle(i);
-        renderer_.label({rect.left+px(32),rect.top,rect.right-px(22),rect.top+(secondary.empty()?px(projectHeadingHeight):px(27))},title,project.missing?muted:foreground);
-        if(!secondary.empty())renderer_.label({rect.left+px(32),rect.top+px(24),rect.right-px(8),headingBottom},secondary,muted);
+        const auto running=summary.counts[static_cast<size_t>(AiState::Running)];
+        const bool showRunning=running&&summary.state!=AiState::Running;
+        const int textLeft=rect.left+px(32),textRight=rect.right-px(showRunning?24:8);
+        if(project.path.wsl()){
+            const int available=std::max(0,textRight-textLeft-px(8));
+            const int secondaryWidth=std::min(renderer_.textWidth(secondary),available/2);
+            const int titleRight=textLeft+std::min(renderer_.textWidth(title),available-secondaryWidth);
+            renderer_.label({textLeft,rect.top,titleRight,headingBottom},title,project.missing?muted:foreground);
+            renderer_.label({titleRight+px(8),rect.top,textRight,headingBottom},secondary,muted);
+        }else{
+            renderer_.label({textLeft,rect.top,textRight,secondary.empty()?headingBottom:rect.top+px(23)},title,project.missing?muted:foreground);
+            if(!secondary.empty())renderer_.label({textLeft,rect.top+px(20),textRight,headingBottom},secondary,muted);
+        }
         renderer_.label({rect.left+px(32),headingBottom,rect.right-px(8),headingBottom+px(projectMessageLineHeight)*projectMessageLines},
             wide(summary.activity),muted,DT_LEFT|DT_TOP|DT_WORDBREAK|DT_END_ELLIPSIS,false,px(projectMessageLineHeight));
-        const auto running=summary.counts[static_cast<size_t>(AiState::Running)];if(running&&summary.state!=AiState::Running)renderer_.label({rect.right-px(24),rect.top+px(22),rect.right-px(3),headingBottom},std::to_wstring(running),accent);
+        if(showRunning)renderer_.label({rect.right-px(24),rect.top+px(20),rect.right-px(3),headingBottom},std::to_wstring(running),accent);
     }
     if(projectDrag_&&projectDrag_->active&&projectDrag_->position){
         const int y=std::clamp(static_cast<int>(row(*projectDrag_->position).top)-px(projectCardGap/2)-px(1),px(44),static_cast<int>(client.bottom)-px(2));
