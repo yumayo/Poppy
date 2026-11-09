@@ -34,7 +34,7 @@ void UpdateTitleButton::layout() {
     const auto dpi = GetDpiForWindow(owner_);
     if (dpi_ != dpi) { dpi_ = dpi; renderer_.setDpi(dpi); }
     // DWM supplies the actual minimize-button edge, including maximized/DPI layouts.
-    const int width = MulDiv(80, dpi_, 96), margin = MulDiv(4, dpi_, 96);
+    const int width = MulDiv(80, dpi_, 96), margin = MulDiv(5, dpi_, 96);
     SetWindowPos(window_, nullptr, frame.left + buttons.left - width, frame.top + buttons.top + margin,
         width, buttons.bottom - buttons.top - 2 * margin, SWP_NOACTIVATE | SWP_NOZORDER | SWP_SHOWWINDOW);
     InvalidateRect(window_, nullptr, FALSE);

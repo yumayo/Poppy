@@ -215,7 +215,7 @@ void restartUpdate(const fs::path& executable, Fixture& fixture) {
     check(button && !IsWindowVisible(button), "Restart was visible without a new release");
     const auto aligned = [&] {
         RECT frame{}, caption{}, bounds{};
-        const int margin = MulDiv(4, GetDpiForWindow(host), 96);
+        const int margin = MulDiv(5, GetDpiForWindow(host), 96);
         return IsWindowVisible(button) && GetWindowRect(host, &frame) && GetWindowRect(button, &bounds) &&
             SUCCEEDED(DwmGetWindowAttribute(host, DWMWA_CAPTION_BUTTON_BOUNDS, &caption, sizeof(caption))) &&
             bounds.right == frame.left + caption.left && bounds.top == frame.top + caption.top + margin &&
