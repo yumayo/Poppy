@@ -154,7 +154,8 @@ DockRect DockLayout::preview(DockRect r, DockSide side) {
 DockLayout restoreDockLayout(ProjectSession& state, int height) {
     DockLayout dock;
     if (dock.restore(state.dockLayout)) return dock;
-    const int lower = dock.split(0, DockSide::Bottom);
+    // Without editor tabs, terminals occupy the top row instead of a lower split.
+    const int lower = state.tabs.empty() ? 0 : dock.split(0, DockSide::Bottom);
     int right = 0, lowerRight = lower;
     if (std::any_of(state.tabs.begin(), state.tabs.end(), [](const SavedTab& tab) { return tab.group == 1; })) {
         const auto index = static_cast<int>(dock.pane(0) - dock.nodes().data());
@@ -166,8 +167,10 @@ DockLayout restoreDockLayout(ProjectSession& state, int height) {
     }
     for (auto& tab : state.tabs) tab.group = tab.group == 1 ? right : 0;
     for (auto& terminal : state.terminals) terminal.group = terminal.group == 1 ? lowerRight : lower;
-    if (height <= 0) height = 800;
-    dock.resize(0, static_cast<int>((static_cast<long long>(height) - state.terminalHeight) * 1000 / height));
+    if (!state.tabs.empty()) {
+        if (height <= 0) height = 800;
+        dock.resize(0, static_cast<int>((static_cast<long long>(height) - state.terminalHeight) * 1000 / height));
+    }
     return dock;
 }
 

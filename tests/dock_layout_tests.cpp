@@ -85,12 +85,34 @@ void migration() {
     check(find(geometry, 0).rect.right < find(geometry, 1).rect.right && find(geometry, 0).rect.bottom < find(geometry, 1).rect.top,
           "Legacy independent ratios or vertical order were lost");
     ProjectSession unopened;
+    unopened.tabs.resize(1);
     const auto deferred = restoreDockLayout(unopened, 0).arrange({0, 0, 1000, 800}, 5);
     check(find(deferred, 0).rect.bottom > 400, "An inactive project migrated with a zero-sized editor");
     state.dockLayout = dock.save();
     const auto restored = restoreDockLayout(state, 1000);
     check(restored.save() == dock.save() && state.tabs[1].group == 2 && state.terminals[1].group == 3,
           "A new dock layout was incorrectly migrated a second time");
+}
+void initialTerminalLayout() {
+    for (int height : {0, 800}) {
+        ProjectSession state;
+        const auto dock = restoreDockLayout(state, height);
+        check(state.tabs.empty() && state.terminals.size() == 1 && state.terminals[0].group == dock.topGroup(),
+              "The initial terminal is not in the top row");
+        for (bool lowerVisible : {false, true}) {
+            const auto geometry = dock.arrange({100, 40, 1100, 840}, 5, lowerVisible);
+            const auto rect = find(geometry, state.terminals[0].group).rect;
+            check(geometry.panes.size() == 1 && geometry.dividers.empty() && rect.left == 100 && rect.top == 40 && rect.right == 1100 && rect.bottom == 840,
+                  "The initial terminal does not fill the sole top dock");
+        }
+    }
+    ProjectSession state;
+    state.terminals.resize(2); state.terminals[1].group = 1; state.terminalRatio = 650;
+    const auto dock = restoreDockLayout(state, 800);
+    const auto geometry = dock.arrange({0, 0, 1000, 800}, 5);
+    const auto left = find(geometry, state.terminals[0].group).rect, right = find(geometry, state.terminals[1].group).rect;
+    check(geometry.panes.size() == 2 && left.top == 0 && right.top == 0 && left.bottom == 800 && right.bottom == 800 && left.right == 646 && left.right + 5 == right.left,
+          "A terminal-only legacy split lost its top row or terminal ratio");
 }
 void targetsAndSession() {
     const DockRect rect{100, 200, 900, 800};
@@ -192,6 +214,6 @@ void terminalFileDestination() {
 }
 }
 int main() {
-    try { nestedLayout(); persistence(); migration(); targetsAndSession(); topRowFiles(); terminalFileDestination(); std::cout << "Dock layout tests passed\n"; }
+    try { nestedLayout(); persistence(); migration(); initialTerminalLayout(); targetsAndSession(); topRowFiles(); terminalFileDestination(); std::cout << "Dock layout tests passed\n"; }
     catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
 }
