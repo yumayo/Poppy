@@ -673,8 +673,92 @@ void terminalPreeditHorizontalBorderTests() {
             "cancelling composition did not preserve a horizontal rule");
     }
 }
+void terminalSoftwareCursorTests() {
+    const std::string border(32, '-');
+    const auto frame = [&](const std::string& input, const std::string& panel = "") {
+        return "\x1b[?25l\x1b[2J\x1b[2;1H" + border + "\x1b[3;1H" + panel +
+            "\x1b[2K\x1b[38;2;100;180;240m❯\x1b[39m" + panel + " " + input +
+            "\x1b[0m\x1b[4;1H" + border + "\x1b[5;1Hstatus";
+    };
+    TerminalModel model(32, 6); TerminalDisplay display;
+    model.feed(frame("\x1b[7mT\x1b[27mry editing a file")); display.update(model, 0, 0, true);
+    check(!model.cursorVisible() && model.cursorY() == 4 && display.inputCursorX() == 2 && display.inputCursorY() == 2,
+        "a hidden VT redraw cursor displaced the inverse-video input cursor");
+    display.beginPreedit();
+    auto preview = display.preedit({u"日", {}, 1});
+    check(preview.composition.glyphs.front().column == 2 && preview.composition.glyphs.front().row == 2 &&
+        preview.composition.caretColumn == 4 && preview.compositionBackground == background,
+        "software-cursor composition or candidates appeared outside the input field");
+    check(preview.cells[2][4].ch == U'T' && preview.cells[2][4].fg == foreground && preview.cells[2][4].bg == background &&
+        model.row(2)[2].fg == background && model.row(2)[2].bg == foreground,
+        "preedit retained the shifted software cursor or modified the real terminal colors");
+    for (const int y : {1, 3, 4}) for (int x = 0; x < model.columns(); ++x)
+        check(preview.cells[y][x].ch == model.row(y)[x].ch && preview.cells[y][x].bg == model.row(y)[x].bg,
+            "software-cursor preedit changed a border or footer");
+    model.feed("\x1b[Hworking\x1b[6;1Hbusy"); display.changed(); display.update(model, 0, 1);
+    check(display.inputCursorX() == 2 && display.inputCursorY() == 2,
+        "background output moved composition from the software cursor");
+    display.cancelPreedit();
+
+    // The highlighted fifth wide glyph is the insertion point, even when the
+    // application's hidden VT cursor sits just after it at the sixth glyph.
+    model.feed(frame("ああああ\x1b[7mあ\x1b[27mああ") + "\x1b[3;13H");
+    display.changed(); display.update(model, 0, 2); display.beginPreedit();
+    preview = display.preedit({u"日本", {}, 1});
+    check(model.cursorX() == 12 && display.inputCursorX() == 10 && display.inputCursorY() == 2 &&
+        preview.composition.glyphs.front().column == 10 && preview.composition.caretColumn == 12 &&
+        preview.cells[2][14].ch == U'あ' && preview.cells[2][15].continuation && preview.cells[2][15].bg == background,
+        "composition started after the highlighted wide glyph or split its continuation");
+
+    display.inputSent(u"日"); display.beginPreedit();
+    model.feed("\x1b[Hwaiting"); display.changed(); display.update(model, 0, 3); display.beginPreedit();
+    check(display.inputCursorX() == 10, "pending software-cursor echo captured unrelated output");
+    // Claude redraws its inverse cursor after the committed text, then leaves
+    // the real VT cursor on the footer. The next composition must advance.
+    model.feed(frame("ああああ日\x1b[7mあ\x1b[27mああ")); display.changed(); display.update(model, 0, 4); display.beginPreedit();
+    check(model.cursorY() == 4 && display.inputCursorX() == 12 && display.inputCursorY() == 2,
+        "a fast second composition did not acknowledge echo at the new software cursor");
+    display.cancelPreedit();
+
+    const auto panel = "\x1b[38;2;90;180;210m\x1b[48;2;30;40;50m";
+    model.feed(frame("abc\x1b[7m😀\x1b[27mdef", panel)); display.changed(); display.update(model, 0, 5); display.beginPreedit();
+    preview = display.preedit({u"ｱ", {}, 1});
+    check(display.inputCursorX() == 5 && preview.compositionBackground == rgb(30,40,50) &&
+        preview.cells[2][6].ch == U'😀' && preview.cells[2][6].fg == rgb(90,180,210) && preview.cells[2][7].bg == rgb(30,40,50),
+        "software-cursor detection lost custom colors or a surrogate-pair glyph");
+    display.cancelPreedit();
+
+    // An actual visible terminal cursor wins, as in Codex and ordinary shells.
+    model.feed(frame("abc\x1b[7mX\x1b[27mdef") + "\x1b[3;10H\x1b[?25h");
+    display.changed(); display.update(model, 0, 6);
+    check(display.inputCursorX() == 9 && display.inputCursorY() == 2,
+        "inverse text overrode a visible hardware input cursor");
+    for (const auto& input : {"\x1b[7mword\x1b[27m", "\x1b[7mX\x1b[27m a \x1b[7mY\x1b[27m"}) {
+        model.feed(frame(input)); display.changed(); display.update(model, 0, 7);
+        check(display.inputCursorX() == model.cursorX() && display.inputCursorY() == model.cursorY(),
+            "a reverse-video selection or ambiguous highlights were treated as an input cursor");
+    }
+    model.feed("\x1b[2J\x1b[H> \x1b[7mX\x1b[27m\x1b[5;1Hstatus"); display.changed(); display.update(model, 0, 8);
+    check(display.inputCursorY() == 4, "unframed reverse-video output was treated as an input cursor");
+
+    // Cursor recovery also works from the colors in an existing host snapshot.
+    model.feed(frame("abc\x1b[7mあ\x1b[27mdef"));
+    auto restored = TerminalModel::fromSnapshot(model.snapshot()); TerminalDisplay reconnected;
+    reconnected.update(restored, 0, 9, true); reconnected.beginPreedit();
+    check(reconnected.inputCursorX() == 5 && reconnected.inputCursorY() == 2,
+        "reconnecting to a terminal host lost the software input cursor");
+    display.cancelPreedit();
+    model.feed(frame("abc\x1b[7m \x1b[27m")); display.changed(); display.update(model, 0, 10);
+    preview = display.preedit({u"日", {}, 1});
+    check(display.inputCursorX() == 5 && preview.compositionBackground == background && preview.composition.caretColumn == 7,
+        "a software cursor on the blank cell at the end of input was lost");
+    model.feed(frame("first line") + "\x1b[4;1H\x1b[2K  second \x1b[7mあ\x1b[27m line\x1b[5;1H" + border + "\x1b[6;1Hfooter");
+    display.changed(); display.update(model, 0, 11);
+    check(display.inputCursorX() == 9 && display.inputCursorY() == 3,
+        "a multiline ruled prompt lost its software cursor on a continuation row");
+}
 }
 int main() {
-    try { textTests(); terminalTests(); terminalTitleTests(); terminalNotificationErrorTests(); terminalDisplayTests(); terminalInputTests(); terminalScrollTests(); terminalCopyTests(); terminalSelectionScrollTests(); terminalPreeditTests(); terminalWrapMetadataTests(); terminalPreeditOutputTests(); terminalPreeditCommitTests(); terminalPreeditHorizontalBorderTests(); std::cout << "Text and terminal core tests passed.\n"; return EXIT_SUCCESS; }
+    try { textTests(); terminalTests(); terminalTitleTests(); terminalNotificationErrorTests(); terminalDisplayTests(); terminalInputTests(); terminalScrollTests(); terminalCopyTests(); terminalSelectionScrollTests(); terminalPreeditTests(); terminalWrapMetadataTests(); terminalPreeditOutputTests(); terminalPreeditCommitTests(); terminalPreeditHorizontalBorderTests(); terminalSoftwareCursorTests(); std::cout << "Text and terminal core tests passed.\n"; return EXIT_SUCCESS; }
     catch (const std::exception& error) { std::cerr << error.what() << '\n'; return EXIT_FAILURE; }
 }

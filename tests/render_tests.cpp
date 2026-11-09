@@ -1729,6 +1729,7 @@ int terminalImeFixture(const char* eventName) {
     const auto output = GetStdHandle(STD_OUTPUT_HANDLE);
     DWORD mode = 0;
     if (!next || !GetConsoleMode(output, &mode) || !SetConsoleMode(output, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING)) return 1;
+    if (!SetConsoleOutputCP(CP_UTF8) || !SetConsoleCP(CP_UTF8)) return 1;
     const char* frames[] = {
         "\x1b[2J\x1b[Hheader\x1b[3;1H> input\x1b[6;1Hstatus\x1b[3;4H\x1b[?25h",
         "\x1b[?25l\x1b[Hworking",
@@ -1751,6 +1752,20 @@ int terminalImeFixture(const char* eventName) {
     std::cout << "\x1b[3;4H\x1b[1@X\x1b]0;Poppy IME frame 6\a" << std::flush;
     if (WaitForSingleObject(next.value, 10000) != WAIT_OBJECT_0) return 1;
     std::cout << "\x1b[6;1Hfooter\x1b]0;Poppy IME frame 7\a" << std::flush;
+    const auto softwareFrame = [](const std::string& text, int frame) {
+        const std::string border(32, '-');
+        std::cout << "\x1b[?25l\x1b[2J\x1b[2;1H" << border << "\x1b[3;1H\x1b[36m>\x1b[39m " << text <<
+            "\x1b[0m\x1b[4;1H" << border << "\x1b[6;1Hfooter\x1b]0;Poppy IME frame " << frame << '\a' << std::flush;
+    };
+    if (WaitForSingleObject(next.value, 10000) != WAIT_OBJECT_0) return 1;
+    softwareFrame("\x1b[7mT\x1b[27mry editing a file", 8);
+    if (WaitForSingleObject(next.value, 10000) != WAIT_OBJECT_0) return 1;
+    softwareFrame("ああああ\x1b[7mあ\x1b[27mああ", 9);
+    if (!ReadFile(input, &character, 1, &count, nullptr) || count != 1 || character != 'Y') return 1;
+    if (WaitForSingleObject(next.value, 10000) != WAIT_OBJECT_0) return 1;
+    softwareFrame("ああああY\x1b[7mあ\x1b[27mああ", 10);
+    if (WaitForSingleObject(next.value, 10000) != WAIT_OBJECT_0) return 1;
+    std::cout << "\x1b[Hworking\x1b[6;1Hbusy\x1b]0;Poppy IME frame 11\a" << std::flush;
     return WaitForSingleObject(next.value, 10000) == WAIT_OBJECT_0 ? 0 : 1;
 }
 void terminalImeOutput() {
@@ -1824,6 +1839,33 @@ void terminalImeOutput() {
         "A fast next composition pinned its native caret and candidates before the accepted input was echoed");
     SetEvent(next.value); waitFrame(7); const auto stable = caret();
     check(EqualRect(&afterEcho, &stable), "Redrawing output moved the next composition after its input echo");
+    SendMessageW(window, WM_IME_ENDCOMPOSITION, 0, 0);
+    SetEvent(next.value); waitFrame(8);
+    Renderer metrics; metrics.setDpi(96);
+    const int cw = metrics.cellWidth();
+    const auto software = caret();
+    check(software.left == 6 + 2 * cw && software.top == origin.top,
+        "Claude-style inverse cursor placed the native caret or candidates on the footer");
+    SendMessageW(window, WM_IME_STARTCOMPOSITION, 0, 0);
+    SendMessageW(window, WM_IME_NOTIFY, IMN_CHANGECANDIDATE, 1);
+    const auto softwareHeld = caret();
+    check(EqualRect(&software, &softwareHeld), "Starting composition lost the software cursor");
+    SendMessageW(window, WM_IME_ENDCOMPOSITION, 0, 0);
+    SetEvent(next.value); waitFrame(9);
+    const auto fifth = caret();
+    check(fifth.left == 6 + 10 * cw && fifth.top == origin.top,
+        "The native IME caret started after the highlighted fifth wide character");
+    SendMessageW(window, WM_CHAR, 'Y', 0);
+    SendMessageW(window, WM_IME_STARTCOMPOSITION, 0, 0);
+    const auto softwarePending = caret();
+    check(EqualRect(&fifth, &softwarePending), "Pending software-cursor input lost the insertion point");
+    SetEvent(next.value); waitFrame(10);
+    const auto softwareEcho = caret();
+    check(softwareEcho.left == fifth.left + cw && softwareEcho.top == fifth.top,
+        "Software-cursor echo did not advance the next composition and candidates");
+    SetEvent(next.value); waitFrame(11);
+    const auto softwareStable = caret();
+    check(EqualRect(&softwareEcho, &softwareStable), "Footer output moved composition from the software cursor");
     SendMessageW(window, WM_IME_ENDCOMPOSITION, 0, 0);
     SetEvent(next.value); terminal.stop();
 }

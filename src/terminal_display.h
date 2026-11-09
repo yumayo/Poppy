@@ -35,8 +35,8 @@ public:
     // Reacquire the insertion point after the terminal echoes accepted input.
     void inputSent(std::u16string text);
     void cancelPreedit() { endPreedit(); pendingCommit_.reset(); }
-    int inputCursorX() const { return preeditCursor_ ? preeditCursor_->x : cursorX_; }
-    int inputCursorY() const { return preeditCursor_ ? preeditCursor_->y : cursorY_; }
+    int inputCursorX() const { return preeditCursor_ ? preeditCursor_->x : softwareCursor_ ? softwareCursor_->x : cursorX_; }
+    int inputCursorY() const { return preeditCursor_ ? preeditCursor_->y : softwareCursor_ ? softwareCursor_->y : cursorY_; }
     TerminalPreedit preedit(const CompositionText& text) const;
     // Selection endpoints are cell boundaries; the end is exclusive.
     std::pair<int, int> selectionRange(int anchor, int caret) const;
@@ -52,7 +52,9 @@ private:
     std::vector<std::vector<Cell>> cells_;
     std::vector<int> wrapped_;
     struct Cursor { int x, y; bool wrap; };
-    std::optional<Cursor> preeditCursor_;
+    std::optional<Cursor> preeditCursor_, softwareCursor_;
+    std::optional<Cursor> findSoftwareCursor() const;
+    bool inputWrapPending() const { return preeditCursor_ ? preeditCursor_->wrap : !softwareCursor_ && wrapPending_; }
     struct Commit { std::u16string text; int column; int64_t row; std::u32string prefix; };
     std::optional<Commit> pendingCommit_;
     bool commitPresented() const;
