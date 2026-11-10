@@ -1959,6 +1959,113 @@ void editorWordSelection() {
         check(viewer.state().after == after, "A double-click selected the wrong diff side");
     }
 }
+void editorColumnSelection() {
+    Viewer viewer;
+    const auto instance = GetModuleHandleW(nullptr);
+    const HWND parent = CreateWindowExW(0, L"STATIC", L"Editor column selection test", WS_POPUP | WS_CLIPCHILDREN,
+        0, 0, 700, 360, nullptr, nullptr, instance, nullptr);
+    check(parent != nullptr, "Could not create the column selection test window");
+    struct WindowOwner { HWND value; ~WindowOwner() { DestroyWindow(value); } } owner{parent};
+    viewer.create(parent, instance);
+    const HWND window = viewer.window(); MoveWindow(window, 0, 0, 700, 360, FALSE);
+    ShowWindow(parent, SW_SHOWNOACTIVATE);
+    struct KeyboardState {
+        BYTE original[256]{};
+        KeyboardState() { GetKeyboardState(original); }
+        ~KeyboardState() { SetKeyboardState(original); }
+    } keyboard;
+    const auto key = [&](WPARAM code, bool ctrl = false) {
+        BYTE keys[256]{}; keys[VK_CONTROL] = ctrl ? 0x80 : 0;
+        check(SetKeyboardState(keys) != FALSE, "Could not set column selection modifiers");
+        SendMessageW(window, WM_KEYDOWN, code, 0);
+    };
+    const auto input = [&](wchar_t c) {
+        BYTE keys[256]{}; SetKeyboardState(keys); SendMessageW(window, WM_CHAR, c, 0);
+    };
+    auto buffer = std::make_shared<EditBuffer>();
+    const std::string original = "abcd\r\n12\r\n\r\nwxyz";
+    const auto load = [&] {
+        buffer->document.text = original; indexDocument(buffer->document); buffer->initialize(original);
+        viewer.edit(buffer, L"columns.txt"); SetFocus(window);
+    };
+    Renderer metrics;
+    int cell = 0, height = 0, gutter = 0;
+    const auto point = [&](int column, int row) { return MAKELPARAM(gutter + column * cell, row * height + height / 2); };
+    const auto drag = [&](int firstColumn, int firstRow, int lastColumn, int lastRow) {
+        SendMessageW(window, WM_MBUTTONDOWN, MK_MBUTTON, point(firstColumn, firstRow));
+        check(GetCapture() == window, "Middle dragging did not capture the editor");
+        SendMessageW(window, WM_LBUTTONUP, MK_MBUTTON, point(firstColumn, firstRow));
+        check(GetCapture() == window, "An unrelated button release ended column selection");
+        SendMessageW(window, WM_MOUSEMOVE, MK_MBUTTON, point(lastColumn, lastRow));
+        SendMessageW(window, WM_MBUTTONUP, 0, point(lastColumn, lastRow));
+        check(GetCapture() != window, "Middle dragging retained mouse capture");
+    };
+    for (const UINT dpi : {96u, 144u, 192u}) for (const bool wrap : {false, true}) for (const bool reverse : {false, true}) {
+        viewer.setDpi(dpi); viewer.setWordWrap(wrap); metrics.setDpi(dpi);
+        cell = metrics.cellWidth(); height = metrics.textHeight() + MulDiv(3, dpi, 96); gutter = MulDiv(70, dpi, 96);
+        for (const bool readOnly : {false, true}) {
+            load();
+            if (readOnly) viewer.show(std::make_shared<Document>(buffer->document), L"readonly.txt");
+            if (reverse) drag(3, 3, 1, 0); else drag(1, 0, 3, 3);
+            check(!buffer->dirty(), "Column selection changed the document");
+            key('C', true);
+            check(clipboardText(window) == L"bc\r\n2 \r\n  \r\nxy", "Column copying included unselected text or lost empty rows");
+            input(L'Q');
+            if (readOnly) {
+                key('C', true); check(clipboardText(window) == L"bc\r\n2 \r\n  \r\nxy", "Read-only columns were edited");
+                continue;
+            }
+            check(buffer->document.text == "aQd\r\n1Q\r\n Q\r\nwQz", "Typing did not replace every selected column");
+            input(L'R'); key(VK_BACK);
+            check(buffer->document.text == "aQd\r\n1Q\r\n Q\r\nwQz", "Repeated typing or Backspace lost the multiple cursors");
+            key('Z', true); key('Z', true); key('Z', true);
+            check(buffer->document.text == original && !buffer->dirty(), "Column edits did not undo as complete operations");
+            drag(1, 0, 3, 3); copyText(window, L"A\r\nB\r\nC\r\nD"); key('V', true);
+            check(buffer->document.text == "aAd\r\n1B\r\n C\r\nwDz", "Column paste did not distribute clipboard lines");
+            key('Z', true); drag(1, 0, 3, 3); key('X', true);
+            check(buffer->document.text == "ad\r\n1\r\n\r\nwz", "Column cut joined lines or removed unselected text");
+            key('Z', true); drag(2, 0, 2, 3); input(L'Z');
+            check(buffer->document.text == "abZcd\r\n12Z\r\n  Z\r\nwxZyz", "Zero-width dragging did not create a cursor per row");
+            key('Z', true); drag(1, 0, 3, 3); key(VK_ESCAPE); input(L'!');
+            check(std::count(buffer->document.text.begin(), buffer->document.text.end(), '!') == 1, "Escape left multiple cursors active");
+            load(); drag(1, 0, 3, 3);
+            SendMessageW(window, WM_LBUTTONDOWN, MK_LBUTTON, point(1, 0));
+            SendMessageW(window, WM_MOUSEMOVE, MK_LBUTTON, point(3, 0));
+            SendMessageW(window, WM_LBUTTONUP, 0, point(3, 0)); input(L'Z');
+            check(buffer->document.text == "aZd\r\n12\r\n\r\nwxyz", "A normal left drag retained column selection");
+        }
+    }
+    viewer.setDpi(96); viewer.setWordWrap(true); metrics.setDpi(96);
+    cell = metrics.cellWidth(); height = metrics.textHeight() + 3; gutter = 70;
+    const int columns = (Scrollbars::contentRect(window).right - 4 - gutter - 2) / cell;
+    buffer->document.text = std::string(columns * 3, 'x'); indexDocument(buffer->document); buffer->initialize(buffer->document.text);
+    viewer.edit(buffer, L"wrapped.txt"); drag(1, 0, 3, 2); input(L'Z');
+    check(std::count(buffer->document.text.begin(), buffer->document.text.end(), 'Z') == 3 && buffer->document.lines.size() == 1,
+        "Column selection did not follow wrapped display rows");
+    auto before = std::make_shared<Document>(); before->text = "abcd\r\n12\r\n\r\nold!"; indexDocument(*before);
+    for (const bool inlineView : {false, true}) {
+        load(); viewer.setDiffLayout(inlineView); viewer.editDiff(buffer, before, L"columns.txt");
+        gutter = inlineView ? 140 : Scrollbars::contentRect(window).right / 2 + 1 + 70;
+        drag(1, 0, 3, inlineView ? 4 : 3); key('C', true);
+        check(clipboardText(window) == L"bc\r\n2 \r\n  \r\nxy", "Diff column copying included patch prefixes or removed rows");
+        input(L'Q'); check(buffer->document.text == "aQd\r\n1Q\r\n Q\r\nwQz", "Diff column edits used patch offsets");
+        key('Z', true); check(buffer->document.text == original, "Diff column Undo changed unrelated text");
+        input(L'Z'); check(std::count(buffer->document.text.begin(), buffer->document.text.end(), 'Z') == 1, "Undo left stale diff column cursors");
+        gutter = 70;
+    }
+    viewer.setWordWrap(false); gutter = 70;
+    buffer->document.text.clear(); for (int row = 0; row < 100; ++row) buffer->document.text += "abcdef\n";
+    indexDocument(buffer->document); buffer->initialize(buffer->document.text); viewer.edit(buffer, L"scroll.txt");
+    SendMessageW(window, WM_MBUTTONDOWN, MK_MBUTTON, point(1, 1));
+    const auto bottom = MAKELPARAM(gutter + 3 * cell, 500);
+    SendMessageW(window, WM_MOUSEMOVE, MK_MBUTTON, bottom);
+    for (int i = 0; i < 5; ++i) SendMessageW(window, WM_TIMER, 0x5058, 0);
+    check(GetScrollPos(window, SB_VERT) > 0, "Middle dragging below the editor did not auto-scroll");
+    SendMessageW(window, WM_MBUTTONUP, 0, bottom); const int top = GetScrollPos(window, SB_VERT);
+    for (int i = 0; i < 5; ++i) SendMessageW(window, WM_TIMER, 0x5058, 0);
+    check(GetCapture() != window && GetScrollPos(window, SB_VERT) == top, "Released middle dragging kept scrolling");
+    viewer.message(L"Loading"); input(L'Z'); check(!buffer->dirty(), "Changing content left stale column cursors");
+}
 void editorWordMovement() {
     Viewer viewer;
     const HWND parent = CreateWindowExW(0, L"STATIC", L"Editor word movement test", WS_POPUP | WS_CLIPCHILDREN,
@@ -3218,7 +3325,7 @@ int main(int argc, char** argv) {
             editorBottomPadding(); editorTailFollowing();
             csvTables(); htmlPreviewSwitching();
             terminalAsyncStartup(); terminalProcessShutdown(); terminalImeOutput();
-            statusBarLimits(); treeMultipleSelection(); commitMessagePopup(); inlineTreeInput(); inlineTreeCreation(); gitCommitInput(); cellPositions(); colorsAndClipping(); imagePreviews(); fractionalMarkers(); smoothIcons(); windowTargets(); editableDiff(); editorCaret(); delayedLoadingMessages(); imeCellRendering(); imeTerminalInsertion(); imeUiRendering(); imePositions(); editorWordSelection(); editorWordMovement(); editorWordDeletion(); editorLineShortcuts(); editorWrapping(); diffWrapping(); documentFind(); horizontalWheelScrolling(); continuousViewerScrolling(); selectionAutoScrolling(); terminalGitBashSocketEnvironment(); terminalSelectionAutoScrolling(); themedScrollbars(); quickOpenStability();
+            statusBarLimits(); treeMultipleSelection(); commitMessagePopup(); inlineTreeInput(); inlineTreeCreation(); gitCommitInput(); cellPositions(); colorsAndClipping(); imagePreviews(); fractionalMarkers(); smoothIcons(); windowTargets(); editableDiff(); editorCaret(); delayedLoadingMessages(); imeCellRendering(); imeTerminalInsertion(); imeUiRendering(); imePositions(); editorWordSelection(); editorColumnSelection(); editorWordMovement(); editorWordDeletion(); editorLineShortcuts(); editorWrapping(); diffWrapping(); documentFind(); horizontalWheelScrolling(); continuousViewerScrolling(); selectionAutoScrolling(); terminalGitBashSocketEnvironment(); terminalSelectionAutoScrolling(); themedScrollbars(); quickOpenStability();
             std::cout << "Direct2D rendering tests passed\n";
         }
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; result = 1; }

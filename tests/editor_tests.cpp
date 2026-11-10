@@ -1,4 +1,5 @@
 #include "edit_buffer.h"
+#include "column_selection.h"
 #include "text_layout.h"
 #include "selection_scroll.h"
 #include "editor_scroll.h"
@@ -55,6 +56,86 @@ EditBuffer load(std::string bytes) {
     EditBuffer buffer; std::string error;
     check(decodeText(bytes, buffer.document.text, buffer.document.encoding, error));
     indexDocument(buffer.document); buffer.initialize(std::move(bytes)); return buffer;
+}
+std::vector<ColumnRange> columns(const Document& document, int first, int last) {
+    std::vector<ColumnRange> ranges;
+    for (size_t row = 0; row < document.lines.size(); ++row) {
+        const auto line = document.line(row);
+        auto range = columnRange(line, {row, 0, line.size()}, first, last);
+        range.begin += document.lines[row]; range.end += document.lines[row];
+        ranges.push_back(range);
+    }
+    return ranges;
+}
+void columnSelection() {
+    auto buffer = load("abcd\r\n12\r\n\r\nwxyz");
+    const auto original = buffer.document.text;
+    auto ranges = columns(buffer.document, 1, 3);
+    check(selectedColumns(buffer.document.text, ranges) == "bc\r\n2 \r\n  \r\nxy");
+    check(selectedColumns(buffer.document.text, columns(buffer.document, 3, 1)) == selectedColumns(buffer.document.text, ranges));
+    check(!buffer.dirty());
+    check(replaceColumns(buffer, ranges, "Q"));
+    check(buffer.document.text == "aQd\r\n1Q\r\n Q\r\nwQz");
+    check(replaceColumns(buffer, ranges, u8"日😀"));
+    check(buffer.document.text == u8"aQ日😀d\r\n1Q日😀\r\n Q日😀\r\nwQ日😀z");
+    check(replaceColumns(buffer, ranges, "", false, ColumnErase::Backward));
+    check(buffer.document.text == u8"aQ日d\r\n1Q日\r\n Q日\r\nwQ日z");
+    size_t anchor = 0, caret = 0;
+    check(buffer.undo(anchor, caret)); check(buffer.undo(anchor, caret)); check(buffer.undo(anchor, caret));
+    check(buffer.document.text == original && !buffer.dirty());
+    check(buffer.redo(anchor, caret)); check(buffer.document.text == "aQd\r\n1Q\r\n Q\r\nwQz");
+
+    buffer = load("ab\nx\n"); ranges = columns(buffer.document, 2, 2);
+    check(replaceColumns(buffer, ranges, "X")); check(buffer.document.text == "abX\nx X\n  X");
+    check(replaceColumns(buffer, ranges, "Y")); check(buffer.document.text == "abXY\nx XY\n  XY");
+    buffer = load("a\r\nb\r\n"); ranges = columns(buffer.document, 0, 0);
+    check(replaceColumns(buffer, ranges, "", false, ColumnErase::Backward));
+    check(buffer.document.text == "ab"); check(buffer.undo(anchor, caret) && !buffer.dirty());
+    ranges = columns(buffer.document, 1, 1);
+    check(replaceColumns(buffer, ranges, "", false, ColumnErase::Forward));
+    check(buffer.document.text == "ab"); check(buffer.undo(anchor, caret) && !buffer.dirty());
+    ranges = columns(buffer.document, 4, 4);
+    check(replaceColumns(buffer, ranges, "", false, ColumnErase::Backward));
+    check(buffer.document.text == "a\r\nb\r\n" && ranges[0].padding == 2 && ranges[2].padding == 3);
+
+    buffer = load(u8"\t日😀x");
+    ranges = columns(buffer.document, 2, 7);
+    check(selectedColumns(buffer.document.text, ranges) == u8"\t日😀");
+    check(replaceColumns(buffer, ranges, "Z")); check(buffer.document.text == "Zx");
+    check(buffer.undo(anchor, caret) && buffer.document.text == u8"\t日😀x");
+    const auto line = buffer.document.line(0);
+    auto range = columnRange(line, wrappedLineRow(line, 6, 0), 4, 6);
+    check(range.begin == 1 && range.end == 4 && range.trailing);
+    range = columnRange(line, wrappedLineRow(line, 6, 1), 0, 2);
+    check(range.begin == 4 && range.end == 8 && !range.trailing);
+    range = columnRange(line, wrappedLineRow(line, 6, 1), 4, 6);
+    check(range.begin == line.size() && range.padding == 1 && range.virtualWidth == 2);
+
+    buffer = load("aa\r\nbb\r\ncc"); ranges = columns(buffer.document, 1, 2);
+    check(replaceColumns(buffer, ranges, "A\r\nB\r\nC", true));
+    check(buffer.document.text == "aA\r\nbB\r\ncC");
+    check(buffer.undo(anchor, caret) && buffer.document.text == "aa\r\nbb\r\ncc");
+    buffer = load("a\nb"); ranges = columns(buffer.document, 1, 1);
+    check(replaceColumns(buffer, ranges, "\n")); check(buffer.document.text == "a\n\nb\n");
+    check(buffer.undo(anchor, caret) && buffer.document.text == "a\nb");
+    ranges = columns(buffer.document, 0, 1);
+    check(replaceColumns(buffer, ranges, "")); check(buffer.document.text == "\n");
+    check(buffer.undo(anchor, caret) && buffer.document.text == "a\nb");
+    buffer = load("abcd"); ranges = {{0, 2}, {2, 4}};
+    check(replaceColumns(buffer, ranges, "") && ranges.size() == 1);
+    check(replaceColumns(buffer, ranges, "X") && buffer.document.text == "X");
+
+    buffer = load("abcdef\r\nxyz"); ranges = {{2, 2}, {4, 4}, {10, 10}};
+    check(replaceColumns(buffer, ranges, "", false, ColumnErase::WordBackward));
+    check(buffer.document.text == "ef\r\nz" && ranges.size() == 2);
+    check(buffer.undo(anchor, caret) && buffer.document.text == "abcdef\r\nxyz");
+    ranges = columns(buffer.document, 0, 1);
+    const auto unchanged = ranges;
+    for (const auto& invalid : {std::string(1, '\0'), std::string("\xff"), std::string(maxFileBytes / 2 + 1, 'x')}) {
+        check(!replaceColumns(buffer, ranges, invalid));
+        check(buffer.document.text == "abcdef\r\nxyz" && ranges.size() == unchanged.size() && ranges[0].end == unchanged[0].end && !buffer.dirty());
+    }
+    check(!selectedColumns(buffer.document.text, {{0, 0, 0, static_cast<int>(maxFileBytes)}, {0, 0, 0, 1}}));
 }
 void mixedUtf8Files() {
     const std::string source = u8"<?php // 日本語😀\r\n$pool->internalAddGeneratedFile('" "\x80\xff" "');\r\n";
@@ -357,6 +438,7 @@ void selectionScrolling() {
 }
 int main() {
     compositionLayout();
+    columnSelection();
     mixedUtf8Files();
     lineCutting();
     lineMovement();

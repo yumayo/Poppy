@@ -51,6 +51,7 @@ void Viewer::setFileDropTarget(FileDropTarget* target) {
     target->AddRef(); fileDropTarget_ = target;
 }
 void Viewer::setDpi(UINT dpi) {
+    stopSelection(); clearColumns();
     dpi_ = dpi;
     renderer_.setDpi(dpi);
     cellWidth_ = renderer_.cellWidth(); cellHeight_ = renderer_.textHeight() + MulDiv(3, dpi, 96);
@@ -67,7 +68,7 @@ void Viewer::show(std::shared_ptr<const Document> d, const ResourceId& path, boo
     html_.hide();
     htmlAllowed_ = allowHtml;
     stopLoading();
-    stopSelection();
+    stopSelection(); clearColumns();
     ime_.cancel(window_);
     image_.reset(); renderer_.setImage({});
     edit_.reset(); diffBefore_.reset(); gitBefore_.reset(); gitChangedLines_ = {}; gitChangeRanges_ = {}; highSurrogate_ = 0;
@@ -109,7 +110,7 @@ void Viewer::showDiff(std::shared_ptr<const DiffDocument> d, const ResourceId& p
     csv_.hide(true);
     html_.hide();
     stopLoading();
-    stopSelection();
+    stopSelection(); clearColumns();
     ime_.cancel(window_);
     image_.reset(); renderer_.setImage({});
     const auto previous = preserve && document_ ? std::optional<State>(state()) : std::nullopt;
@@ -136,6 +137,7 @@ void Viewer::editDiff(std::shared_ptr<EditBuffer> buffer, std::shared_ptr<const 
 }
 void Viewer::refreshBuffer(bool externalUpdate) {
     if (!edit_) return;
+    stopSelection(); clearColumns();
     if (csv_.active()) {
         csv_.refresh(); updateGitLines(); layoutDirty_ = true;
         if (statusChanged) statusChanged();
@@ -164,7 +166,7 @@ void Viewer::message(const std::wstring& text, const ResourceId& path) {
     csv_.hide(true);
     html_.hide();
     stopLoading();
-    stopSelection();
+    stopSelection(); clearColumns();
     ime_.cancel(window_);
     image_.reset(); renderer_.setImage({});
     findBar_.close(); KillTimer(window_, findTimer); search_.query("");
@@ -201,7 +203,7 @@ void Viewer::htmlLayout() {
 }
 void Viewer::setHtmlPreview(bool enabled) {
     if (!htmlAvailable() || enabled == html_.active()) return;
-    stopSelection(); ime_.cancel(window_); findBar_.close();
+    stopSelection(); clearColumns(); ime_.cancel(window_); findBar_.close();
     if (enabled) html_.show(window_, path_, {});
     else html_.hide();
     scrollbars(); findLayout(); htmlLayout(); caretPosition();
@@ -212,7 +214,7 @@ void Viewer::setHtmlPreview(bool enabled) {
 void Viewer::setCsvTable(bool enabled) {
     if (!csvAvailable() || enabled == csv_.active()) return;
     const auto previous = state();
-    stopSelection(); ime_.cancel(window_); findBar_.close();
+    stopSelection(); clearColumns(); ime_.cancel(window_); findBar_.close();
     if (enabled) {
         csv_.show(document_, true); csv_.buffer(edit_); csv_.restore(previous);
         KillTimer(window_, caretTimer); caretVisible_ = false;
@@ -266,6 +268,7 @@ void Viewer::restoreTop(const State& state) {
 }
 void Viewer::restore(const State& state) {
     if (!document_) return;
+    stopSelection(); clearColumns();
     if (csv_.active()) { csv_.restore(state); return; }
     restoreTop(state);
     caretTrailing_ = false;
@@ -277,7 +280,7 @@ void Viewer::restore(const State& state) {
 }
 void Viewer::setWordWrap(bool enabled) {
     if (wordWrap_ == enabled) return;
-    stopSelection();
+    stopSelection(); clearColumns();
     const auto previous = state();
     wordWrap_ = enabled; layoutDirty_ = true;
     scrollbars(); findLayout();
@@ -287,6 +290,7 @@ void Viewer::setWordWrap(bool enabled) {
 void Viewer::toggleDiffLayout() { if (diff_) setDiffLayout(!inlineView_); }
 void Viewer::setDiffLayout(bool inlineView) {
     if (inlineView_ == inlineView) return;
+    stopSelection(); clearColumns();
     const auto previous = state();
     inlineView_ = inlineView; layoutDirty_ = true;
     if (diff_) diffChangeRanges_ = changedDiffRows(*diff_, inlineView_);
@@ -355,9 +359,57 @@ void Viewer::extendSelection(int x, int y) {
     const auto rect = contentRect();
     const int top = contentTop() + (stickyFile() ? cellHeight_ : 0);
     if (rect.bottom <= top) return;
+    if (columnDragging_) { extendColumns(x, std::clamp(y, top, static_cast<int>(rect.bottom) - 1)); return; }
     // Hit-test the visible edge; the timer brings further rows into view.
     caret_ = position(x, std::clamp(y, top, static_cast<int>(rect.bottom) - 1), &caretTrailing_);
     caretPosition(); InvalidateRect(window_, nullptr, FALSE); UpdateWindow(window_);
+}
+void Viewer::clearColumns() {
+    if (!columnRanges_.empty()) anchor_ = caret_;
+    columnRanges_.clear();
+}
+void Viewer::syncColumns() {
+    if (columnRanges_.empty()) return;
+    columnActive_ = std::min(columnActive_, columnRanges_.size() - 1);
+    const auto& range = columnRanges_[columnActive_];
+    anchor_ = caret_ = columnCaretAtEnd_ ? range.end : range.begin;
+    caretTrailing_ = columnCaretAtEnd_ && range.trailing;
+}
+bool Viewer::hasSelection() const {
+    return columnRanges_.empty() ? anchor_ != caret_ : std::any_of(columnRanges_.begin(), columnRanges_.end(),
+        [](const ColumnRange& range) { return range.begin != range.end || range.virtualWidth; });
+}
+void Viewer::extendColumns(int x, int y) {
+    const size_t lastRow = std::min(rowCount() - 1, static_cast<size_t>(std::max(0, (y - contentTop()) / cellHeight_ + top_)));
+    const int origin = textGutter() + (splitDiff() && after_ ? contentRect().right / 2 + 1 : 0);
+    if (splitDiff()) x = std::min(x, static_cast<int>(after_ ? contentRect().right : contentRect().right / 2));
+    const int column = std::clamp((x - origin + cellWidth_ / 2) / cellWidth_ + left_, 0, static_cast<int>(maxLineColumns));
+    columnRanges_.clear();
+    for (size_t row = std::min(columnStartRow_, lastRow); row <= std::max(columnStartRow_, lastRow); ++row) {
+        WrappedRow wrapped;
+        std::string_view line; size_t offset = 0;
+        if (diff_) {
+            const auto change = diff_->displayRow(diffRow(row), inlineView_);
+            const auto source = after_ ? change.after : change.before;
+            if (change.heading || !source.number) continue;
+            line = diff_->line(source); offset = diff_->offset(source);
+            if (wrapping()) {
+                if (diffLayout_.row(row).continuation >= wrappedLineRows(line, diffLayout_.columns())) continue;
+                wrapped = diffLayout_.textRow(*diff_, row, after_);
+            }
+        } else {
+            if (wrapping()) wrapped = textLayout_.row(*document_, row);
+            const size_t logical = wrapping() ? wrapped.line : row;
+            line = document_->line(logical); offset = document_->lines[logical];
+        }
+        if (!wrapping()) wrapped.end = line.size();
+        auto range = columnRange(line, wrapped, columnStart_, column);
+        range.begin += offset; range.end += offset;
+        columnRanges_.push_back(range);
+    }
+    columnActive_ = lastRow < columnStartRow_ || columnRanges_.empty() ? 0 : columnRanges_.size() - 1;
+    columnCaretAtEnd_ = column >= columnStart_;
+    syncColumns(); caretPosition(); InvalidateRect(window_, nullptr, FALSE); UpdateWindow(window_);
 }
 void Viewer::scrollSelection() {
     if (!selecting_ || GetCapture() != window_) { stopSelection(); return; }
@@ -371,7 +423,7 @@ void Viewer::scrollSelection() {
 void Viewer::stopSelection() {
     if (window_) KillTimer(window_, selectionTimer);
     if (!selecting_) return;
-    selecting_ = false;
+    selecting_ = false; columnDragging_ = false;
     if (GetCapture() == window_) ReleaseCapture();
 }
 size_t Viewer::position(int x, int y, bool* trailing, WordRange* word) const {
@@ -430,7 +482,12 @@ size_t Viewer::position(int x, int y, bool* trailing, WordRange* word) const {
     return offset + p;
 }
 void Viewer::copy() {
-    if (!document_ || anchor_ == caret_) return;
+    if (!document_ || !hasSelection()) return;
+    if (!columnRanges_.empty()) {
+        const auto text = selectedColumns(document_->text, columnRanges_);
+        if (!text || !copyText(window_, wide(*text))) MessageBeep(MB_ICONWARNING);
+        return;
+    }
     const size_t start = std::min(anchor_, caret_), end = std::max(anchor_, caret_);
     size_t anchor = 0, caret = 0;
     if (diff_ && editSelection(anchor, caret)) copyText(window_, wide(std::string_view(edit_->document.text).substr(std::min(anchor, caret), std::max(anchor, caret) - std::min(anchor, caret))));
@@ -438,6 +495,14 @@ void Viewer::copy() {
     else copyText(window_, wide(std::string_view(document_->text).substr(start, end - start)));
 }
 void Viewer::cut() {
+    if (!columnRanges_.empty()) {
+        size_t anchor = 0, caret = 0;
+        if (!editSelection(anchor, caret) || !hasSelection()) return;
+        const auto text = selectedColumns(document_->text, columnRanges_);
+        if (text && copyText(window_, wide(*text))) replaceColumnSelection("");
+        else MessageBeep(MB_ICONWARNING);
+        return;
+    }
     size_t anchor = 0, caret = 0;
     if (!editSelection(anchor, caret)) return;
     const auto range = edit_->cutRange(anchor, caret);
@@ -450,7 +515,7 @@ void Viewer::findLayout() {
 }
 std::optional<std::wstring> Viewer::searchSeed() const {
     if (csv_.active()) return csv_.searchSeed();
-    if (!document_ || html_.active() || anchor_ == caret_) return {};
+    if (!document_ || html_.active() || !columnRanges_.empty() || anchor_ == caret_) return {};
     const size_t begin = std::min(anchor_, caret_), end = std::max(anchor_, caret_);
     if (end - begin > 2048) return {};
     const auto selected = diff_ ? diff_->selectedText(after_, begin, end, inlineView_) : document_->text.substr(begin, end - begin);
@@ -460,6 +525,7 @@ std::optional<std::wstring> Viewer::searchSeed() const {
 void Viewer::find() {
     if (!document_) return;
     const auto seed = searchSeed();
+    stopSelection(); clearColumns();
     if (csv_.active()) setCsvTable(false);
     if (html_.active()) setHtmlPreview(false);
     findBar_.show(seed); scrollbars(); findLayout(); requestFind();
@@ -526,6 +592,7 @@ bool Viewer::selectSearch(size_t begin, size_t end, const std::string& query, bo
     revealFind_ = false; revealRange({begin, end}); return true;
 }
 void Viewer::revealRange(TextMatch match) {
+    stopSelection(); clearColumns();
     anchor_ = match.begin; caret_ = match.end; caretTrailing_ = false;
     const size_t patchRow = static_cast<size_t>(std::upper_bound(document_->lines.begin(), document_->lines.end(), match.begin) - document_->lines.begin() - 1);
     auto line = document_->line(patchRow); size_t offset = document_->lines[patchRow], row = patchRow;
@@ -550,28 +617,36 @@ void Viewer::revealRange(TextMatch match) {
     scrollbars(); caretPosition(); InvalidateRect(window_, nullptr, FALSE);
 }
 POINT Viewer::caretPoint() const {
-    if (!edit_) return {gutter_, contentTop()};
-    const auto& d = edit_->document;
+    auto point = caretPoint(caret_, caretTrailing_);
+    if (!columnRanges_.empty()) {
+        const auto& range = columnRanges_[columnActive_];
+        point.x += (range.padding + (columnCaretAtEnd_ ? range.virtualWidth : 0)) * cellWidth_;
+    }
+    return point;
+}
+POINT Viewer::caretPoint(size_t caret, bool trailing) const {
+    if (!document_) return {gutter_, contentTop()};
+    const auto& d = *document_;
     if (diff_) {
-        const size_t patchRow = static_cast<size_t>(std::upper_bound(document_->lines.begin(), document_->lines.end(), caret_) - document_->lines.begin() - 1);
+        const size_t patchRow = static_cast<size_t>(std::upper_bound(document_->lines.begin(), document_->lines.end(), caret) - document_->lines.begin() - 1);
         const DiffLine source{static_cast<uint32_t>(patchRow), 1};
-        size_t row = diff_->rowForLine(source, true, inlineView_);
+        size_t row = diff_->rowForLine(source, after_, inlineView_);
         const auto line = diff_->line(source); const auto offset = diff_->offset(source);
-        if (wrapping()) row = diffLayout_.rowForOffset(*diff_, row, caret_ - offset, true, caretTrailing_);
-        const auto wrapped = wrapping() ? diffLayout_.textRow(*diff_, row, true) : WrappedRow{};
+        if (wrapping()) row = diffLayout_.rowForOffset(*diff_, row, caret - offset, after_, trailing);
+        const auto wrapped = wrapping() ? diffLayout_.textRow(*diff_, row, after_) : WrappedRow{};
         int column = wrapping() ? wrapped.column : 0;
-        for (size_t p = wrapping() ? wrapped.begin : 0; p < line.size() && offset + p < caret_;) {
+        for (size_t p = wrapping() ? wrapped.begin : 0; p < line.size() && offset + p < caret;) {
             const auto c = decodeUtf8(line, p); column += c == '\t' ? 4 - column % 4 : std::max(1, cellWidth(c));
         }
         if (wrapping()) column -= wrapped.column;
-        const int origin = textGutter() + (splitDiff() ? contentRect().right / 2 + 1 : 0);
+        const int origin = textGutter() + (splitDiff() && after_ ? contentRect().right / 2 + 1 : 0);
         return {origin + (column - left_) * cellWidth_, contentTop() + (static_cast<int>(row) - top_) * cellHeight_};
     }
-    const size_t row = wrapping() ? textLayout_.rowForOffset(d, caret_, caretTrailing_) : static_cast<size_t>(std::upper_bound(d.lines.begin(), d.lines.end(), caret_) - d.lines.begin() - 1);
+    const size_t row = wrapping() ? textLayout_.rowForOffset(d, caret, trailing) : static_cast<size_t>(std::upper_bound(d.lines.begin(), d.lines.end(), caret) - d.lines.begin() - 1);
     const auto wrapped = wrapping() ? textLayout_.row(d, row) : WrappedRow{};
     const size_t logicalRow = wrapping() ? wrapped.line : row;
     const auto line = d.line(logicalRow); int col = wrapping() ? wrapped.column : 0;
-    for (size_t p = wrapping() ? wrapped.begin : 0; p < line.size() && d.lines[logicalRow] + p < caret_;) { const auto c = decodeUtf8(line, p); col += c == '\t' ? 4 - col % 4 : std::max(1, cellWidth(c)); }
+    for (size_t p = wrapping() ? wrapped.begin : 0; p < line.size() && d.lines[logicalRow] + p < caret;) { const auto c = decodeUtf8(line, p); col += c == '\t' ? 4 - col % 4 : std::max(1, cellWidth(c)); }
     if (wrapping()) col -= wrapped.column;
     return {gutter_ + (col - left_) * cellWidth_, contentTop() + (static_cast<int>(row) - top_) * cellHeight_};
 }
@@ -622,22 +697,39 @@ void Viewer::edited() {
         document_ = std::shared_ptr<const Document>(comparison, &comparison->patch); diff_ = std::move(comparison);
         diffChangeRanges_ = changedDiffRows(*diff_, inlineView_);
         anchor_ = diff_->patchOffset(anchor_); caret_ = diff_->patchOffset(caret_); after_ = true;
+        for (auto& range : columnRanges_) { range.begin = diff_->patchOffset(range.begin); range.end = diff_->patchOffset(range.end); }
     }
     updateGitLines();
     layoutDirty_ = true; caretTrailing_ = false; requestFind(false, false, false); scrollbars(); caretPosition(true); InvalidateRect(window_, nullptr, FALSE); if (changed) changed(); if (statusChanged) statusChanged();
 }
 void Viewer::undo(bool redo) {
+    stopSelection(); clearColumns();
     size_t anchor = 0, caret = 0;
     if (!editSelection(anchor, caret)) return;
     if (redo ? edit_->redo(anchor, caret) : edit_->undo(anchor, caret)) { anchor_ = anchor; caret_ = caret; edited(); }
 }
 void Viewer::selectAll() {
     if (!document_) return;
+    stopSelection(); clearColumns();
     anchor_ = 0; caret_ = document_->text.size();
     if (diff_ && edit_) { anchor_ = diff_->patchOffset(0); caret_ = diff_->patchOffset(edit_->document.text.size()); after_ = true; }
     caretPosition(); InvalidateRect(window_, nullptr, FALSE);
 }
-void Viewer::replace(std::string text) {
+void Viewer::replaceColumnSelection(std::string_view text, bool paste, ColumnErase erase) {
+    size_t anchor = 0, caret = 0;
+    if (!editSelection(anchor, caret)) return;
+    stopSelection();
+    auto ranges = columnRanges_;
+    if (diff_) for (auto& range : ranges) {
+        const auto begin = diff_->workingOffset(range.begin), end = diff_->workingOffset(range.end);
+        if (!begin || !end) return;
+        range.begin = *begin; range.end = *end;
+    }
+    if (!replaceColumns(*edit_, ranges, text, paste, erase)) { MessageBeep(MB_ICONWARNING); return; }
+    columnRanges_ = std::move(ranges); columnCaretAtEnd_ = true;
+    syncColumns(); edited();
+}
+void Viewer::replace(std::string text, bool paste) {
     size_t anchor = 0, caret = 0;
     if (!editSelection(anchor, caret)) return;
     std::string normalized; const auto newline = edit_->newline();
@@ -645,11 +737,13 @@ void Viewer::replace(std::string text) {
         if (text[p] == '\r' || text[p] == '\n') { if (text[p] == '\r' && p + 1 < text.size() && text[p + 1] == '\n') ++p; normalized += newline; }
         else normalized += text[p];
     }
+    if (!columnRanges_.empty()) { replaceColumnSelection(normalized, paste); return; }
     const size_t begin = std::min(anchor, caret), end = std::max(anchor, caret), length = normalized.size();
     if (edit_->replace(begin, end, std::move(normalized))) { anchor_ = caret_ = begin + length; edited(); }
     else MessageBeep(MB_ICONWARNING);
 }
 void Viewer::moveCaret(WPARAM key, bool shift, bool ctrl) {
+    stopSelection(); clearColumns();
     revealFind_ = false;
     size_t anchor = 0, caret = 0;
     if (!editSelection(anchor, caret)) return;
@@ -788,6 +882,7 @@ void Viewer::paint() {
                 const int firstColumn = wrapping() ? wrapped.column : left_;
                 int col = wrapping() ? wrapped.column : 0; size_t token = 0;
                 const size_t end = wrapping() ? wrapped.end : line.size();
+                const bool selectedSide = diff_ && edit_ && after_ ? (inlineView_ ? change.after.number != 0 : side != 0) : !splitDiff() || static_cast<bool>(side) == after_;
                 TextSearchCursor highlightCursor;
                 std::optional<TextMatch> highlight;
                 if (findBar_.visible()) highlight = search_.pattern().next(line, highlightCursor, line.size());
@@ -800,8 +895,13 @@ void Viewer::paint() {
                     const size_t offset = lineOffset + begin;
                     while (highlight && highlight->end <= begin) highlight = search_.pattern().next(line, highlightCursor, line.size());
                     const bool matched = highlight && begin >= highlight->begin && begin < highlight->end;
-                    const bool selectedSide = diff_ && edit_ && after_ ? (inlineView_ ? change.after.number != 0 : side != 0) : !splitDiff() || static_cast<bool>(side) == after_;
-                    const Color bg = selectedSide && offset >= selectionStart && offset < selectionEnd ? rgb(50, 70, 94) : matched ? rgb(92, 73, 34) : rowBackground;
+                    bool selected = offset >= selectionStart && offset < selectionEnd;
+                    if (!columnRanges_.empty()) {
+                        const auto next = std::upper_bound(columnRanges_.begin(), columnRanges_.end(), offset,
+                            [](size_t p, const ColumnRange& range) { return p < range.begin; });
+                        selected = next != columnRanges_.begin() && offset < std::prev(next)->end;
+                    }
+                    const Color bg = selectedSide && selected ? rgb(50, 70, 94) : matched ? rgb(92, 73, 34) : rowBackground;
                     if (c < 32) c = U' ';
                     for (int i = 0; i < width; ++i) {
                         const int x = col + i - firstColumn; if (x < 0 || x >= columns) continue;
@@ -812,6 +912,35 @@ void Viewer::paint() {
                     col += width;
                 }
                 RECT clip{textLeft, body, paneRight, r.bottom}; dc.cells(textLeft, y, cellWidth_, cellHeight_, cells, columns, clip);
+                if (selectedSide && !columnRanges_.empty()) {
+                    const size_t firstByte = lineOffset + (wrapping() ? wrapped.begin : 0), lastByte = lineOffset + end;
+                    auto range = std::lower_bound(columnRanges_.begin(), columnRanges_.end(), firstByte,
+                        [](const ColumnRange& range, size_t p) { return range.end < p; });
+                    const auto fill = [&](RECT bounds, Color color) { RECT clipped{}; if (IntersectRect(&clipped, &bounds, &clip)) dc.fill(clipped, color); };
+                    const auto rangePoint = [&](size_t offset, bool trailing) -> std::optional<POINT> {
+                        if (offset < firstByte || offset > lastByte) return {};
+                        if (wrapping() && ((offset == lastByte && !trailing && end < line.size()) ||
+                            (offset == firstByte && trailing && wrapped.begin))) return {};
+                        int column = wrapping() ? wrapped.column : 0;
+                        for (size_t p = wrapping() ? wrapped.begin : 0; p < offset - lineOffset;) {
+                            const auto c = decodeUtf8(line, p); column += c == '\t' ? 4 - column % 4 : std::max(1, cellWidth(c));
+                        }
+                        return POINT{textLeft + (column - firstColumn) * cellWidth_, y};
+                    };
+                    for (; range != columnRanges_.end() && range->begin <= lastByte; ++range) {
+                        const auto endPoint = rangePoint(range->end, range->trailing);
+                        if (range->virtualWidth && endPoint) {
+                            const int x = endPoint->x + range->padding * cellWidth_;
+                            fill({x, y, x + range->virtualWidth * cellWidth_, y + cellHeight_}, rgb(50, 70, 94));
+                        }
+                        if (edit_ && caretVisible_ && GetFocus() == window_ && ime_.text().text.empty()) {
+                            if (auto point = rangePoint(columnCaretAtEnd_ ? range->end : range->begin, columnCaretAtEnd_ && range->trailing)) {
+                                point->x += (range->padding + (columnCaretAtEnd_ ? range->virtualWidth : 0)) * cellWidth_;
+                                fill({point->x, y, point->x + 2, y + cellHeight_}, foreground);
+                            }
+                        }
+                    }
+                }
             }
         }
         if (splitDiff()) dc.fill({middle, body, middle + 1, r.bottom}, border);
@@ -838,7 +967,7 @@ void Viewer::paint() {
                 dc.fill({0, bottom - 1, r.right, bottom}, border);
             }
         }
-        if (edit_ && caretVisible_ && GetFocus() == window_ && ime_.text().text.empty()) {
+        if (edit_ && columnRanges_.empty() && caretVisible_ && GetFocus() == window_ && ime_.text().text.empty()) {
             const auto point = caretPoint();
             const RECT caret{point.x, point.y, point.x + 2, point.y + cellHeight_};
             const RECT bodyRect{textGutter() + (splitDiff() ? middle + 1 : 0), body + (stickyFile() ? cellHeight_ : 0), r.right, r.bottom};
@@ -864,7 +993,7 @@ LRESULT Viewer::handle(UINT m, WPARAM a, LPARAM b) {
     switch (m) {
     case WM_PAINT: paint(); return 0;
     case WM_ERASEBKGND: return 1;
-    case WM_SIZE: scrollbars(); findLayout(); htmlLayout(); caretPosition(); InvalidateRect(window_, nullptr, FALSE); return 0;
+    case WM_SIZE: stopSelection(); clearColumns(); scrollbars(); findLayout(); htmlLayout(); caretPosition(); InvalidateRect(window_, nullptr, FALSE); return 0;
     case WM_MOVE: htmlLayout(); return 0;
     case WM_SETTINGCHANGE: caretPosition(); return 0;
     case WM_SETFOCUS: caretPosition(); if (focused) focused(); if (html_.active()) html_.focus(); return 0;
@@ -894,12 +1023,15 @@ LRESULT Viewer::handle(UINT m, WPARAM a, LPARAM b) {
         if (image_ && LOWORD(b) == HTCLIENT) { SetCursor(LoadCursorW(nullptr, IDC_ARROW)); return TRUE; }
         return DefWindowProcW(window_, m, a, b);
     case WM_GETDLGCODE: return DLGC_WANTARROWS | DLGC_WANTCHARS;
+    case WM_MBUTTONDOWN: case WM_MBUTTONDBLCLK:
     case WM_LBUTTONDOWN: case WM_LBUTTONDBLCLK: {
         SetFocus(window_);
         const POINT point{GET_X_LPARAM(b), GET_Y_LPARAM(b)};
         if (!document_) return 0;
-        if (html_.active()) return 0;
+        if (html_.active() || csv_.active()) return 0;
         if (point.y < contentTop() + (stickyFile() ? cellHeight_ : 0)) return 0;
+        if (point.x >= contentRect().right || point.y >= contentRect().bottom || !rowCount()) return 0;
+        stopSelection(); clearColumns(); ime_.cancel(window_);
         revealFind_ = false;
         bool after = splitDiff() && point.x >= contentRect().right / 2;
         if (diff_ && inlineView_ && rowCount()) {
@@ -908,6 +1040,12 @@ LRESULT Viewer::handle(UINT m, WPARAM a, LPARAM b) {
         }
         const bool extend = (GetKeyState(VK_SHIFT) & 0x8000) && (!splitDiff() || after == after_);
         after_ = after;
+        if (m == WM_MBUTTONDOWN || m == WM_MBUTTONDBLCLK) {
+            const int origin = textGutter() + (splitDiff() && after_ ? contentRect().right / 2 + 1 : 0);
+            columnStart_ = std::clamp((static_cast<int>(point.x) - origin + cellWidth_ / 2) / cellWidth_ + left_, 0, static_cast<int>(maxLineColumns));
+            columnStartRow_ = std::min(rowCount() - 1, static_cast<size_t>((point.y - contentTop()) / cellHeight_ + top_));
+            columnDragging_ = true;
+        }
         if (m == WM_LBUTTONDBLCLK) {
             stopSelection();
             WordRange word{anchor_, caret_};
@@ -915,12 +1053,19 @@ LRESULT Viewer::handle(UINT m, WPARAM a, LPARAM b) {
             anchor_ = word.begin; caret_ = word.end; caretTrailing_ = false;
             caretPosition(); InvalidateRect(window_, nullptr, FALSE); return 0;
         }
-        if (!extend) anchor_ = position(GET_X_LPARAM(b), GET_Y_LPARAM(b));
+        if (!extend && !columnDragging_) anchor_ = position(point.x, point.y);
         selecting_ = true; SetCapture(window_); SetTimer(window_, selectionTimer, 50, nullptr);
         extendSelection(point.x, point.y); return 0;
     }
-    case WM_MOUSEMOVE: if (selecting_) extendSelection(GET_X_LPARAM(b), GET_Y_LPARAM(b)); return 0;
-    case WM_LBUTTONUP: if (selecting_) { extendSelection(GET_X_LPARAM(b), GET_Y_LPARAM(b)); stopSelection(); } return 0;
+    case WM_MOUSEMOVE:
+        if (selecting_) {
+            if (!(a & (columnDragging_ ? MK_MBUTTON : MK_LBUTTON))) stopSelection();
+            else extendSelection(GET_X_LPARAM(b), GET_Y_LPARAM(b));
+        }
+        return 0;
+    case WM_MBUTTONUP: case WM_LBUTTONUP:
+        if (selecting_ && columnDragging_ == (m == WM_MBUTTONUP)) { extendSelection(GET_X_LPARAM(b), GET_Y_LPARAM(b)); stopSelection(); }
+        return 0;
     case WM_CANCELMODE: case WM_CAPTURECHANGED: stopSelection(); return 0;
     case WM_MOUSEWHEEL: scroll(-GET_WHEEL_DELTA_WPARAM(a) / WHEEL_DELTA * 3, 0); return 0;
     case WM_VSCROLL: case WM_HSCROLL: {
@@ -941,21 +1086,28 @@ LRESULT Viewer::handle(UINT m, WPARAM a, LPARAM b) {
         if (edit_ && !(GetKeyState(VK_CONTROL) & 0x8000) && (GetKeyState(VK_SHIFT) & 0x8000) &&
             (GetKeyState(VK_MENU) & 0x8000) && (a == VK_UP || a == VK_DOWN)) {
             revealFind_ = false;
+            stopSelection(); clearColumns();
             size_t anchor = 0, caret = 0;
             if (editSelection(anchor, caret) && edit_->moveLines(anchor, caret, a == VK_DOWN)) { anchor_ = anchor; caret_ = caret; edited(); }
             return 0;
         }
         if (m == WM_SYSKEYDOWN) break;
-        if (a == VK_ESCAPE && selecting_) { stopSelection(); return 0; }
+        if (a == VK_ESCAPE && (selecting_ || !columnRanges_.empty())) {
+            stopSelection(); clearColumns(); caretPosition(); InvalidateRect(window_, nullptr, FALSE); return 0;
+        }
         if (findKey(MSG{window_, m, a, b, 0, {0, 0}})) return 0;
         revealFind_ = false;
         if (edit_) {
             const bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0, shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
             if (ctrl && a == 'S') { if (save) save(); return 0; }
             if (ctrl && a == 'X') { cut(); return 0; }
-            if ((ctrl && a == 'V') || (shift && a == VK_INSERT)) { replace(utf8(clipboardText(window_))); return 0; }
+            if ((ctrl && a == 'V') || (shift && a == VK_INSERT)) { replace(utf8(clipboardText(window_)), true); return 0; }
             if (ctrl && (a == 'Z' || a == 'Y')) { undo(a == 'Y' || shift); return 0; }
             if (a == VK_DELETE || a == VK_BACK) {
+                if (!columnRanges_.empty()) {
+                    replaceColumnSelection("", false, a == VK_DELETE ? ColumnErase::Forward : ctrl ? ColumnErase::WordBackward : ColumnErase::Backward);
+                    return 0;
+                }
                 size_t anchor = 0, caret = 0;
                 if (!editSelection(anchor, caret)) return 0;
                 if (anchor == caret) {
@@ -993,7 +1145,7 @@ LRESULT Viewer::handle(UINT m, WPARAM a, LPARAM b) {
     case WM_CONTEXTMENU: {
         if (image_ || html_.active()) return 0;
         revealFind_ = false;
-        HMENU menu = CreatePopupMenu(); AppendMenuW(menu, MF_STRING | (anchor_ == caret_ ? MF_GRAYED : 0), 1, L"Copy\tCtrl+C"); AppendMenuW(menu, MF_STRING, 2, L"Select all\tCtrl+A");
+        HMENU menu = CreatePopupMenu(); AppendMenuW(menu, MF_STRING | (hasSelection() ? 0 : MF_GRAYED), 1, L"Copy\tCtrl+C"); AppendMenuW(menu, MF_STRING, 2, L"Select all\tCtrl+A");
         if (edit_) {
             size_t anchor = 0, caret = 0;
             const auto flags = MF_STRING | (editSelection(anchor, caret) ? 0 : MF_GRAYED);
@@ -1002,7 +1154,7 @@ LRESULT Viewer::handle(UINT m, WPARAM a, LPARAM b) {
         POINT p{GET_X_LPARAM(b), GET_Y_LPARAM(b)}; if (p.x == -1) { p = {gutter_, header_}; ClientToScreen(window_, &p); }
         const UINT command = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, p.x, p.y, 0, window_, nullptr); DestroyMenu(menu);
         if (command == 1) copy(); else if (command == 2) selectAll();
-        else if (edit_) { if (command == 3) cut(); else if (command == 4) replace(utf8(clipboardText(window_))); else if (command == 5 || command == 6) undo(command == 6); else if (command == 7 && save) save(); }
+        else if (edit_) { if (command == 3) cut(); else if (command == 4) replace(utf8(clipboardText(window_)), true); else if (command == 5 || command == 6) undo(command == 6); else if (command == 7 && save) save(); }
         return 0;
     }
     default: return DefWindowProcW(window_, m, a, b);
@@ -1014,6 +1166,7 @@ LRESULT Viewer::handle(UINT m, WPARAM a, LPARAM b) {
 size_t poppy::Viewer::documentBytes() const {
     size_t bytes = textLayout_.bytes() + diffLayout_.bytes() + (document_ ? document_->text.capacity() + document_->lines.capacity() * sizeof(uint32_t) + document_->states.capacity() * sizeof(LexState) : 0);
     bytes += csv_.bytes();
+    bytes += columnRanges_.capacity() * sizeof(ColumnRange);
     bytes += gitChangedLines_.capacity() / 8;
     bytes += gitChangeRanges_.capacity() * sizeof(LineChange);
     bytes += diffChangeRanges_.capacity() * sizeof(DiffChange);

@@ -4,6 +4,7 @@
 #include "diff_layout.h"
 #include "session.h"
 #include "edit_buffer.h"
+#include "column_selection.h"
 #include "find_bar.h"
 #include "text_search.h"
 #include "text_layout.h"
@@ -66,6 +67,11 @@ private:
     void scrollbars(bool followTail = false);
     void scroll(int vertical, int horizontal);
     void extendSelection(int x, int y);
+    void extendColumns(int x, int y);
+    void clearColumns();
+    void syncColumns();
+    bool hasSelection() const;
+    void replaceColumnSelection(std::string_view text, bool paste = false, ColumnErase erase = ColumnErase::None);
     void scrollSelection();
     void stopSelection();
     void stopLoading();
@@ -73,7 +79,7 @@ private:
     size_t position(int x, int y, bool* trailing = nullptr, WordRange* word = nullptr) const;
     void copy();
     void cut();
-    void replace(std::string text);
+    void replace(std::string text, bool paste = false);
     void edited();
     void updateGitLines();
     bool editSelection(size_t& anchor, size_t& caret) const;
@@ -87,6 +93,7 @@ private:
     void revealMatch();
     void revealRange(TextMatch match);
     POINT caretPoint() const;
+    POINT caretPoint(size_t offset, bool trailing) const;
     RECT inputRect() const;
     void htmlLayout();
     int visibleRows() const;
@@ -113,6 +120,10 @@ private:
     EditorScrollRange scrollRange_;
     size_t anchor_ = 0, caret_ = 0;
     bool selecting_ = false, after_ = false, inlineView_ = true;
+    bool columnDragging_ = false, columnCaretAtEnd_ = true;
+    size_t columnStartRow_ = 0, columnActive_ = 0;
+    int columnStart_ = 0;
+    std::vector<ColumnRange> columnRanges_;
     POINT selectionPoint_{};
     bool wordWrap_ = true, layoutDirty_ = true, caretTrailing_ = false;
     bool textOnly_ = false;
