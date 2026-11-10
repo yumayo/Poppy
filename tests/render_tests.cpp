@@ -1210,6 +1210,22 @@ void editableDiff() {
         int saves = 0; viewer.save = [&] { ++saves; }; key('S', true); check(saves == 1, "Ctrl+S in a diff did not request a save"); viewer.save = {};
         viewer.showDiff(std::make_shared<DiffDocument>(diff), L"file.cpp"); SendMessageW(viewer.window(), WM_CHAR, '!', 0);
         check(!viewer.buffer() && buffer->document.text == "head\r\nq\r\ntail", "Read-only comparisons retained an editable buffer");
+
+        const std::string indented = u8"    head\r\n\t日本😀\r\n  tail";
+        buffer->document.text = indented; indexDocument(buffer->document); buffer->initialize(indented);
+        viewer.editDiff(buffer, before, L"file.cpp"); select(indented.size(), 0);
+        key(VK_TAB, false, true);
+        check(buffer->document.text == u8"head\r\n日本😀\r\ntail", "Shift+Tab in a diff used patch offsets");
+        const auto outdented = workingDiff(*before, buffer->document);
+        check(viewer.state().anchor == outdented.patchOffset(buffer->document.text.size()) && viewer.state().caret == outdented.patchOffset(0),
+            "Diff outdent lost the selection direction");
+        key('Z', true); check(buffer->document.text == indented && !buffer->dirty(), "Diff outdent did not undo as one edit");
+        const auto restored = workingDiff(*before, buffer->document);
+        for (const auto& row : restored.rows) if (row.before.number) {
+            viewer.restore({0, 0, restored.offset(row.before), restored.offset(row.before), false}); break;
+        }
+        key(VK_TAB, false, true);
+        check(buffer->document.text == indented, "Shift+Tab edited the Before side of a diff");
     }
     auto buffer = std::make_shared<EditBuffer>(); buffer->document.text = std::string(1000, 'x'); indexDocument(buffer->document); buffer->initialize(buffer->document.text);
     viewer.setWordWrap(true); viewer.setDpi(96); viewer.setDiffLayout(false); viewer.editDiff(buffer, before, L"file.cpp");
@@ -1974,8 +1990,8 @@ void editorColumnSelection() {
         KeyboardState() { GetKeyboardState(original); }
         ~KeyboardState() { SetKeyboardState(original); }
     } keyboard;
-    const auto key = [&](WPARAM code, bool ctrl = false) {
-        BYTE keys[256]{}; keys[VK_CONTROL] = ctrl ? 0x80 : 0;
+    const auto key = [&](WPARAM code, bool ctrl = false, bool shift = false) {
+        BYTE keys[256]{}; keys[VK_CONTROL] = ctrl ? 0x80 : 0; keys[VK_SHIFT] = shift ? 0x80 : 0;
         check(SetKeyboardState(keys) != FALSE, "Could not set column selection modifiers");
         SendMessageW(window, WM_KEYDOWN, code, 0);
     };
@@ -2034,6 +2050,17 @@ void editorColumnSelection() {
             SendMessageW(window, WM_LBUTTONUP, 0, point(3, 0)); input(L'Z');
             check(buffer->document.text == "aZd\r\n12\r\n\r\nwxyz", "A normal left drag retained column selection");
         }
+        const std::string indented = "        a\r\n        b\r\n        c";
+        buffer->document.text = indented; indexDocument(buffer->document); buffer->initialize(indented);
+        viewer.edit(buffer, L"indented.txt"); SetFocus(window);
+        if (reverse) drag(9, 2, 8, 0); else drag(8, 0, 9, 2);
+        key(VK_TAB, false, true);
+        check(buffer->document.text == "    a\r\n    b\r\n    c", "Shift+Tab did not outdent each column-selected line");
+        key('C', true); check(clipboardText(window) == L"a\r\nb\r\nc", "Outdenting lost the column selection");
+        key(VK_TAB, false, true);
+        check(buffer->document.text == "a\r\nb\r\nc", "Repeated Shift+Tab lost selected lines");
+        key('Z', true); check(buffer->document.text == "    a\r\n    b\r\n    c", "Column outdent did not undo as one edit");
+        key('Z', true); check(buffer->document.text == indented && !buffer->dirty(), "Undo did not restore the column indents");
     }
     viewer.setDpi(96); viewer.setWordWrap(true); metrics.setDpi(96);
     cell = metrics.cellWidth(); height = metrics.textHeight() + 3; gutter = 70;
@@ -2042,6 +2069,9 @@ void editorColumnSelection() {
     viewer.edit(buffer, L"wrapped.txt"); drag(1, 0, 3, 2); input(L'Z');
     check(std::count(buffer->document.text.begin(), buffer->document.text.end(), 'Z') == 3 && buffer->document.lines.size() == 1,
         "Column selection did not follow wrapped display rows");
+    buffer->document.text = "        " + std::string(columns * 3, 'x'); indexDocument(buffer->document); buffer->initialize(buffer->document.text);
+    viewer.edit(buffer, L"wrapped.txt"); drag(1, 0, 3, 2); key(VK_TAB, false, true);
+    check(buffer->document.text == "    " + std::string(columns * 3, 'x'), "Shift+Tab outdented a wrapped logical line more than once");
     auto before = std::make_shared<Document>(); before->text = "abcd\r\n12\r\n\r\nold!"; indexDocument(*before);
     for (const bool inlineView : {false, true}) {
         load(); viewer.setDiffLayout(inlineView); viewer.editDiff(buffer, before, L"columns.txt");
@@ -2051,6 +2081,14 @@ void editorColumnSelection() {
         input(L'Q'); check(buffer->document.text == "aQd\r\n1Q\r\n Q\r\nwQz", "Diff column edits used patch offsets");
         key('Z', true); check(buffer->document.text == original, "Diff column Undo changed unrelated text");
         input(L'Z'); check(std::count(buffer->document.text.begin(), buffer->document.text.end(), 'Z') == 1, "Undo left stale diff column cursors");
+        auto indentedBefore = std::make_shared<Document>(); indentedBefore->text = "    a\r\n    old"; indexDocument(*indentedBefore);
+        const std::string indented = "    a\r\n    b";
+        buffer->document.text = indented; indexDocument(buffer->document); buffer->initialize(indented);
+        viewer.editDiff(buffer, indentedBefore, L"indented.txt"); drag(4, 0, 5, inlineView ? 2 : 1);
+        key(VK_TAB, false, true);
+        check(buffer->document.text == "a\r\nb", "Diff column outdent changed patch metadata or skipped working lines");
+        key('C', true); check(clipboardText(window) == L"a\r\nb", "Diff column outdent lost its mapped selections");
+        key('Z', true); check(buffer->document.text == indented && !buffer->dirty(), "Diff column outdent did not undo together");
         gutter = 70;
     }
     viewer.setWordWrap(false); gutter = 70;
@@ -2250,6 +2288,25 @@ void editorLineShortcuts() {
         check(copyText(window, L"unchanged"), "Could not prepare the read-only clipboard test");
         key(WM_KEYDOWN, 'X', true, false, false); key(WM_SYSKEYDOWN, VK_DOWN, false, true, true);
         check(!viewer.buffer() && buffer->document.text == "only" && clipboardText(window) == L"unchanged", "Line shortcuts edited a read-only document");
+
+        load("    one", 6, 6); key(WM_KEYDOWN, VK_TAB, false, true, false);
+        check(buffer->document.text == "one", "Shift+Tab inserted a tab instead of outdenting"); selection(2, 2);
+        key(WM_KEYDOWN, VK_TAB, false, false, false);
+        check(buffer->document.text == "on\te", "Plain Tab no longer inserts a tab"); selection(3, 3);
+        const std::string indented = "    a\r\n\tb\r\n  c";
+        load(indented, 11, 0); key(WM_KEYDOWN, VK_TAB, false, true, false);
+        check(buffer->document.text == "a\r\nb\r\n  c", "Shift+Tab included the line at the exclusive selection end"); selection(6, 0);
+        const auto revision = buffer->revision;
+        key(WM_KEYDOWN, VK_TAB, false, true, false);
+        check(buffer->revision == revision, "An outdent without indentation created an edit"); selection(6, 0);
+        key(WM_KEYDOWN, 'Z', true, false, false);
+        check(buffer->document.text == indented && !buffer->dirty(), "Selected-line outdent did not undo in one operation");
+        key(WM_KEYDOWN, 'Y', true, false, false);
+        check(buffer->document.text == "a\r\nb\r\n  c", "Redo did not restore the outdented lines");
+        load("    readonly", 4, 4);
+        viewer.show(std::make_shared<Document>(buffer->document), L"readonly.txt");
+        key(WM_KEYDOWN, VK_TAB, false, true, false);
+        check(buffer->document.text == "    readonly" && !buffer->dirty(), "Shift+Tab edited a read-only document");
     }
     viewer.setWordWrap(true);
     load(std::string(2000, 'x') + "\nlast", 1000, 1000);

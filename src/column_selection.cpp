@@ -95,4 +95,55 @@ bool replaceColumns(EditBuffer& buffer, std::vector<ColumnRange>& ranges, std::s
     ranges = std::move(cursors);
     return true;
 }
+bool outdentLines(EditBuffer& buffer, std::vector<ColumnRange>& ranges) {
+    const auto& document = buffer.document;
+    if (ranges.empty() || document.lines.empty()) return false;
+    const auto boundary = [&](size_t p) { return p == document.text.size() || (static_cast<unsigned char>(document.text[p]) & 0xc0) != 0x80; };
+    size_t previousEnd = 0;
+    for (const auto& range : ranges) {
+        if (range.begin > range.end || range.end > document.text.size() || range.begin < previousEnd ||
+            !boundary(range.begin) || !boundary(range.end)) return false;
+        previousEnd = range.end;
+    }
+    struct Removal { size_t begin, length, before; };
+    std::vector<Removal> removals;
+    size_t removed = 0, nextRow = 0;
+    const auto rowAt = [&](size_t p) { return static_cast<size_t>(std::upper_bound(document.lines.begin(), document.lines.end(), p) - document.lines.begin() - 1); };
+    for (const auto& range : ranges) {
+        size_t last = rowAt(range.end);
+        // The next line at an exclusive selection end is not selected.
+        if (range.begin != range.end && range.end == document.lines[last]) --last;
+        for (size_t row = std::max(nextRow, rowAt(range.begin)); row <= last; ++row) {
+            const auto line = document.line(row);
+            size_t length = 0;
+            int columns = 0;
+            while (length < line.size() && columns < 4) {
+                if (line[length] == ' ') ++columns;
+                else if (line[length] == '\t') columns = 4;
+                else break;
+                ++length;
+            }
+            if (length) { removals.push_back({document.lines[row], length, removed}); removed += length; }
+        }
+        nextRow = std::max(nextRow, last + 1);
+    }
+    if (removals.empty()) return true;
+    const size_t begin = removals.front().begin, end = removals.back().begin + removals.back().length;
+    std::string replacement; replacement.reserve(end - begin - removed);
+    size_t offset = begin;
+    for (const auto& removal : removals) {
+        replacement.append(document.text, offset, removal.begin - offset);
+        offset = removal.begin + removal.length;
+    }
+    if (!buffer.replace(begin, end, std::move(replacement))) return false;
+    const auto remap = [&](size_t p) {
+        const auto next = std::upper_bound(removals.begin(), removals.end(), p,
+            [](size_t value, const Removal& removal) { return value < removal.begin; });
+        if (next == removals.begin()) return p;
+        const auto& removal = *std::prev(next);
+        return p - removal.before - std::min(p - removal.begin, removal.length);
+    };
+    for (auto& range : ranges) { range.begin = remap(range.begin); range.end = remap(range.end); }
+    return true;
+}
 }

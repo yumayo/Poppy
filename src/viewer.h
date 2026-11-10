@@ -80,6 +80,7 @@ private:
     void copy();
     void cut();
     void replace(std::string text, bool paste = false);
+    void outdent();
     void edited();
     void updateGitLines();
     bool editSelection(size_t& anchor, size_t& caret) const;

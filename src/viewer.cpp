@@ -742,6 +742,28 @@ void Viewer::replace(std::string text, bool paste) {
     if (edit_->replace(begin, end, std::move(normalized))) { anchor_ = caret_ = begin + length; edited(); }
     else MessageBeep(MB_ICONWARNING);
 }
+void Viewer::outdent() {
+    size_t anchor = 0, caret = 0;
+    if (!editSelection(anchor, caret)) return;
+    stopSelection();
+    auto ranges = columnRanges_;
+    if (ranges.empty()) ranges.push_back({std::min(anchor, caret), std::max(anchor, caret)});
+    else if (diff_) for (auto& range : ranges) {
+        const auto begin = diff_->workingOffset(range.begin), end = diff_->workingOffset(range.end);
+        if (!begin || !end) return;
+        range.begin = *begin; range.end = *end;
+    }
+    const auto revision = edit_->revision;
+    if (!outdentLines(*edit_, ranges)) { MessageBeep(MB_ICONWARNING); return; }
+    if (edit_->revision == revision) return;
+    if (columnRanges_.empty()) {
+        anchor_ = anchor <= caret ? ranges.front().begin : ranges.front().end;
+        caret_ = anchor <= caret ? ranges.front().end : ranges.front().begin;
+    } else {
+        columnRanges_ = std::move(ranges); syncColumns();
+    }
+    edited();
+}
 void Viewer::moveCaret(WPARAM key, bool shift, bool ctrl) {
     stopSelection(); clearColumns();
     revealFind_ = false;
@@ -1116,7 +1138,7 @@ LRESULT Viewer::handle(UINT m, WPARAM a, LPARAM b) {
                 }
                 replace(""); return 0;
             }
-            if (a == VK_TAB) { replace("\t"); return 0; }
+            if (a == VK_TAB) { if (shift) outdent(); else replace("\t"); return 0; }
             if (a == VK_LEFT || a == VK_RIGHT || a == VK_UP || a == VK_DOWN || a == VK_HOME || a == VK_END || a == VK_PRIOR || a == VK_NEXT) { moveCaret(a, shift, ctrl); return 0; }
         }
         if ((GetKeyState(VK_CONTROL) & 0x8000) && a == 'C') { copy(); return 0; }

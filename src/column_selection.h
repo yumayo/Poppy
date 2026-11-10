@@ -18,4 +18,7 @@ enum class ColumnErase { None, Backward, Forward, WordBackward };
 // of lines is distributed across rows; ordinary typing is repeated per cursor.
 bool replaceColumns(EditBuffer& buffer, std::vector<ColumnRange>& ranges, std::string_view text,
     bool distribute = false, ColumnErase erase = ColumnErase::None);
+// Remove one four-column indent from each logical line touched by sorted
+// selections, once per line and as one Undo operation. Remap their offsets.
+bool outdentLines(EditBuffer& buffer, std::vector<ColumnRange>& ranges);
 }

@@ -246,6 +246,88 @@ void lineMovement() {
         check(buffer.undo(anchor, caret) && buffer.encoded() == bytes && buffer.document.text == original);
     }
 }
+void lineOutdenting() {
+    struct Case { std::string before; size_t begin, end; std::string after; size_t mappedBegin, mappedEnd; };
+    const std::vector<Case> cases{
+        {"\t\tfoo", 3, 3, "\tfoo", 2, 2},
+        {"        foo", 10, 10, "    foo", 6, 6},
+        {"  foo", 1, 1, "foo", 0, 0},
+        {"  foo", 0, 0, "foo", 0, 0},
+        {"   \t foo", 5, 5, " foo", 1, 1},
+        {"    \tfoo", 6, 6, "\tfoo", 2, 2},
+        {"   ", 3, 3, "", 0, 0},
+        {"a\n  ", 4, 4, "a\n", 2, 2},
+        {"x\r\n\tbar", 5, 5, "x\r\nbar", 4, 4},
+        {"x\n    bar\n\ty", 9, 9, "x\nbar\n\ty", 5, 5},
+        {"    a\n\tb\n  c", 0, 12, "a\nb\nc", 0, 5},
+        {"    a\n\tb\n  c", 1, 10, "a\nb\nc", 0, 4},
+        {"    a\n\tb\n  c", 0, 9, "a\nb\n  c", 0, 4},
+        {"    a\r\n\tb\r\n  c", 0, 11, "a\r\nb\r\n  c", 0, 6},
+        {"    a\r\n\tb\n  c", 4, 13, "a\r\nb\nc", 0, 6},
+        {"    a\n\tb\n    c", 6, 8, "    a\nb\n    c", 6, 7},
+        {"\n  \n\t\n", 0, 6, "\n\n\n", 0, 3},
+        {u8"\t日本😀\r\n    最後", 4, 23, u8"日本😀\r\n最後", 3, 18},
+        {"    " + std::string(2000, 'x'), 1004, 1004, std::string(2000, 'x'), 1000, 1000}
+    };
+    for (const auto& test : cases) {
+        auto buffer = load(test.before);
+        std::vector<ColumnRange> ranges{{test.begin, test.end}};
+        check(outdentLines(buffer, ranges));
+        if (buffer.document.text != test.after || ranges[0].begin != test.mappedBegin || ranges[0].end != test.mappedEnd) {
+            std::cerr << "Outdent failed at " << test.begin << ',' << test.end << ": got " << ranges[0].begin << ',' << ranges[0].end << '\n';
+            check(false);
+        }
+        check(buffer.document.lines == load(test.after).document.lines && buffer.revision == 1);
+        size_t anchor = 0, caret = 0;
+        check(buffer.undo(anchor, caret) && buffer.encoded() == test.before && !buffer.dirty());
+        check(!buffer.undo(anchor, caret));
+        check(buffer.redo(anchor, caret) && buffer.document.text == test.after);
+    }
+    for (const auto& text : {"", "only", "a\n\r\nb\n", "x \t", u8"　text"}) {
+        auto buffer = load(text);
+        std::vector<ColumnRange> ranges{{0, buffer.document.text.size()}};
+        check(outdentLines(buffer, ranges) && !buffer.dirty() && buffer.revision == 0);
+        check(ranges[0].begin == 0 && ranges[0].end == buffer.document.text.size());
+        size_t anchor = 0, caret = 0; check(!buffer.undo(anchor, caret));
+    }
+    auto buffer = load("    a\n    b\n    c");
+    std::vector<ColumnRange> ranges{{4, 5}, {16, 17, 2, 3, true}};
+    check(outdentLines(buffer, ranges) && buffer.document.text == "a\n    b\nc");
+    check(ranges[0].begin == 0 && ranges[0].end == 1 && ranges[1].begin == 8 && ranges[1].end == 9);
+    check(ranges[1].padding == 2 && ranges[1].virtualWidth == 3 && ranges[1].trailing);
+
+    // Multiple wrapped selections on one logical line must remove its indent once.
+    buffer = load("        abcdef\n\tlast"); ranges = {{8, 9}, {10, 11}, {16, 20}};
+    check(outdentLines(buffer, ranges) && buffer.document.text == "    abcdef\nlast");
+    check(ranges[0].begin == 4 && ranges[0].end == 5 && ranges[1].begin == 6 && ranges[1].end == 7);
+    check(ranges[2].begin == 11 && ranges[2].end == 15);
+    check(outdentLines(buffer, ranges) && buffer.document.text == "abcdef\nlast");
+    size_t anchor = 0, caret = 0;
+    check(buffer.undo(anchor, caret) && buffer.document.text == "    abcdef\nlast");
+    check(buffer.undo(anchor, caret) && !buffer.dirty());
+    // A no-op must retain redo history.
+    buffer = load("    a\nplain"); ranges = {{0, 0}};
+    check(outdentLines(buffer, ranges) && buffer.undo(anchor, caret));
+    const auto revision = buffer.revision; ranges = {{7, 7}};
+    check(outdentLines(buffer, ranges) && buffer.revision == revision && !buffer.dirty());
+    check(buffer.redo(anchor, caret) && buffer.document.text == "a\nplain");
+
+    buffer = load("    a\n  b\n\tc"); ranges = columns(buffer.document, 2, 2);
+    check(outdentLines(buffer, ranges) && buffer.document.text == "a\nb\nc");
+    check(ranges.size() == 3 && ranges[0].begin == ranges[0].end && ranges[1].begin == 2 && ranges[2].begin == 4);
+    buffer = load(u8"    日\n\tlast");
+    for (auto invalid : {std::vector<ColumnRange>{}, std::vector<ColumnRange>{{5, 5}},
+        std::vector<ColumnRange>{{0, 100}}, std::vector<ColumnRange>{{4, 3}}, std::vector<ColumnRange>{{8, 8}, {0, 0}}}) {
+        check(!outdentLines(buffer, invalid) && !buffer.dirty() && buffer.revision == 0);
+    }
+    for (const auto& encoding : {"UTF-8", "UTF-16 LE", "UTF-16 BE"}) {
+        auto source = load(u8"    日本😀\r\n\t最後"); source.document.encoding = encoding; source.bom = true;
+        const auto bytes = source.encoded(); buffer = load(bytes); ranges = {{0, buffer.document.text.size()}};
+        check(outdentLines(buffer, ranges) && buffer.document.text == u8"日本😀\r\n最後");
+        check(load(buffer.encoded()).document.text == buffer.document.text && buffer.document.encoding == encoding);
+        check(buffer.undo(anchor, caret) && buffer.encoded() == bytes && !buffer.dirty());
+    }
+}
 void wordMovement() {
     auto buffer = load("foo_bar42  += bar.baz\r\n\r\n  end \t");
     const std::vector<size_t> stops{0, 11, 14, 17, 18, 27, 32};
@@ -442,6 +524,7 @@ int main() {
     mixedUtf8Files();
     lineCutting();
     lineMovement();
+    lineOutdenting();
     selectionScrolling();
     scrollPastLastLine();
     wordMovement();
