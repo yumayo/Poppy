@@ -3613,7 +3613,7 @@ void multiProjectTests(const fs::path& executable) {
     const auto select = [&](size_t index) {
         const UINT dpi=GetDpiForWindow(app.host);const auto left=bounds(app.host,app.window).left;
         click(app.host,MulDiv(60,dpi,96),MulDiv(44+static_cast<int>(index)*projectRowHeight+24,dpi,96));app.tree();
-        if(bounds(app.host,app.window).left!=left)click(app.host,MulDiv(16,dpi,96),MulDiv(22,dpi,96));
+        check(bounds(app.host,app.window).left==left,"Selecting a project changed the PROJECTS width");
         checkStatusBar();
     };
     open(b.root); const auto surfaceB = app.window; const auto treeB = app.tree();
@@ -3652,19 +3652,27 @@ void multiProjectTests(const fs::path& executable) {
     send(app.host,WM_LBUTTONDOWN,MK_LBUTTON,MAKELPARAM(px(60),px(68)));
     check(bounds(app.host,surfaceA).left==expandedProjectLeft,"Pressing the active project toggled PROJECTS before release");
     send(app.host,WM_LBUTTONUP,0,MAKELPARAM(px(60),px(68)));
-    check(bounds(app.host,surfaceA).left==px(64)+px(5),"Clicking the active project did not collapse PROJECTS");
+    check(bounds(app.host,surfaceA).left==expandedProjectLeft,"Clicking the active project collapsed PROJECTS");
+    click(app.host,px(16),px(22));
+    check(bounds(app.host,surfaceA).left==px(64)+px(5),"Clicking the heading arrow did not collapse PROJECTS");
     click(app.host,px(30),px(44+64+18));app.tree();checkStatusBar();
     check(app.window==surfaceB&&bounds(app.host,surfaceB).left==px(64)+px(5),"Clicking another compact project did not select it while keeping PROJECTS collapsed");
     click(app.host,px(30),px(44+64+18));
-    check(bounds(app.host,surfaceB).left==expandedProjectLeft,"Clicking the selected compact project did not expand PROJECTS");
+    check(bounds(app.host,surfaceB).left==px(64)+px(5),"Clicking the selected compact project expanded PROJECTS");
+    click(app.host,px(16),px(22));
+    check(bounds(app.host,surfaceB).left==expandedProjectLeft,"Clicking the heading arrow did not restore the expanded PROJECTS width");
     click(app.host,px(60),px(44+projectRowHeight+24));
-    check(bounds(app.host,surfaceB).left==px(64)+px(5),"Clicking the selected project did not collapse PROJECTS");
+    check(bounds(app.host,surfaceB).left==expandedProjectLeft,"Clicking the selected project collapsed PROJECTS");
+    click(app.host,px(16),px(22));
+    check(bounds(app.host,surfaceB).left==px(64)+px(5),"Clicking the heading arrow did not collapse PROJECTS");
     click(app.host,px(30),px(88));app.tree();checkStatusBar();
     check(app.window==surfaceA&&nextItem(treeA,TreeRelation::Root)==rootA&&scrollInfo(viewerA).nPos==top&&
           IsWindow(shell)&&WaitForSingleObject(shellProcess,0)==WAIT_TIMEOUT,"Collapsing PROJECTS lost a document or running terminal");
     check(bounds(app.host,surfaceA).left==px(64)+px(5),"Clicking another compact project's AI status icon expanded PROJECTS");
     click(app.host,px(30),px(88));
-    check(bounds(app.host,surfaceA).left==expandedProjectLeft,"Clicking the active compact AI status icon did not expand PROJECTS");
+    check(bounds(app.host,surfaceA).left==px(64)+px(5),"Clicking the active compact AI status icon expanded PROJECTS");
+    click(app.host,px(16),px(22));
+    check(bounds(app.host,surfaceA).left==expandedProjectLeft,"Clicking the heading arrow did not expand PROJECTS");
     for(const POINT point:{POINT{px(5),px(49)},POINT{px(59),px(49)},POINT{px(5),px(103)},POINT{px(59),px(103)},POINT{px(30),px(88)}}){
         click(app.host,px(16),px(22));
         check(bounds(app.host,surfaceA).left==px(64)+px(5),"Could not collapse PROJECTS for card hit testing");
@@ -3673,7 +3681,9 @@ void multiProjectTests(const fs::path& executable) {
         click(app.host,point.x,point.y);app.tree();
         check(app.window==surfaceA&&bounds(app.host,surfaceA).left==px(64)+px(5),"Clicking an inactive compact project card did not select it while keeping PROJECTS collapsed");
         click(app.host,point.x,point.y);
-        check(bounds(app.host,surfaceA).left==expandedProjectLeft,"Clicking the active compact project card did not restore the expanded width");
+        check(bounds(app.host,surfaceA).left==px(64)+px(5),"Clicking the active compact project card expanded PROJECTS");
+        click(app.host,px(16),px(22));
+        check(bounds(app.host,surfaceA).left==expandedProjectLeft,"Clicking the heading arrow did not restore the expanded PROJECTS width");
     }
     LARGE_INTEGER frequency{}; QueryPerformanceFrequency(&frequency); double maximum = 0;
     for (int i = 0; i < 6; ++i) { LARGE_INTEGER start{}, end{}; QueryPerformanceCounter(&start); select(i % 2); QueryPerformanceCounter(&end); maximum = std::max(maximum, (end.QuadPart-start.QuadPart)*1000.0/frequency.QuadPart); }

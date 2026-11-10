@@ -76,7 +76,6 @@ struct ProjectDrag {
     POINT origin, point;
     bool active = false;
     std::optional<size_t> position;
-    bool toggleOnClick = false;
 };
 class Workspace {
 public:
@@ -657,8 +656,6 @@ void Workspace::endProjectDrag(bool drop) {
             }
         }
     }
-    if (drop && !drag.active && drag.toggleOnClick && active_ < projects_.size() &&
-        projects_[active_].id == drag.id && hit(drag.point) == active_) toggleProjectList();
     InvalidateRect(window_,nullptr,FALSE);
 }
 std::wstring Workspace::subtitle(size_t index) const {
@@ -796,9 +793,8 @@ case WM_LBUTTONDOWN:{
     else if(PtInRect(&addButton,point))choose();
     else if(const auto index=hit(point);index<projects_.size()){
         const auto icon=aiStatusBounds(row(index));const bool attention=!session_.projectListCollapsed&&PtInRect(&icon,point);
-        const bool toggleOnClick=index==active_&&!attention;
         select(index,attention);
-        projectDrag_=ProjectDrag{projects_[index].id,point,point,false,std::nullopt,toggleOnClick};SetCapture(window_);
+        projectDrag_=ProjectDrag{projects_[index].id,point,point,false,std::nullopt};SetCapture(window_);
     }
     return 0;
 }
