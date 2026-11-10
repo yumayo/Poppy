@@ -298,7 +298,18 @@ public:
         try { const auto response = call("listDirectory", path, {{"requireAccess", requireAccess ? "1" : "0"}}); result.truncated = field(response.metadata, "truncated") == "1"; for (const auto& item : response.entries) { const bool unsupported = field(item, "unsupported") == "1"; result.entries.push_back({unsupported ? ResourceId{} : path.at(field(item, "path")), field(item, "directory") == "1", field(item, "link") == "1", unsupported, wide(field(item, "name"))}); } } catch (const std::exception& error) { result.error = wide(error.what()); }
         return result;
     }
-    ProviderFile readFile(const ResourceId& path) override { try { auto response = call("readFile", path); return {std::move(response.bytes), field(response.metadata, "version"), {}}; } catch (const std::exception& error) { return {{}, {}, wide(error.what())}; } }
+    ProviderFile readFile(const ResourceId& path, FileReadMode mode) override {
+        try {
+            auto response = call("readFile", path, mode == FileReadMode::Full ? Message{} : Message{{"readMode", mode == FileReadMode::Tail ? "tail" : "preview"}});
+            ProviderFile result{std::move(response.bytes), field(response.metadata, "version"), {}};
+            result.tail = field(response.metadata, "tail") == "1";
+            if (result.tail) {
+                result.offset = number(response.metadata, "offset"); result.fileBytes = number(response.metadata, "fileBytes");
+                if (mode == FileReadMode::Full || result.offset > result.fileBytes || result.bytes.size() > maxTailBytes + 2) throw std::runtime_error("Invalid WSL tail snapshot");
+            }
+            return result;
+        } catch (const std::exception& error) { return {{}, {}, wide(error.what())}; }
+    }
     ProviderSave saveFile(const ResourceId& path, const std::string& bytes, const std::string& version, const std::string&) override {
         try { if (bytes.size() > maxFileBytes || version.empty()) throw std::runtime_error("File cannot be saved without a valid version and a size below 16 MiB"); const auto response = call("saveFile", path, {{"size", std::to_string(bytes.size())}, {"version", version}}, &bytes); return {field(response.metadata, "version"), {}}; } catch (const std::exception& error) { return {{}, wide(error.what())}; }
     }

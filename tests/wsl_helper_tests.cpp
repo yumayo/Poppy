@@ -6,6 +6,7 @@
 #include "explorer_history.h"
 #include "explorer_clipboard_paths.h"
 #include "text.h"
+#include "file_tail.h"
 #include <algorithm>
 #include <chrono>
 #include <cerrno>
@@ -377,6 +378,46 @@ void files(const std::string& executable) {
     helper.call("renameResource",a,{{"name","CON"},{"version",version(info)}}); check(fs::exists(fixture.root/"CON"),"Linux reserved-name rename failed");
     info = helper.call("stat",b); helper.call("renameResource",b,{{"name","../escape"},{"version",version(info)}},nullptr,false);
     write(fixture.root/"notify","external update"); check(helper.event(),"inotify did not request a refresh");
+    helper.eof();
+}
+void largeFiles(const std::string& executable) {
+    Fixture fixture;
+    const auto file = fixture.root / "large 日本語.log";
+    write(file, "log\n");
+    const uint64_t sparseSize = 5ull * 1024 * 1024 * 1024 + 17;
+    fs::resize_file(file, sparseSize);
+    const auto entries = [](int first, int last) {
+        std::string text;
+        for (int i = first; i < last; ++i) text += std::to_string(i) + u8" 日本😀\r\n";
+        return text;
+    };
+    const auto append = [&](const std::string& text) { std::ofstream stream(file, std::ios::binary | std::ios::app); stream << text; stream.close(); check(!stream.fail(), "Cannot append to a sparse log"); };
+    append(entries(0, 140));
+    Helper helper(executable); helper.hello(); helper.call("connect", fixture.root);
+    helper.call("readFile", file, {}, nullptr, false);
+    auto snapshot = helper.call("readFile", file, {{"readMode", "preview"}});
+    check(snapshot.bytes == entries(40, 140) && field(snapshot.metadata, "tail") == "1" && version(snapshot).empty(), "A multi-GB preview was not a read-only tail");
+    check(number(snapshot.metadata, "fileBytes") == fs::file_size(file) && number(snapshot.metadata, "offset") > 0xffffffffull && snapshot.bytes.size() <= poppy::maxTailBytes, "Sparse log metadata overflowed or exceeded the receive bound");
+    const std::string edited = "must not overwrite a partial file";
+    helper.call("saveFile", file, {{"version", version(snapshot)}, {"size", std::to_string(edited.size())}}, &edited, false);
+    check(fs::file_size(file) == number(snapshot.metadata, "fileBytes"), "A tail snapshot could overwrite the full file");
+    append(entries(140, 170));
+    snapshot = helper.call("readFile", file, {{"readMode", "tail"}});
+    check(snapshot.bytes == entries(70, 170), "A sparse file tail did not advance after appending");
+    const auto link = fixture.root / "alias.log";
+    fs::create_symlink(file.filename(), link);
+    check(helper.call("readFile", link, {{"readMode", "preview"}}).bytes == snapshot.bytes, "A large symlink target could not be tailed");
+    fs::rename(file, fixture.root / "rotated.log"); write(file, "new log\n");
+    snapshot = helper.call("readFile", file, {{"readMode", "tail"}});
+    check(snapshot.bytes == "new log\n" && field(snapshot.metadata, "tail") == "1" && number(snapshot.metadata, "offset") == 0, "Log rotation did not retain read-only tail mode");
+    append(entries(0, 140));
+    check(helper.call("readFile", file, {{"readMode", "tail"}}).bytes == entries(40, 140), "A truncated tail did not resume growing");
+    snapshot = helper.call("readFile", file, {{"readMode", "preview"}});
+    check(snapshot.bytes == disk(file) && field(snapshot.metadata, "tail") == "0" && !version(snapshot).empty(), "Small previews lost full-file editing");
+    write(file, "");
+    snapshot = helper.call("readFile", file, {{"readMode", "tail"}});
+    check(snapshot.bytes.empty() && snapshot.last && field(snapshot.metadata, "tail") == "1", "An empty tailed file omitted its final chunk");
+    helper.call("readFile", file, {{"readMode", "unsupported"}}, nullptr, false);
     helper.eof();
 }
 void moving(const std::string& executable) {
@@ -753,6 +794,6 @@ void terminals(const std::string& executable) {
 }
 int main(int argc,char** argv) {
     signal(SIGPIPE,SIG_IGN);
-    try { check(argc == 2,"Expected helper executable argument"); const std::string executable = argv[1]; installation(executable); watching(executable); missingWatchDirectories(executable); watchFailureDetails(executable); watchLimitIdle(executable); creation(executable); batchedListings(executable); files(executable); moving(executable); copying(executable); explorerHistory(executable); repositories(executable); protocolFailures(executable); gitAndCancellation(executable); contentSearch(executable); terminals(executable); std::cout << "WSL helper integration tests passed\n"; }
+    try { check(argc == 2,"Expected helper executable argument"); const std::string executable = argv[1]; installation(executable); watching(executable); missingWatchDirectories(executable); watchFailureDetails(executable); watchLimitIdle(executable); creation(executable); batchedListings(executable); files(executable); largeFiles(executable); moving(executable); copying(executable); explorerHistory(executable); repositories(executable); protocolFailures(executable); gitAndCancellation(executable); contentSearch(executable); terminals(executable); std::cout << "WSL helper integration tests passed\n"; }
     catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
 }

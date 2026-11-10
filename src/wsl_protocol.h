@@ -9,7 +9,7 @@
 
 namespace poppy::wsl {
 constexpr unsigned protocolVersion = 1;
-constexpr const char* helperVersion = "13";
+constexpr const char* helperVersion = "14";
 constexpr size_t maxControl = 64 * 1024, maxChunk = 256 * 1024, maxFrame = 1024 * 1024;
 constexpr size_t maxOutputBatch = 64 * 1024;
 // Used only if the helper cannot read the Linux user watch limit at startup.

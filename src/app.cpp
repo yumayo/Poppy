@@ -170,9 +170,9 @@ COLORREF stateColor(wchar_t state) {
     return state == L'U' || state == L'D' ? RGB(231,112,118) : state == L'?' || state == L'A' ? accent : RGB(224,192,128);
 }
 
-std::shared_ptr<FileResult> readDocument(ProjectProvider& provider, const ResourceId& path) {
+std::shared_ptr<FileResult> readDocument(ProjectProvider& provider, const ResourceId& path, FileReadMode mode = FileReadMode::Full) {
     auto result = std::make_shared<FileResult>();
-    auto file = provider.readFile(path);
+    auto file = provider.readFile(path, isImageExtension(path.extension().native()) ? FileReadMode::Full : mode);
     if (!file.error.empty()) { result->error = file.error; return result; }
     if (isImageExtension(path.extension().native())) {
         try { result->image = decodeImage(file.bytes); }
@@ -183,6 +183,10 @@ std::shared_ptr<FileResult> readDocument(ProjectProvider& provider, const Resour
     if (!decodeText(bytes, document->text, document->encoding, error)) { result->error = wide(error); return result; }
     if (static_cast<size_t>(std::count(document->text.begin(), document->text.end(), '\n')) >= maxLines) { result->error = L"This file exceeds the 1,000,000-line preview limit."; return result; }
     document->language = path.filename() == L"CMakeLists.txt" ? Language::Config : languageFor(utf8(path.extension().native()));
+    if (file.tail) {
+        document->tail = true; document->tailOffset = file.offset; document->fileBytes = file.fileBytes;
+        indexDocument(*document); result->document = std::move(document); return result;
+    }
     indexDocument(*document); buffer->initialize(std::move(bytes)); buffer->fileVersion = std::move(file.version); result->buffer = std::move(buffer); result->document = std::move(document); return result;
 }
 std::shared_ptr<Document> readWorkingBase(ProjectProvider& provider, const ResourceId& root, const std::string& relative, Language language, const std::atomic<bool>* cancelled) {
@@ -801,6 +805,7 @@ void ProjectRuntime::Impl::ensureGroup(int target) {
             updateTabs(false); if (owner_ && owner_->changed) owner_->changed();
         };
         view.save = [this, group] { saveFile(groupTab(group)); };
+        view.tailRequested = [this, group] { loadTab(true, group); };
         view.diffLayoutChanged = [this, group] {
             for (int other = 0; other < groupCount(); ++other)
                 if (other != group) viewers_[other].setDiffLayout(viewers_[group].diffInline());
@@ -3158,21 +3163,38 @@ void ProjectRuntime::Impl::loadTab(bool preserve, int group, bool revealExplorer
     if (!preserve) viewers_[group].loading(tab.diff ? L"Loading Git diff…" : L"Loading…", path);
     status((tab.diff ? L"Git diff: " : L"") + path.filename().native());
     if (!tab.diff && tab.diffKind != GitDiffKind::Commit && tab.diffKind != GitDiffKind::Compare) {
-        worker_->submit(L"file:" + std::to_wstring(group), [this, group, path, serial, generation, preserve, state, provider = fileProvider(path)] {
-            auto result = readDocument(*provider, path);
+        if (preserve && viewers_[group].tailPaused()) return;
+        const auto mode = preserve && viewers_[group].tailPreview() ? FileReadMode::Tail : FileReadMode::Preview;
+        worker_->submit(L"file:" + std::to_wstring(group), [this, group, path, serial, generation, preserve, state, mode, provider = fileProvider(path)] {
+            auto result = readDocument(*provider, path, mode);
             worker_->complete([this, group, result, path, serial, generation, preserve, state] {
                 if (generation != generation_ || serial != serial_[group]) return;
                 if (viewers_[group].buffer() && (viewers_[group].buffer()->dirty() || viewers_[group].buffer()->saving)) return;
+                if (preserve && viewers_[group].tailPaused()) return;
                 if (result->image) {
                     tabs_[groupTab(group)].buffer.reset();
                     viewers_[group].showImage(result->image, path);
                     status(std::to_wstring(result->image->width) + L" × " + std::to_wstring(result->image->height) + L" px  ·  READ ONLY  ·  F6: diff");
+                } else if (result->document && result->document->tail) {
+                    // Another pane may have edited the shared full document
+                    // while this read was in flight. Keep those edits.
+                    const auto buffer = shareBuffer(path);
+                    if (buffer && (buffer->dirty() || buffer->saving)) {
+                        viewers_[group].edit(buffer, path, preserve); if (!preserve) viewers_[group].restore(state);
+                        status(L"Unsaved changes kept  ·  Ctrl+S: save"); return;
+                    }
+                    auto& tab = tabs_[groupTab(group)];
+                    tab.buffer.reset(); tab.searchTarget.reset();
+                    viewers_[group].showTail(result->document, path, preserve);
+                    status(L"Tail · " + std::to_wstring(result->document->fileBytes) + L" bytes · Up to 100 lines / 1 MiB · READ ONLY");
                 } else if (result->document) {
                     const auto buffer = shareBuffer(path, result->buffer);
                     viewers_[group].edit(buffer, path, preserve); if (!preserve) viewers_[group].restore(state);
                     refreshEditorGit(group);
                     status(std::to_wstring(result->document->lines.size()) + L" lines  ·  Ctrl+S: save  ·  F6: diff");
                     applyContentResult(groupTab(group));
+                } else if (preserve && viewers_[group].tailPreview()) {
+                    status(L"Tail reload failed: " + result->error);
                 } else { viewers_[group].message(result->error, path); status(L"Preview unavailable"); }
             });
         });

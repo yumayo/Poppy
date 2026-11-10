@@ -7,6 +7,7 @@
 #include "resource.h"
 #include "resource_copy.h"
 #include "text.h"
+#include "file_tail.h"
 #include <algorithm>
 #include <atomic>
 #include <cerrno>
@@ -154,8 +155,11 @@ std::string real(const std::string& p) { char* value = realpath(p.c_str(), nullp
 std::string stamp(const struct stat& s) {
     return std::to_string(s.st_dev) + ':' + std::to_string(s.st_ino) + ':' + std::to_string(s.st_size) + ':' + std::to_string(s.st_mtim.tv_sec) + ':' + std::to_string(s.st_mtim.tv_nsec) + ':' + std::to_string(s.st_ctim.tv_sec) + ':' + std::to_string(s.st_ctim.tv_nsec) + ':' + std::to_string(s.st_mode) + ':' + std::to_string(s.st_nlink) + ':' + std::to_string(s.st_uid) + ':' + std::to_string(s.st_gid);
 }
-struct Snapshot { std::string bytes, version, target; struct stat info{}; };
-Snapshot read(const std::string& p, const std::atomic<bool>* cancelled = nullptr) {
+struct Snapshot {
+    std::string bytes, version, target; struct stat info{};
+    bool tail = false; uint64_t offset = 0;
+};
+Snapshot read(const std::string& p, const std::atomic<bool>* cancelled = nullptr, FileReadMode mode = FileReadMode::Full) {
     Snapshot result; struct stat link{}; if (lstat(p.c_str(), &link)) failure("Cannot inspect file");
     result.target = real(p);
     struct stat target{}; if (stat(result.target.c_str(), &target)) failure("Cannot inspect target");
@@ -163,6 +167,24 @@ Snapshot read(const std::string& p, const std::atomic<bool>* cancelled = nullptr
     Fd fd(open(result.target.c_str(), O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW)); if (fd.value < 0) failure("Cannot open file");
     if (fstat(fd.value, &result.info)) failure("Cannot inspect open file");
     if (!S_ISREG(result.info.st_mode)) throw std::runtime_error("Only regular files can be opened");
+    if (result.info.st_size >= 0 && (mode == FileReadMode::Tail || (mode == FileReadMode::Preview && static_cast<uint64_t>(result.info.st_size) > maxFileBytes))) {
+        auto tail = readFileTail(static_cast<uint64_t>(result.info.st_size), [&](uint64_t at, size_t count) {
+            std::string bytes(count, 0); size_t offset = 0;
+            while (offset < count) {
+                if (cancelled && *cancelled) throw std::runtime_error("Request cancelled");
+                const auto received = pread(fd.value, bytes.data() + offset, count - offset, static_cast<off_t>(at + offset));
+                if (received < 0) { if (errno == EINTR) continue; failure("Cannot read file tail"); }
+                if (!received) break;
+                offset += static_cast<size_t>(received);
+            }
+            bytes.resize(offset); return bytes;
+        });
+        // The descriptor and captured size bound this snapshot. Concurrent
+        // appends are allowed; hashing/revalidating the whole file would
+        // prevent following a continuously written log.
+        result.bytes = std::move(tail.bytes); result.tail = true; result.offset = tail.offset;
+        return result;
+    }
     if (result.info.st_size < 0 || static_cast<uint64_t>(result.info.st_size) > maxFileBytes) throw std::runtime_error("File exceeds the 16 MiB limit");
     char buffer[32768];
     for (;;) {
@@ -486,13 +508,19 @@ void Server::execute(const std::shared_ptr<Request>& r) {
             const auto p = path(r->message); struct stat info{}; if (lstat(p.c_str(), &info)) failure("Cannot inspect resource");
             reply(*r, {{"version", stamp(info)}, {"directory", S_ISDIR(info.st_mode) ? "1" : "0"}, {"link", S_ISLNK(info.st_mode) ? "1" : "0"}, {"done", "1"}});
         } else if (op == "readFile") {
-            const auto p = path(r->message); const auto snapshot = read(p, &r->cancelled); watch(std::filesystem::path(snapshot.target).parent_path().string());
+            const auto mode = field(r->message, "readMode");
+            if (!mode.empty() && mode != "preview" && mode != "tail") throw std::runtime_error("Unsupported file read mode");
+            const auto p = path(r->message);
+            const auto snapshot = read(p, &r->cancelled, mode == "tail" ? FileReadMode::Tail : mode == "preview" ? FileReadMode::Preview : FileReadMode::Full);
+            watch(std::filesystem::path(snapshot.target).parent_path().string());
             if (snapshot.target != p) {
                 std::lock_guard<std::mutex> lock(watchMutex_);
                 if (readAliasCount_ < 8192) { if (readAliases_[snapshot.target].insert(p).second) ++readAliasCount_; }
                 else { watchLimited_ = true; watchReason_ = "aliases"; watchFailedPath_ = p; watchError_.clear(); }
             }
-            reply(*r, {{"body", "1"}, {"size", std::to_string(snapshot.bytes.size())}, {"version", snapshot.version}}); body(*r, snapshot.bytes); reply(*r, {{"done", "1"}});
+            reply(*r, {{"body", "1"}, {"size", std::to_string(snapshot.bytes.size())}, {"version", snapshot.version},
+                {"tail", snapshot.tail ? "1" : "0"}, {"offset", std::to_string(snapshot.offset)}, {"fileBytes", std::to_string(snapshot.info.st_size)}});
+            body(*r, snapshot.bytes); reply(*r, {{"done", "1"}});
         } else if (op == "saveFile") save(*r);
         else if (op == "createFile") create(*r);
         else if (op == "copyResource") {

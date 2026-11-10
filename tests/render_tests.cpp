@@ -2809,6 +2809,58 @@ void editorTailFollowing() {
         check(scrollInfo(viewer.window()).nPos == 0, "Opening another file inherited tail following");
     }
 }
+void largeFileTailPreview() {
+    const auto instance = GetModuleHandleW(nullptr);
+    const auto parent = CreateWindowExW(0, L"STATIC", L"Large file tail test", WS_POPUP | WS_CLIPCHILDREN,
+        0, 0, 640, 360, nullptr, nullptr, instance, nullptr);
+    check(parent != nullptr, "Could not create the large file tail test window");
+    struct WindowOwner { HWND value; ~WindowOwner() { DestroyWindow(value); } } owner{parent};
+    Viewer viewer; viewer.create(parent, instance); MoveWindow(viewer.window(), 0, 0, 640, 360, FALSE);
+    const auto snapshot = [](int first, int count) {
+        auto document = std::make_shared<Document>(); document->tail = true;
+        document->fileBytes = 5ull * 1024 * 1024 * 1024;
+        for (int i = first; i < first + count; ++i) document->text += std::to_string(i) + u8" 日本😀\r\n";
+        indexDocument(*document); return document;
+    };
+    const auto atBottom = [&] {
+        SCROLLINFO info{sizeof(info), SIF_RANGE | SIF_PAGE | SIF_POS, 0, 0, 0, 0, 0};
+        GetScrollInfo(viewer.window(), SB_VERT, &info);
+        return info.nPos == std::max(0, info.nMax - static_cast<int>(info.nPage) + 1);
+    };
+    int requests = 0; viewer.tailRequested = [&] { ++requests; };
+    for (const bool wrap : {false, true}) for (const UINT dpi : {96u, 144u, 192u}) {
+        viewer.setDpi(dpi); viewer.setWordWrap(wrap);
+        auto first = snapshot(0, 100);
+        viewer.showTail(first, L"large.log");
+        check(viewer.tailPreview() && !viewer.tailPaused() && atBottom() && !viewer.buffer(), "A large file did not open read-only at EOF");
+        check(viewer.textStatus().find(L"TAIL") != std::wstring::npos && viewer.textStatus().find(L"READ ONLY") != std::wstring::npos, "Tail status did not explain the partial view");
+        SendMessageW(viewer.window(), WM_CHAR, 'x', 0);
+        SendMessageW(viewer.window(), WM_KEYDOWN, VK_DELETE, 0);
+        check(first->text == snapshot(0, 100)->text && !viewer.buffer(), "Typing changed a partial tail document");
+        SendMessageW(viewer.window(), WM_VSCROLL, SB_LINEUP, 0);
+        check(viewer.tailPaused(), "Scrolling up did not pause a bounded tail");
+        const auto position = viewer.state();
+        viewer.showTail(snapshot(30, 100), L"large.log", true);
+        viewer.selectSearch(0, 1, "0", true);
+        check(viewer.state().caret == 1, "A paused tail replaced the text under its selection");
+        viewer.restore(position);
+        const auto oldRequests = requests;
+        SendMessageW(viewer.window(), WM_VSCROLL, SB_BOTTOM, 0);
+        check(requests == oldRequests + 1 && !viewer.tailPaused(), "Returning to EOF did not request the latest snapshot");
+        viewer.showTail(snapshot(30, 100), L"large.log", true);
+        check(atBottom() && !viewer.tailPaused(), "A sliding tail window lost EOF following");
+        viewer.showTail(snapshot(0, 1), L"large.log", true);
+        check(atBottom() && !viewer.buffer(), "Log rotation lost EOF or enabled editing");
+        viewer.showTail(snapshot(0, 100), L"large.log", true);
+        check(atBottom(), "A truncated tail stopped following growth");
+        viewer.showTail(snapshot(0, 100), L"large.csv");
+        check(!viewer.csvAvailable() && !viewer.csvTable(), "A partial CSV opened as a complete table");
+        viewer.showTail(snapshot(0, 100), L"large.html");
+        check(!viewer.htmlAvailable() && !viewer.htmlPreview(), "A partial HTML document launched a whole-file browser preview");
+        viewer.show(std::make_shared<Document>(), L"ordinary.txt");
+        check(!viewer.tailPreview() && viewer.textStatus().find(L"TAIL") == std::wstring::npos, "An ordinary file inherited tail mode");
+    }
+}
 void continuousViewerScrolling() {
     Viewer viewer;
     const HWND parent = CreateWindowExW(0, L"STATIC", L"Continuous scrolling test", WS_POPUP | WS_CLIPCHILDREN,
@@ -3379,7 +3431,7 @@ int main(int argc, char** argv) {
             editorBodyFileDrops(); continuousDraggedTab(); terminalDropPreviewClipping();
             shutdownProgress();
             persistentErrorPopup();
-            editorBottomPadding(); editorTailFollowing();
+            editorBottomPadding(); editorTailFollowing(); largeFileTailPreview();
             csvTables(); htmlPreviewSwitching();
             terminalAsyncStartup(); terminalProcessShutdown(); terminalImeOutput();
             statusBarLimits(); treeMultipleSelection(); commitMessagePopup(); inlineTreeInput(); inlineTreeCreation(); gitCommitInput(); cellPositions(); colorsAndClipping(); imagePreviews(); fractionalMarkers(); smoothIcons(); windowTargets(); editableDiff(); editorCaret(); delayedLoadingMessages(); imeCellRendering(); imeTerminalInsertion(); imeUiRendering(); imePositions(); editorWordSelection(); editorColumnSelection(); editorWordMovement(); editorWordDeletion(); editorLineShortcuts(); editorWrapping(); diffWrapping(); documentFind(); horizontalWheelScrolling(); continuousViewerScrolling(); selectionAutoScrolling(); terminalGitBashSocketEnvironment(); terminalSelectionAutoScrolling(); themedScrollbars(); quickOpenStability();

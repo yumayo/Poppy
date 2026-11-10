@@ -24,12 +24,16 @@ public:
     void setFileDropTarget(FileDropTarget* target);
     void setDpi(UINT dpi);
     void show(std::shared_ptr<const Document> document, const ResourceId& path, bool preserve = false, bool allowHtml = true);
+    void showTail(std::shared_ptr<const Document> document, const ResourceId& path, bool preserve = false);
+    bool tailPreview() const { return document_ && document_->tail && !diff_; }
+    bool tailPaused() const { return tailPreview() && !scrollRange_.atTail(top_); }
     void showRevision(std::shared_ptr<const Document> document, const DiffDocument& changes, const ResourceId& path, bool preserve = false);
     void edit(std::shared_ptr<EditBuffer> buffer, const ResourceId& path, bool preserve = false);
     void setGitBase(std::shared_ptr<const Document> before);
     void showImage(std::shared_ptr<const ImagePreview> image, const ResourceId& path);
     std::shared_ptr<EditBuffer> buffer() const { return edit_; }
     std::function<void()> changed, save, focused, diffLayoutChanged, statusChanged;
+    std::function<void()> tailRequested;
     std::wstring textStatus() const;
     void showDiff(std::shared_ptr<const DiffDocument> document, const ResourceId& path, bool preserve = false);
     void editDiff(std::shared_ptr<EditBuffer> buffer, std::shared_ptr<const Document> before, const ResourceId& path, bool preserve = false);
@@ -128,6 +132,7 @@ private:
     POINT selectionPoint_{};
     bool wordWrap_ = true, layoutDirty_ = true, caretTrailing_ = false;
     bool textOnly_ = false;
+    bool tailWasPaused_ = false;
     TextLayout textLayout_;
     DiffLayout diffLayout_;
     static constexpr UINT_PTR caretTimer = 0x5056;

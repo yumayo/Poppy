@@ -48,11 +48,29 @@ public:
         if (requireAccess && error) result.error = wide(error.message());
         return result;
     }
-    ProviderFile readFile(const ResourceId& path) override {
+    ProviderFile readFile(const ResourceId& path, FileReadMode mode) override {
         ProviderFile result;
         Handle file(CreateFileW(path.local().c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN, nullptr));
         if (!file) { result.error = winError(); return result; }
         LARGE_INTEGER size{}; if (!GetFileSizeEx(file.value, &size)) { result.error = winError(); return result; }
+        if (size.QuadPart >= 0 && (mode == FileReadMode::Tail || (mode == FileReadMode::Preview && size.QuadPart > static_cast<LONGLONG>(maxFileBytes)))) {
+            try {
+                auto tail = readFileTail(static_cast<uint64_t>(size.QuadPart), [&](uint64_t at, size_t count) {
+                    LARGE_INTEGER position{}; position.QuadPart = static_cast<LONGLONG>(at);
+                    if (!SetFilePointerEx(file.value, position, nullptr, FILE_BEGIN)) throw std::runtime_error(utf8(winError()));
+                    std::string bytes(count, 0); size_t offset = 0;
+                    while (offset < count) {
+                        DWORD received = 0;
+                        if (!ReadFile(file.value, bytes.data() + offset, static_cast<DWORD>(count - offset), &received, nullptr)) throw std::runtime_error(utf8(winError()));
+                        if (!received) break;
+                        offset += received;
+                    }
+                    bytes.resize(offset); return bytes;
+                });
+                result.bytes = std::move(tail.bytes); result.tail = true; result.offset = tail.offset; result.fileBytes = tail.fileBytes;
+            } catch (const std::exception& error) { result.error = wide(error.what()); }
+            return result;
+        }
         if (size.QuadPart < 0 || size.QuadPart > static_cast<LONGLONG>(maxFileBytes)) { result.error = L"This file exceeds the 16 MiB preview limit."; return result; }
         result.bytes.resize(static_cast<size_t>(size.QuadPart)); size_t offset = 0;
         while (offset < result.bytes.size()) { DWORD count = 0; if (!ReadFile(file.value, result.bytes.data() + offset, static_cast<DWORD>(result.bytes.size() - offset), &count, nullptr)) { result.error = winError(); return result; } if (!count) break; offset += count; }

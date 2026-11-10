@@ -5,12 +5,17 @@
 #include "content_search.h"
 #include "git_repositories.h"
 #include "limit_status.h"
+#include "file_tail.h"
 #include <memory>
 
 namespace poppy {
 struct ProviderEntry { ResourceId path; bool directory = false, reparse = false, unsupported = false; std::wstring label; };
 struct ProviderListing { std::vector<ProviderEntry> entries; std::wstring error; bool truncated = false; };
-struct ProviderFile { std::string bytes, version; std::wstring error; };
+struct ProviderFile {
+    std::string bytes, version; std::wstring error;
+    bool tail = false;
+    uint64_t offset = 0, fileBytes = 0;
+};
 struct ProviderSave { std::string version; std::wstring error; };
 enum class ConnectionState { Disconnected, Connecting, Ready, Unavailable };
 struct ProviderChanges {
@@ -26,7 +31,7 @@ public:
     virtual ResourceId connect(const ResourceId& root) = 0;
     // Deletion checks must report inaccessible contents instead of hiding them.
     virtual ProviderListing listDirectory(const ResourceId& path, bool requireAccess = false) = 0;
-    virtual ProviderFile readFile(const ResourceId& path) = 0;
+    virtual ProviderFile readFile(const ResourceId& path, FileReadMode mode = FileReadMode::Full) = 0;
     virtual ProviderSave saveFile(const ResourceId& path, const std::string& bytes, const std::string& version, const std::string& baseline) = 0;
     // Publish a new file only after writing it completely; never replace a name.
     virtual std::wstring createFile(const ResourceId& path, const std::string& bytes) = 0;

@@ -91,6 +91,16 @@ void Viewer::showRevision(std::shared_ptr<const Document> d, const DiffDocument&
         std::fill(gitChangedLines_.begin() + range.begin, gitChangedLines_.begin() + range.end, true);
     InvalidateRect(window_, nullptr, FALSE);
 }
+void Viewer::showTail(std::shared_ptr<const Document> d, const ResourceId& path, bool preserve) {
+    // Keep the old bounded snapshot while the user reads it. Replacing a
+    // sliding window would otherwise change the text under their selection.
+    if (preserve && path_ == path && tailPaused()) return;
+    if (preserve && path_ == path && tailPreview() && document_->tailOffset == d->tailOffset &&
+        document_->fileBytes == d->fileBytes && document_->text == d->text) return;
+    const bool follow = !preserve || path_ != path || !document_ || scrollRange_.atTail(top_);
+    show(std::move(d), path, preserve, false);
+    scrollbars(follow); caretPosition(); InvalidateRect(window_, nullptr, FALSE);
+}
 void Viewer::edit(std::shared_ptr<EditBuffer> buffer, const ResourceId& path, bool preserve) {
     const auto before = edit_ == buffer && path_ == path ? gitBefore_ : nullptr;
     show(std::shared_ptr<const Document>(buffer, &buffer->document), path, preserve);
@@ -232,7 +242,8 @@ std::wstring Viewer::textStatus() const {
     if (!document_ || diff_) return {};
     const auto newline = document_->text.find('\n');
     const bool crlf = newline != std::string::npos && newline > 0 && document_->text[newline - 1] == '\r';
-    return (csv_.active() ? csv_.status() + L"  ·  " : L"") + wide(document_->encoding) + (crlf ? L"  ·  CRLF" : L"  ·  LF");
+    return (tailPreview() ? L"TAIL · READ ONLY  ·  " : csv_.active() ? csv_.status() + L"  ·  " : L"") +
+        wide(document_->encoding) + (crlf ? L"  ·  CRLF" : L"  ·  LF");
 }
 Viewer::State Viewer::state() const {
     if (csv_.active()) return csv_.state();
@@ -345,11 +356,15 @@ void Viewer::scrollbars(bool followTail) {
         SCROLLINFO vertical{sizeof(vertical), SIF_RANGE | SIF_PAGE | SIF_POS, 0, scrollRange_.totalRows() - 1, static_cast<UINT>(pageRows), top_, 0}; SetScrollInfo(window_, SB_VERT, &vertical, FALSE);
         SCROLLINFO horizontal{sizeof(horizontal), SIF_RANGE | SIF_PAGE | SIF_POS, 0, wrapping() ? 0 : cols - 1, static_cast<UINT>(pageCols), left_, 0}; SetScrollInfo(window_, SB_HORZ, &horizontal, FALSE);
     }
+    tailWasPaused_ = tailPaused();
 }
 void Viewer::scroll(int vertical, int horizontal) {
+    const bool wasPaused = tailWasPaused_;
     revealFind_ = false;
     top_ += vertical; left_ += horizontal; scrollbars(); caretPosition();
     InvalidateRect(window_, nullptr, FALSE);
+    // Refresh on returning to EOF even if no further filesystem event arrives.
+    if (wasPaused && tailPreview() && !tailPaused() && tailRequested) tailRequested();
     // WM_PAINT has lower priority than mouse input. Present this position
     // before handling another move, including while a thumb is dragged quickly.
     UpdateWindow(window_);
