@@ -34,6 +34,7 @@ struct SavedTerminal {
     bool displayed = false;
     TerminalShell shell = TerminalShell::PowerShell;
     std::string hostSession = {};
+    bool pinned = false;
 };
 struct SavedSearch {
     std::string query, status = "Type to search this project.";

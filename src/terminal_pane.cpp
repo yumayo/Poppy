@@ -104,6 +104,7 @@ void TerminalPane::add(SavedTerminal configuration, bool reconnect) {
     if (reconnect && hadHost) ptr->terminal->reconnect();
 }
 bool TerminalPane::contains(HWND window) const {
+    if (!window) return false;
     if (window == window_ || IsChild(window_, window) || window == rename_) return true;
     return std::any_of(sessions_.begin(), sessions_.end(), [window](const auto& s) {
         return window == s->terminal->window() || IsChild(s->terminal->window(), window);
@@ -115,7 +116,7 @@ void TerminalPane::dockSelect(size_t index, int group) {
     for (auto& session : sessions_) if (session->configuration.group == group) session->configuration.displayed = false;
     sessions_[index]->configuration.displayed = true;
 }
-void TerminalPane::dockMenu(size_t index, POINT point, RECT bounds) { dockRename_ = bounds; menu(index, point); }
+void TerminalPane::dockRename(size_t index, RECT bounds) { dockRename_ = bounds; rename(index); }
 void TerminalPane::dockAdd(int group, bool dropdown, POINT point) {
     if (dropdown) addMenu(group, point); else addShell(group, defaultShell_);
 }
@@ -150,14 +151,13 @@ void TerminalPane::relocate(const ResourceId& source, const ResourceId& destinat
 }
 void TerminalPane::restore(const ProjectSession& state) {
     defaultShell_ = state.defaultShell;
-    finishRename(false); endDrag(); ratio_ = state.terminalRatio; stop(); for(auto& s:sessions_) DestroyWindow(s->terminal->window()); sessions_.clear();
+    finishRename(false); endDrag(); ratio_ = state.terminalRatio; stop(); for(auto& s:sessions_) DestroyWindow(s->terminal->window()); sessions_.clear(); active_ = 0;
     for(const auto& saved:state.terminals) add(saved, true);
-    if(sessions_.empty()) add({"", "Shell", directory_.u8string(), 0, false, defaultShell_});
     for (size_t i = 0; i < state.terminals.size() && i < sessions_.size(); ++i) { sessions_[i]->configuration.displayed = state.terminals[i].displayed; sessions_[i]->configuration.group = state.terminals[i].group; }
     const auto found=std::find_if(sessions_.begin(),sessions_.end(),[&](const auto& s){return s->configuration.id==state.activeTerminal;});
     select(found==sessions_.end()?0:static_cast<size_t>(found-sessions_.begin()));
 }
-void TerminalPane::snapshot(ProjectSession& state) const { state.terminals.clear();for(const auto& s:sessions_)state.terminals.push_back(s->configuration);state.activeTerminal=active().configuration.id; state.terminalRatio = ratio_; state.defaultShell = defaultShell_; }
+void TerminalPane::snapshot(ProjectSession& state) const { state.terminals.clear();for(const auto& s:sessions_)state.terminals.push_back(s->configuration);state.activeTerminal=activeSessionId(); state.terminalRatio = ratio_; state.defaultShell = defaultShell_; }
 bool TerminalPane::apply(const AiEvent& event) {
     for(size_t i=0;i<sessions_.size();++i) if(sessions_[i]->notificationId==event.sessionId) {
         const bool visible=sessions_[i]->configuration.displayed && (dockParent_ ? IsWindowVisible(sessions_[i]->terminal->window()) : IsWindowVisible(window_)) && GetForegroundWindow()==GetAncestor(window_,GA_ROOT) && !IsIconic(GetAncestor(window_,GA_ROOT));
@@ -166,6 +166,7 @@ bool TerminalPane::apply(const AiEvent& event) {
     return false;
 }
 void TerminalPane::focusAttention() {
+    if (sessions_.empty()) return;
     const auto state = summary().state;
     for (size_t i = 0; i < sessions_.size(); ++i) if (sessions_[i]->ai.detected && sessions_[i]->ai.state == state) { select(i); break; }
     SetFocus(window());
@@ -227,10 +228,10 @@ void TerminalPane::select(size_t index) {
 void TerminalPane::close(size_t index) {
     if(index>=sessions_.size())return;
     endDrag(); finishRename(false);
-    const int closedGroup = sessions_[index]->configuration.group;
     sessions_[index]->terminal->stop();DestroyWindow(sessions_[index]->terminal->window());sessions_.erase(sessions_.begin()+static_cast<std::ptrdiff_t>(index));
     if(index<active_)--active_;
-    if(sessions_.empty())add({"", "Shell", directory_.u8string(), closedGroup, false, defaultShell_}); else select(std::min(active_,sessions_.size()-1));
+    if (sessions_.empty()) { active_ = 0; layout(); if (changed) changed(); }
+    else select(std::min(active_,sessions_.size()-1));
 }
 void TerminalPane::stop(ShutdownDialog* progress) {
     for (size_t i = 0; i < sessions_.size(); ++i) {
@@ -281,7 +282,7 @@ std::wstring TerminalPane::sessionName(const TerminalSession& session) const {
     return directory_.wsl() ? L"WSL" : terminalShellName(session.configuration.shell);
 }
 void TerminalPane::layout(){
-    if(!window_||sessions_.empty())return;
+    if(!window_)return;
     if (dockParent_) {
         for (const auto& session : sessions_) SetWindowTextW(session->terminal->window(), sessionName(*session).c_str());
         if (rename_) SetWindowPos(rename_, HWND_TOP, dockRename_.left, dockRename_.top, std::max(1L, dockRename_.right - dockRename_.left),
@@ -385,18 +386,21 @@ bool TerminalPane::key(const MSG& message) {
     return false;
 }
 void TerminalPane::menu(size_t index,POINT point){
+    if (index >= sessions_.size()) return;
     HMENU menu=CreatePopupMenu();AppendMenuW(menu,MF_STRING,1,L"Rename terminal");AppendMenuW(menu,MF_STRING,2,L"Close terminal");
     const auto command=TrackPopupMenu(menu,TPM_RETURNCMD|TPM_RIGHTBUTTON,point.x,point.y,0,dockParent_ ? dockParent_ : window_,nullptr);DestroyMenu(menu);
     if(command==2)close(index);
-    else if(command==1){
-        finishRename(false);
-        renaming_=index;
-        renameInput_.commitOnFocusLoss = true;
-        renameInput_.finished = [this](bool commit) { finishRename(commit); };
-        rename_ = renameInput_.create(dockParent_ ? dockParent_ : window_, instance_, sessionName(*sessions_[index]), foreground);
-        layout();
-        SendMessageW(rename_,EM_SETLIMITTEXT,120,0);SendMessageW(rename_,EM_SETSEL,0,-1);SetFocus(rename_);
-    }
+    else if(command==1)rename(index);
+}
+void TerminalPane::rename(size_t index) {
+    if (index >= sessions_.size()) return;
+    finishRename(false);
+    renaming_=index;
+    renameInput_.commitOnFocusLoss = true;
+    renameInput_.finished = [this](bool commit) { finishRename(commit); };
+    rename_ = renameInput_.create(dockParent_ ? dockParent_ : window_, instance_, sessionName(*sessions_[index]), foreground);
+    layout();
+    SendMessageW(rename_,EM_SETLIMITTEXT,120,0);SendMessageW(rename_,EM_SETSEL,0,-1);SetFocus(rename_);
 }
 void TerminalPane::addAi(const std::wstring& tool, int group) {
     if (!directory_.wsl()) return;

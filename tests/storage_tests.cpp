@@ -52,7 +52,7 @@ bool same(const poppy::ProjectSession& a, const poppy::ProjectSession& b) {
         const auto& x = a.tabs[i]; const auto& y = b.tabs[i];
         if (x.path != y.path || x.diff != y.diff || x.pinned != y.pinned || x.group != y.group || x.displayed != y.displayed || x.diffKind != y.diffKind || x.revision != y.revision || x.allChanges != y.allChanges || x.gitRoot != y.gitRoot || x.comparePath != y.comparePath || !same(x.fileView, y.fileView) || !same(x.diffView, y.diffView)) return false;
     }
-    for (size_t i = 0; i < a.terminals.size(); ++i) { const auto& x = a.terminals[i]; const auto& y = b.terminals[i]; if (x.id != y.id || x.name != y.name || x.directory != y.directory || x.group != y.group || x.displayed != y.displayed || x.shell != y.shell || x.hostSession != y.hostSession) return false; }
+    for (size_t i = 0; i < a.terminals.size(); ++i) { const auto& x = a.terminals[i]; const auto& y = b.terminals[i]; if (x.id != y.id || x.name != y.name || x.directory != y.directory || x.group != y.group || x.displayed != y.displayed || x.shell != y.shell || x.hostSession != y.hostSession || x.pinned != y.pinned) return false; }
     return true;
 }
 void roundTripAndIsolation() {
@@ -355,7 +355,7 @@ void schemaAndRegistry() {
     {
         poppy::Storage storage(fixture.directory);
         const auto projectDb = storage.projectDirectory("c:\\future", "c:\\future") / "storage.sql";
-        execute(projectDb, "PRAGMA user_version=17");
+        execute(projectDb, "PRAGMA user_version=18");
         rejects([&] { storage.loadProject("c:\\future", "c:\\future"); }, "A newer project schema was overwritten");
         storage.projectDirectory("c:\\invalid", "c:\\invalid");
         execute(appDb, R"(UPDATE projects SET directory='../../escape' WHERE path_key='c:\invalid')");
@@ -382,6 +382,40 @@ void terminalHostMigration() {
     check(same(*storage.loadProject(key, key), state), "A failed terminal save replaced the reconnect identity");
     execute(db, "UPDATE terminal_hosts SET host_session='invalid';"); state.terminals[0].hostSession.clear();
     check(same(*storage.loadProject(key, key), state), "Invalid saved terminal host identity was reused");
+}
+void terminalPinMigration() {
+    Fixture fixture; poppy::Storage storage(fixture.directory); const std::string key = "c:/terminal tabs";
+    poppy::ProjectSession state;
+    state.terminals = {{"first", "Build", key, 0, true}, {"second", "Shell", key + "/src", 1, true, poppy::TerminalShell::GitBash}};
+    state.terminals[0].hostSession = "0123456789abcdef0123456789abcdef"; state.activeTerminal = "second";
+    storage.saveProject(key, key, state);
+    const auto db = storage.projectDirectory(key, key) / "storage.sql";
+    execute(db, "DROP TABLE terminal_pins; PRAGMA user_version=16;");
+    check(same(*storage.loadProject(key, key), state), "Terminal pin migration changed existing sessions or pinned them");
+    state.terminals[0].pinned = true;
+    storage.saveProject(key, key, state);
+    {
+        poppy::Storage reopened(fixture.directory);
+        check(same(*reopened.loadProject(key, key), state), "Restart lost terminal pin state or reconnect identity");
+    }
+    auto invalid = state; invalid.terminals.push_back(invalid.terminals[0]);
+    rejects([&] { storage.saveProject(key, key, invalid); }, "Duplicate pinned terminal was accepted");
+    check(same(*storage.loadProject(key, key), state), "Failed save changed terminal pin state");
+    state.terminals[0].pinned = false; state.terminals[1].pinned = true;
+    storage.saveProject(key, key, state);
+    check(same(*storage.loadProject(key, key), state), "Unpinning a terminal was not persisted");
+    state.terminals.clear(); state.activeTerminal.clear(); state.focusedPane = "viewer"; state.terminalVisible = false;
+    storage.saveProject(key, key, state);
+    {
+        poppy::Storage reopened(fixture.directory);
+        check(same(*reopened.loadProject(key, key), state), "Restart recreated a terminal after closing all tabs");
+    }
+    execute(db, "UPDATE view_state SET active_terminal='closed', focused_pane='terminal';");
+    const auto empty = storage.loadProject(key, key);
+    check(empty && empty->terminals.empty() && empty->activeTerminal.empty(), "An empty terminal list retained a stale active session");
+    state.terminals = {{"second", "New shell", key}}; state.activeTerminal = "second";
+    storage.saveProject(key, key, state);
+    check(same(*storage.loadProject(key, key), state), "A new terminal reused a closed tab's pin state");
 }
 void searchRoundTripAndMigration() {
     Fixture fixture;
@@ -504,7 +538,7 @@ void wslRoundTripAndMigration() {
 }
 int main() {
     try {
-        roundTripAndIsolation(); migrateProjectListState(); atomicSave(); projectHistory(); migrateProjectLayout(); migrateGitLayout(); migratePinnedTabs(); migrateWorkspaceAndTerminals(); migrateSplitLayout(); migrateWrapping(); terminalShellMigration(); terminalHostMigration(); schemaAndRegistry(); searchRoundTripAndMigration(); fileComparisonRoundTrip(); gitComparisonRoundTrip(); wslRoundTripAndMigration();
+        roundTripAndIsolation(); migrateProjectListState(); atomicSave(); projectHistory(); migrateProjectLayout(); migrateGitLayout(); migratePinnedTabs(); migrateWorkspaceAndTerminals(); migrateSplitLayout(); migrateWrapping(); terminalShellMigration(); terminalHostMigration(); terminalPinMigration(); schemaAndRegistry(); searchRoundTripAndMigration(); fileComparisonRoundTrip(); gitComparisonRoundTrip(); wslRoundTripAndMigration();
         std::cout << "Storage tests passed\n";
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
 }

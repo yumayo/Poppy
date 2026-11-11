@@ -40,7 +40,7 @@ public:
     void focusAttention();
     bool hasSession(const std::string& id) const;
     void activateSession(const std::string& id);
-    const std::string& activeSessionId() const { return active().configuration.id; }
+    std::string activeSessionId() const { return sessions_.empty() ? std::string{} : active().configuration.id; }
     AiSummary summary() const;
     std::wstring description() const;
     void stop(ShutdownDialog* progress = nullptr);
@@ -53,12 +53,12 @@ public:
     const AiStatus& dockStatus(size_t index) const { return sessions_[index]->ai; }
     HWND dockWindow(size_t index) const { return sessions_[index]->terminal->window(); }
     void dockSelect(size_t index, int group);
-    void dockPlace(size_t index, int group, bool displayed) { sessions_[index]->configuration.group = group; sessions_[index]->configuration.displayed = displayed; }
+    void dockPlace(size_t index, int group, bool displayed, bool pinned) { auto& config = sessions_[index]->configuration; config.group = group; config.displayed = displayed; config.pinned = pinned; }
     void dockClose(size_t index) { close(index); }
-    void dockMenu(size_t index, POINT point, RECT bounds);
+    void dockRename(size_t index, RECT bounds);
     void dockAdd(int group, bool dropdown, POINT point);
     std::function<void()> dockChanged;
-    HWND window() const { return active().terminal->window(); }
+    HWND window() const { return sessions_.empty() ? nullptr : active().terminal->window(); }
     HWND container() const { return window_; }
     std::function<void()> changed;
     std::function<void(const std::string&)> activated;
@@ -72,6 +72,7 @@ private:
     void add(SavedTerminal configuration = {}, bool reconnect = false);
     void select(size_t index);
     void close(size_t index);
+    void rename(size_t index);
     void menu(size_t index, POINT point);
     void addAi(const std::wstring& tool, int group);
     void addShell(int group, TerminalShell shell);

@@ -850,7 +850,7 @@ bool ProjectRuntime::Impl::syncTerminalTabs() {
         const auto found = std::find_if(tabs_.begin(), tabs_.end(), [&](const Tab& tab) { return tab.terminalId == config.id; });
         if (found == tabs_.end()) {
             changed = true;
-            Tab tab; tab.terminalId = config.id; tab.group = config.group; tab.displayed = config.displayed;
+            Tab tab; tab.terminalId = config.id; tab.group = config.group; tab.displayed = config.displayed; tab.pinned = config.pinned;
             if (!dock_.pane(tab.group)) tab.group = focusedGroup_;
             tabs_.push_back(std::move(tab));
         }
@@ -987,7 +987,7 @@ void ProjectRuntime::Impl::layout(bool revealTab) {
         const auto found = std::find_if(tabs_.begin(), tabs_.end(), [&](const Tab& tab) { return tab.terminalId == terminal_.dockConfiguration(i).id; });
         if (found == tabs_.end()) continue;
         const auto& rect = editorGroups_[found->group].body;
-        terminal_.dockPlace(i, found->group, found->displayed);
+        terminal_.dockPlace(i, found->group, found->displayed, found->pinned);
         if (found->displayed && found->group == focusedGroup_) terminal_.dockSelect(i, found->group);
         panes.push_back({terminal_.dockWindow(i), rect.left, rect.top, std::max(0L, rect.right - rect.left), std::max(0L, rect.bottom - rect.top), found->displayed && rect.bottom > rect.top ? SWP_SHOWWINDOW : SWP_HIDEWINDOW});
     }
@@ -2439,7 +2439,7 @@ ProjectSession ProjectRuntime::Impl::saveSession() {
     else state.gitSelected = pendingGitSelection_;
     for (const auto& path : collapsedGitPaths_) state.collapsedGit.push_back(utf8(path));
     const auto focus = GetFocus();
-    if (focus == terminal_.window()) focusedPane_ = "terminal";
+    if (focus && focus == terminal_.window()) focusedPane_ = "terminal";
     else if (focus == tree_) focusedPane_ = "explorer";
     else if (focus == gitTree_) focusedPane_ = "git";
     else if (focus == viewer().window() || IsChild(viewer().window(), focus)) focusedPane_ = "viewer";
@@ -3059,11 +3059,7 @@ void ProjectRuntime::Impl::tabMenu(POINT screen) {
         if (index >= tabs_.size()) return;
     }
     if (index >= tabs_.size()) return;
-    if (!tabs_[index].terminalId.empty()) {
-        const auto terminal = terminalIndex(tabs_[index].terminalId);
-        if (terminal < terminal_.dockCount()) terminal_.dockMenu(terminal, screen, tabBounds(index));
-        return;
-    }
+    const auto terminalId = tabs_[index].terminalId;
     const auto path = tabs_[index].path;
     const auto key = tabKey(tabs_[index]);
     const auto absolutePath = editorTabPathText(tabs_[index], root_, false);
@@ -3078,9 +3074,10 @@ void ProjectRuntime::Impl::tabMenu(POINT screen) {
     HMENU menu = CreatePopupMenu();
     if (!menu) return;
     AppendMenuW(menu, MF_STRING, 1, pinned ? L"Unpin tab" : L"Pin tab");
+    if (!terminalId.empty()) AppendMenuW(menu, MF_STRING, 9, L"Rename terminal");
     if (absolutePath) AppendMenuW(menu, MF_STRING, 7, L"Copy Path");
     if (relativePath) AppendMenuW(menu, MF_STRING, 8, L"Copy Relative Path");
-    if (!tabs_[index].allChanges && tabs_[index].diffKind != GitDiffKind::Commit && tabs_[index].diffKind != GitDiffKind::Compare) {
+    if (terminalId.empty() && !tabs_[index].allChanges && tabs_[index].diffKind != GitDiffKind::Commit && tabs_[index].diffKind != GitDiffKind::Compare) {
         AppendMenuW(menu, MF_STRING, 4, L"Reveal in File Explorer");
         AppendMenuW(menu, MF_STRING, 3, L"Open with Default Application");
     }
@@ -3095,6 +3092,10 @@ void ProjectRuntime::Impl::tabMenu(POINT screen) {
         index = static_cast<size_t>(found - tabs_.begin());
         if (command == 1) toggleTabPin(index);
         else if (command == 2) closeTab(index);
+        else if (command == 9) {
+            const auto terminal = terminalIndex(terminalId);
+            if (terminal < terminal_.dockCount()) terminal_.dockRename(terminal, tabBounds(index));
+        }
         else if (command == 3) openWithDefaultApp(path);
         else if (command == 4) revealInFileExplorer(path);
         else if ((command == 7 && absolutePath) || (command == 8 && relativePath)) {
@@ -3543,6 +3544,17 @@ void ProjectRuntime::Impl::stopWatch(ShutdownDialog* progress) {
 void ProjectRuntime::Impl::toggleTerminal() {
     endTabDrag();
     saveTab();
+    if (!terminal_.dockCount()) {
+        int group = focusedGroup_;
+        if (!tabs_.empty()) {
+            group = dock_.split(group, DockSide::Bottom);
+            if (group < 0) { status(L"Cannot open terminal: too many tab groups."); return; }
+            ensureGroup(group);
+        }
+        hiddenDockGroup_ = group; terminalVisible_ = true;
+        terminal_.dockAdd(group, false, {});
+        return;
+    }
     const auto previous = dockGeometry_.panes;
     const int focused = focusedGroup_;
     terminalVisible_ = !terminalVisible_;
@@ -3818,7 +3830,7 @@ void ProjectRuntime::activate(bool active) {
     if (active && impl_->root_.wsl() && !impl_->connected_ && impl_->provider_ && impl_->provider_->state() == ConnectionState::Disconnected) impl_->connectRemote();
     if (!active) {
         impl_->saveTab(); impl_->lastFocus_ = GetFocus();
-        if (impl_->lastFocus_ == impl_->terminal_.window()) impl_->focusedPane_ = "terminal";
+        if (impl_->lastFocus_ && impl_->lastFocus_ == impl_->terminal_.window()) impl_->focusedPane_ = "terminal";
         else if (impl_->lastFocus_ == impl_->tree_) impl_->focusedPane_ = "explorer";
         else if (impl_->lastFocus_ == impl_->gitTree_) impl_->focusedPane_ = "git";
         else if (impl_->lastFocus_ == impl_->viewer().window() || IsChild(impl_->viewer().window(), impl_->lastFocus_)) impl_->focusedPane_ = "viewer";
@@ -3829,10 +3841,10 @@ void ProjectRuntime::activate(bool active) {
         impl_->updateStatusBar();
         HWND focus = impl_->lastFocus_;
         if (!focus || !IsWindow(focus) || !IsWindowVisible(focus)) {
-            focus = impl_->focusedPane_ == "terminal" && impl_->terminalVisible_ ? impl_->terminal_.window() : impl_->focusedPane_ == "explorer" && IsWindowVisible(impl_->tree_) ? impl_->tree_ : impl_->focusedPane_ == "git" && IsWindowVisible(impl_->gitTree_) ? impl_->gitTree_ : impl_->selectedWindow();
+            focus = impl_->focusedPane_ == "terminal" && impl_->terminalVisible_ && impl_->terminal_.dockCount() ? impl_->terminal_.window() : impl_->focusedPane_ == "explorer" && IsWindowVisible(impl_->tree_) ? impl_->tree_ : impl_->focusedPane_ == "git" && IsWindowVisible(impl_->gitTree_) ? impl_->gitTree_ : impl_->selectedWindow();
         }
         SetFocus(focus); impl_->terminal_.acknowledge(); PostMessageW(window(), WM_APP+12, 0, 0);
-        if (!impl_->restoringProject_ && focus == impl_->terminal_.window() && activated)
+        if (!impl_->restoringProject_ && focus && focus == impl_->terminal_.window() && activated)
             activated({0, {}, impl_->terminal_.activeSessionId()});
         else if (focus == impl_->viewer().window() || IsChild(impl_->viewer().window(), focus)) impl_->recordEditorNavigation();
     }

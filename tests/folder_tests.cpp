@@ -402,9 +402,8 @@ void dragTerminalTab(const Application& app, HWND terminal, POINT target, UINT c
     } else if (cancel) send(app.window, cancel);
     send(app.window, WM_LBUTTONUP, 0, MAKELPARAM(target.x, target.y));
 }
-enum class TabMenuCommand { Pin, CopyPath, CopyRelativePath, CloseOthers, CloseAll };
-void tabMenuCommand(const Application& app, int visibleIndex, TabMenuCommand command, bool wait = true) {
-    const auto rect = tabBounds(app, visibleIndex);
+enum class TabMenuCommand { Pin, RenameTerminal, CopyPath, CopyRelativePath, CloseOthers, CloseAll };
+void tabMenuCommandAt(const Application& app, RECT rect, TabMenuCommand command, bool wait = true) {
     POINT point{rect.left + 1, (rect.top + rect.bottom) / 2}; ClientToScreen(app.window, &point);
     check(PostMessageW(app.window, WM_CONTEXTMENU, reinterpret_cast<WPARAM>(app.window), MAKELPARAM(point.x, point.y)) != FALSE,
           "Could not open a tab's context menu");
@@ -415,15 +414,21 @@ void tabMenuCommand(const Application& app, int visibleIndex, TabMenuCommand com
     };
     waitFor(menuOpen, "The tab context menu did not open");
     // Path commands follow Pin; bulk close commands are the last two entries.
-    const bool fromStart = command == TabMenuCommand::Pin || command == TabMenuCommand::CopyPath || command == TabMenuCommand::CopyRelativePath;
+    const bool fromStart = command == TabMenuCommand::Pin || command == TabMenuCommand::RenameTerminal || command == TabMenuCommand::CopyPath || command == TabMenuCommand::CopyRelativePath;
     PostMessageW(app.window, WM_KEYDOWN, fromStart ? VK_HOME : VK_END, 0);
-    if (command == TabMenuCommand::CopyPath || command == TabMenuCommand::CopyRelativePath) PostMessageW(app.window, WM_KEYDOWN, VK_DOWN, 0);
+    if (command == TabMenuCommand::RenameTerminal || command == TabMenuCommand::CopyPath || command == TabMenuCommand::CopyRelativePath) PostMessageW(app.window, WM_KEYDOWN, VK_DOWN, 0);
     if (command == TabMenuCommand::CopyRelativePath) PostMessageW(app.window, WM_KEYDOWN, VK_DOWN, 0);
     if (command == TabMenuCommand::CloseOthers) PostMessageW(app.window, WM_KEYDOWN, VK_UP, 0);
     PostMessageW(app.window, WM_KEYDOWN, VK_RETURN, 0);
     waitFor([&] { return !menuOpen(); }, "The tab context menu did not close");
     // A save confirmation keeps the original context-menu handler running.
     if (wait) send(app.window, WM_NULL);
+}
+void tabMenuCommand(const Application& app, int visibleIndex, TabMenuCommand command, bool wait = true) {
+    tabMenuCommandAt(app, tabBounds(app, visibleIndex), command, wait);
+}
+void terminalTabMenuCommand(const Application& app, HWND terminal, TabMenuCommand command) {
+    tabMenuCommandAt(app, terminalTabBounds(app, terminal), command);
 }
 void toggleTabPin(const Application& app, int visibleIndex) {
     tabMenuCommand(app, visibleIndex, TabMenuCommand::Pin);
@@ -3943,6 +3948,96 @@ void scrollingProjectDragTests(const fs::path& executable) {
     }
     check(scrollInfo(scrollbar).nPos==0,"A fitting project list retained its old scroll position");
 }
+void terminalTabManagementTests(const fs::path& executable) {
+    Fixture fixture;
+    const auto firstTerminal = [](const Application& app) { return FindWindowExW(app.window, nullptr, L"PoppyTerminal", nullptr); };
+    const auto protect = [](const Application& app, HWND shell) {
+        const auto rect = terminalTabBounds(app, shell);
+        click(app.window, rect.left + 12, (rect.top + rect.bottom) / 2, true);
+        check(IsWindow(shell), "Middle-click closed a pinned terminal");
+        click(app.window, rect.right - MulDiv(14, GetDpiForWindow(app.window), 96), (rect.top + rect.bottom) / 2);
+        check(IsWindow(shell), "A pinned terminal retained a close button");
+    };
+    {
+        Application app(executable, fixture.root); app.tree();
+        const auto first = firstTerminal(app); check(first != nullptr, "Initial terminal is missing");
+        addTerminal(app, first);
+        const auto second = FindWindowExW(app.window, first, L"PoppyTerminal", nullptr);
+        addTerminal(app, second);
+        const auto third = FindWindowExW(app.window, second, L"PoppyTerminal", nullptr);
+        check(second && third, "Terminal tab fixture did not add sessions");
+        terminalTabMenuCommand(app, second, TabMenuCommand::Pin);
+        check(IsWindowVisible(third), "Pinning an inactive terminal changed the selection");
+        check(terminalTabBounds(app, second).bottom == terminalTabBounds(app, first).top, "Pinned terminal did not move to its own row");
+        protect(app, second);
+        clickTerminalTab(app, third);
+        terminalTabMenuCommand(app, first, TabMenuCommand::CloseOthers);
+        check(IsWindow(first) && IsWindow(second) && !IsWindow(third) && IsWindowVisible(first),
+              "Terminal Close Others lost its inactive target or closed a pinned session");
+        terminalTabMenuCommand(app, first, TabMenuCommand::CloseAll);
+        check(!IsWindow(first) && IsWindow(second) && dockTabCount(app) == 1, "Terminal Close All closed a pinned session");
+    }
+    {
+        Application app(executable, fixture.root); app.tree();
+        const auto shell = firstTerminal(app);
+        check(shell && dockTabCount(app) == 1, "Restart did not restore the surviving terminal");
+        protect(app, shell);
+        terminalTabMenuCommand(app, shell, TabMenuCommand::Pin);
+        const auto rect = terminalTabBounds(app, shell);
+        click(app.window, rect.left + 12, (rect.top + rect.bottom) / 2, true);
+        check(!firstTerminal(app) && dockTabCount(app) == 0, "Closing the final terminal created a replacement");
+    }
+    {
+        Application app(executable, fixture.root); app.tree();
+        check(!firstTerminal(app) && dockTabCount(app) == 0, "Restart recreated a closed terminal");
+        const auto viewer = FindWindowExW(app.window, nullptr, L"PoppyViewer", nullptr);
+        controlShortcut(app, viewer, 'J', [&] { return firstTerminal(app) != nullptr; }, "Ctrl+J did not create the first terminal after restart");
+        const auto shell = firstTerminal(app);
+        check(IsWindowVisible(shell) && dockTabCount(app) == 1, "Ctrl+J did not show exactly one new terminal");
+        terminalTabMenuCommand(app, shell, TabMenuCommand::CloseAll);
+        check(!firstTerminal(app) && dockTabCount(app) == 0, "Close All did not close the final terminal");
+        controlShortcut(app, viewer, 'J', [&] { return firstTerminal(app) != nullptr; }, "Ctrl+J did not recreate a terminal in the same session");
+        check(IsWindowVisible(firstTerminal(app)), "Recreated terminal was hidden");
+    }
+
+    Fixture mixed; writeLines(mixed.root / L"a.txt", 120); writeLines(mixed.root / L"b.txt", 240);
+    {
+        Application app(executable, mixed.root); const auto tree = app.tree();
+        const auto first = firstTerminal(app); addTerminal(app, first);
+        const auto second = FindWindowExW(app.window, first, L"PoppyTerminal", nullptr);
+        const auto viewer = FindWindowExW(app.window, nullptr, L"PoppyViewer", nullptr);
+        waitFor([&] { return send(tree, treeGetCount) == 3; }, "Mixed terminal fixture did not load");
+        const auto file = nextItem(tree, TreeRelation::Child, nextItem(tree, TreeRelation::Root));
+        send(tree, treeSelect, file); waitLines(viewer, 120); toggleTabPin(app, 0);
+        send(tree, treeSelect, nextItem(tree, TreeRelation::Next, file)); waitLines(viewer, 240); keepTab(app, 1);
+        terminalTabMenuCommand(app, second, TabMenuCommand::CloseOthers);
+        check(!IsWindow(first) && IsWindow(second) && IsWindowVisible(second) && visibleTabCount(app) == 1,
+              "Terminal Close Others did not include editor tabs or preserve the pinned editor");
+        terminalTabMenuCommand(app, second, TabMenuCommand::CloseAll);
+        check(!firstTerminal(app) && visibleTabCount(app) == 1 && IsWindowVisible(viewer), "Mixed Close All lost the pinned editor or recreated a terminal");
+        waitLines(viewer, 120);
+        controlShortcut(app, viewer, 'J', [&] { return firstTerminal(app) != nullptr; }, "Ctrl+J did not add a terminal below the retained editor");
+        const auto lower = firstTerminal(app);
+        check(IsWindowVisible(lower) && bounds(app.window, lower).top > bounds(app.window, viewer).bottom,
+              "The first new terminal did not open below the editor");
+        controlShortcut(app, viewer, 'J', [&] { return !IsWindowVisible(lower); }, "Ctrl+J did not hide the recreated lower pane");
+        controlShortcut(app, viewer, 'J', [&] { return IsWindowVisible(lower) != FALSE; }, "Ctrl+J did not restore the recreated lower pane");
+        addTerminal(app, lower);
+        const auto right = FindWindowExW(app.window, lower, L"PoppyTerminal", nullptr);
+        const auto body = bounds(app.window, right);
+        dragTerminalTab(app, lower, {body.left + 1, (body.top + body.bottom) / 2});
+        check(IsWindowVisible(lower) && IsWindowVisible(right), "Terminal close fixture did not split");
+        terminalTabMenuCommand(app, lower, TabMenuCommand::CloseAll);
+        check(!IsWindow(lower) && IsWindowVisible(right) && visibleTabCount(app) == 1, "Terminal Close All affected another group");
+        terminalTabMenuCommand(app, right, TabMenuCommand::CloseAll);
+        check(!firstTerminal(app) && visibleTabCount(app) == 1 && IsWindowVisible(viewer), "Closing split terminals did not return to the editor");
+        waitLines(viewer, 120);
+    }
+    {
+        Application app(executable, mixed.root); app.tree();
+        check(!firstTerminal(app) && visibleTabCount(app) == 1, "Restart lost the pinned editor or recreated closed split terminals");
+    }
+}
 void terminalTitleTests(const fs::path& executable) {
     Fixture fixture; writeFile(fixture.root / L"test.txt");
     {
@@ -3968,9 +4063,7 @@ void terminalTitleTests(const fs::path& executable) {
         check(name(second) == L"Second title", "Background title changed the active terminal's name");
         clickTerminalTab(app, shell);
 
-        check(PostMessageW(app.window, WM_CONTEXTMENU, reinterpret_cast<WPARAM>(app.window), MAKELPARAM(-1, -1)), "Cannot open terminal context menu");
-        waitFor([&] { GUITHREADINFO info{}; info.cbSize = sizeof(info); return GetGUIThreadInfo(app.process.dwThreadId, &info) && (info.flags & GUI_INMENUMODE); }, "Terminal context menu did not open");
-        PostMessageW(pane, WM_KEYDOWN, VK_HOME, 0); PostMessageW(pane, WM_KEYDOWN, VK_RETURN, 0);
+        terminalTabMenuCommand(app, shell, TabMenuCommand::RenameTerminal);
         HWND edit = nullptr;
         waitFor([&] { edit = GetDlgItem(pane, 1001); return edit != nullptr; }, "Terminal rename did not open");
         wchar_t initial[512]{}; send(edit, WM_GETTEXT, 512, reinterpret_cast<LPARAM>(initial));
@@ -4223,7 +4316,7 @@ int wmain(int argc, wchar_t** argv) {
         if (argc == 3) { Fixture appData; AppDataEnvironment environment(appData.root); fileDockPlacementTests(fs::absolute(argv[1])); dockLayoutTests(fs::absolute(argv[1])); return 0; }
         for (const auto test : {folderTests, explorerSortTests, sidebarTests, treeInteractionTests, collapseAllSidebarTests, navigationHistoryTests, previewTabTests, explorerPreviewTabTests, previewTabSplitTests, fileDockPlacementTests, tabTests, rapidTabMiddleClickTests, pinnedTabTests,
                 tabCopyPathTests, bulkTabCloseTests, bulkTabSaveTests, bulkTabSplitTests, explorerActiveFileTests, htmlTabToolsTests, editorTailTests,
-                tabDragTests, wrappingTabDragTests, wrappingTabTests, renameTests, explorerMoveTests, explorerDeleteTests, explorerDeleteConfirmationTests, explorerMultipleSelectionTests, crossProjectFolderCopyTests, createItemTests, newFileShortcutTests, pasteImageTests, splitPaneTests, dockLayoutTests, quickOpenTests, fileComparisonTests, fullSearchTests, searchRetentionTests, gitSidebarTests, gitIgnoredExplorerTests, gitAutoRefreshTests, editableGitDiffTests, branchSidebarTests, comparisonSidebarTests, multiRepositoryTests, sessionTests, multiProjectTests, recentProjectTests, projectDragTests, scrollingProjectDragTests, terminalTitleTests, terminalShellTests, terminalShortcutTests, terminalBackspaceTests}) {
+                tabDragTests, wrappingTabDragTests, wrappingTabTests, renameTests, explorerMoveTests, explorerDeleteTests, explorerDeleteConfirmationTests, explorerMultipleSelectionTests, crossProjectFolderCopyTests, createItemTests, newFileShortcutTests, pasteImageTests, splitPaneTests, dockLayoutTests, quickOpenTests, fileComparisonTests, fullSearchTests, searchRetentionTests, gitSidebarTests, gitIgnoredExplorerTests, gitAutoRefreshTests, editableGitDiffTests, branchSidebarTests, comparisonSidebarTests, multiRepositoryTests, sessionTests, multiProjectTests, recentProjectTests, projectDragTests, scrollingProjectDragTests, terminalTabManagementTests, terminalTitleTests, terminalShellTests, terminalShortcutTests, terminalBackspaceTests}) {
             Fixture appData; AppDataEnvironment environment(appData.root);
             test(fs::absolute(argv[1]));
         }
