@@ -25,8 +25,10 @@ public:
     void setDpi(UINT dpi);
     void show(std::shared_ptr<const Document> document, const ResourceId& path, bool preserve = false, bool allowHtml = true);
     void showTail(std::shared_ptr<const Document> document, const ResourceId& path, bool preserve = false);
+    void showFileWindow(std::shared_ptr<const Document> document, const ResourceId& path, uint64_t requestedOffset);
+    void cancelFileWindowRequest();
     bool tailPreview() const { return document_ && document_->tail && !diff_; }
-    bool tailPaused() const { return tailPreview() && !scrollRange_.atTail(top_); }
+    bool tailPaused() const { return tailPreview() && (pendingFileOffset_ || document_->tailEndOffset < document_->fileBytes || !scrollRange_.atTail(top_)); }
     void showRevision(std::shared_ptr<const Document> document, const DiffDocument& changes, const ResourceId& path, bool preserve = false);
     void edit(std::shared_ptr<EditBuffer> buffer, const ResourceId& path, bool preserve = false);
     void setGitBase(std::shared_ptr<const Document> before);
@@ -34,6 +36,7 @@ public:
     std::shared_ptr<EditBuffer> buffer() const { return edit_; }
     std::function<void()> changed, save, focused, diffLayoutChanged, statusChanged;
     std::function<void()> tailRequested;
+    std::function<void(uint64_t)> fileWindowRequested;
     std::wstring textStatus() const;
     void showDiff(std::shared_ptr<const DiffDocument> document, const ResourceId& path, bool preserve = false);
     void editDiff(std::shared_ptr<EditBuffer> buffer, std::shared_ptr<const Document> before, const ResourceId& path, bool preserve = false);
@@ -70,6 +73,12 @@ private:
     RECT contentRect() const;
     void scrollbars(bool followTail = false);
     void scroll(int vertical, int horizontal);
+    void seekFileByte(uint64_t offset);
+    void requestFileWindow(uint64_t offset, int rows = 0);
+    void indexFileBytes();
+    uint64_t fileByteAt(size_t offset) const;
+    size_t fileTextAt(uint64_t offset) const;
+    uint64_t fileRowByte(int row) const;
     void extendSelection(int x, int y);
     void extendColumns(int x, int y);
     void clearColumns();
@@ -133,6 +142,10 @@ private:
     bool wordWrap_ = true, layoutDirty_ = true, caretTrailing_ = false;
     bool textOnly_ = false;
     bool tailWasPaused_ = false;
+    std::optional<uint64_t> pendingFileOffset_;
+    int pendingFileRows_ = 0;
+    // UTF-16 positions use original code units, while the displayed text is UTF-8.
+    std::vector<uint32_t> fileLineBytes_;
     TextLayout textLayout_;
     DiffLayout diffLayout_;
     static constexpr UINT_PTR caretTimer = 0x5056;

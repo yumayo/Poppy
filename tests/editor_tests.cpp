@@ -3,6 +3,7 @@
 #include "text_layout.h"
 #include "selection_scroll.h"
 #include "editor_scroll.h"
+#include "file_byte_scroll.h"
 #include "change_marks.h"
 #include "composition.h"
 #include "terminal_model.h"
@@ -518,7 +519,31 @@ void selectionScrolling() {
     check(selectionScrollRows(100, 40, 20, 20) == 0);
     check(selectionScrollRows(100, 0, 80, 0) == 0);
 }
+void byteScrolling() {
+    for (const uint64_t size : {0ull, 1ull, 1024ull, 5ull * 1024 * 1024 * 1024, 12ull * 1024 * 1024 * 1024 * 1024, ~0ull}) {
+        const FileByteScroll range{size, 512};
+        check(range.range() > 0 && range.range() <= 1000000000);
+        check(range.page() >= 1 && range.page() <= range.range());
+        check(range.position(0) == 0 && range.position(size) == range.maximum());
+        check(range.position(~0ull) == range.maximum());
+        if (!range.maximum()) continue;
+        check(range.byte(0) == 0 && range.byte(range.maximum()) == size);
+        int previous = 0;
+        for (const int percent : {1, 10, 25, 50, 75, 90, 99}) {
+            const uint64_t byte = size / 100 * percent;
+            const int position = range.position(byte);
+            check(position >= previous && position < range.maximum());
+            const auto restored = range.byte(position);
+            const auto difference = restored > byte ? restored - byte : byte - restored;
+            check(difference <= size / static_cast<uint64_t>(range.maximum()) + 4096);
+            previous = position;
+        }
+    }
+    check(scaleFileBytes(1000, 500, 23) == 23);
+    check(scaleFileBytes(0, 0, ~0ull) == 0);
+}
 int main() {
+    byteScrolling();
     compositionLayout();
     columnSelection();
     mixedUtf8Files();

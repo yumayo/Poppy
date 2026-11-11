@@ -48,14 +48,14 @@ public:
         if (requireAccess && error) result.error = wide(error.message());
         return result;
     }
-    ProviderFile readFile(const ResourceId& path, FileReadMode mode) override {
+    ProviderFile readFile(const ResourceId& path, FileReadMode mode, uint64_t requestedOffset) override {
         ProviderFile result;
         Handle file(CreateFileW(path.local().c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN, nullptr));
         if (!file) { result.error = winError(); return result; }
         LARGE_INTEGER size{}; if (!GetFileSizeEx(file.value, &size)) { result.error = winError(); return result; }
-        if (size.QuadPart >= 0 && (mode == FileReadMode::Tail || (mode == FileReadMode::Preview && size.QuadPart > static_cast<LONGLONG>(maxFileBytes)))) {
+        if (size.QuadPart >= 0 && (mode == FileReadMode::Tail || mode == FileReadMode::Window || (mode == FileReadMode::Preview && size.QuadPart > static_cast<LONGLONG>(maxFileBytes)))) {
             try {
-                auto tail = readFileTail(static_cast<uint64_t>(size.QuadPart), [&](uint64_t at, size_t count) {
+                const ReadFileRange range = [&](uint64_t at, size_t count) {
                     LARGE_INTEGER position{}; position.QuadPart = static_cast<LONGLONG>(at);
                     if (!SetFilePointerEx(file.value, position, nullptr, FILE_BEGIN)) throw std::runtime_error(utf8(winError()));
                     std::string bytes(count, 0); size_t offset = 0;
@@ -66,8 +66,9 @@ public:
                         offset += received;
                     }
                     bytes.resize(offset); return bytes;
-                });
-                result.bytes = std::move(tail.bytes); result.tail = true; result.offset = tail.offset; result.fileBytes = tail.fileBytes;
+                };
+                auto tail = mode == FileReadMode::Window ? readFileWindow(static_cast<uint64_t>(size.QuadPart), requestedOffset, range) : readFileTail(static_cast<uint64_t>(size.QuadPart), range);
+                result.bytes = std::move(tail.bytes); result.tail = true; result.offset = tail.offset; result.fileBytes = tail.fileBytes; result.endOffset = tail.endOffset;
             } catch (const std::exception& error) { result.error = wide(error.what()); }
             return result;
         }

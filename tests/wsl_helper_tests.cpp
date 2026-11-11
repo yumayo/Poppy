@@ -398,9 +398,26 @@ void largeFiles(const std::string& executable) {
     auto snapshot = helper.call("readFile", file, {{"readMode", "preview"}});
     check(snapshot.bytes == entries(40, 140) && field(snapshot.metadata, "tail") == "1" && version(snapshot).empty(), "A multi-GB preview was not a read-only tail");
     check(number(snapshot.metadata, "fileBytes") == fs::file_size(file) && number(snapshot.metadata, "offset") > 0xffffffffull && snapshot.bytes.size() <= poppy::maxTailBytes, "Sparse log metadata overflowed or exceeded the receive bound");
+    check(number(snapshot.metadata, "endOffset") == fs::file_size(file), "A tail snapshot did not identify EOF");
     const std::string edited = "must not overwrite a partial file";
     helper.call("saveFile", file, {{"version", version(snapshot)}, {"size", std::to_string(edited.size())}}, &edited, false);
     check(fs::file_size(file) == number(snapshot.metadata, "fileBytes"), "A tail snapshot could overwrite the full file");
+    const uint64_t middle = 4ull * 1024 * 1024 * 1024 + 123;
+    const std::string marker = u8"\nMIDDLE 日本😀\r\n";
+    {
+        std::fstream stream(file, std::ios::binary | std::ios::in | std::ios::out);
+        stream.seekp(static_cast<std::streamoff>(middle)); stream.write(marker.data(), static_cast<std::streamsize>(marker.size())); stream.close();
+        check(!stream.fail(), "Cannot write a sparse log's middle marker");
+    }
+    auto range = helper.call("readFile", file, {{"readMode", "window"}, {"offset", std::to_string(middle + 1)}});
+    check(range.bytes == marker.substr(1) && number(range.metadata, "offset") == middle + 1 && number(range.metadata, "endOffset") == middle + marker.size(), "An arbitrary multi-GB range did not read its requested lines");
+    check(field(range.metadata, "tail") == "1" && version(range).empty() && range.bytes.size() <= poppy::maxFileWindowBytes, "An arbitrary file range became editable or unbounded");
+    range = helper.call("readFile", file, {{"readMode", "window"}, {"offset", "0"}});
+    check(range.bytes == "log\n" && number(range.metadata, "offset") == 0, "A start jump did not read the beginning of a sparse log");
+    range = helper.call("readFile", file, {{"readMode", "window"}, {"offset", "18446744073709551615"}});
+    check(range.bytes == entries(1, 140) && number(range.metadata, "endOffset") == fs::file_size(file), "A byte offset beyond EOF did not clamp to the last window");
+    for (const auto& offset : {"-1", "18446744073709551616", "abc"}) helper.call("readFile", file, {{"readMode", "window"}, {"offset", offset}}, nullptr, false);
+    helper.call("readFile", file, {{"readMode", "window"}}, nullptr, false);
     append(entries(140, 170));
     snapshot = helper.call("readFile", file, {{"readMode", "tail"}});
     check(snapshot.bytes == entries(70, 170), "A sparse file tail did not advance after appending");
@@ -410,6 +427,8 @@ void largeFiles(const std::string& executable) {
     fs::rename(file, fixture.root / "rotated.log"); write(file, "new log\n");
     snapshot = helper.call("readFile", file, {{"readMode", "tail"}});
     check(snapshot.bytes == "new log\n" && field(snapshot.metadata, "tail") == "1" && number(snapshot.metadata, "offset") == 0, "Log rotation did not retain read-only tail mode");
+    range = helper.call("readFile", file, {{"readMode", "window"}, {"offset", std::to_string(middle)}});
+    check(range.bytes == "new log\n" && number(range.metadata, "offset") == 0 && number(range.metadata, "endOffset") == 8 && version(range).empty(), "A byte request from before rotation did not clamp to the replacement file");
     append(entries(0, 140));
     check(helper.call("readFile", file, {{"readMode", "tail"}}).bytes == entries(40, 140), "A truncated tail did not resume growing");
     snapshot = helper.call("readFile", file, {{"readMode", "preview"}});
@@ -417,6 +436,8 @@ void largeFiles(const std::string& executable) {
     write(file, "");
     snapshot = helper.call("readFile", file, {{"readMode", "tail"}});
     check(snapshot.bytes.empty() && snapshot.last && field(snapshot.metadata, "tail") == "1", "An empty tailed file omitted its final chunk");
+    range = helper.call("readFile", file, {{"readMode", "window"}, {"offset", "18446744073709551615"}});
+    check(range.bytes.empty() && range.last && number(range.metadata, "endOffset") == 0, "An empty byte window lost its EOF marker or final chunk");
     helper.call("readFile", file, {{"readMode", "unsupported"}}, nullptr, false);
     helper.eof();
 }

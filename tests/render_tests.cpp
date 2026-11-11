@@ -9,6 +9,7 @@
 #include "git_commit_pane.h"
 #include "shutdown_dialog.h"
 #include "error_popup.h"
+#include "file_tail.h"
 #include <commctrl.h>
 #include <imm.h>
 #include <algorithm>
@@ -2820,6 +2821,7 @@ void largeFileTailPreview() {
         auto document = std::make_shared<Document>(); document->tail = true;
         document->fileBytes = 5ull * 1024 * 1024 * 1024;
         for (int i = first; i < first + count; ++i) document->text += std::to_string(i) + u8" 日本😀\r\n";
+        document->tailOffset = document->fileBytes - document->text.size(); document->tailEndOffset = document->fileBytes;
         indexDocument(*document); return document;
     };
     const auto atBottom = [&] {
@@ -2833,7 +2835,7 @@ void largeFileTailPreview() {
         auto first = snapshot(0, 100);
         viewer.showTail(first, L"large.log");
         check(viewer.tailPreview() && !viewer.tailPaused() && atBottom() && !viewer.buffer(), "A large file did not open read-only at EOF");
-        check(viewer.textStatus().find(L"TAIL") != std::wstring::npos && viewer.textStatus().find(L"READ ONLY") != std::wstring::npos, "Tail status did not explain the partial view");
+        check(viewer.textStatus().find(L"LARGE FILE") != std::wstring::npos && viewer.textStatus().find(L"READ ONLY") != std::wstring::npos, "Large file status did not explain the partial view");
         SendMessageW(viewer.window(), WM_CHAR, 'x', 0);
         SendMessageW(viewer.window(), WM_KEYDOWN, VK_DELETE, 0);
         check(first->text == snapshot(0, 100)->text && !viewer.buffer(), "Typing changed a partial tail document");
@@ -2858,7 +2860,136 @@ void largeFileTailPreview() {
         viewer.showTail(snapshot(0, 100), L"large.html");
         check(!viewer.htmlAvailable() && !viewer.htmlPreview(), "A partial HTML document launched a whole-file browser preview");
         viewer.show(std::make_shared<Document>(), L"ordinary.txt");
-        check(!viewer.tailPreview() && viewer.textStatus().find(L"TAIL") == std::wstring::npos, "An ordinary file inherited tail mode");
+        check(!viewer.tailPreview() && viewer.textStatus().find(L"LARGE FILE") == std::wstring::npos, "An ordinary file inherited tail mode");
+    }
+}
+void largeFileByteScrolling() {
+    const auto instance = GetModuleHandleW(nullptr);
+    const auto parent = CreateWindowExW(0, L"STATIC", L"Large file byte scroll test", WS_POPUP | WS_CLIPCHILDREN,
+        0, 0, 640, 360, nullptr, nullptr, instance, nullptr);
+    check(parent != nullptr, "Could not create byte scroll test window");
+    struct WindowOwner { HWND value; ~WindowOwner() { DestroyWindow(value); } } owner{parent};
+    Viewer viewer; viewer.create(parent, instance); MoveWindow(viewer.window(), 0, 0, 640, 360, FALSE);
+    constexpr uint64_t size = 5ull * 1024 * 1024 * 1024;
+    const auto snapshot = [](uint64_t offset, int count, uint64_t fileBytes = 5ull * 1024 * 1024 * 1024) {
+        auto document = std::make_shared<Document>(); document->tail = true;
+        document->fileBytes = fileBytes; document->tailOffset = offset;
+        for (int row = 0; row < count; ++row) document->text += std::string(63, 'x') + '\n';
+        document->tailEndOffset = offset + document->text.size(); indexDocument(*document); return document;
+    };
+    std::vector<uint64_t> requests;
+    viewer.fileWindowRequested = [&](uint64_t offset) { requests.push_back(offset); };
+    const auto window = viewer.window();
+    const auto info = [&] { return ScrollbarWindow::info(window, SB_VERT); };
+    for (const bool wrap : {false, true}) for (const UINT dpi : {96u, 144u, 192u}) {
+        viewer.setDpi(dpi); viewer.setWordWrap(wrap); requests.clear();
+        viewer.showTail(snapshot(size - 6400, 100), L"huge.log");
+        SendMessageW(window, WM_VSCROLL, SB_TOP, 0);
+        check(requests.size() == 1 && requests.back() == 0 && viewer.tailPaused(), "File beginning did not request a byte window or pause following");
+        viewer.showTail(snapshot(size - 6400, 100), L"huge.log", true);
+        check(viewer.tailPaused(), "An external refresh cancelled pending navigation");
+        viewer.showFileWindow(snapshot(0, 100), L"huge.log", 0);
+        check(viewer.state().top == 0 && info().nPos == 0 && viewer.tailPaused(), "Beginning window did not land at the global beginning");
+        const auto oldRequests = requests.size();
+        SendMessageW(window, WM_MOUSEWHEEL, MAKEWPARAM(0, static_cast<WORD>(-WHEEL_DELTA)), 0);
+        check(viewer.state().top > 0 && requests.size() == oldRequests, "Scrolling within a cached window performed I/O");
+        SendMessageW(window, WM_VSCROLL, SB_BOTTOM, 0);
+        check(requests.back() == std::numeric_limits<uint64_t>::max(), "End seek used the stale file size");
+        viewer.showFileWindow(snapshot(size + 6400 - 6400, 100, size + 6400), L"huge.log", requests.back());
+        check(!viewer.tailPaused() && info().nPos == info().nMax - static_cast<int>(info().nPage) + 1,
+            "End seek did not follow data appended during the read");
+
+        // Crossing a cache boundary preserves an existing row as its anchor.
+        constexpr uint64_t middle = size / 2;
+        viewer.showFileWindow(snapshot(middle, 100), L"huge.log", middle);
+        SendMessageW(window, WM_KEYDOWN, VK_UP, 0);
+        check(requests.back() == middle - 1, "Scrolling above a window did not include the preceding row");
+        const auto beforePending = requests.size();
+        SendMessageW(window, WM_KEYDOWN, VK_UP, 0);
+        check(requests.size() == beforePending, "Pending row movement queued duplicate reads");
+        viewer.showFileWindow(snapshot(middle - 6400, 300), L"huge.log", middle - 1);
+        check(viewer.state().top == 98 || (wrap && viewer.state().top == 99), "The next window lost accumulated upward row movement");
+        check(viewer.tailPaused(), "An interior window incorrectly resumed tail following");
+
+        // A thumb drag uses the entire file, even above the 32-bit byte range.
+        viewer.showFileWindow(snapshot(0, 100), L"huge.log", 0);
+        const auto thumb = Scrollbars::thumbRect(window, SB_VERT), track = Scrollbars::trackRect(window, SB_VERT);
+        const int x = (thumb.left + thumb.right) / 2, y = (thumb.top + thumb.bottom) / 2;
+        SendMessageW(window, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(x, y));
+        check(GetCapture() == window, "Could not drag the global file scrollbar");
+        SendMessageW(window, WM_MOUSEMOVE, MK_LBUTTON, MAKELPARAM(x, (track.top + track.bottom) / 2));
+        check(!requests.empty() && requests.back() > size / 3 && requests.back() < size * 2 / 3,
+            "Thumb drag did not target the middle of the multi-GB file");
+        SendMessageW(window, WM_LBUTTONUP, 0, MAKELPARAM(x, (track.top + track.bottom) / 2));
+        SendMessageW(window, WM_KEYDOWN, VK_HOME, 0);
+        check(requests.back() == 0, "Home did not supersede an outstanding thumb request");
+        viewer.cancelFileWindowRequest();
+        viewer.show(std::make_shared<Document>(), L"ordinary.txt");
+        check(!viewer.tailPreview() && !viewer.tailPaused(), "Changing files retained pending large-file navigation");
+    }
+    viewer.setDpi(96); viewer.setWordWrap(true);
+    auto giant = std::make_shared<Document>(); giant->tail = true; giant->fileBytes = size;
+    giant->tailOffset = size / 2; giant->text.assign(512 * 1024, 'x'); giant->tailEndOffset = giant->tailOffset + giant->text.size();
+    indexDocument(*giant); viewer.showFileWindow(giant, L"giant.log", giant->tailOffset);
+    auto bottom = viewer.state(); bottom.top = 0; bottom.wrapOffset = maxLineColumns;
+    viewer.restore(bottom); SendMessageW(window, WM_KEYDOWN, VK_DOWN, 0);
+    check(requests.back() == giant->tailEndOffset, "A giant line reloaded its old fragment instead of advancing");
+    for (const bool wrap : {false, true}) {
+        viewer.setWordWrap(wrap);
+        auto next = std::make_shared<Document>(*giant); next->tailOffset += 256 * 1024; next->tailEndOffset += 256 * 1024;
+        viewer.showFileWindow(next, L"giant.log", next->tailOffset);
+        auto position = viewer.state(); position.top = 0; position.wrapOffset = maxLineColumns;
+        viewer.restore(position);
+        const auto before = requests.size();
+        SendMessageW(window, WM_KEYDOWN, VK_UP, 0);
+        check(requests.size() == before || requests.back() <= next->tailOffset,
+            "Scrolling up in a giant line incorrectly fetched a later fragment");
+    }
+    viewer.setWordWrap(false);
+    auto mixed = std::make_shared<Document>(*giant); mixed->text.insert(0, "one\ntwo\n");
+    mixed->tailEndOffset += 8; indexDocument(*mixed);
+    viewer.showFileWindow(mixed, L"giant.log", mixed->tailOffset);
+    auto nearEnd = viewer.state(); nearEnd.top = 1; viewer.restore(nearEnd);
+    const auto beforeLastRow = requests.size();
+    SendMessageW(window, WM_KEYDOWN, VK_DOWN, 0);
+    check(requests.size() == beforeLastRow && viewer.state().top == 2,
+        "Forward prefetch skipped the remaining visible rows before a giant fragment");
+    SendMessageW(window, WM_KEYDOWN, VK_DOWN, 0);
+    check(requests.size() == beforeLastRow + 1 && requests.back() == mixed->tailEndOffset,
+        "Exhausting a giant fragment did not advance to the next byte window");
+    auto utf16 = std::make_shared<Document>(); utf16->tail = true; utf16->encoding = "UTF-16 LE";
+    utf16->fileBytes = size; utf16->tailOffset = size / 2;
+    uint64_t rawBytes = 0, target = 0;
+    for (int row = 0; row < 100; ++row) {
+        if (row == 60) target = utf16->tailOffset + rawBytes;
+        const auto line = row % 2 ? std::string("ASCII\r\n") : std::string(u8"日本😀\r\n");
+        utf16->text += line;
+        for (size_t at = 0; at < line.size();) rawBytes += decodeUtf8(line, at) >= 0x10000 ? 4 : 2;
+    }
+    utf16->tailEndOffset = utf16->tailOffset + rawBytes; indexDocument(*utf16);
+    viewer.showFileWindow(utf16, L"utf16.log", target);
+    check(viewer.state().top == 60, "UTF-16 seeking used decoded UTF-8 byte widths");
+
+    const std::string source = std::string(maxFileWindowBytes * 2, 'x') + "\nafter\n" + std::string(maxFileWindowBytes * 2, 'y');
+    const uint64_t afterGiant = maxFileWindowBytes * 2 + 1;
+    const auto loadWindow = [&](uint64_t offset) {
+        const auto range = readFileWindow(source.size(), offset,
+            [&](uint64_t at, size_t count) { return source.substr(static_cast<size_t>(at), count); });
+        auto document = std::make_shared<Document>(); document->tail = true;
+        document->tailOffset = range.offset; document->tailEndOffset = range.endOffset; document->fileBytes = range.fileBytes;
+        std::string error; check(decodeText(range.bytes, document->text, document->encoding, error), "Could not decode a byte window fixture");
+        indexDocument(*document); return document;
+    };
+    for (const bool wrap : {false, true}) {
+        viewer.setWordWrap(wrap);
+        auto initial = loadWindow(afterGiant); viewer.showFileWindow(initial, L"previous-giant.log", afterGiant);
+        check(initial->tailOffset == afterGiant && viewer.state().top == 0, "The preceding giant-line fixture did not start at a cache boundary");
+        SendMessageW(window, WM_KEYDOWN, VK_UP, 0);
+        const auto requested = requests.back(); auto previous = loadWindow(requested);
+        check(requested == afterGiant - 1 && previous->tailOffset < initial->tailOffset && previous->text.front() == 'x',
+            "Backward scrolling repeatedly discarded the preceding giant line");
+        viewer.showFileWindow(previous, L"previous-giant.log", requested);
+        check(viewer.state().top == 0, "Backward scrolling failed to display the preceding giant-line fragment");
     }
 }
 void continuousViewerScrolling() {
@@ -3431,7 +3562,7 @@ int main(int argc, char** argv) {
             editorBodyFileDrops(); continuousDraggedTab(); terminalDropPreviewClipping();
             shutdownProgress();
             persistentErrorPopup();
-            editorBottomPadding(); editorTailFollowing(); largeFileTailPreview();
+            editorBottomPadding(); editorTailFollowing(); largeFileTailPreview(); largeFileByteScrolling();
             csvTables(); htmlPreviewSwitching();
             terminalAsyncStartup(); terminalProcessShutdown(); terminalImeOutput();
             statusBarLimits(); treeMultipleSelection(); commitMessagePopup(); inlineTreeInput(); inlineTreeCreation(); gitCommitInput(); cellPositions(); colorsAndClipping(); imagePreviews(); fractionalMarkers(); smoothIcons(); windowTargets(); editableDiff(); editorCaret(); delayedLoadingMessages(); imeCellRendering(); imeTerminalInsertion(); imeUiRendering(); imePositions(); editorWordSelection(); editorColumnSelection(); editorWordMovement(); editorWordDeletion(); editorLineShortcuts(); editorWrapping(); diffWrapping(); documentFind(); horizontalWheelScrolling(); continuousViewerScrolling(); selectionAutoScrolling(); terminalGitBashSocketEnvironment(); terminalSelectionAutoScrolling(); themedScrollbars(); quickOpenStability();

@@ -2,6 +2,7 @@
 #include "file_drop.h"
 #include "selection_scroll.h"
 #include "change_marks.h"
+#include "file_byte_scroll.h"
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -74,6 +75,7 @@ void Viewer::show(std::shared_ptr<const Document> d, const ResourceId& path, boo
     edit_.reset(); diffBefore_.reset(); gitBefore_.reset(); gitChangedLines_ = {}; gitChangeRanges_ = {}; highSurrogate_ = 0;
     diffLayout_ = {}; layoutDirty_ = true; caretTrailing_ = false;
     diff_.reset(); diffChangeRanges_ = {}; document_ = std::move(d); path_ = path; message_.clear();
+    pendingFileOffset_.reset(); pendingFileRows_ = 0; indexFileBytes();
     if (!preserve) { top_ = left_ = 0; anchor_ = caret_ = 0; after_ = false; }
     else { anchor_ = std::min(anchor_, document_->text.size()); caret_ = std::min(caret_, document_->text.size()); }
     scrollbars(); findLayout(); requestFind(false, false, false); caretPosition(); InvalidateRect(window_, nullptr, FALSE);
@@ -101,6 +103,89 @@ void Viewer::showTail(std::shared_ptr<const Document> d, const ResourceId& path,
     show(std::move(d), path, preserve, false);
     scrollbars(follow); caretPosition(); InvalidateRect(window_, nullptr, FALSE);
 }
+void Viewer::showFileWindow(std::shared_ptr<const Document> d, const ResourceId& path, uint64_t requestedOffset) {
+    const int rows = path_ == path && pendingFileOffset_ == requestedOffset ? pendingFileRows_ : 0;
+    const int horizontal = path_ == path ? left_ : 0;
+    const bool follow = requestedOffset >= d->fileBytes && rows >= 0;
+    show(std::move(d), path, false, false);
+    const auto text = fileTextAt(requestedOffset);
+    const int row = wrapping() ? static_cast<int>(textLayout_.rowForOffset(*document_, text)) :
+        static_cast<int>(std::upper_bound(document_->lines.begin(), document_->lines.end(), text) - document_->lines.begin() - 1);
+    top_ = static_cast<int>(std::clamp<int64_t>(static_cast<int64_t>(row) + rows, 0, scrollRange_.maximumTop()));
+    left_ = horizontal;
+    scrollbars(follow); caretPosition(); InvalidateRect(window_, nullptr, FALSE);
+    if (statusChanged) statusChanged();
+}
+void Viewer::cancelFileWindowRequest() {
+    pendingFileOffset_.reset(); pendingFileRows_ = 0;
+    scrollbars(); InvalidateRect(window_, nullptr, FALSE);
+}
+void Viewer::indexFileBytes() {
+    fileLineBytes_.clear();
+    if (!tailPreview() || document_->encoding.compare(0, 6, "UTF-16") != 0) return;
+    fileLineBytes_.reserve(document_->lines.size()); fileLineBytes_.push_back(0);
+    uint32_t bytes = 0;
+    for (size_t at = 0; at < document_->text.size();) {
+        const auto ch = decodeUtf8(document_->text, at);
+        bytes += ch >= 0x10000 ? 4 : 2;
+        if (ch == '\n') fileLineBytes_.push_back(bytes);
+    }
+}
+uint64_t Viewer::fileByteAt(size_t offset) const {
+    offset = std::min(offset, document_->text.size());
+    if (fileLineBytes_.empty()) {
+        return document_->tailOffset + scaleFileBytes(offset, document_->text.size(), document_->tailEndOffset - document_->tailOffset);
+    }
+    const auto row = static_cast<size_t>(std::upper_bound(document_->lines.begin(), document_->lines.end(), offset) - document_->lines.begin() - 1);
+    uint64_t bytes = fileLineBytes_[row];
+    for (size_t at = document_->lines[row]; at < offset;) bytes += decodeUtf8(document_->text, at) >= 0x10000 ? 4 : 2;
+    return std::min(document_->tailEndOffset, document_->tailOffset + bytes);
+}
+size_t Viewer::fileTextAt(uint64_t offset) const {
+    if (offset <= document_->tailOffset) return 0;
+    if (offset >= document_->tailEndOffset) return document_->text.size();
+    const uint64_t bytes = offset - document_->tailOffset;
+    if (fileLineBytes_.empty()) return static_cast<size_t>(scaleFileBytes(bytes, document_->tailEndOffset - document_->tailOffset, document_->text.size()));
+    const auto row = static_cast<size_t>(std::upper_bound(fileLineBytes_.begin(), fileLineBytes_.end(), bytes) - fileLineBytes_.begin() - 1);
+    uint64_t position = fileLineBytes_[row]; size_t at = document_->lines[row];
+    while (at < document_->text.size() && position < bytes) {
+        size_t next = at; const auto ch = decodeUtf8(document_->text, next);
+        const auto count = ch >= 0x10000 ? 4u : 2u;
+        if (count > bytes - position) break;
+        at = next; position += count;
+    }
+    return at;
+}
+uint64_t Viewer::fileRowByte(int row) const {
+    if (row < 0) return document_->tailOffset;
+    if (static_cast<size_t>(row) >= rowCount()) return document_->tailEndOffset;
+    if (!wrapping()) return fileByteAt(document_->lines[static_cast<size_t>(row)]);
+    const auto wrapped = textLayout_.row(*document_, static_cast<size_t>(row));
+    return fileByteAt(document_->lines[wrapped.line] + wrapped.begin);
+}
+void Viewer::requestFileWindow(uint64_t offset, int rows) {
+    if (!fileWindowRequested) return;
+    pendingFileOffset_ = offset; pendingFileRows_ = rows;
+    scrollbars(); InvalidateRect(window_, nullptr, FALSE);
+    fileWindowRequested(*pendingFileOffset_);
+}
+void Viewer::seekFileByte(uint64_t offset) {
+    if (!tailPreview()) return;
+    revealFind_ = false;
+    // An explicit seek supersedes any outstanding read, including when the
+    // destination lies in the old cache, so its reply cannot undo this move.
+    if (fileWindowRequested && (pendingFileOffset_ || offset < document_->tailOffset ||
+        offset >= document_->tailEndOffset)) {
+        requestFileWindow(offset); UpdateWindow(window_); return;
+    }
+    const bool wasPaused = tailPaused();
+    const size_t text = fileTextAt(offset);
+    top_ = wrapping() ? static_cast<int>(textLayout_.rowForOffset(*document_, text)) :
+        static_cast<int>(std::upper_bound(document_->lines.begin(), document_->lines.end(), text) - document_->lines.begin() - 1);
+    scrollbars(offset >= document_->fileBytes); caretPosition(); InvalidateRect(window_, nullptr, FALSE);
+    if (wasPaused && !tailPaused() && tailRequested) tailRequested();
+    UpdateWindow(window_);
+}
 void Viewer::edit(std::shared_ptr<EditBuffer> buffer, const ResourceId& path, bool preserve) {
     const auto before = edit_ == buffer && path_ == path ? gitBefore_ : nullptr;
     show(std::shared_ptr<const Document>(buffer, &buffer->document), path, preserve);
@@ -117,6 +202,7 @@ void Viewer::updateGitLines() {
     gitChangedLines_ = gitBefore_ && document_ && !diff_ ? changedWorkingLines(*gitBefore_, *document_, &gitChangeRanges_) : std::vector<bool>{};
 }
 void Viewer::showDiff(std::shared_ptr<const DiffDocument> d, const ResourceId& path, bool preserve) {
+    pendingFileOffset_.reset(); pendingFileRows_ = 0; fileLineBytes_.clear();
     csv_.hide(true);
     html_.hide();
     stopLoading();
@@ -173,6 +259,7 @@ void Viewer::refreshBuffer(bool externalUpdate) {
     layoutDirty_ = true; requestFind(false, false, false); scrollbars(followTail); caretPosition(); InvalidateRect(window_, nullptr, FALSE);
 }
 void Viewer::message(const std::wstring& text, const ResourceId& path) {
+    pendingFileOffset_.reset(); pendingFileRows_ = 0; fileLineBytes_.clear();
     csv_.hide(true);
     html_.hide();
     stopLoading();
@@ -242,7 +329,10 @@ std::wstring Viewer::textStatus() const {
     if (!document_ || diff_) return {};
     const auto newline = document_->text.find('\n');
     const bool crlf = newline != std::string::npos && newline > 0 && document_->text[newline - 1] == '\r';
-    return (tailPreview() ? L"TAIL · READ ONLY  ·  " : csv_.active() ? csv_.status() + L"  ·  " : L"") +
+    const auto mode = tailPreview() ? L"LARGE FILE · READ ONLY  ·  " + std::to_wstring(document_->tailOffset) + L"–" +
+        std::to_wstring(document_->tailEndOffset) + L" / " + std::to_wstring(document_->fileBytes) + L" bytes  ·  " :
+        csv_.active() ? csv_.status() + L"  ·  " : L"";
+    return mode +
         wide(document_->encoding) + (crlf ? L"  ·  CRLF" : L"  ·  LF");
 }
 Viewer::State Viewer::state() const {
@@ -353,7 +443,14 @@ void Viewer::scrollbars(bool followTail) {
         top_ = followTail ? scrollRange_.maximumTop() : std::clamp(top_, 0, scrollRange_.maximumTop());
         left_ = std::clamp(left_, 0, std::max(0, cols - pageCols));
         if (wrapping()) left_ = 0;
-        SCROLLINFO vertical{sizeof(vertical), SIF_RANGE | SIF_PAGE | SIF_POS, 0, scrollRange_.totalRows() - 1, static_cast<UINT>(pageRows), top_, 0}; SetScrollInfo(window_, SB_VERT, &vertical, FALSE);
+        SCROLLINFO vertical{sizeof(vertical), SIF_RANGE | SIF_PAGE | SIF_POS, 0, scrollRange_.totalRows() - 1, static_cast<UINT>(pageRows), top_, 0};
+        if (tailPreview()) {
+            const auto viewportBytes = scaleFileBytes(pageRows, std::max(1, rows), document_->tailEndOffset - document_->tailOffset);
+            const FileByteScroll range{document_->fileBytes, viewportBytes};
+            const auto byte = pendingFileOffset_.value_or(!tailPaused() ? document_->fileBytes : fileRowByte(top_));
+            vertical.nMax = range.range() - 1; vertical.nPage = static_cast<UINT>(range.page()); vertical.nPos = range.position(byte);
+        }
+        SetScrollInfo(window_, SB_VERT, &vertical, FALSE);
         SCROLLINFO horizontal{sizeof(horizontal), SIF_RANGE | SIF_PAGE | SIF_POS, 0, wrapping() ? 0 : cols - 1, static_cast<UINT>(pageCols), left_, 0}; SetScrollInfo(window_, SB_HORZ, &horizontal, FALSE);
     }
     tailWasPaused_ = tailPaused();
@@ -361,6 +458,33 @@ void Viewer::scrollbars(bool followTail) {
 void Viewer::scroll(int vertical, int horizontal) {
     const bool wasPaused = tailWasPaused_;
     revealFind_ = false;
+    if (tailPreview() && fileWindowRequested && vertical) {
+        if (pendingFileOffset_) {
+            pendingFileRows_ = static_cast<int>(std::clamp<int64_t>(static_cast<int64_t>(pendingFileRows_) + vertical, -1000000, 1000000));
+            left_ += horizontal; scrollbars(); InvalidateRect(window_, nullptr, FALSE); UpdateWindow(window_); return;
+        }
+        const auto next = static_cast<int64_t>(top_) + vertical;
+        const bool before = next < 0 && document_->tailOffset > (document_->encoding.compare(0, 6, "UTF-16") == 0 ? 2u : 3u);
+        const bool after = vertical > 0 && next + visibleRows() >= static_cast<int64_t>(rowCount()) && document_->tailEndOffset < document_->fileBytes;
+        if (before || after) {
+            // Keep an existing row as the anchor. After the larger window
+            // arrives, apply the original line/page movement to that row.
+            const auto lastLine = document_->line(document_->lines.size() - 1);
+            const bool clipped = after && (wrapping() ? textLayout_.row(*document_, rowCount() - 1).end < lastLine.size() : lastLine.size() > maxLineColumns);
+            // A line can exceed the display column limit and the byte cache.
+            // Seeking at its displayed prefix would reload the same fragment.
+            // Finish scrolling through its visible prefix before advancing.
+            if (!clipped || next >= static_cast<int64_t>(rowCount())) {
+                const auto anchor = fileRowByte(top_);
+                // Include the preceding row in a backward read. A giant
+                // preceding line would otherwise be discarded as a partial
+                // first line, leaving this window unchanged forever.
+                requestFileWindow(before ? anchor - 1 : clipped ? document_->tailEndOffset : anchor,
+                    before ? vertical + 1 : clipped ? 0 : vertical);
+                UpdateWindow(window_); return;
+            }
+        }
+    }
     top_ += vertical; left_ += horizontal; scrollbars(); caretPosition();
     InvalidateRect(window_, nullptr, FALSE);
     // Refresh on returning to EOF even if no further filesystem event arrives.
@@ -1108,6 +1232,23 @@ LRESULT Viewer::handle(UINT m, WPARAM a, LPARAM b) {
     case WM_VSCROLL: case WM_HSCROLL: {
         const bool vertical = m == WM_VSCROLL; int& pos = vertical ? top_ : left_;
         SCROLLINFO info{sizeof(info), SIF_ALL, 0, 0, 0, 0, 0}; GetScrollInfo(window_, vertical ? SB_VERT : SB_HORZ, &info);
+        if (vertical && tailPreview()) {
+            switch (LOWORD(a)) {
+            case SB_LINEUP: scroll(-1, 0); break; case SB_LINEDOWN: scroll(1, 0); break;
+            case SB_PAGEUP: scroll(-visibleRows(), 0); break; case SB_PAGEDOWN: scroll(visibleRows(), 0); break;
+            case SB_TOP: seekFileByte(0); break;
+            case SB_BOTTOM: seekFileByte(std::numeric_limits<uint64_t>::max()); break;
+            case SB_THUMBTRACK: case SB_THUMBPOSITION: {
+                const int maximum = std::max(0, info.nMax - static_cast<int>(info.nPage) + 1);
+                const int tracked = scrollbars_.trackPosition(SB_VERT, info.nTrackPos);
+                seekFileByte(tracked >= maximum ? std::numeric_limits<uint64_t>::max() :
+                    scaleFileBytes(static_cast<uint64_t>(std::max(0, tracked)), maximum, document_->fileBytes));
+                break;
+            }
+            default: break;
+            }
+            return 0;
+        }
         switch (LOWORD(a)) {
         case SB_LINEUP: --pos; break; case SB_LINEDOWN: ++pos; break;
         case SB_PAGEUP: pos -= static_cast<int>(info.nPage); break; case SB_PAGEDOWN: pos += static_cast<int>(info.nPage); break;
@@ -1161,8 +1302,8 @@ LRESULT Viewer::handle(UINT m, WPARAM a, LPARAM b) {
         if (a == VK_UP) scroll(-1, 0); else if (a == VK_DOWN) scroll(1, 0);
         else if (a == VK_LEFT) scroll(0, -4); else if (a == VK_RIGHT) scroll(0, 4);
         else if (a == VK_PRIOR) scroll(-visibleRows(), 0); else if (a == VK_NEXT) scroll(visibleRows(), 0);
-        else if (a == VK_HOME) { top_ = left_ = 0; scroll(0, 0); }
-        else if (a == VK_END && document_) { top_ = static_cast<int>(rowCount()); scroll(0, 0); }
+        else if (a == VK_HOME) { if (tailPreview()) seekFileByte(0); else { top_ = left_ = 0; scroll(0, 0); } }
+        else if (a == VK_END && document_) { if (tailPreview()) seekFileByte(std::numeric_limits<uint64_t>::max()); else { top_ = static_cast<int>(rowCount()); scroll(0, 0); } }
         return 0;
     case WM_CHAR:
         if (html_.active()) return 0;
@@ -1204,6 +1345,7 @@ size_t poppy::Viewer::documentBytes() const {
     size_t bytes = textLayout_.bytes() + diffLayout_.bytes() + (document_ ? document_->text.capacity() + document_->lines.capacity() * sizeof(uint32_t) + document_->states.capacity() * sizeof(LexState) : 0);
     bytes += csv_.bytes();
     bytes += columnRanges_.capacity() * sizeof(ColumnRange);
+    bytes += fileLineBytes_.capacity() * sizeof(uint32_t);
     bytes += gitChangedLines_.capacity() / 8;
     bytes += gitChangeRanges_.capacity() * sizeof(LineChange);
     bytes += diffChangeRanges_.capacity() * sizeof(DiffChange);

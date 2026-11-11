@@ -170,9 +170,9 @@ COLORREF stateColor(wchar_t state) {
     return state == L'U' || state == L'D' ? RGB(231,112,118) : state == L'?' || state == L'A' ? accent : RGB(224,192,128);
 }
 
-std::shared_ptr<FileResult> readDocument(ProjectProvider& provider, const ResourceId& path, FileReadMode mode = FileReadMode::Full) {
+std::shared_ptr<FileResult> readDocument(ProjectProvider& provider, const ResourceId& path, FileReadMode mode = FileReadMode::Full, uint64_t offset = 0) {
     auto result = std::make_shared<FileResult>();
-    auto file = provider.readFile(path, isImageExtension(path.extension().native()) ? FileReadMode::Full : mode);
+    auto file = provider.readFile(path, isImageExtension(path.extension().native()) ? FileReadMode::Full : mode, offset);
     if (!file.error.empty()) { result->error = file.error; return result; }
     if (isImageExtension(path.extension().native())) {
         try { result->image = decodeImage(file.bytes); }
@@ -184,7 +184,7 @@ std::shared_ptr<FileResult> readDocument(ProjectProvider& provider, const Resour
     if (static_cast<size_t>(std::count(document->text.begin(), document->text.end(), '\n')) >= maxLines) { result->error = L"This file exceeds the 1,000,000-line preview limit."; return result; }
     document->language = path.filename() == L"CMakeLists.txt" ? Language::Config : languageFor(utf8(path.extension().native()));
     if (file.tail) {
-        document->tail = true; document->tailOffset = file.offset; document->fileBytes = file.fileBytes;
+        document->tail = true; document->tailOffset = file.offset; document->tailEndOffset = file.endOffset; document->fileBytes = file.fileBytes;
         indexDocument(*document); result->document = std::move(document); return result;
     }
     indexDocument(*document); buffer->initialize(std::move(bytes)); buffer->fileVersion = std::move(file.version); result->buffer = std::move(buffer); result->document = std::move(document); return result;
@@ -393,6 +393,7 @@ private:
     void toggleTabPin(size_t index);
     void tabMenu(POINT screen);
     void loadTab(bool preserve = false, int group = -1, bool revealExplorer = true);
+    void loadFileWindow(int group, uint64_t offset);
     void refreshEditorGit(int group);
     void updateTabs(bool reveal = true);
     bool tabVisible(size_t index) const;
@@ -806,6 +807,7 @@ void ProjectRuntime::Impl::ensureGroup(int target) {
         };
         view.save = [this, group] { saveFile(groupTab(group)); };
         view.tailRequested = [this, group] { loadTab(true, group); };
+        view.fileWindowRequested = [this, group](uint64_t offset) { loadFileWindow(group, offset); };
         view.diffLayoutChanged = [this, group] {
             for (int other = 0; other < groupCount(); ++other)
                 if (other != group) viewers_[other].setDiffLayout(viewers_[group].diffInline());
@@ -2177,6 +2179,7 @@ void ProjectRuntime::Impl::applyExplorerBatch(const std::vector<ExplorerEdit>& e
     for (const auto& pair : nodes_) if (const auto n = node(pair.second)) items[pathKey(n->path)] = pair.second;
     std::vector<ResourceId> selected;
     ++generation_; for (auto& serial : serial_) ++serial;
+    for (auto& view : viewers_) view.cancelFileWindowRequest();
     for (const auto& edit : edits) {
         if (edit.kind == ExplorerEditKind::Move) {
             const auto source = redo ? edit.before : edit.after, destination = redo ? edit.after : edit.before;
@@ -2242,6 +2245,7 @@ void ProjectRuntime::Impl::applyRelocation(const ResourceId& source, const Resou
     }
     const bool moving = pathKey(source.parent_path()) != pathKey(destination.parent_path());
     saveTab(); ++generation_; for (auto& serial : serial_) ++serial;
+    for (auto& view : viewers_) view.cancelFileWindowRequest();
     std::map<std::wstring, ResourceId> expanded;
     for (const auto& pair : expandedPaths_) { auto path = relocateResource(pair.second, source, destination); expanded[pathKey(path)] = std::move(path); }
     expandedPaths_ = std::move(expanded); pendingTreeSelection_ = destination;
@@ -2389,6 +2393,7 @@ void ProjectRuntime::Impl::connectRemote() {
     status(L"Connecting to WSL · " + wide(root_.location().distro) + L"…");
     if (owner_ && owner_->changed) owner_->changed();
     const auto root = root_; const auto generation = ++generation_;
+    for (auto& view : viewers_) view.cancelFileWindowRequest();
     worker_->submit(L"connect-wsl", [this, root, generation, expectedUid = wslUid_] {
         ResourceId resolved; std::wstring error;
         try { provider_->reconnect(); provider_->expectIdentity(expectedUid); resolved = provider_->connect(root); }
@@ -3110,8 +3115,50 @@ void ProjectRuntime::Impl::tabMenu(POINT screen) {
         }
     }
 }
+void ProjectRuntime::Impl::loadFileWindow(int group, uint64_t offset) {
+    const auto index = groupTab(group);
+    auto& view = viewers_[group];
+    if (index >= tabs_.size() || !view.tailPreview()) { view.cancelFileWindowRequest(); return; }
+    const auto& tab = tabs_[index];
+    if (tab.diff || !tab.comparePath.empty() || !tab.terminalId.empty()) { view.cancelFileWindowRequest(); return; }
+    const auto path = tab.path;
+    if (path.wsl() && !connected_) {
+        view.cancelFileWindowRequest(); status(L"WSL disconnected. Press F5 to reconnect."); return;
+    }
+    const auto serial = ++serial_[group], generation = generation_;
+    // Reuse the pane's file queue: queued thumb movements collapse to the
+    // latest request, and completions from older reads cannot replace it.
+    worker_->submit(L"file:" + std::to_wstring(group), [this, group, path, offset, serial, generation, provider = fileProvider(path)] {
+        std::shared_ptr<FileResult> result;
+        try { result = readDocument(*provider, path, FileReadMode::Window, offset); }
+        catch (const std::exception& error) { result = std::make_shared<FileResult>(); result->error = wide(error.what()); }
+        worker_->complete([this, group, path, offset, serial, generation, result] {
+            if (generation != generation_ || serial != serial_[group]) return;
+            const auto index = groupTab(group);
+            auto& view = viewers_[group];
+            if (index >= tabs_.size() || tabs_[index].path != path || !view.tailPreview()) { view.cancelFileWindowRequest(); return; }
+            const auto buffer = shareBuffer(path);
+            if (buffer && (buffer->dirty() || buffer->saving)) {
+                view.cancelFileWindowRequest(); view.edit(buffer, path);
+                status(L"Unsaved changes kept  ·  Ctrl+S: save"); return;
+            }
+            if (!result->document || !result->document->tail) {
+                view.cancelFileWindowRequest(); status(L"Large file read failed: " + result->error); return;
+            }
+            tabs_[index].buffer.reset(); tabs_[index].searchTarget.reset();
+            view.showFileWindow(result->document, path, offset);
+            status(L"Large file · " + std::to_wstring(result->document->fileBytes) + L" bytes · READ ONLY");
+            // Watch events may have arrived while navigation held the old
+            // snapshot. Catch up once at EOF even if the writer has stopped.
+            if (!view.tailPaused()) loadTab(true, group);
+        });
+    });
+}
 void ProjectRuntime::Impl::loadTab(bool preserve, int group, bool revealExplorer) {
     if (group < 0) group = focusedGroup_;
+    // Watching an actively written file must not invalidate a pending scroll
+    // read, or replace the snapshot being read away from EOF.
+    if (preserve && viewers_[group].tailPaused()) return;
     ++serial_[group];
     if (!preserve && group == focusedGroup_ && revealExplorer) revealActiveFile();
     waitingForGit_[group] = false;
@@ -3187,7 +3234,7 @@ void ProjectRuntime::Impl::loadTab(bool preserve, int group, bool revealExplorer
                     auto& tab = tabs_[groupTab(group)];
                     tab.buffer.reset(); tab.searchTarget.reset();
                     viewers_[group].showTail(result->document, path, preserve);
-                    status(L"Tail · " + std::to_wstring(result->document->fileBytes) + L" bytes · Up to 100 lines / 1 MiB · READ ONLY");
+                    status(L"Large file · " + std::to_wstring(result->document->fileBytes) + L" bytes · READ ONLY");
                 } else if (result->document) {
                     const auto buffer = shareBuffer(path, result->buffer);
                     viewers_[group].edit(buffer, path, preserve); if (!preserve) viewers_[group].restore(state);
@@ -3195,7 +3242,7 @@ void ProjectRuntime::Impl::loadTab(bool preserve, int group, bool revealExplorer
                     status(std::to_wstring(result->document->lines.size()) + L" lines  ·  Ctrl+S: save  ·  F6: diff");
                     applyContentResult(groupTab(group));
                 } else if (preserve && viewers_[group].tailPreview()) {
-                    status(L"Tail reload failed: " + result->error);
+                    status(L"Large file reload failed: " + result->error);
                 } else { viewers_[group].message(result->error, path); status(L"Preview unavailable"); }
             });
         });
@@ -3499,7 +3546,7 @@ void ProjectRuntime::Impl::pollWatch() {
         const bool usageChanged = !(usage == watchUsage_);
         if (usageChanged) { watchUsage_ = usage; statusDirty_ = true; }
         const auto changes = connected_ ? provider_->takeChanges() : ProviderChanges{};
-        if (connected_ && provider_->state() != ConnectionState::Ready) { connected_ = false; ++generation_; for (auto& serial : serial_) ++serial; connectionError_ = provider_->error(); status(L"WSL disconnected. " + connectionError_ + L" Your edits have been kept. Use F5 to reconnect."); if (owner_ && owner_->changed) owner_->changed(); }
+        if (connected_ && provider_->state() != ConnectionState::Ready) { connected_ = false; ++generation_; for (auto& serial : serial_) ++serial; for (auto& view : viewers_) view.cancelFileWindowRequest(); connectionError_ = provider_->error(); status(L"WSL disconnected. " + connectionError_ + L" Your edits have been kept. Use F5 to reconnect."); if (owner_ && owner_->changed) owner_->changed(); }
         else if (connected_) {
             if (changes.watchLimited || (usageChanged && usage && usage->limited)) { watchLimited_ = true; status(watchLimitMessage(usage)); }
             if (changes.changed) {

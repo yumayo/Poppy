@@ -659,6 +659,95 @@ void editorTailTests(const fs::path& executable) {
     answerTabSave(app, L"output.log", IDNO);
     waitFor([&] { return WaitForSingleObject(app.process.hProcess, 0) == WAIT_OBJECT_0; }, "The tail test did not close");
 }
+void editorLargeFileScrollTests(const fs::path& executable) {
+    Fixture fixture;
+    const auto path = fixture.root / L"large.log";
+    {
+        std::ofstream file(path, std::ios::binary);
+        for (int block = 0; block < 18; ++block) {
+            auto line = "block-" + std::to_string(block) + " ";
+            line.resize(63, 'x'); line += '\n';
+            std::string bytes; bytes.reserve(1024 * 1024);
+            for (int row = 0; row < 16384; ++row) bytes += line;
+            file.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+        }
+        file.close(); check(!file.fail(), "Cannot write the large scrolling fixture");
+    }
+    writeLines(fixture.root / L"ordinary.txt", 50);
+    Application app(executable, fixture.root);
+    const auto tree = app.tree(), viewer = FindWindowExW(app.window, nullptr, L"PoppyViewer", nullptr);
+    waitFor([&] { return send(tree, treeGetCount) == 3; }, "Large scrolling fixture did not load");
+    const auto large = nextItem(tree, TreeRelation::Child, nextItem(tree, TreeRelation::Root));
+    const auto key = [&](WPARAM value, bool ctrl = false) {
+        check(AttachThreadInput(GetCurrentThreadId(), app.process.dwThreadId, TRUE) != FALSE, "Cannot attach large-file input");
+        BYTE previous[256]{}, keys[256]{}; GetKeyboardState(previous);
+        if (ctrl) keys[VK_CONTROL] = keys[VK_LCONTROL] = 0x80;
+        SetFocus(viewer); SetKeyboardState(keys); send(viewer, WM_KEYDOWN, value); SetKeyboardState(previous);
+        AttachThreadInput(GetCurrentThreadId(), app.process.dwThreadId, FALSE);
+    };
+    const auto text = [&] {
+        key('A', true); key('C', true);
+        if (!OpenClipboard(app.host)) return std::wstring{};
+        const auto value = GetClipboardData(CF_UNICODETEXT);
+        const auto data = value ? static_cast<const wchar_t*>(GlobalLock(value)) : nullptr;
+        const std::wstring result = data ? data : L"";
+        if (data) GlobalUnlock(value);
+        CloseClipboard(); return result;
+    };
+    const auto atBottom = [&] {
+        const auto info = scrollInfo(viewer);
+        return info.nPos == std::max(0, info.nMax - static_cast<int>(info.nPage) + 1);
+    };
+    const auto atStart = [&] { return scrollInfo(viewer).nPos == 0 && text().find(L"block-0 ") == 0; };
+    const auto append = [&](const char* value) {
+        std::ofstream file(path, std::ios::binary | std::ios::app); file << value << '\n';
+        file.close(); check(!file.fail(), "Cannot append to the large scrolling fixture");
+    };
+    send(tree, treeSelect, large);
+    waitFor([&] { return text().find(L"block-17 ") == 0 && atBottom(); }, "Large file did not open at its tail");
+    const auto initial = text();
+    check(std::count(initial.begin(), initial.end(), L'\n') == 100, "Initial large-file preview did not contain 100 entries");
+    // Page through the initial snapshot into an earlier part of the file.
+    for (int i = 0; i < 20; ++i) key(VK_PRIOR);
+    waitFor([&] { return text().size() > initial.size() && !atBottom(); }, "Paging up stopped at the initial 100-line snapshot");
+    key(VK_HOME, true);
+    waitFor(atStart, "Ctrl+Home did not load the real beginning of a large file");
+    const auto start = text();
+    check(start.size() <= 512 * 1024, "Large-file navigation loaded more than its bounded window");
+    // Exercise the actual custom scrollbar, including its 32-bit track position.
+    RECT rect{}; GetClientRect(viewer, &rect);
+    const auto dpi = GetDpiForWindow(viewer);
+    const int bar = GetSystemMetricsForDpi(SM_CXVSCROLL, dpi);
+    const int x = rect.right - bar / 2, thumbCenter = bar + MulDiv(10, dpi, 96);
+    send(viewer, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(x, thumbCenter));
+    send(viewer, WM_MOUSEMOVE, MK_LBUTTON, MAKELPARAM(x, rect.bottom / 2));
+    send(viewer, WM_LBUTTONUP, 0, MAKELPARAM(x, rect.bottom / 2));
+    waitFor([&] {
+        const auto loaded = text();
+        return (loaded.find(L"block-8 ") != loaded.npos || loaded.find(L"block-9 ") != loaded.npos) &&
+            loaded.find(L"block-0 ") == loaded.npos && loaded.find(L"block-17 ") == loaded.npos;
+    }, "Dragging the thumb did not load the middle of the file");
+    const auto middle = scrollInfo(viewer);
+    check(middle.nPos > middle.nMax / 3 && middle.nPos < middle.nMax - middle.nMax / 3, "Large-file thumb did not represent its byte position");
+    send(viewer, WM_VSCROLL, SB_TOP); send(viewer, WM_VSCROLL, SB_BOTTOM); send(viewer, WM_VSCROLL, SB_TOP);
+    waitFor(atStart, "An older asynchronous load replaced the latest large-file navigation");
+    append("APPENDED WHILE PAUSED");
+    send(app.window, WM_KEYDOWN, VK_F5);
+    writeFile(fixture.root / L"refresh-marker.txt");
+    waitFor([&] { return send(tree, treeGetCount) == 4; }, "Paused large-file refresh did not finish");
+    check(atStart() && text() == start, "An append replaced a large-file snapshot away from EOF");
+    key(VK_END, true);
+    waitFor([&] { return text().find(L"APPENDED WHILE PAUSED") != std::wstring::npos && atBottom(); }, "Ctrl+End did not read the latest EOF");
+    append("APPENDED WHILE FOLLOWING");
+    waitFor([&] { return text().find(L"APPENDED WHILE FOLLOWING") != std::wstring::npos && atBottom(); }, "A byte-scrolled file did not resume following appends");
+    const auto readOnly = text(); const auto bytes = fs::file_size(path);
+    send(viewer, WM_CHAR, '!'); key(VK_DELETE); key('S', true);
+    check(text() == readOnly && fs::file_size(path) == bytes, "Large-file navigation enabled editing or saving a partial document");
+    send(viewer, WM_VSCROLL, SB_TOP);
+    const auto ordinary = nextItem(tree, TreeRelation::Next, nextItem(tree, TreeRelation::Child, nextItem(tree, TreeRelation::Root)));
+    send(tree, treeSelect, ordinary); waitLines(viewer, 50);
+    check(text().find(L"0 example") == 0, "A pending large-file load replaced a different tab");
+}
 void explorerPreviewTabTests(const fs::path& executable) {
     Fixture fixture;
     for (int i = 0; i < 3; ++i) writeLines(fixture.root / (std::wstring(1, L'a' + i) + L".txt"), 200 + i * 100);
@@ -4315,7 +4404,7 @@ int wmain(int argc, wchar_t** argv) {
         SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         if (argc == 3) { Fixture appData; AppDataEnvironment environment(appData.root); fileDockPlacementTests(fs::absolute(argv[1])); dockLayoutTests(fs::absolute(argv[1])); return 0; }
         for (const auto test : {folderTests, explorerSortTests, sidebarTests, treeInteractionTests, collapseAllSidebarTests, navigationHistoryTests, previewTabTests, explorerPreviewTabTests, previewTabSplitTests, fileDockPlacementTests, tabTests, rapidTabMiddleClickTests, pinnedTabTests,
-                tabCopyPathTests, bulkTabCloseTests, bulkTabSaveTests, bulkTabSplitTests, explorerActiveFileTests, htmlTabToolsTests, editorTailTests,
+                tabCopyPathTests, bulkTabCloseTests, bulkTabSaveTests, bulkTabSplitTests, explorerActiveFileTests, htmlTabToolsTests, editorTailTests, editorLargeFileScrollTests,
                 tabDragTests, wrappingTabDragTests, wrappingTabTests, renameTests, explorerMoveTests, explorerDeleteTests, explorerDeleteConfirmationTests, explorerMultipleSelectionTests, crossProjectFolderCopyTests, createItemTests, newFileShortcutTests, pasteImageTests, splitPaneTests, dockLayoutTests, quickOpenTests, fileComparisonTests, fullSearchTests, searchRetentionTests, gitSidebarTests, gitIgnoredExplorerTests, gitAutoRefreshTests, editableGitDiffTests, branchSidebarTests, comparisonSidebarTests, multiRepositoryTests, sessionTests, multiProjectTests, recentProjectTests, projectDragTests, scrollingProjectDragTests, terminalTabManagementTests, terminalTitleTests, terminalShellTests, terminalShortcutTests, terminalBackspaceTests}) {
             Fixture appData; AppDataEnvironment environment(appData.root);
             test(fs::absolute(argv[1]));

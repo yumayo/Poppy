@@ -298,14 +298,17 @@ public:
         try { const auto response = call("listDirectory", path, {{"requireAccess", requireAccess ? "1" : "0"}}); result.truncated = field(response.metadata, "truncated") == "1"; for (const auto& item : response.entries) { const bool unsupported = field(item, "unsupported") == "1"; result.entries.push_back({unsupported ? ResourceId{} : path.at(field(item, "path")), field(item, "directory") == "1", field(item, "link") == "1", unsupported, wide(field(item, "name"))}); } } catch (const std::exception& error) { result.error = wide(error.what()); }
         return result;
     }
-    ProviderFile readFile(const ResourceId& path, FileReadMode mode) override {
+    ProviderFile readFile(const ResourceId& path, FileReadMode mode, uint64_t requestedOffset) override {
         try {
-            auto response = call("readFile", path, mode == FileReadMode::Full ? Message{} : Message{{"readMode", mode == FileReadMode::Tail ? "tail" : "preview"}});
+            Message options;
+            if (mode != FileReadMode::Full) options["readMode"] = mode == FileReadMode::Tail ? "tail" : mode == FileReadMode::Window ? "window" : "preview";
+            if (mode == FileReadMode::Window) options["offset"] = std::to_string(requestedOffset);
+            auto response = call("readFile", path, options);
             ProviderFile result{std::move(response.bytes), field(response.metadata, "version"), {}};
             result.tail = field(response.metadata, "tail") == "1";
             if (result.tail) {
-                result.offset = number(response.metadata, "offset"); result.fileBytes = number(response.metadata, "fileBytes");
-                if (mode == FileReadMode::Full || result.offset > result.fileBytes || result.bytes.size() > maxTailBytes + 2) throw std::runtime_error("Invalid WSL tail snapshot");
+                result.offset = number(response.metadata, "offset"); result.fileBytes = number(response.metadata, "fileBytes"); result.endOffset = number(response.metadata, "endOffset");
+                if (mode == FileReadMode::Full || result.offset > result.endOffset || result.endOffset > result.fileBytes || result.endOffset - result.offset > maxTailBytes || result.bytes.size() > maxTailBytes + 2) throw std::runtime_error("Invalid WSL file window");
             }
             return result;
         } catch (const std::exception& error) { return {{}, {}, wide(error.what())}; }

@@ -2,6 +2,7 @@
 #include "text.h"
 #include <algorithm>
 #include <iostream>
+#include <limits>
 #include <stdexcept>
 
 using namespace poppy;
@@ -9,6 +10,9 @@ namespace {
 void check(bool value, const char* message) { if (!value) throw std::runtime_error(message); }
 FileTail tail(const std::string& bytes) {
     return readFileTail(bytes.size(), [&](uint64_t at, size_t count) { return bytes.substr(static_cast<size_t>(at), count); });
+}
+FileTail window(const std::string& bytes, uint64_t offset) {
+    return readFileWindow(bytes.size(), offset, [&](uint64_t at, size_t count) { return bytes.substr(static_cast<size_t>(at), count); });
 }
 std::string decoded(const FileTail& snapshot, const std::string& expectedEncoding = "UTF-8") {
     std::string text, encoding, error;
@@ -97,8 +101,65 @@ void boundedReads() {
     catch (const std::runtime_error&) { failed = true; }
     check(failed, "A short suffix read was accepted");
 }
+void byteWindows() {
+    for (const std::string newline : {"\n", "\r\n"}) {
+        const auto text = entries(0, 120000, newline);
+        for (const int encoding : {0, 1, 2, 3}) {
+            const auto bytes = encoding < 2 ? (encoding ? "\xef\xbb\xbf" + text : text) : utf16(text, encoding == 2);
+            const size_t bom = encoding < 2 ? (encoding ? 3 : 0) : 2;
+            for (const auto requested : {uint64_t{0}, static_cast<uint64_t>(bytes.size() / 2), static_cast<uint64_t>(bytes.size() - 1), std::numeric_limits<uint64_t>::max()}) {
+                const auto snapshot = window(bytes, requested);
+                check(snapshot.bytes.size() <= maxFileWindowBytes + 2 && snapshot.endOffset <= bytes.size() && snapshot.offset <= snapshot.endOffset, "Byte window exceeded its range or allocation bound");
+                check(snapshot.offset <= std::max<uint64_t>(bom, std::min<uint64_t>(requested, bytes.size())) && snapshot.endOffset >= std::min<uint64_t>(requested, bytes.size()), "Line alignment dropped the requested position");
+                const auto source = bytes.substr(snapshot.offset, snapshot.endOffset - snapshot.offset);
+                check(snapshot.bytes == (encoding >= 2 ? bytes.substr(0, 2) + source : source), "Byte window lost or duplicated source bytes");
+                const auto decodedText = decoded(snapshot, encoding < 2 ? "UTF-8" : encoding == 2 ? "UTF-16 LE" : "UTF-16 BE");
+                check(decodedText.find(u8"�") == std::string::npos && text.find(decodedText) != std::string::npos, "Byte window split a character or changed text");
+                check(requested || snapshot.offset == bom, "Start jump did not reach the first line");
+                check(requested < bytes.size() || snapshot.endOffset == bytes.size(), "EOF jump did not reach the final line");
+            }
+        }
+    }
+    const auto line = std::string(maxFileWindowBytes * 3, 'x');
+    const auto target = static_cast<uint64_t>(maxFileWindowBytes);
+    for (const auto& bytes : {line, line + "\nlast\n", std::string("first\n") + line}) {
+        const auto snapshot = window(bytes, target);
+        check(snapshot.offset < target && snapshot.endOffset > target && snapshot.bytes.size() <= maxFileWindowBytes, "A very long neighboring line removed the requested fragment");
+    }
+    // Every possible UTF-8/UTF-16 cut through a multibyte scalar must decode.
+    std::string scalars;
+    for (size_t i = 0; i < maxFileWindowBytes; ++i) scalars += u8"😀";
+    for (size_t padding = 0; padding < 5; ++padding) {
+        for (const int encoding : {0, 1, 2}) {
+            const auto bytes = encoding ? utf16(scalars, encoding == 1) : scalars;
+            const auto snapshot = window(bytes, maxFileWindowBytes + padding);
+            const auto content = decoded(snapshot, !encoding ? "UTF-8" : encoding == 1 ? "UTF-16 LE" : "UTF-16 BE");
+            check(content.find(u8"�") == std::string::npos && scalars.find(content) != std::string::npos, "A bounded giant-line window split a surrogate or UTF-8 sequence");
+        }
+    }
+    for (const bool le : {true, false}) {
+        const auto bytes = utf16(u8"日本😀", le) + (le ? std::string("\0\xd8", 2) : std::string("\xd8\0", 2)) + "x";
+        const auto snapshot = window(bytes, std::numeric_limits<uint64_t>::max());
+        check(snapshot.endOffset == bytes.size() && decoded(snapshot, le ? "UTF-16 LE" : "UTF-16 BE") == u8"日本😀", "An incomplete UTF-16 write lost EOF following");
+    }
+    check(window("", 100).bytes.empty() && window("x", 100).bytes == "x", "A window beyond a truncated file failed");
+    check(window(std::string(maxFileWindowBytes * 2, '\n'), maxFileWindowBytes).bytes.size() < 1000000, "A byte window exceeded the line index limit");
+    const uint64_t size = 7ull * 1024 * 1024 * 1024;
+    const uint64_t requested = 5ull * 1024 * 1024 * 1024 + 123;
+    size_t reads = 0, total = 0;
+    const auto snapshot = readFileWindow(size, requested, [&](uint64_t at, size_t count) {
+        check(at == 0 || (at <= requested && requested - at <= maxFileWindowBytes), "A byte window scanned unrelated file contents");
+        ++reads; total += count;
+        return std::string(count, 'x');
+    });
+    check(reads == 2 && total <= maxFileWindowBytes + 3 && snapshot.offset > 0xffffffffull && snapshot.endOffset < size, "A multi-GB byte window overflowed or performed unbounded reads");
+    bool failed = false;
+    try { readFileWindow(size, requested, [](uint64_t at, size_t count) { return std::string(at ? count - 1 : count, 'x'); }); }
+    catch (const std::runtime_error&) { failed = true; }
+    check(failed, "A concurrently truncated window silently published an incomplete snapshot");
+}
 }
 int main() {
-    try { lineWindows(); boundedReads(); std::cout << "File tail tests passed\n"; }
+    try { lineWindows(); boundedReads(); byteWindows(); std::cout << "File tail tests passed\n"; }
     catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
 }
