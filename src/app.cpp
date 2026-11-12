@@ -90,7 +90,8 @@ std::wstring tabKey(const Tab& tab) {
 }
 // A pane can show the same tab as a file or as its Git diff.
 std::wstring diffLoadKey(const Tab& tab) { return tabKey(tab) + (tab.diff ? L"\ndiff" : L"\nfile"); }
-std::wstring tabTitle(const Tab& tab) {
+// changes is the pending file count shown on a working tree All Changes tab.
+std::wstring tabTitle(const Tab& tab, std::optional<size_t> changes = std::nullopt) {
     if (!tab.comparePath.empty()) return tab.comparePath.filename().native() + L" ↔ " + tab.path.filename().native() + L" (diff)";
     auto title = tab.allChanges ? L"All Changes · " + tab.path.filename().native() : tab.path.filename().native();
     if (tab.diffKind == GitDiffKind::Compare) {
@@ -100,6 +101,7 @@ std::wstring tabTitle(const Tab& tab) {
     } else if (tab.diffKind == GitDiffKind::Commit) title += L" · " + wide(tab.revision.substr(0, 8));
     else if (tab.diffKind == GitDiffKind::Staged) title += L" · Staged";
     else if (tab.diffKind != GitDiffKind::Automatic) title += L" · Changes";
+    if (changes) title += L" (" + std::to_wstring(*changes) + L")";
     return title + (tab.diff ? L" (diff)" : L"");
 }
 struct TabDrop { size_t position; RECT marker; int group = 0; DockSide side = DockSide::Center; bool inStrip = false; };
@@ -512,6 +514,7 @@ private:
     std::deque<PendingLoad> diffLoads_;
     std::map<uint64_t, TreeItem> nodes_;
     std::shared_ptr<GitWorkspace> git_;
+    size_t gitChanges_ = 0;
     bool gitScanDirty_ = true;
     uint64_t gitScanRevision_ = 0;
     std::shared_ptr<ProjectProvider> provider_;
@@ -835,7 +838,18 @@ size_t ProjectRuntime::Impl::terminalIndex(const std::string& id) const {
     return terminal_.dockCount();
 }
 std::wstring ProjectRuntime::Impl::titleFor(const Tab& tab) const {
-    if (tab.terminalId.empty()) return tabTitle(tab);
+    if (tab.terminalId.empty()) {
+        std::optional<size_t> changes;
+        if (git_ && tab.allChanges && tab.comparePath.empty() && (tab.diffKind == GitDiffKind::Changes || tab.diffKind == GitDiffKind::Staged)) {
+            const auto root = pathKey(tab.gitRoot.empty() ? tab.path : tab.gitRoot);
+            for (const auto& repo : git_->repositories) if (pathKey(repo->root) == root && repo->error.empty()) {
+                changes = static_cast<size_t>(std::count_if(repo->entries.begin(), repo->entries.end(),
+                    [&](const GitEntry& entry) { return tab.diffKind == GitDiffKind::Staged ? entry.staged : entry.changed; }));
+                break;
+            }
+        }
+        return tabTitle(tab, changes);
+    }
     const auto index = terminalIndex(tab.terminalId);
     return index < terminal_.dockCount() ? terminal_.dockTitle(index) : L"Terminal";
 }
@@ -1220,7 +1234,9 @@ void ProjectRuntime::Impl::sortHistory(TreeItem item) {
     });
 }
 void ProjectRuntime::Impl::updateGitFiles() {
-    gitActivity_.setBadgeCount(git_ ? git_->changed + git_->untracked : 0);
+    const size_t gitChanges = git_ ? git_->changed + git_->untracked : 0;
+    gitActivity_.setBadgeCount(gitChanges);
+    if (gitChanges_ != gitChanges) { gitChanges_ = gitChanges; if (owner_ && owner_->changed) owner_->changed(); }
     std::wstring selected = wide(pendingGitSelection_);
     const int oldTop = changes_.top(), oldLeft = changes_.left();
     if (const auto source = sourceNode(changes_.selection())) selected = source->path;
@@ -3942,6 +3958,7 @@ bool ProjectRuntime::key(const MSG& message) { return impl_->key(message); }
 bool ProjectRuntime::terminalInput(HWND window) const { return impl_->terminal_.contains(window); }
 ProjectSession ProjectRuntime::snapshot() { return impl_->saveSession(); }
 AiSummary ProjectRuntime::summary() const { return impl_->terminal_.summary(); }
+size_t ProjectRuntime::gitChanges() const { return impl_->gitChanges_; }
 std::wstring ProjectRuntime::description() const { return (impl_->root_.wsl() ? L"\n" + (impl_->connectionError_.empty() ? impl_->provider_->error() : impl_->connectionError_) + (impl_->watchLimited_ ? L"\n" + watchLimitMessage(impl_->watchUsage_) : L"") : L"") + impl_->terminal_.description(); }
 bool ProjectRuntime::apply(const AiEvent& event) { return impl_->terminal_.apply(event); }
 void ProjectRuntime::focusAttention() { impl_->terminalVisible_ = true; impl_->layout(false); impl_->terminal_.focusAttention(); }

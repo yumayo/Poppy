@@ -29,6 +29,8 @@ public:
     bool terminalInput(HWND window) const;
     ProjectSession snapshot();
     AiSummary summary() const;
+    // Pending files shown on the Source Control badge.
+    size_t gitChanges() const;
     std::wstring description() const;
     bool apply(const AiEvent& event);
     void focusAttention();

@@ -728,7 +728,12 @@ void Workspace::paint(){
         const auto secondary=subtitle(i);
         const auto running=summary.counts[static_cast<size_t>(AiState::Running)];
         const bool showRunning=running&&summary.state!=AiState::Running;
-        const int textLeft=rect.left+px(32),textRight=rect.right-px(showRunning?24:8);
+        // Match the Source Control badge in the card's top-right corner.
+        const size_t changes=project.runtime->gitChanges();RECT badge{rect.right,rect.top,rect.right,rect.top};
+        if(changes){const auto text=std::to_wstring(changes);const int height=px(18),width=std::max(height,renderer_.textWidth(text)+px(8));
+            badge={rect.right-px(6)-width,rect.top+px(3),rect.right-px(6),rect.top+px(3)+height};
+            renderer_.fillRounded(badge,accent,height/2.0f);renderer_.label(badge,text,background,DT_CENTER|DT_VCENTER|DT_SINGLELINE);}
+        const int textLeft=rect.left+px(32),textRight=std::min<int>(rect.right-px(showRunning?24:8),changes?badge.left-px(4):rect.right);
         if(project.path.wsl()){
             const int available=std::max(0,textRight-textLeft-px(8));
             const int secondaryWidth=std::min(renderer_.textWidth(secondary),available/2);
