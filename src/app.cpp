@@ -90,8 +90,7 @@ std::wstring tabKey(const Tab& tab) {
 }
 // A pane can show the same tab as a file or as its Git diff.
 std::wstring diffLoadKey(const Tab& tab) { return tabKey(tab) + (tab.diff ? L"\ndiff" : L"\nfile"); }
-// changes is the pending file count shown on a working tree All Changes tab.
-std::wstring tabTitle(const Tab& tab, std::optional<size_t> changes = std::nullopt) {
+std::wstring tabTitle(const Tab& tab) {
     if (!tab.comparePath.empty()) return tab.comparePath.filename().native() + L" ↔ " + tab.path.filename().native() + L" (diff)";
     auto title = tab.allChanges ? L"All Changes · " + tab.path.filename().native() : tab.path.filename().native();
     if (tab.diffKind == GitDiffKind::Compare) {
@@ -101,7 +100,6 @@ std::wstring tabTitle(const Tab& tab, std::optional<size_t> changes = std::nullo
     } else if (tab.diffKind == GitDiffKind::Commit) title += L" · " + wide(tab.revision.substr(0, 8));
     else if (tab.diffKind == GitDiffKind::Staged) title += L" · Staged";
     else if (tab.diffKind != GitDiffKind::Automatic) title += L" · Changes";
-    if (changes) title += L" (" + std::to_wstring(*changes) + L")";
     return title + (tab.diff ? L" (diff)" : L"");
 }
 struct TabDrop { size_t position; RECT marker; int group = 0; DockSide side = DockSide::Center; bool inStrip = false; };
@@ -465,6 +463,8 @@ private:
     bool syncTerminalTabs();
     size_t terminalIndex(const std::string& id) const;
     std::wstring titleFor(const Tab& tab) const;
+    size_t tabChanges(const Tab& tab) const;
+    RECT tabBadge(const Tab& tab, const RECT& rect) const;
     HWND selectedWindow() const;
     void loadGroups(bool preserve = false);
     void pruneGroups();
@@ -838,20 +838,26 @@ size_t ProjectRuntime::Impl::terminalIndex(const std::string& id) const {
     return terminal_.dockCount();
 }
 std::wstring ProjectRuntime::Impl::titleFor(const Tab& tab) const {
-    if (tab.terminalId.empty()) {
-        std::optional<size_t> changes;
-        if (git_ && tab.allChanges && tab.comparePath.empty() && (tab.diffKind == GitDiffKind::Changes || tab.diffKind == GitDiffKind::Staged)) {
-            const auto root = pathKey(tab.gitRoot.empty() ? tab.path : tab.gitRoot);
-            for (const auto& repo : git_->repositories) if (pathKey(repo->root) == root && repo->error.empty()) {
-                changes = static_cast<size_t>(std::count_if(repo->entries.begin(), repo->entries.end(),
-                    [&](const GitEntry& entry) { return tab.diffKind == GitDiffKind::Staged ? entry.staged : entry.changed; }));
-                break;
-            }
-        }
-        return tabTitle(tab, changes);
-    }
+    if (tab.terminalId.empty()) return tabTitle(tab);
     const auto index = terminalIndex(tab.terminalId);
     return index < terminal_.dockCount() ? terminal_.dockTitle(index) : L"Terminal";
+}
+size_t ProjectRuntime::Impl::tabChanges(const Tab& tab) const {
+    if (!git_ || !tab.allChanges || !tab.comparePath.empty() || (tab.diffKind != GitDiffKind::Changes && tab.diffKind != GitDiffKind::Staged)) return 0;
+    const auto root = pathKey(tab.gitRoot.empty() ? tab.path : tab.gitRoot);
+    for (const auto& repo : git_->repositories) if (pathKey(repo->root) == root && repo->error.empty())
+        return static_cast<size_t>(std::count_if(repo->entries.begin(), repo->entries.end(),
+            [&](const GitEntry& entry) { return tab.diffKind == GitDiffKind::Staged ? entry.staged : entry.changed; }));
+    return 0;
+}
+// The same pill as the Source Control badge; empty when there is no count.
+RECT ProjectRuntime::Impl::tabBadge(const Tab& tab, const RECT& rect) const {
+    const auto scaled = [this](int v) { return MulDiv(v, dpi_, 96); };
+    const auto changes = tabChanges(tab);
+    if (!changes) return {rect.right - scaled(40), rect.top, rect.right - scaled(40), rect.top};
+    const int height = scaled(18), width = std::max(height, renderer_.textWidth(std::to_wstring(changes)) + scaled(8));
+    const int top = (rect.top + rect.bottom - height) / 2;
+    return {rect.right - scaled(40) - width, top, rect.right - scaled(40), top + height};
 }
 HWND ProjectRuntime::Impl::selectedWindow() const {
     const auto index = groupTab(focusedGroup_);
@@ -962,7 +968,9 @@ void ProjectRuntime::Impl::layout(bool revealTab) {
             const auto title = titleFor(tab);
             // Reserve both title styles and the modified marker from the start.
             const int titleWidth = std::max(renderer_.textWidth(title), renderer_.textWidth(title, true));
-            sizes.push_back({titleWidth + MulDiv(tab.terminalId.empty() ? 52 : 78, dpi_, 96), tab.pinned});
+            const auto badge = tabBadge(tab, {});
+            const int badgeWidth = badge.right > badge.left ? badge.right - badge.left + MulDiv(6, dpi_, 96) : 0;
+            sizes.push_back({titleWidth + badgeWidth + MulDiv(tab.terminalId.empty() ? 52 : 78, dpi_, 96), tab.pinned});
         }
         const auto found = std::find(pane.indices.begin(), pane.indices.end(), selected);
         const auto layout = layoutTabs(sizes, edge - start, edge - start - addWidth, edge - start - toolsWidth, MulDiv(56, dpi_, 96), maxRows,
@@ -1085,7 +1093,12 @@ void ProjectRuntime::Impl::paint() {
                 const auto index = terminalIndex(tabs_[i].terminalId);
                 if (index < terminal_.dockCount()) drawAiStatus(dc, {rect.left, rect.top, rect.left + scaled(26), rect.bottom}, terminal_.dockStatus(index).state, dpi_);
             }
-            dc.label({rect.left + scaled(tabs_[i].terminalId.empty() ? 12 : 32), rect.top, rect.right - scaled(40), rect.bottom}, title, active ? foreground : muted,
+            const auto badge = tabBadge(tabs_[i], rect);
+            if (badge.right > badge.left) {
+                dc.fillRounded(badge, accent, (badge.bottom - badge.top) / 2.0f);
+                dc.label(badge, std::to_wstring(tabChanges(tabs_[i])), background, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            }
+            dc.label({rect.left + scaled(tabs_[i].terminalId.empty() ? 12 : 32), rect.top, badge.right > badge.left ? badge.left - scaled(6) : rect.right - scaled(40), rect.bottom}, title, active ? foreground : muted,
                 DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS, tabs_[i].preview);
             // Draw unsaved state outside the ellipsized filename, before the
             // close/pin control. This also applies to editable diff tabs.
