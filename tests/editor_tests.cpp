@@ -4,6 +4,7 @@
 #include "selection_scroll.h"
 #include "editor_scroll.h"
 #include "file_byte_scroll.h"
+#include "pending_load.h"
 #include "change_marks.h"
 #include "composition.h"
 #include "terminal_model.h"
@@ -542,8 +543,29 @@ void byteScrolling() {
     check(scaleFileBytes(1000, 500, 23) == 23);
     check(scaleFileBytes(0, 0, ~0ull) == 0);
 }
+void pendingLoads() {
+    PendingLoad load;
+    check(!load.defer(1, L"a") && !load.finish());
+    load.start(3, L"a");
+    // A newer load or another tab in the pane restarts instead of waiting.
+    check(!load.defer(4, L"a") && !load.defer(3, L"b"));
+    check(!load.finish() && !load.defer(3, L"a"));
+    // Refreshes during a load collapse into exactly one follow-up.
+    load.start(5, L"a");
+    check(load.defer(5, L"a") && load.defer(5, L"a"));
+    check(load.finish() && !load.finish());
+    // F5 cancels the wait and restarts the load.
+    load.start(6, L"a"); check(load.defer(6, L"a"));
+    load.cancel();
+    check(!load.defer(6, L"a") && !load.finish());
+    // A user-started load replaces any deferred reload of the previous one.
+    load.start(7, L"a"); check(load.defer(7, L"a"));
+    load.start(8, L"b");
+    check(!load.finish());
+}
 int main() {
     byteScrolling();
+    pendingLoads();
     compositionLayout();
     columnSelection();
     mixedUtf8Files();
