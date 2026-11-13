@@ -320,8 +320,13 @@ void CsvView::paint() {
         dc.label(rowHeader, std::to_wstring(r + 1), r == caret_.row ? accent : muted, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
         dc.fill({0, rowHeader.bottom - 1, rowHeader.right, rowHeader.bottom}, border);
     }
-    auto current = cellRect(caret_); RECT clip{gutter, bodyTop(), rect.right, rect.bottom}, visible{};
-    if (IntersectRect(&visible, &current, &clip)) dc.outline(visible, accent, static_cast<float>(px(2)));
+    // Fill the caret frame as whole-pixel strips over the cell's grid lines so it never straddles a pixel boundary.
+    auto current = cellRect(caret_); current.left -= 1; current.top -= 1;
+    const RECT clip{gutter, bodyTop(), rect.right, rect.bottom}; const int thick = std::max(1, px(2));
+    for (const RECT& strip : {RECT{current.left, current.top, current.right, current.top + thick}, RECT{current.left, current.bottom - thick, current.right, current.bottom},
+                              RECT{current.left, current.top, current.left + thick, current.bottom}, RECT{current.right - thick, current.top, current.right, current.bottom}}) {
+        RECT visible{}; if (IntersectRect(&visible, &strip, &clip)) dc.fill(visible, accent);
+    }
     dc.fill({0, headerTop(), rect.right, std::min<LONG>(bodyTop(), rect.bottom)}, panel);
     for (size_t c = firstColumn; c <= lastColumn; ++c) {
         const auto cell = cellRect({static_cast<size_t>(top_), c});
