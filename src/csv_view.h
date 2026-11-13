@@ -4,6 +4,7 @@
 #include "scrollbars.h"
 #include "session.h"
 #include <algorithm>
+#include <chrono>
 
 namespace poppy {
 // Uses the viewer's body window so focus, file drops and tab shortcuts keep
@@ -56,6 +57,9 @@ private:
     void select(CsvPosition cell, bool extend = false, bool scrollIntoView = true);
     void drag(POINT point);
     void stopDrag();
+    void dragCaret();
+    bool advanceDrag();
+    void dragStatus(bool flush = false);
     void move(WPARAM key, bool shift, bool ctrl);
     void copy(bool cut = false);
     void paste();
@@ -84,12 +88,18 @@ private:
     CsvPosition anchor_, caret_;
     POINT dragPoint_{};
     int dragHeader_ = 0;
+    std::chrono::steady_clock::time_point dragTick_;
+    double dragCarryX_ = 0, dragCarryY_ = 0;
+    bool dragScrolling_ = false, statusPending_ = false;
+    // The status bar repaints its own windows, each waiting for vertical sync,
+    // so a drag reports at most this often instead of on every frame.
+    std::chrono::steady_clock::time_point statusTick_;
+    static constexpr UINT_PTR statusTimer = 0x5062;
     InputLine input_;
     ImeComposition ime_;
     std::wstring text_;
     size_t textAnchor_ = 0, textCaret_ = 0;
     wchar_t highSurrogate_ = 0;
     uint64_t editRevision_ = 0;
-    static constexpr UINT_PTR dragTimer = 0x5061;
 };
 }

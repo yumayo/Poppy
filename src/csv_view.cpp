@@ -101,21 +101,65 @@ void CsvView::select(CsvPosition cell, bool extend, bool scrollIntoView) {
     InvalidateRect(window_, nullptr, FALSE); if (statusChanged) statusChanged();
 }
 void CsvView::drag(POINT point) {
-    dragPoint_ = point;
+    dragPoint_ = point; dragCaret();
+    InvalidateRect(window_, nullptr, FALSE); UpdateWindow(window_); dragStatus();
+}
+void CsvView::dragStatus(bool flush) {
+    const auto now = std::chrono::steady_clock::now();
+    if (!flush && now - statusTick_ < std::chrono::milliseconds(100)) {
+        if (!statusPending_) SetTimer(window_, statusTimer, 100, nullptr);
+        statusPending_ = true; return;
+    }
+    if (statusPending_) KillTimer(window_, statusTimer);
+    statusPending_ = false; statusTick_ = now;
+    if (statusChanged) statusChanged();
+}
+void CsvView::dragCaret() {
+    auto point = dragPoint_;
     const auto r = Scrollbars::contentRect(window_);
     point.x = std::clamp<LONG>(point.x, rowGutter(), std::max<LONG>(rowGutter(), r.right - 1));
     point.y = std::clamp<LONG>(point.y, bodyTop(), std::max<LONG>(bodyTop(), r.bottom - 1));
     caret_ = hit(point);
     if (dragHeader_ == 1) caret_.column = table_.columns() - 1;
     if (dragHeader_ == 2) caret_.row = table_.rows() - 1;
-    InvalidateRect(window_, nullptr, FALSE); UpdateWindow(window_); if (statusChanged) statusChanged();
 }
 void CsvView::stopDrag() {
     if (!window_) return;
-    KillTimer(window_, dragTimer);
+    dragScrolling_ = false;
+    if (statusPending_) dragStatus(true);
     const bool captured = selecting_ || inputSelecting_ || resizing_ >= 0;
     selecting_ = inputSelecting_ = false; resizing_ = -1;
     if (captured && GetCapture() == window_) ReleaseCapture();
+}
+// Called at the start of every frame while a selection is being dragged. It
+// scrolls by the time since the previous frame, so the speed follows the
+// pointer exactly and the next frame is requested as soon as this one is
+// presented, without waiting on low-priority WM_TIMER messages.
+bool CsvView::advanceDrag() {
+    const auto r = Scrollbars::contentRect(window_); const int rh = rowHeight();
+    // Rows per second: rows scroll whole, like the grid's other scrolling.
+    const double vertical = dragHeader_ != 2 ? selectionScrollSpeed(dragPoint_.y, bodyTop(), r.bottom, rh) : 0;
+    const double horizontal = dragHeader_ != 1 ? selectionScrollSpeed(dragPoint_.x, rowGutter(), r.right, rh) * px(24) : 0;
+    const auto now = std::chrono::steady_clock::now();
+    // The first frame outside moves at once instead of idling: a whole row
+    // vertically, a frame's worth horizontally.
+    const double seconds = dragScrolling_ ? std::min(0.05, std::chrono::duration<double>(now - dragTick_).count()) : 1.0 / 60;
+    if (!dragScrolling_) dragCarryY_ = vertical < 0 ? -1 : vertical > 0 ? 1 : 0;
+    dragTick_ = now;
+    const auto advance = [seconds](double& carry, double speed) {
+        if (!speed) { carry = 0; return 0; }
+        carry += speed * seconds; const int units = static_cast<int>(carry); carry -= units; return units;
+    };
+    const int top = top_, left = left_;
+    top_ += advance(dragCarryY_, vertical); left_ += advance(dragCarryX_, horizontal);
+    layout();
+    // Keep requesting frames while a partial row accumulates, and stop once
+    // the table is at its limit in every direction the pointer points.
+    const int bottom = std::max(0, static_cast<int>(gridRows()) - pageRows());
+    const int right = std::max(0, edges_.back() - std::max(1, static_cast<int>(r.right) - rowGutter()));
+    dragScrolling_ = (vertical < 0 && top_ > 0) || (vertical > 0 && top_ < bottom) || (horizontal < 0 && left_ > 0) || (horizontal > 0 && left_ < right);
+    if (top != top_ || left != left_) { dragCaret(); dragStatus(); }
+    return dragScrolling_;
 }
 void CsvView::move(WPARAM key, bool shift, bool ctrl) {
     auto cell = caret_;
@@ -290,7 +334,11 @@ void CsvView::revealFind() {
 }
 void CsvView::clearFind() { search_ = {}; if (window_) InvalidateRect(window_, nullptr, FALSE); }
 void CsvView::paint() {
-    Renderer::Paint paint(*renderer_, window_); if (!paint) return;
+    const bool scrolling = selecting_ && advanceDrag();
+    Renderer::Paint paint(*renderer_, window_);
+    // Invalidate after BeginPaint so the request survives into the next frame.
+    if (scrolling) InvalidateRect(window_, nullptr, FALSE);
+    if (!paint) return;
     auto& dc = *renderer_; dc.font(Renderer::Font::Ui);
     const auto rect = Scrollbars::contentRect(window_);
     dc.fill(rect, background);
@@ -383,7 +431,7 @@ bool CsvView::handle(UINT message, WPARAM a, LPARAM b, LRESULT& result) {
         if (dragHeader_ == 1) { anchor_.column = 0; caret_.column = table_.columns() - 1; }
         if (dragHeader_ == 2) { anchor_.row = 0; caret_.row = table_.rows() - 1; }
         if (message == WM_LBUTTONDBLCLK && !dragHeader_) { startEdit(); return true; }
-        selecting_ = true; dragPoint_ = point; SetCapture(window_); SetTimer(window_, dragTimer, 50, nullptr); return true;
+        selecting_ = true; dragScrolling_ = false; dragPoint_ = point; dragCarryX_ = dragCarryY_ = 0; SetCapture(window_); return true;
     }
     case WM_MOUSEMOVE: {
         const POINT point{GET_X_LPARAM(b), GET_Y_LPARAM(b)};
@@ -397,14 +445,9 @@ bool CsvView::handle(UINT message, WPARAM a, LPARAM b, LRESULT& result) {
         stopDrag(); return true;
     case WM_CANCELMODE: case WM_CAPTURECHANGED: stopDrag(); return false;
     case WM_TIMER:
-        if (a != dragTimer) return false;
-        if (!selecting_ || GetCapture() != window_) { stopDrag(); return true; }
-        if (dragHeader_ != 2) top_ += selectionScrollRows(dragPoint_.y, bodyTop(), Scrollbars::contentRect(window_).bottom, rowHeight());
-        if (dragHeader_ != 1) {
-            if (dragPoint_.x < rowGutter()) left_ -= px(24);
-            else if (dragPoint_.x >= Scrollbars::contentRect(window_).right) left_ += px(24);
-        }
-        layout(); drag(dragPoint_); return true;
+        if (a != statusTimer) return false;
+        if (statusPending_) dragStatus(true);
+        return true;
     case WM_MOUSEWHEEL:
         wheel_ += GET_WHEEL_DELTA_WPARAM(a); top_ -= wheel_ / WHEEL_DELTA * 3; wheel_ %= WHEEL_DELTA;
         layout(); InvalidateRect(window_, nullptr, FALSE); UpdateWindow(window_); return true;

@@ -519,6 +519,19 @@ void selectionScrolling() {
     check(selectionScrollRows(-10, 40, 40, 20) == 0);
     check(selectionScrollRows(100, 40, 20, 20) == 0);
     check(selectionScrollRows(100, 0, 80, 0) == 0);
+    for (const int height : {20, 30}) {
+        const int top = 3 * height, bottom = top + 10 * height;
+        for (int y = top; y < bottom; ++y) check(selectionScrollSpeed(y, top, bottom, height) == 0);
+        check(selectionScrollSpeed(top - 1, top, bottom, height) == -20);
+        check(selectionScrollSpeed(bottom, top, bottom, height) == 20);
+        // Speed grows continuously with distance instead of in whole-row steps.
+        check(selectionScrollSpeed(bottom + height / 2, top, bottom, height) == 30);
+        check(selectionScrollSpeed(bottom + height / 2, top, bottom, height) < selectionScrollSpeed(bottom + height / 2 + 1, top, bottom, height));
+        check(selectionScrollSpeed(-32000, top, bottom, height) == -160);
+        check(selectionScrollSpeed(32000, top, bottom, height) == 160);
+    }
+    check(selectionScrollSpeed(-10, 40, 40, 20) == 0);
+    check(selectionScrollSpeed(100, 0, 80, 0) == 0);
 }
 void byteScrolling() {
     for (const uint64_t size : {0ull, 1ull, 1024ull, 5ull * 1024 * 1024 * 1024, 12ull * 1024 * 1024 * 1024 * 1024, ~0ull}) {
