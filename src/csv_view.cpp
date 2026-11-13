@@ -311,13 +311,13 @@ void CsvView::paint() {
             dc.fill(cell, selected ? selectedCell : !search_.empty() && search_.matches(table_, document_->text, {r, c}) ? matchedCell : background);
             dc.fill({cell.left, cell.bottom - 1, cell.right, cell.bottom}, border);
             if (right <= rect.right) dc.fill({right - 1, cell.top, right, cell.bottom}, border);
-            auto label = cell; label.left = std::max<LONG>(cell.left + px(7), cellRect({r, c}).left + px(7)); label.right -= px(6);
-            dc.label(label, displayValue(wide(table_.value(document_->text, {r, c}))), foreground);
+            auto label = cellRect({r, c}); label.left += px(7); label.right -= px(6);
+            dc.label(label, cell, displayValue(wide(table_.value(document_->text, {r, c}))), foreground);
         }
         const int y = bodyTop() + (static_cast<int>(r) - top_) * rh;
         const RECT rowHeader{0, y, std::min<LONG>(gutter, rect.right), std::min<LONG>(y + rh, rect.bottom)};
         dc.fill(rowHeader, r >= range.firstRow && r <= range.lastRow ? activeHeader : panel);
-        dc.label(rowHeader, std::to_wstring(r + 1), r == caret_.row ? accent : muted, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        dc.label({0, y, gutter, y + rh}, rowHeader, std::to_wstring(r + 1), r == caret_.row ? accent : muted, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
         dc.fill({0, rowHeader.bottom - 1, rowHeader.right, rowHeader.bottom}, border);
     }
     // Fill the caret frame as whole-pixel strips over the cell's grid lines so it never straddles a pixel boundary.
@@ -332,7 +332,7 @@ void CsvView::paint() {
         const auto cell = cellRect({static_cast<size_t>(top_), c});
         const RECT header{std::max<LONG>(gutter, cell.left), headerTop(), std::min(cell.right, rect.right), std::min<LONG>(bodyTop(), rect.bottom)};
         dc.fill(header, c >= range.firstColumn && c <= range.lastColumn ? activeHeader : panel);
-        dc.label(header, wide(csvColumnName(c)), c == caret_.column ? accent : muted, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        dc.label({cell.left, headerTop(), cell.right, bodyTop()}, header, wide(csvColumnName(c)), c == caret_.column ? accent : muted, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
         dc.fill({header.right - 1, header.top, header.right, header.bottom}, border);
     }
     dc.fill({0, headerTop(), std::min<LONG>(gutter, rect.right), std::min<LONG>(bodyTop(), rect.bottom)}, panel);

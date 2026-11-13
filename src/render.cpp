@@ -466,6 +466,12 @@ void Renderer::label(const RECT& rect, const std::wstring& text, COLORREF value,
     color(value);
     target_->DrawTextLayout(D2D1::Point2F(static_cast<float>(rect.left), static_cast<float>(rect.top)), layout.get(), brush_.get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
 }
+void Renderer::label(const RECT& rect, const RECT& clip, const std::wstring& text, COLORREF value, UINT flags) {
+    RECT visible{}; if (!target_ || !IntersectRect(&visible, &rect, &clip)) return;
+    target_->PushAxisAlignedClip(rectangle(visible), D2D1_ANTIALIAS_MODE_ALIASED);
+    label(rect, text, value, flags);
+    target_->PopAxisAlignedClip();
+}
 void Renderer::cells(int x, int y, int cw, int ch, const std::vector<Cell>& cells, int columns, const RECT& clip) {
     const int count = std::min(columns, static_cast<int>(cells.size()));
     RECT row{x, y, x + count * cw, y + ch}, visible{};
