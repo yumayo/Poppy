@@ -1860,6 +1860,10 @@ void ProjectRuntime::Impl::revealInFileExplorer(ResourceId resource) {
         }
         std::replace(path.begin(), path.end(), L'/', L'\\');
         path = L"\\\\wsl.localhost\\" + wide(resource.location().distro) + path;
+    } else {
+        // Tab paths can mix separators (for example "D:\\repo/src/file"), and
+        // SHParseDisplayName rejects forward slashes with E_INVALIDARG.
+        path = resource.local().lexically_normal().make_preferred().native();
     }
     PIDLIST_ABSOLUTE item = nullptr;
     auto result = SHParseDisplayName(path.c_str(), nullptr, &item, 0, nullptr);
