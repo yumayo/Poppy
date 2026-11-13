@@ -62,6 +62,7 @@ private:
     void imePosition();
     void sendComposition(const std::u16string& text);
     void finishComposition();
+    CompositionLayout echoedComposition() const;
     int point(int x, int y) const;
     std::string linkAt(int x, int y) const;
     HWND window_ = nullptr;

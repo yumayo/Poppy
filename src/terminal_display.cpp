@@ -29,8 +29,40 @@ bool TerminalDisplay::update(TerminalModel& model, size_t scroll, uint64_t now, 
     }
     continuesAbove_ = scroll_ < model.historySize() && model.wrappedLength(0, scroll_ + 1) != 0;
     cursorX_ = model.cursorX(); cursorY_ = model.cursorY(); cursorVisible_ = model.cursorVisible();
+    wrapPending_ = model.wrapPending();
     dirty_ = false;
     return true;
+}
+CompositionLayout TerminalDisplay::echoedComposition(const CompositionText& text) const {
+    if (text.text.empty() || scroll_ || cursorY_ < 0 || cursorY_ >= rows() || columns_ < 2) return {};
+    // A single unbounded row gives each glyph's character, width and attribute.
+    auto glyphs = text.layout(1 << 20, 0);
+    int y = cursorY_, x = wrapPending_ ? columns_ : std::min(cursorX_, columns_);
+    for (auto glyph = glyphs.glyphs.rbegin(); glyph != glyphs.glyphs.rend(); ++glyph) {
+        const int width = glyph->width;
+        if (x == 0) {
+            // Continue only across an automatic wrap, excluding wide-glyph padding.
+            if (y == 0 || !wrapped_[y - 1]) return {};
+            x = wrapped_[--y];
+        }
+        if (x < width) return {};
+        const auto& cells = row(y);
+        if (cells[x - width].continuation || cells[x - width].ch != glyph->character ||
+            (width == 2 && !cells[x - 1].continuation)) return {};
+        x -= width;
+        glyph->row = y; glyph->column = x;
+    }
+    CompositionLayout result;
+    result.glyphs = std::move(glyphs.glyphs);
+    result.endRow = cursorY_; result.endColumn = wrapPending_ ? columns_ : cursorX_;
+    // The IME caret sits before the glyph at its offset, or at the cursor.
+    int offset = glyphs.caretColumn;
+    result.caretRow = result.endRow; result.caretColumn = result.endColumn;
+    for (const auto& glyph : result.glyphs) {
+        if (offset <= 0) { result.caretRow = glyph.row; result.caretColumn = glyph.column; break; }
+        offset -= glyph.width;
+    }
+    return result;
 }
 std::string TerminalDisplay::linkAt(int column, int y) const {
     if (column < 0 || column >= columns_ || y < 0 || y >= rows()) return {};

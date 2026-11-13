@@ -351,9 +351,17 @@ void Terminal::stopSelection() {
     selecting_ = false;
     if (GetCapture() == window_) ReleaseCapture();
 }
+CompositionLayout Terminal::echoedComposition() const {
+    if (sentComposition_.empty() || ime_.text().text != sentComposition_) return {};
+    return display_.echoedComposition(ime_.text());
+}
 void Terminal::imePosition() {
     // The shell echoes composition text itself, so the VT cursor follows it.
-    const POINT caret{6 + display_.cursorX() * cellWidth_, 4 + display_.cursorY() * cellHeight_};
+    // Once the echo is on screen, follow the IME caret within it.
+    const auto composition = echoedComposition();
+    const POINT caret = composition.glyphs.empty()
+        ? POINT{6 + display_.cursorX() * cellWidth_, 4 + display_.cursorY() * cellHeight_}
+        : POINT{6 + composition.caretColumn * cellWidth_, 4 + composition.caretRow * cellHeight_};
     positionIme(window_, caret, cellHeight_, renderer_.compositionFont());
 }
 void Terminal::sendComposition(const std::u16string& text) {
@@ -414,14 +422,31 @@ void Terminal::paint() {
     } else {
         RECT clip{6, 4, rect.right - 6, rect.bottom};
         const auto [begin, end] = display_.selectionRange();
+        const auto composition = GetFocus() == window_ ? echoedComposition() : CompositionLayout{};
+        const auto target = [](const CompositionGlyph& glyph) { return glyph.attribute == ATTR_TARGET_CONVERTED || glyph.attribute == ATTR_TARGET_NOTCONVERTED; };
         std::vector<Cell> visible;
         for (int y = 0; y < display_.rows(); ++y) {
             visible = display_.row(y);
             if (begin < end) for (int x = 0; x < display_.columns(); ++x) { const int index = y * display_.columns() + x; if (index >= begin && index < end) visible[x].bg = rgb(50,70,94); }
+            for (const auto& glyph : composition.glyphs)
+                if (glyph.row == y && target(glyph)) for (int x = 0; x < glyph.width; ++x) visible[glyph.column + x].bg = rgb(50,70,94);
             const int sy = 4 + y * cellHeight_;
             dc.cells(6, sy, cellWidth_, cellHeight_, visible, display_.columns(), clip);
         }
-        if (running() && display_.cursorVisible() && GetFocus() == window_) {
+        // Underline the echoed composition like editor preedit: the active
+        // clause is thick and highlighted, the rest thin.
+        RECT visibleRect{};
+        for (const auto& glyph : composition.glyphs) {
+            const int left = 6 + glyph.column * cellWidth_, bottom = 4 + (glyph.row + 1) * cellHeight_;
+            const RECT underline{left, bottom - (target(glyph) ? 2 : 1), left + glyph.width * cellWidth_, bottom};
+            if (IntersectRect(&visibleRect, &underline, &clip)) dc.fill(visibleRect, target(glyph) ? accent : muted);
+        }
+        if (!composition.glyphs.empty()) {
+            const int x = 6 + composition.caretColumn * cellWidth_, y = 4 + composition.caretRow * cellHeight_;
+            const RECT caret{x, y, x + 2, y + cellHeight_};
+            if (IntersectRect(&visibleRect, &caret, &clip)) dc.fill(visibleRect, accent);
+        }
+        else if (running() && display_.cursorVisible() && GetFocus() == window_) {
             const int x = 6 + display_.cursorX() * cellWidth_, y = 4 + display_.cursorY() * cellHeight_;
             if (x + cellWidth_ <= clip.right && y + cellHeight_ <= clip.bottom)
                 dc.fill({x, y + cellHeight_ - 2, x + cellWidth_, y + cellHeight_}, accent);

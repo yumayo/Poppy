@@ -429,7 +429,38 @@ void compositionEditTests() {
     edit = compositionEdit(u"\xd83d\xde00", u"\xd83d\xde01");
     check(edit.erase == 1 && edit.insert == u"\xd83d\xde01", "a shared high surrogate does not split a code point");
 }
+void echoedCompositionTests() {
+    const auto columns = [](const CompositionLayout& layout) {
+        std::string result;
+        for (const auto& glyph : layout.glyphs) result += std::to_string(glyph.row) + ":" + std::to_string(glyph.column) + " ";
+        return result;
+    };
+    TerminalModel model(10, 3); TerminalDisplay display;
+    model.feed("$ かんじdef\x1b[1;9H"); display.update(model, 0, 0, true);
+    auto layout = display.echoedComposition({u"かんじ", {}, 3});
+    check(columns(layout) == "0:2 0:4 0:6 " && layout.caretRow == 0 && layout.caretColumn == 8,
+        "echoed composition ends at the cursor");
+    layout = display.echoedComposition({u"かんじ", {}, 1});
+    check(layout.caretColumn == 4, "the IME caret maps to its glyph cell");
+    check(display.echoedComposition({u"漢字", {}, 2}).glyphs.empty(), "a pending echo is not decorated");
+    check(display.echoedComposition({u"じ", {}, 1}).glyphs.size() == 1, "only the cells before the cursor are matched");
+
+    TerminalModel wrapped(5, 3); TerminalDisplay multiline;
+    wrapped.feed("abcd日本"); multiline.update(wrapped, 0, 0, true);
+    layout = multiline.echoedComposition({u"d日本", {}, 3});
+    check(columns(layout) == "0:3 1:0 1:2 ", "composition spans an automatic wrap without its padding cell");
+    check(multiline.echoedComposition({u"Zd日本", {}, 4}).glyphs.empty(), "a mismatch before a wrap rejects the echo");
+
+    TerminalModel edge(4, 2); TerminalDisplay pending;
+    edge.feed("ab日"); pending.update(edge, 0, 0, true);
+    layout = pending.echoedComposition({u"日", {}, 1});
+    check(columns(layout) == "0:2 " && layout.endColumn == 4, "a pending autowrap ends the composition at the right edge");
+
+    TerminalModel hard(6, 3); TerminalDisplay lines;
+    hard.feed("abc\r\nde"); lines.update(hard, 0, 0, true);
+    check(lines.echoedComposition({u"cde", {}, 3}).glyphs.empty(), "a hard line break ends the echoed composition");
+}
 int main() {
-    try { textTests(); terminalTests(); terminalTitleTests(); terminalNotificationErrorTests(); terminalDisplayTests(); terminalInputTests(); terminalScrollTests(); terminalCopyTests(); terminalSelectionScrollTests(); terminalWrapMetadataTests(); compositionEditTests(); std::cout << "Text and terminal core tests passed.\n"; return EXIT_SUCCESS; }
+    try { textTests(); terminalTests(); terminalTitleTests(); terminalNotificationErrorTests(); terminalDisplayTests(); terminalInputTests(); terminalScrollTests(); terminalCopyTests(); terminalSelectionScrollTests(); terminalWrapMetadataTests(); compositionEditTests(); echoedCompositionTests(); std::cout << "Text and terminal core tests passed.\n"; return EXIT_SUCCESS; }
     catch (const std::exception& error) { std::cerr << error.what() << '\n'; return EXIT_FAILURE; }
 }
