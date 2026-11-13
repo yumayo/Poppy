@@ -146,8 +146,7 @@ void Terminal::completeStart() {
 }
 void Terminal::stop(ShutdownDialog* progress) {
     stopSelection();
-    ime_.cancel(window_);
-    display_.cancelPreedit();
+    finishComposition();
     stopping_ = true; condition_.notify_all();
     // Preparation owns the relay and process handles until its thread exits.
     const auto joinLaunch = [this] { launcher_.join(); launchReady_ = {}; };
@@ -187,11 +186,9 @@ void Terminal::detach(ShutdownDialog* progress) {
 }
 void Terminal::send(std::string text, bool userInput) {
     if ((!launching_ && !running()) || text.empty()) return;
-    const auto input = userInput ? wide(text) : std::wstring{};
     { std::lock_guard<std::mutex> lock(mutex_); if (writeBytes_ + text.size() > 1024 * 1024) { MessageBeep(MB_ICONWARNING); return; } writeBytes_ += text.size(); writes_.push_back(std::move(text)); }
     condition_.notify_all();
     if (userInput) {
-        display_.inputSent(std::u16string(input.begin(), input.end()));
         stopSelection();
         const bool selected = hasSelection();
         scroll_ = 0; display_.clearSelection();
@@ -355,11 +352,23 @@ void Terminal::stopSelection() {
     if (GetCapture() == window_) ReleaseCapture();
 }
 void Terminal::imePosition() {
-    if (ime_.active()) display_.beginPreedit(); else display_.endPreedit();
-    const POINT origin{6 + display_.inputCursorX() * cellWidth_, 4 + display_.inputCursorY() * cellHeight_};
-    const auto preview = display_.preedit(ime_.text());
-    const POINT caret = preview.cells.empty() ? origin : POINT{6 + preview.composition.caretColumn * cellWidth_, 4 + preview.composition.caretRow * cellHeight_};
+    // The shell echoes composition text itself, so the VT cursor follows it.
+    const POINT caret{6 + display_.cursorX() * cellWidth_, 4 + display_.cursorY() * cellHeight_};
     positionIme(window_, caret, cellHeight_, renderer_.compositionFont());
+}
+void Terminal::sendComposition(const std::u16string& text) {
+    if (text == sentComposition_) return;
+    const auto edit = compositionEdit(sentComposition_, text);
+    sentComposition_ = text;
+    std::string input(edit.erase, '\x7f');
+    input += utf8(std::wstring(edit.insert.begin(), edit.insert.end()));
+    send(std::move(input));
+}
+void Terminal::finishComposition() {
+    // Leave text already sent in place, as if committed, so that a later IME
+    // message cannot erase or duplicate it.
+    sentComposition_.clear();
+    ime_.cancel(window_);
 }
 void Terminal::paste() {
     auto text = utf8(clipboardText(window_)); if (text.empty()) return;
@@ -398,7 +407,6 @@ void Terminal::paint() {
     Renderer::Paint paint(renderer_, window_); if (!paint) return;
     auto& dc = renderer_; dc.font(Renderer::Font::Ui);
     const auto rect = Scrollbars::contentRect(window_);
-    const auto preview = GetFocus() == window_ ? display_.preedit(ime_.text()) : TerminalPreedit{};
     dc.fill(rect, background);
     if (!started_) {
         RECT text{20, 18, std::max<LONG>(20, rect.right - 20), rect.bottom};
@@ -408,21 +416,16 @@ void Terminal::paint() {
         const auto [begin, end] = display_.selectionRange();
         std::vector<Cell> visible;
         for (int y = 0; y < display_.rows(); ++y) {
-            visible = preview.cells.empty() ? display_.row(y) : preview.cells[y];
+            visible = display_.row(y);
             if (begin < end) for (int x = 0; x < display_.columns(); ++x) { const int index = y * display_.columns() + x; if (index >= begin && index < end) visible[x].bg = rgb(50,70,94); }
             const int sy = 4 + y * cellHeight_;
             dc.cells(6, sy, cellWidth_, cellHeight_, visible, display_.columns(), clip);
         }
-        if (running() && display_.cursorVisible() && GetFocus() == window_ && ime_.text().text.empty()) {
+        if (running() && display_.cursorVisible() && GetFocus() == window_) {
             const int x = 6 + display_.cursorX() * cellWidth_, y = 4 + display_.cursorY() * cellHeight_;
             if (x + cellWidth_ <= clip.right && y + cellHeight_ <= clip.bottom)
                 dc.fill({x, y + cellHeight_ - 2, x + cellWidth_, y + cellHeight_}, accent);
         }
-    }
-    if (!preview.cells.empty()) {
-        const RECT clip{6 + preview.left * cellWidth_, 4 + preview.firstRow * cellHeight_,
-            6 + preview.right * cellWidth_, 4 + (preview.lastRow + 1) * cellHeight_};
-        dc.composition(preview.composition, {6, 4}, cellWidth_, cellHeight_, clip, preview.compositionBackground);
     }
     scrollbars_.paint(window_, dc, background);
 }
@@ -444,12 +447,12 @@ LRESULT Terminal::handle(UINT m, WPARAM a, LPARAM b) {
         if (a == selectionTimer) scrollSelection();
         else if (a == 2) pump();
         return 0;
-    case WM_DESTROY: stopSelection(); ime_.clear(); display_.cancelPreedit(); if (GetFocus() == window_) DestroyCaret(); return 0;
-    case WM_SHOWWINDOW: if (!a) { stopSelection(); ime_.cancel(window_); display_.cancelPreedit(); } break;
+    case WM_DESTROY: stopSelection(); sentComposition_.clear(); ime_.clear(); if (GetFocus() == window_) DestroyCaret(); return 0;
+    case WM_SHOWWINDOW: if (!a) { stopSelection(); finishComposition(); } break;
     case WM_GETDLGCODE: return DLGC_WANTALLKEYS;
     case WM_COPY: copy(); return 0;
     case WM_SETFOCUS: imePosition(); if (focused) focused(); InvalidateRect(window_, nullptr, FALSE); return 0;
-    case WM_KILLFOCUS: stopSelection(); ime_.clear(); display_.cancelPreedit(); highSurrogate_ = 0; DestroyCaret(); InvalidateRect(window_, nullptr, FALSE); return 0;
+    case WM_KILLFOCUS: stopSelection(); finishComposition(); highSurrogate_ = 0; DestroyCaret(); InvalidateRect(window_, nullptr, FALSE); return 0;
     case WM_SETCURSOR:
         if (LOWORD(b) == HTCLIENT) {
             POINT cursor{}; GetCursorPos(&cursor); ScreenToClient(window_, &cursor);
@@ -459,7 +462,7 @@ LRESULT Terminal::handle(UINT m, WPARAM a, LPARAM b) {
         break;
     case WM_LBUTTONDOWN:
         SetFocus(window_);
-        ime_.cancel(window_); display_.cancelPreedit(); imePosition();
+        finishComposition(); imePosition();
         if (!started_) { start(); InvalidateRect(window_, nullptr, FALSE); return 0; }
         selectionPoint_ = {GET_X_LPARAM(b), GET_Y_LPARAM(b)};
         display_.beginSelection(point(selectionPoint_.x, selectionPoint_.y));
@@ -556,10 +559,18 @@ LRESULT Terminal::handle(UINT m, WPARAM a, LPARAM b) {
     }
     case WM_IME_SETCONTEXT: case WM_INPUTLANGCHANGE: case WM_IME_NOTIFY:
     case WM_IME_STARTCOMPOSITION: case WM_IME_ENDCOMPOSITION: case WM_IME_COMPOSITION:
-        if (m == WM_IME_STARTCOMPOSITION) { stopSelection(); display_.endPreedit(); display_.clearSelection(); if (scroll_) scroll(0); }
-        if (m == WM_IME_COMPOSITION && !b) display_.cancelPreedit();
-        return ime_.handle(window_, m, a, b, [this] { imePosition(); },
-            [this](std::wstring text) { send(utf8(text)); });
+    {
+        if (m == WM_IME_STARTCOMPOSITION) { stopSelection(); display_.clearSelection(); if (scroll_) scroll(0); }
+        const auto result = ime_.handle(window_, m, a, b, [this] { imePosition(); },
+            [this](std::wstring text) {
+                // Replace the sent composition with the committed text.
+                sendComposition(std::u16string(text.begin(), text.end()));
+                sentComposition_.clear();
+            });
+        // Send what remains in composition, including an empty string on cancel.
+        if (m == WM_IME_COMPOSITION || m == WM_IME_ENDCOMPOSITION) sendComposition(ime_.text().text);
+        return result;
+    }
     default: break;
     }
     return DefWindowProcW(window_, m, a, b);

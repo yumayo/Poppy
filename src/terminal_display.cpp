@@ -3,28 +3,6 @@
 #include <algorithm>
 
 namespace poppy {
-namespace {
-bool verticalBorder(char32_t ch) {
-    return ch == U'│' || ch == U'┃' || ch == U'┆' || ch == U'┇' || ch == U'┊' || ch == U'┋' ||
-        ch == U'╎' || ch == U'╏' || ch == U'║' || (ch >= U'├' && ch <= U'┫');
-}
-bool horizontalBorder(const std::vector<Cell>& row) {
-    int strokes = 0;
-    for (const auto& cell : row) {
-        const auto ch = cell.ch;
-        if (ch == U'-' || ch == U'_' || ch == U'=' || ch == U'─' || ch == U'━' ||
-            (ch >= U'┄' && ch <= U'┅') || (ch >= U'┈' && ch <= U'┉') || ch == U'╌' || ch == U'╍' || ch == U'═') ++strokes;
-        else if (ch != U' ' && !(ch >= U'┌' && ch <= U'╋') && !(ch >= U'╔' && ch <= U'╬') &&
-            !(ch >= U'╭' && ch <= U'╰') && !verticalBorder(ch)) return false;
-    }
-    return strokes >= 3;
-}
-bool emptyRow(const std::vector<Cell>& row) {
-    return std::all_of(row.begin(), row.end(), [](const Cell& cell) {
-        return cell.ch == U' ' && !cell.continuation && cell.bg == background;
-    });
-}
-}
 bool TerminalDisplay::update(TerminalModel& model, size_t scroll, uint64_t now, bool force) {
     scroll = std::min(scroll, model.historySize());
     const bool scrollChanged = scroll != scroll_;
@@ -38,7 +16,6 @@ bool TerminalDisplay::update(TerminalModel& model, size_t scroll, uint64_t now, 
     synchronizing_ = false;
     if (!dirty_ && !force && !scrollChanged) return false;
 
-    if (generation_ != model.generation() || columns_ != model.columns() || rows() != model.rows()) cancelPreedit();
     if (generation_ != model.generation() ||
         (anchor_ >= 0 && std::min(anchor_, caret_) < model.firstRow() * model.columns())) clearSelection();
     generation_ = model.generation();
@@ -52,9 +29,6 @@ bool TerminalDisplay::update(TerminalModel& model, size_t scroll, uint64_t now, 
     }
     continuesAbove_ = scroll_ < model.historySize() && model.wrappedLength(0, scroll_ + 1) != 0;
     cursorX_ = model.cursorX(); cursorY_ = model.cursorY(); cursorVisible_ = model.cursorVisible();
-    wrapPending_ = model.wrapPending();
-    softwareCursor_ = findSoftwareCursor();
-    if (pendingCommit_ && commitPresented()) { pendingCommit_.reset(); endPreedit(); }
     dirty_ = false;
     return true;
 }
@@ -76,176 +50,6 @@ std::string TerminalDisplay::linkAt(int column, int y) const {
         for (int x = 0; x < length; ++x) text += row(rowIndex)[x].continuation ? U' ' : row(rowIndex)[x].ch;
     }
     return terminalLinkAt(text, position);
-}
-std::optional<TerminalDisplay::Cursor> TerminalDisplay::findSoftwareCursor() const {
-    if (cursorVisible_ || scroll_) return {};
-    // Claude Code hides the VT cursor and paints one inverse glyph in its
-    // ruled prompt. The VT cursor can remain on a footer or after that glyph.
-    // Recover only an unambiguous single glyph in a bounded prompt; inverse
-    // selections, menus and ordinary shell output are not input locations.
-    std::optional<Cursor> result;
-    int top = -1;
-    for (int bottom = 0; bottom < rows(); ++bottom) {
-        if (!horizontalBorder(row(bottom))) continue;
-        if (top >= 0) {
-            bool prompt = false;
-            Color promptBackground = background;
-            for (int y = top + 1; y < bottom; ++y) {
-                int x = 0;
-                while (x < columns_ && row(y)[x].ch == U' ') ++x;
-                if (x == columns_) continue;
-                const auto ch = row(y)[x].ch;
-                prompt = ch == U'>' || ch == U'❯' || ch == U'›';
-                promptBackground = row(y)[x].bg;
-                break;
-            }
-            if (prompt) for (int y = top + 1; y < bottom; ++y) {
-                const auto& cells = row(y);
-                for (int x = 0; x < columns_; ++x) {
-                    const auto& cell = cells[x];
-                    if (cell.continuation || cell.fg != promptBackground || cell.fg == cell.bg) continue;
-                    const int width = std::max(1, cellWidth(cell.ch));
-                    const auto same = [&](int neighbor) { return cells[neighbor].fg == cell.fg && cells[neighbor].bg == cell.bg; };
-                    const auto reversed = [&](int neighbor) { return cells[neighbor].fg == cell.bg && cells[neighbor].bg == cell.fg; };
-                    if ((x > 0 && same(x - 1)) || (x + width < columns_ && same(x + width))) continue;
-                    if (!(x > 0 && reversed(x - 1)) && !(x + width < columns_ && reversed(x + width))) continue;
-                    if (result) return {};
-                    result = Cursor{x, y, false};
-                }
-            }
-        }
-        top = bottom;
-    }
-    return result;
-}
-void TerminalDisplay::beginPreedit() {
-    if (preeditCursor_ || scroll_ || !rows()) return;
-    // While echo is pending, retain the last input location rather than an
-    // unrelated redraw cursor. update() releases it once the new input lands.
-    if (pendingCommit_ && pendingCommit_->row >= firstRow_ && pendingCommit_->row < firstRow_ + rows())
-        preeditCursor_ = Cursor{std::min(pendingCommit_->column, columns_ - 1),
-            static_cast<int>(pendingCommit_->row - firstRow_), pendingCommit_->column == columns_};
-    else preeditCursor_ = Cursor{inputCursorX(), inputCursorY(), inputWrapPending()};
-}
-void TerminalDisplay::inputSent(std::u16string text) {
-    // Editing commands and line submission invalidate the expected echo. Bound
-    // tracking to a screenful even for non-echoing or reformatting applications.
-    if (std::any_of(text.begin(), text.end(), [](char16_t ch) { return ch < 32 || ch == 127; }) ||
-        text.size() + (pendingCommit_ ? pendingCommit_->text.size() : 0) > static_cast<size_t>(columns_ * rows() * 2)) {
-        cancelPreedit(); return;
-    }
-    if (!text.empty() && !scroll_ && rows()) {
-        if (pendingCommit_) pendingCommit_->text += text;
-        else {
-            const int y = inputCursorY();
-            int column = inputWrapPending() ? columns_ : inputCursorX();
-            if (column < columns_ && row(y)[column].continuation) --column;
-            std::u32string prefix;
-            for (int x = 0; x < column; ++x) prefix += row(y)[x].ch;
-            pendingCommit_ = Commit{std::move(text), column, firstRow_ + y, std::move(prefix)};
-        }
-    }
-    endPreedit();
-}
-bool TerminalDisplay::commitPresented() const {
-    if (scroll_) return false;
-    const auto& pending = *pendingCommit_;
-    const auto layout = CompositionText{pending.text, {}, pending.text.size()}.layout(columns_, pending.column);
-    const auto cursor = softwareCursor_.value_or(Cursor{cursorX_, cursorY_, wrapPending_});
-    // Output can arrive in multiple chunks or redraw unrelated rows first. A
-    // changed cursor alone is not evidence that the input has been processed.
-    if (layout.endColumn != (cursor.wrap ? 0 : cursor.x)) return false;
-    // A growing TUI input area may move the whole prompt vertically. Match the
-    // echo and its original prefix at the new cursor, not only at the old row.
-    const int first = cursor.y + (cursor.wrap ? 1 : 0) - layout.endRow;
-    if (first >= 0) for (size_t x = 0; x < pending.prefix.size(); ++x)
-        if (row(first)[x].ch != pending.prefix[x]) return false;
-    bool visible = false;
-    for (const auto& glyph : layout.glyphs) {
-        const int y = first + glyph.row;
-        if (y < 0) continue; // Echo may have scrolled the beginning into history.
-        if (y >= rows() || row(static_cast<int>(y))[glyph.column].ch != glyph.character) return false;
-        visible = true;
-    }
-    return visible;
-}
-TerminalPreedit TerminalDisplay::preedit(const CompositionText& text) const {
-    TerminalPreedit result;
-    const int cursorY = inputCursorY();
-    if (text.text.empty() || scroll_ || columns_ < 2 || cursorY < 0 || cursorY >= rows() || horizontalBorder(row(cursorY))) return result;
-
-    int column = inputWrapPending() ? columns_ : inputCursorX();
-    // A cursor-addressing sequence may land inside a wide glyph.
-    if (column < columns_ && row(cursorY)[column].continuation) --column;
-    int left = 0, right = columns_;
-    for (int x = 0; x < column; ++x) if (verticalBorder(row(cursorY)[x].ch)) left = x + 1;
-    for (int x = column; x < columns_; ++x) if (verticalBorder(row(cursorY)[x].ch)) { right = x; break; }
-    if (right - left < 2) return result;
-    // The software cursor is display decoration, not part of the inserted
-    // text or suffix. Remove its inverse colors only in this temporary view.
-    const auto preeditCell = [&](int x, int y) {
-        auto cell = row(y)[x];
-        if (softwareCursor_ && y == softwareCursor_->y &&
-            (x == softwareCursor_->x || (x == softwareCursor_->x + 1 && cell.continuation))) std::swap(cell.fg, cell.bg);
-        return cell;
-    };
-    const bool framed = left > 0 || right < columns_;
-    int first = cursorY, last = cursorY;
-    if (!framed) {
-        while (first > 0 && wrapped_[first - 1] && !horizontalBorder(row(first - 1))) --first;
-        while (last + 1 < rows() && wrapped_[last] && !horizontalBorder(row(last + 1))) ++last;
-    }
-    int available = last;
-    // Only automatic continuations and unused rows belong to this preview.
-    // Hard line breaks, colored panels and box borders remain in place.
-    if (!framed) while (available + 1 < rows() && emptyRow(row(available + 1))) ++available;
-
-    const int width = right - left;
-    auto layout = text.layout(width, (cursorY - first) * width + column - left);
-    const int offset = std::max(0, layout.caretRow - (available - first));
-    result.cells = cells_;
-    result.left = left; result.right = right; result.firstRow = first; result.lastRow = available;
-    result.compositionBackground = preeditCell(std::min(column, right - 1), cursorY).bg;
-    for (int y = first; y <= available; ++y) {
-        Cell blank; blank.bg = preeditCell(left, y).bg;
-        std::fill(result.cells[y].begin() + left, result.cells[y].begin() + right, blank);
-    }
-
-    // Retain the input before the insertion point. When space is exhausted,
-    // pan only this logical input block to keep the IME cursor visible.
-    for (int y = first; y <= cursorY; ++y) {
-        const int destination = y - offset;
-        if (destination < first || destination > available) continue;
-        const int end = y == cursorY ? column : (wrapped_[y] ? wrapped_[y] : right);
-        for (int x = left; x < end; ++x) result.cells[destination][x] = preeditCell(x, y);
-    }
-
-    // Shift whole glyphs after the *end* of preedit, independently of the IME
-    // cursor or the active conversion clause. Preserve terminal colors.
-    int targetRow = first + layout.endRow - offset, targetColumn = left + layout.endColumn;
-    for (int y = cursorY; y <= last; ++y) {
-        int end = y < last ? wrapped_[y] : right;
-        if (y == last) while (end > left && row(y)[end - 1].ch == U' ' && !row(y)[end - 1].continuation) --end;
-        for (int x = y == cursorY ? column : left; x < end; ++x) {
-            const auto cell = preeditCell(x, y);
-            if (cell.continuation) continue;
-            const int advance = std::max(1, cellWidth(cell.ch));
-            if (targetColumn + advance > right) { ++targetRow; targetColumn = left; }
-            if (targetRow >= first && targetRow <= available) {
-                result.cells[targetRow][targetColumn] = cell;
-                if (advance == 2) {
-                    auto tail = cell; tail.ch = 0; tail.continuation = true;
-                    result.cells[targetRow][targetColumn + 1] = tail;
-                }
-            }
-            targetColumn += advance;
-        }
-    }
-    for (auto& glyph : layout.glyphs) { glyph.row += first - offset; glyph.column += left; }
-    layout.caretRow += first - offset; layout.caretColumn += left;
-    layout.endRow += first - offset; layout.endColumn += left;
-    result.composition = std::move(layout);
-    return result;
 }
 std::pair<int, int> TerminalDisplay::selectionRange(int anchor, int caret) const {
     if (anchor < 0 || caret < 0 || !columns_) return {0, 0};

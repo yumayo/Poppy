@@ -60,11 +60,16 @@ private:
     void scrollSelection();
     void stopSelection();
     void imePosition();
+    void sendComposition(const std::u16string& text);
+    void finishComposition();
     int point(int x, int y) const;
     std::string linkAt(int x, int y) const;
     HWND window_ = nullptr;
     Renderer renderer_{D2D1_PRESENT_OPTIONS_IMMEDIATELY};
     ImeComposition ime_;
+    // Composition text already written to the shell. The application renders
+    // it; each change erases the changed tail with Backspace and resends it.
+    std::u16string sentComposition_;
     Scrollbars scrollbars_;
     int cellWidth_ = 8, cellHeight_ = 20;
     fs::path directory_;

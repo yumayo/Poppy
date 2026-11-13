@@ -25,4 +25,15 @@ CompositionLayout CompositionText::layout(int columns, int firstColumn) const {
     result.endRow = row; result.endColumn = column;
     return result;
 }
+CompositionEdit compositionEdit(const std::u16string& sent, const std::u16string& next) {
+    size_t common = 0;
+    while (common < sent.size() && common < next.size() && sent[common] == next[common]) ++common;
+    // Keep the shared prefix on a code point boundary.
+    if (common > 0 && sent[common - 1] >= 0xd800 && sent[common - 1] <= 0xdbff) --common;
+    CompositionEdit result;
+    for (size_t i = common; i < sent.size(); ++i)
+        if (!(sent[i] >= 0xdc00 && sent[i] <= 0xdfff && i > common && sent[i - 1] >= 0xd800 && sent[i - 1] <= 0xdbff)) ++result.erase;
+    result.insert = next.substr(common);
+    return result;
+}
 }

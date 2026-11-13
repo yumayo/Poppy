@@ -21,4 +21,12 @@ struct CompositionText {
     size_t cursor = 0;
     CompositionLayout layout(int columns, int firstColumn) const;
 };
+// Rewrites composition text that was already sent to a line editor: erase the
+// changed tail (one Backspace per code point), then insert the new tail.
+// Surrogate pairs are never split.
+struct CompositionEdit {
+    size_t erase = 0;
+    std::u16string insert;
+};
+CompositionEdit compositionEdit(const std::u16string& sent, const std::u16string& next);
 }
