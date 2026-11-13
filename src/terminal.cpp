@@ -186,6 +186,7 @@ void Terminal::detach(ShutdownDialog* progress) {
 }
 void Terminal::send(std::string text, bool userInput) {
     if ((!launching_ && !running()) || text.empty()) return;
+    if (userInput) compositionAnchor_.reset();
     { std::lock_guard<std::mutex> lock(mutex_); if (writeBytes_ + text.size() > 1024 * 1024) { MessageBeep(MB_ICONWARNING); return; } writeBytes_ += text.size(); writes_.push_back(std::move(text)); }
     condition_.notify_all();
     if (userInput) {
@@ -351,14 +352,23 @@ void Terminal::stopSelection() {
     selecting_ = false;
     if (GetCapture() == window_) ReleaseCapture();
 }
-CompositionLayout Terminal::echoedComposition() const {
+TerminalPrediction Terminal::compositionView() {
     if (sentComposition_.empty() || ime_.text().text != sentComposition_) return {};
-    return display_.echoedComposition(ime_.text());
+    TerminalPrediction view;
+    view.composition = display_.echoedComposition(ime_.text());
+    if (!view.composition.glyphs.empty()) {
+        // The echo is authoritative; later predictions start where it starts.
+        const auto& first = view.composition.glyphs.front();
+        compositionAnchor_ = CompositionAnchor{display_.firstRow() + first.row, first.column};
+        return view;
+    }
+    if (!compositionAnchor_ || GetTickCount64() - compositionSentAt_ >= predictionWindow) return {};
+    return display_.predictComposition(ime_.text(), compositionAnchor_->row, compositionAnchor_->column);
 }
 void Terminal::imePosition() {
     // The shell echoes composition text itself, so the VT cursor follows it.
     // Once the echo is on screen, follow the IME caret within it.
-    const auto composition = echoedComposition();
+    const auto composition = compositionView().composition;
     const POINT caret = composition.glyphs.empty()
         ? POINT{6 + display_.cursorX() * cellWidth_, 4 + display_.cursorY() * cellHeight_}
         : POINT{6 + composition.caretColumn * cellWidth_, 4 + composition.caretRow * cellHeight_};
@@ -366,16 +376,24 @@ void Terminal::imePosition() {
 }
 void Terminal::sendComposition(const std::u16string& text) {
     if (text == sentComposition_) return;
+    const auto now = GetTickCount64();
+    auto anchor = compositionAnchor_;
+    // A new composition continues after a commit whose echo may be pending.
+    if (sentComposition_.empty() && !(anchor && now - compositionSentAt_ < predictionWindow))
+        anchor = display_.cursorVisible() ? std::optional<CompositionAnchor>{{display_.firstRow() + display_.cursorY(), display_.inputColumn()}} : std::nullopt;
     const auto edit = compositionEdit(sentComposition_, text);
     sentComposition_ = text;
     std::string input(edit.erase, '\x7f');
     input += utf8(std::wstring(edit.insert.begin(), edit.insert.end()));
     send(std::move(input));
+    compositionAnchor_ = anchor; compositionSentAt_ = now;
+    // Repaint once the prediction expires without a matching echo.
+    if (window_) SetTimer(window_, compositionTimer, static_cast<UINT>(predictionWindow), nullptr);
 }
 void Terminal::finishComposition() {
     // Leave text already sent in place, as if committed, so that a later IME
     // message cannot erase or duplicate it.
-    sentComposition_.clear();
+    sentComposition_.clear(); compositionAnchor_.reset();
     ime_.cancel(window_);
 }
 void Terminal::paste() {
@@ -422,11 +440,12 @@ void Terminal::paint() {
     } else {
         RECT clip{6, 4, rect.right - 6, rect.bottom};
         const auto [begin, end] = display_.selectionRange();
-        const auto composition = GetFocus() == window_ ? echoedComposition() : CompositionLayout{};
+        const auto view = GetFocus() == window_ ? compositionView() : TerminalPrediction{};
+        const auto& composition = view.composition;
         const auto target = [](const CompositionGlyph& glyph) { return glyph.attribute == ATTR_TARGET_CONVERTED || glyph.attribute == ATTR_TARGET_NOTCONVERTED; };
         std::vector<Cell> visible;
         for (int y = 0; y < display_.rows(); ++y) {
-            visible = display_.row(y);
+            visible = view.cells.empty() ? display_.row(y) : view.cells[y];
             if (begin < end) for (int x = 0; x < display_.columns(); ++x) { const int index = y * display_.columns() + x; if (index >= begin && index < end) visible[x].bg = rgb(50,70,94); }
             for (const auto& glyph : composition.glyphs)
                 if (glyph.row == y && target(glyph)) for (int x = 0; x < glyph.width; ++x) visible[glyph.column + x].bg = rgb(50,70,94);
@@ -471,8 +490,9 @@ LRESULT Terminal::handle(UINT m, WPARAM a, LPARAM b) {
     case WM_TIMER:
         if (a == selectionTimer) scrollSelection();
         else if (a == 2) pump();
+        else if (a == compositionTimer) { KillTimer(window_, compositionTimer); imePosition(); InvalidateRect(window_, nullptr, FALSE); }
         return 0;
-    case WM_DESTROY: stopSelection(); sentComposition_.clear(); ime_.clear(); if (GetFocus() == window_) DestroyCaret(); return 0;
+    case WM_DESTROY: stopSelection(); KillTimer(window_, compositionTimer); sentComposition_.clear(); compositionAnchor_.reset(); ime_.clear(); if (GetFocus() == window_) DestroyCaret(); return 0;
     case WM_SHOWWINDOW: if (!a) { stopSelection(); finishComposition(); } break;
     case WM_GETDLGCODE: return DLGC_WANTALLKEYS;
     case WM_COPY: copy(); return 0;
@@ -589,7 +609,13 @@ LRESULT Terminal::handle(UINT m, WPARAM a, LPARAM b) {
         const auto result = ime_.handle(window_, m, a, b, [this] { imePosition(); },
             [this](std::wstring text) {
                 // Replace the sent composition with the committed text.
-                sendComposition(std::u16string(text.begin(), text.end()));
+                const std::u16string result(text.begin(), text.end());
+                sendComposition(result);
+                // The next composition starts after the committed text.
+                if (compositionAnchor_) {
+                    const auto end = CompositionText{result, {}, result.size()}.layout(display_.columns(), compositionAnchor_->column);
+                    compositionAnchor_->row += end.endRow; compositionAnchor_->column = end.endColumn;
+                }
                 sentComposition_.clear();
             });
         // Send what remains in composition, including an empty string on cancel.

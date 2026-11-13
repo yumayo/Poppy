@@ -5,6 +5,11 @@
 #include <utility>
 
 namespace poppy {
+// A temporary frame that shows composition text before the shell echoes it.
+struct TerminalPrediction {
+    std::vector<std::vector<Cell>> cells;
+    CompositionLayout composition;
+};
 // Present parsed output immediately; retain the last complete frame only when
 // the application explicitly requests synchronized output.
 class TerminalDisplay {
@@ -24,6 +29,13 @@ public:
     // cursor. Glyphs use viewport cells; nothing is returned until every glyph
     // matches, so a pending or reformatted echo is never decorated.
     CompositionLayout echoedComposition(const CompositionText& text) const;
+    // Draw composition text from an input position given in buffer rows.
+    // Cells are overwritten, not shifted; cells the previous composition still
+    // occupies up to the cursor are blanked. Empty when it does not fit.
+    TerminalPrediction predictComposition(const CompositionText& text, int64_t row, int column) const;
+    int64_t firstRow() const { return firstRow_; }
+    // The input position after the cursor, including a pending autowrap.
+    int inputColumn() const { return wrapPending_ ? columns_ : cursorX_; }
     // Selection endpoints are cell boundaries; the end is exclusive.
     std::pair<int, int> selectionRange(int anchor, int caret) const;
     std::string selectedText(int anchor, int caret) const;

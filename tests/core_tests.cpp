@@ -460,7 +460,41 @@ void echoedCompositionTests() {
     hard.feed("abc\r\nde"); lines.update(hard, 0, 0, true);
     check(lines.echoedComposition({u"cde", {}, 3}).glyphs.empty(), "a hard line break ends the echoed composition");
 }
+void predictedCompositionTests() {
+    const auto text = [](const TerminalPrediction& prediction, int y) {
+        std::string result;
+        for (const auto& cell : prediction.cells[y]) if (!cell.continuation) appendUtf8(result, cell.ch);
+        while (!result.empty() && result.back() == ' ') result.pop_back();
+        return result;
+    };
+    TerminalModel model(10, 3); TerminalDisplay display;
+    model.feed("$ "); display.update(model, 0, 0, true);
+    auto prediction = display.predictComposition({u"かん", {}, 2}, display.firstRow(), 2);
+    check(text(prediction, 0) == "$ かん" && prediction.composition.glyphs.size() == 2 && prediction.composition.caretColumn == 6,
+        "composition is drawn before the shell echoes it");
+    check(line(display, 0) == "$", "prediction never changes the displayed buffer");
+
+    model.feed("かんじ"); display.changed(); display.update(model, 0, 1);
+    prediction = display.predictComposition({u"漢字", {}, 2}, display.firstRow(), 2);
+    check(text(prediction, 0) == "$ 漢字", "a shorter conversion hides the previous echo up to the cursor");
+
+    TerminalModel wide(10, 2); TerminalDisplay half;
+    wide.feed("$ ab日本\x1b[1;3H"); half.update(wide, 0, 0, true);
+    prediction = half.predictComposition({u"xyz", {}, 3}, half.firstRow(), 2);
+    check(text(prediction, 0) == "$ xyz 本", "overwriting half of a wide glyph clears its other half");
+
+    TerminalModel edge(5, 3); TerminalDisplay wrap;
+    edge.feed("abc"); wrap.update(edge, 0, 0, true);
+    prediction = wrap.predictComposition({u"X日", {}, 2}, wrap.firstRow(), 3);
+    check(text(prediction, 0) == "abcX" && text(prediction, 1) == "日" && prediction.composition.glyphs[1].row == 1,
+        "a wide glyph at the edge wraps with padding like the terminal");
+
+    TerminalModel bottom(5, 2); TerminalDisplay full;
+    bottom.feed("\r\nabc"); full.update(bottom, 0, 0, true);
+    check(full.predictComposition({u"日本", {}, 2}, full.firstRow() + 1, 3).cells.empty(), "a prediction that would scroll is not drawn");
+    check(full.predictComposition({u"日", {}, 1}, full.firstRow() - 1, 0).cells.empty(), "an anchor outside the screen is not drawn");
+}
 int main() {
-    try { textTests(); terminalTests(); terminalTitleTests(); terminalNotificationErrorTests(); terminalDisplayTests(); terminalInputTests(); terminalScrollTests(); terminalCopyTests(); terminalSelectionScrollTests(); terminalWrapMetadataTests(); compositionEditTests(); echoedCompositionTests(); std::cout << "Text and terminal core tests passed.\n"; return EXIT_SUCCESS; }
+    try { textTests(); terminalTests(); terminalTitleTests(); terminalNotificationErrorTests(); terminalDisplayTests(); terminalInputTests(); terminalScrollTests(); terminalCopyTests(); terminalSelectionScrollTests(); terminalWrapMetadataTests(); compositionEditTests(); echoedCompositionTests(); predictedCompositionTests(); std::cout << "Text and terminal core tests passed.\n"; return EXIT_SUCCESS; }
     catch (const std::exception& error) { std::cerr << error.what() << '\n'; return EXIT_FAILURE; }
 }

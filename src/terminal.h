@@ -62,7 +62,7 @@ private:
     void imePosition();
     void sendComposition(const std::u16string& text);
     void finishComposition();
-    CompositionLayout echoedComposition() const;
+    TerminalPrediction compositionView();
     int point(int x, int y) const;
     std::string linkAt(int x, int y) const;
     HWND window_ = nullptr;
@@ -71,6 +71,13 @@ private:
     // Composition text already written to the shell. The application renders
     // it; each change erases the changed tail with Backspace and resends it.
     std::u16string sentComposition_;
+    // Until the echo arrives, composition is drawn from where it started.
+    // Without a visible VT cursor there is no reliable start, so no prediction.
+    struct CompositionAnchor { int64_t row; int column; };
+    std::optional<CompositionAnchor> compositionAnchor_;
+    uint64_t compositionSentAt_ = 0;
+    static constexpr uint64_t predictionWindow = 300;
+    static constexpr UINT_PTR compositionTimer = 0x5059;
     Scrollbars scrollbars_;
     int cellWidth_ = 8, cellHeight_ = 20;
     fs::path directory_;

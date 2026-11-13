@@ -37,7 +37,7 @@ CompositionLayout TerminalDisplay::echoedComposition(const CompositionText& text
     if (text.text.empty() || scroll_ || cursorY_ < 0 || cursorY_ >= rows() || columns_ < 2) return {};
     // A single unbounded row gives each glyph's character, width and attribute.
     auto glyphs = text.layout(1 << 20, 0);
-    int y = cursorY_, x = wrapPending_ ? columns_ : std::min(cursorX_, columns_);
+    int y = cursorY_, x = std::min(inputColumn(), columns_);
     for (auto glyph = glyphs.glyphs.rbegin(); glyph != glyphs.glyphs.rend(); ++glyph) {
         const int width = glyph->width;
         if (x == 0) {
@@ -54,7 +54,7 @@ CompositionLayout TerminalDisplay::echoedComposition(const CompositionText& text
     }
     CompositionLayout result;
     result.glyphs = std::move(glyphs.glyphs);
-    result.endRow = cursorY_; result.endColumn = wrapPending_ ? columns_ : cursorX_;
+    result.endRow = cursorY_; result.endColumn = inputColumn();
     // The IME caret sits before the glyph at its offset, or at the cursor.
     int offset = glyphs.caretColumn;
     result.caretRow = result.endRow; result.caretColumn = result.endColumn;
@@ -62,6 +62,54 @@ CompositionLayout TerminalDisplay::echoedComposition(const CompositionText& text
         if (offset <= 0) { result.caretRow = glyph.row; result.caretColumn = glyph.column; break; }
         offset -= glyph.width;
     }
+    return result;
+}
+TerminalPrediction TerminalDisplay::predictComposition(const CompositionText& text, int64_t row, int column) const {
+    if (text.text.empty() || scroll_ || columns_ < 2 || row < firstRow_ || row >= firstRow_ + rows()) return {};
+    const int top = static_cast<int>(row - firstRow_);
+    column = std::clamp(column, 0, columns_);
+    auto layout = text.layout(columns_, column);
+    const auto toEdge = [&](int& y, int& x) { if (x == 0 && y > 0 && top + y >= rows()) { --y; x = columns_; } };
+    toEdge(layout.endRow, layout.endColumn); toEdge(layout.caretRow, layout.caretColumn);
+    // The shell would scroll the screen; do not guess the resulting frame.
+    if (top + layout.endRow >= rows()) return {};
+    TerminalPrediction result;
+    result.cells = cells_;
+    auto& cells = result.cells;
+    const int first = top + column / columns_, last = top + layout.endRow;
+    for (const auto& glyph : layout.glyphs) {
+        auto& cell = cells[top + glyph.row][glyph.column];
+        cell.ch = glyph.character; cell.fg = foreground; cell.continuation = false;
+        if (glyph.width == 2) { auto tail = cell; tail.ch = 0; tail.continuation = true; cells[top + glyph.row][glyph.column + 1] = tail; }
+    }
+    // A wide glyph that does not fit leaves padding in the last column.
+    for (size_t i = 0; i < layout.glyphs.size(); ++i) {
+        const auto& glyph = layout.glyphs[i];
+        if (glyph.width != 2 || glyph.column != 0 || glyph.row == 0) continue;
+        const int previousEnd = i ? layout.glyphs[i - 1].column + layout.glyphs[i - 1].width : column % columns_;
+        if (previousEnd == columns_ - 1) { auto& pad = cells[top + glyph.row - 1][columns_ - 1]; pad.ch = U' '; pad.continuation = false; }
+    }
+    // A shorter conversion leaves the previous text until the echo arrives.
+    const int64_t end = static_cast<int64_t>(last) * columns_ + layout.endColumn;
+    const int64_t cursor = static_cast<int64_t>(cursorY_) * columns_ + inputColumn();
+    const int64_t start = static_cast<int64_t>(top) * columns_ + column;
+    int blankLast = last;
+    if (cursor > end && cursor >= start) for (int64_t index = end; index < cursor && index < static_cast<int64_t>(rows()) * columns_; ++index) {
+        auto& cell = cells[index / columns_][index % columns_];
+        cell.ch = U' '; cell.continuation = false;
+        blankLast = static_cast<int>(index / columns_);
+    }
+    // Overwriting half of an existing wide glyph must not leave the other half.
+    for (int y = std::min(first, top); y <= blankLast && y < rows(); ++y) {
+        auto& line = cells[y];
+        for (int x = 0; x < columns_; ++x) {
+            if (line[x].continuation && (x == 0 || line[x - 1].continuation || cellWidth(line[x - 1].ch) < 2)) { line[x].ch = U' '; line[x].continuation = false; }
+            else if (!line[x].continuation && cellWidth(line[x].ch) == 2 && (x + 1 >= columns_ || !line[x + 1].continuation)) line[x].ch = U' ';
+        }
+    }
+    for (auto& glyph : layout.glyphs) glyph.row += top;
+    layout.caretRow += top; layout.endRow += top;
+    result.composition = std::move(layout);
     return result;
 }
 std::string TerminalDisplay::linkAt(int column, int y) const {
