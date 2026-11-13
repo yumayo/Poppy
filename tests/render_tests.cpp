@@ -864,8 +864,25 @@ void csvTables() {
         SCROLLINFO after{sizeof(after), SIF_ALL, 0, 0, 0, 0, 0}; GetScrollInfo(window, SB_HORZ, &after);
         check(after.nMax == before.nMax + px(80), "CSV column resizing did not update the horizontal range");
         RedrawWindow(window, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW);
-        viewer.find(); check(!viewer.csvTable(), "CSV search did not switch to searchable source");
-        const auto find = FindWindowExW(window, nullptr, L"PoppyFindBar", nullptr); SendMessageW(find, WM_KEYDOWN, VK_ESCAPE, 0);
+        viewer.restore({});
+        viewer.find(); check(viewer.csvTable(), "CSV search left the table");
+        const auto find = FindWindowExW(window, nullptr, L"PoppyFindBar", nullptr);
+        check(find && IsWindowVisible(find), "CSV search did not show the find bar");
+        const auto finish = [&] { for (int i = 0; i < 1000 && KillTimer(window, 0x5057); ++i) SendMessageW(window, WM_TIMER, 0x5057, 0); };
+        SetFocus(find); SendMessageW(find, WM_CHAR, L'e', 0);
+        finish(); SendMessageW(find, WM_KEYDOWN, VK_RETURN, 0); finish();
+        table.parse(buffer->document.text);
+        const auto matched = table.position(viewer.state().caret);
+        check(table.value(buffer->document.text, matched).find('e') != std::string::npos && viewer.csvTable(), "CSV search did not select a matching cell");
+        SendMessageW(find, WM_KEYDOWN, VK_RETURN, 0); finish();
+        const auto next = table.position(viewer.state().caret);
+        check((next.row != matched.row || next.column != matched.column) && table.value(buffer->document.text, next).find('e') != std::string::npos, "Enter did not move to the next matching cell");
+        // Column A was widened above, so click inside it below the find bar.
+        const auto shifted = MAKELPARAM(px(52 + 20), px(34) * 2 + rowHeight * 2 + rowHeight / 2);
+        SendMessageW(window, WM_LBUTTONDOWN, MK_LBUTTON, shifted); SendMessageW(window, WM_LBUTTONUP, 0, shifted);
+        check(viewer.state().caret == table.offset({1, 0}), "The find bar did not shift CSV hit testing");
+        viewer.setCsvTable(false); check(IsWindowVisible(find), "Switching to Source closed the find bar");
+        viewer.setCsvTable(true); SendMessageW(find, WM_KEYDOWN, VK_ESCAPE, 0); check(!IsWindowVisible(find) && viewer.csvTable(), "Escape did not close the CSV find bar");
         viewer.setCsvTable(true); const auto selected = buffer->document.text.find("saved");
         check(viewer.selectSearch(selected, selected + 5, "saved", true) && !viewer.csvTable(), "Project search did not reveal CSV source");
         auto readonly = std::make_shared<Document>(buffer->document); viewer.show(readonly, L"readonly.csv");

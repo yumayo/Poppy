@@ -4,7 +4,7 @@
 
 namespace poppy {
 namespace {
-constexpr COLORREF selectedCell = RGB(43, 62, 55), activeHeader = RGB(43, 67, 52);
+constexpr COLORREF selectedCell = RGB(43, 62, 55), activeHeader = RGB(43, 67, 52), matchedCell = RGB(92, 73, 34);
 std::wstring displayValue(std::wstring text) {
     // Keep UTF-16 offsets intact for the formula input's selection and IME.
     for (auto& ch : text) {
@@ -27,6 +27,7 @@ void CsvView::show(std::shared_ptr<const Document> document, bool preserve) {
 }
 void CsvView::hide(bool release) {
     finishEdit(); stopDrag(); active_ = false;
+    search_ = {};
     if (release) { document_.reset(); edit_.reset(); table_ = {}; widths_ = {}; edges_ = {}; text_ = {}; }
 }
 void CsvView::rebuild() {
@@ -45,7 +46,7 @@ int CsvView::rowGutter() const {
 int CsvView::pageRows() const { return std::max(1, static_cast<int>(Scrollbars::contentRect(window_).bottom - bodyTop()) / rowHeight()); }
 RECT CsvView::formula() const {
     const auto rect = Scrollbars::contentRect(window_);
-    return {px(82), px(4), std::max<LONG>(px(82), rect.right - px(6)), px(30)};
+    return {px(82), top() + px(4), std::max<LONG>(px(82), rect.right - px(6)), top() + px(30)};
 }
 RECT CsvView::cellRect(CsvPosition cell) const {
     if (cell.column + 1 >= edges_.size()) return {};
@@ -89,7 +90,7 @@ CsvRange CsvView::selection() const {
     return {std::min(anchor_.row, caret_.row), std::min(anchor_.column, caret_.column), std::max(anchor_.row, caret_.row), std::max(anchor_.column, caret_.column)};
 }
 int CsvView::resizeColumn(POINT point) const {
-    if (!valid_ || point.y < px(34) || point.y >= bodyTop() || point.x < rowGutter()) return -1;
+    if (!valid_ || point.y < headerTop() || point.y >= bodyTop() || point.x < rowGutter()) return -1;
     const int x = point.x - rowGutter() + left_;
     const auto edge = std::lower_bound(edges_.begin() + 1, edges_.end(), x - px(4));
     return edge != edges_.end() && std::abs(*edge - x) <= px(4) ? static_cast<int>(edge - edges_.begin() - 1) : -1;
@@ -274,6 +275,20 @@ std::optional<std::wstring> CsvView::searchSeed() const {
     if (value.empty() || value.size() > 2048 || value.find_first_of("\r\n") != std::string::npos) return {};
     return wide(value);
 }
+void CsvView::find(std::string query, bool matchCase, bool navigate, bool backwards) {
+    search_.query(std::move(query), matchCase);
+    // Typing keeps a still-matching current cell; Enter / F3 move past it.
+    search_.start(valid_ ? caret_ : CsvPosition{}, backwards, navigate && !backwards);
+    InvalidateRect(window_, nullptr, FALSE);
+}
+bool CsvView::findStep(size_t cellBudget) {
+    return !valid_ || !document_ || search_.step(table_, document_->text, cellBudget);
+}
+void CsvView::revealFind() {
+    if (valid_ && search_.current()) select(*search_.current());
+    else InvalidateRect(window_, nullptr, FALSE);
+}
+void CsvView::clearFind() { search_ = {}; if (window_) InvalidateRect(window_, nullptr, FALSE); }
 void CsvView::paint() {
     Renderer::Paint paint(*renderer_, window_); if (!paint) return;
     auto& dc = *renderer_; dc.font(Renderer::Font::Ui);
@@ -293,7 +308,7 @@ void CsvView::paint() {
             cell.left = std::max<LONG>(gutter, cell.left); cell.right = std::min(cell.right, rect.right); cell.bottom = std::min(cell.bottom, rect.bottom);
             if (cell.right <= cell.left) continue;
             const bool selected = r >= range.firstRow && r <= range.lastRow && c >= range.firstColumn && c <= range.lastColumn;
-            dc.fill(cell, selected ? selectedCell : background);
+            dc.fill(cell, selected ? selectedCell : !search_.empty() && search_.matches(table_, document_->text, {r, c}) ? matchedCell : background);
             dc.fill({cell.left, cell.bottom - 1, cell.right, cell.bottom}, border);
             if (right <= rect.right) dc.fill({right - 1, cell.top, right, cell.bottom}, border);
             auto label = cell; label.left = std::max<LONG>(cell.left + px(7), cellRect({r, c}).left + px(7)); label.right -= px(6);
@@ -307,19 +322,19 @@ void CsvView::paint() {
     }
     auto current = cellRect(caret_); RECT clip{gutter, bodyTop(), rect.right, rect.bottom}, visible{};
     if (IntersectRect(&visible, &current, &clip)) dc.outline(visible, accent, static_cast<float>(px(2)));
-    dc.fill({0, px(34), rect.right, std::min<LONG>(bodyTop(), rect.bottom)}, panel);
+    dc.fill({0, headerTop(), rect.right, std::min<LONG>(bodyTop(), rect.bottom)}, panel);
     for (size_t c = firstColumn; c <= lastColumn; ++c) {
         const auto cell = cellRect({static_cast<size_t>(top_), c});
-        const RECT header{std::max<LONG>(gutter, cell.left), px(34), std::min(cell.right, rect.right), std::min<LONG>(bodyTop(), rect.bottom)};
+        const RECT header{std::max<LONG>(gutter, cell.left), headerTop(), std::min(cell.right, rect.right), std::min<LONG>(bodyTop(), rect.bottom)};
         dc.fill(header, c >= range.firstColumn && c <= range.lastColumn ? activeHeader : panel);
         dc.label(header, wide(csvColumnName(c)), c == caret_.column ? accent : muted, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
         dc.fill({header.right - 1, header.top, header.right, header.bottom}, border);
     }
-    dc.fill({0, px(34), std::min<LONG>(gutter, rect.right), std::min<LONG>(bodyTop(), rect.bottom)}, panel);
+    dc.fill({0, headerTop(), std::min<LONG>(gutter, rect.right), std::min<LONG>(bodyTop(), rect.bottom)}, panel);
     dc.fill({0, bodyTop() - 1, rect.right, bodyTop()}, border);
-    dc.fill({gutter - 1, px(34), gutter, rect.bottom}, border);
-    dc.fill({0, 0, rect.right, std::min<LONG>(px(34), rect.bottom)}, panel);
-    dc.label({0, 0, px(78), px(34)}, wide(csvColumnName(caret_.column)) + std::to_wstring(caret_.row + 1), accent, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    dc.fill({gutter - 1, headerTop(), gutter, rect.bottom}, border);
+    dc.fill({0, top(), rect.right, std::min<LONG>(headerTop(), rect.bottom)}, panel);
+    dc.label({0, top(), px(78), headerTop()}, wide(csvColumnName(caret_.column)) + std::to_wstring(caret_.row + 1), accent, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     const auto box = formula(); dc.fill(box, background); dc.outline(box, editing_ ? accent : border);
     if (editing_) input_.draw(dc, foreground, RGB(50, 70, 94), GetFocus() == window_);
     else dc.label({box.left + px(6), box.top, box.right - px(4), box.bottom}, displayValue(wide(table_.value(document_->text, caret_))), foreground);
@@ -350,7 +365,7 @@ bool CsvView::handle(UINT message, WPARAM a, LPARAM b, LRESULT& result) {
             inputSelecting_ = true; SetCapture(window_); inputChanged(); return true;
         }
         finishEdit();
-        const auto bounds = Scrollbars::contentRect(window_); if (!PtInRect(&bounds, point) || point.y < px(34)) return true;
+        const auto bounds = Scrollbars::contentRect(window_); if (!PtInRect(&bounds, point) || point.y < headerTop()) return true;
         resizing_ = resizeColumn(point);
         if (resizing_ >= 0) { resizeX_ = point.x; resizeWidth_ = widths_[resizing_]; SetCapture(window_); return true; }
         if (point.x < rowGutter() && point.y < bodyTop()) {

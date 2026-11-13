@@ -22,8 +22,9 @@ void Viewer::create(HWND parent, HINSTANCE instance, bool textOnly) {
     RegisterClassW(&cls);
     window_ = CreateWindowExW(0, cls.lpszClassName, L"Code viewer", WS_CHILD | WS_VISIBLE | WS_CLIPCHILDREN | WS_VSCROLL | WS_HSCROLL | WS_TABSTOP, 0, 0, 0, 0, parent, nullptr, instance, this);
     csv_.attach(window_, renderer_, scrollbars_);
+    csv_.inset = [this] { return contentTop(); };
     csv_.changed = [this] {
-        layoutDirty_ = true; updateGitLines();
+        layoutDirty_ = true; updateGitLines(); requestFind(false, false, false);
         if (changed) changed();
         if (statusChanged) statusChanged();
     };
@@ -34,7 +35,7 @@ void Viewer::create(HWND parent, HINSTANCE instance, bool textOnly) {
     findBar_.navigate = [this](bool backwards) { findNext(backwards); };
     findBar_.focused = [this] { if (focused) focused(); };
     findBar_.closed = [this] {
-        KillTimer(window_, findTimer); search_.query("");
+        KillTimer(window_, findTimer); search_.query(""); csv_.clearFind();
         scrollbars(); caretPosition(); InvalidateRect(window_, nullptr, FALSE);
     };
     html_.changed = [this] { InvalidateRect(window_, nullptr, FALSE); };
@@ -235,7 +236,7 @@ void Viewer::refreshBuffer(bool externalUpdate) {
     if (!edit_) return;
     stopSelection(); clearColumns();
     if (csv_.active()) {
-        csv_.refresh(); updateGitLines(); layoutDirty_ = true;
+        csv_.refresh(); updateGitLines(); layoutDirty_ = true; requestFind(false, false, false);
         if (statusChanged) statusChanged();
         return;
     }
@@ -311,7 +312,8 @@ void Viewer::setHtmlPreview(bool enabled) {
 void Viewer::setCsvTable(bool enabled) {
     if (!csvAvailable() || enabled == csv_.active()) return;
     const auto previous = state();
-    stopSelection(); clearColumns(); ime_.cancel(window_); findBar_.close();
+    // Both views search the same document, so the find bar stays open.
+    stopSelection(); clearColumns(); ime_.cancel(window_); KillTimer(window_, findTimer);
     if (enabled) {
         csv_.show(document_, true); csv_.buffer(edit_); csv_.restore(previous);
         KillTimer(window_, caretTimer); caretVisible_ = false;
@@ -320,6 +322,7 @@ void Viewer::setCsvTable(bool enabled) {
         auto source = previous; source.left = 0;
         scrollbars(); restore(source);
     }
+    findLayout(); requestFind(false, false, false);
     InvalidateRect(window_, nullptr, FALSE);
     if (statusChanged) statusChanged();
 }
@@ -663,9 +666,10 @@ std::optional<std::wstring> Viewer::searchSeed() const {
 }
 void Viewer::find() {
     if (!document_) return;
-    const auto seed = searchSeed();
+    // In a table the current cell always holds a value; reusing it after
+    // navigating to a match would replace the query with the whole cell.
+    const auto seed = csv_.active() && findBar_.visible() ? std::nullopt : searchSeed();
     stopSelection(); clearColumns();
-    if (csv_.active()) setCsvTable(false);
     if (html_.active()) setHtmlPreview(false);
     findBar_.show(seed); scrollbars(); findLayout(); requestFind();
     InvalidateRect(window_, nullptr, FALSE);
@@ -684,26 +688,47 @@ bool Viewer::findKey(const MSG& message) {
     if (ctrl && !shift && !(GetKeyState(VK_MENU) & 0x8000) && message.wParam == 'F') { find(); return true; }
     if (message.hwnd == findBar_.window()) return false; // Let the input's IME handle these keys first.
     if (!ctrl && message.wParam == VK_F3) { findNext(shift); return true; }
-    if (message.wParam == VK_ESCAPE && findBar_.visible()) { findBar_.close(); return true; }
+    // Escape cancels a cell edit before it closes the find bar.
+    if (message.wParam == VK_ESCAPE && findBar_.visible() && !(csv_.active() && csv_.editing() && message.hwnd == window_)) { findBar_.close(); return true; }
     return false;
 }
 void Viewer::requestFind(bool navigate, bool backwards, bool reveal) {
     KillTimer(window_, findTimer);
     if (!findBar_.visible() || !document_) return;
+    revealFind_ = reveal;
+    if (csv_.active()) {
+        csv_.find(utf8(findBar_.query()), findBar_.matchCase(), navigate, backwards);
+        findBar_.status(csv_.search().ready() ? L"" : L"Searching…");
+        if (!csv_.search().ready()) SetTimer(window_, findTimer, navigate ? 1 : 60, nullptr);
+        return;
+    }
     size_t origin = std::min(anchor_, caret_);
     if (navigate) origin = backwards ? std::min(anchor_, caret_) : std::max(anchor_, caret_);
     search_.query(utf8(findBar_.query()), findBar_.matchCase());
     search_.start(origin, backwards);
-    revealFind_ = reveal;
     findBar_.status(search_.ready() ? L"" : L"Searching…");
     if (!search_.ready()) SetTimer(window_, findTimer, navigate ? 1 : 60, nullptr);
     InvalidateRect(window_, nullptr, FALSE);
 }
 void Viewer::searchSlice() {
-    if (!findBar_.visible() || !document_ || search_.ready()) { KillTimer(window_, findTimer); return; }
+    if (!findBar_.visible() || !document_ || (csv_.active() ? csv_.search().ready() : search_.ready())) { KillTimer(window_, findTimer); return; }
     // Search the live document on the UI thread in short, cancellable slices.
     // An edit or tab change replaces this state before another slice can run.
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(2);
+    if (csv_.active()) {
+        do {
+            if (csv_.findStep(1024)) {
+                KillTimer(window_, findTimer);
+                const auto& found = csv_.search();
+                findBar_.status(!found.count() ? L"No results" : revealFind_ ? std::to_wstring(found.ordinal()) + L" / " + std::to_wstring(found.count()) + L" cells" : std::to_wstring(found.count()) + L" cells");
+                if (revealFind_) csv_.revealFind();
+                else InvalidateRect(window_, nullptr, FALSE);
+                return;
+            }
+        } while (std::chrono::steady_clock::now() < deadline);
+        SetTimer(window_, findTimer, 1, nullptr);
+        return;
+    }
     const std::function<bool(TextMatch)> accept = diff_ ? std::function<bool(TextMatch)>([this](TextMatch match) { return diff_->inlineRowForText(match.begin, match.end).has_value(); }) : std::function<bool(TextMatch)>{};
     do {
         if (search_.step(document_->text, 8192, accept)) {

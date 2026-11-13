@@ -1,5 +1,5 @@
 #pragma once
-#include "csv_table.h"
+#include "csv_search.h"
 #include "edit_buffer.h"
 #include "scrollbars.h"
 #include "session.h"
@@ -17,6 +17,7 @@ public:
     void hide(bool release = false);
     bool active() const { return active_; }
     bool composing() const { return ime_.active(); }
+    bool editing() const { return editing_; }
     void refresh();
     void layout();
     void paint();
@@ -26,11 +27,21 @@ public:
     std::wstring status() const;
     std::optional<std::wstring> searchSeed() const;
     size_t bytes() const { return table_.bytes() + widths_.capacity() * sizeof(int) + edges_.capacity() * sizeof(int) + text_.capacity() * sizeof(wchar_t); }
+    // Cell search: start a scan, run it in slices, then select the target.
+    void find(std::string query, bool matchCase, bool navigate, bool backwards);
+    bool findStep(size_t cellBudget);
+    void revealFind();
+    void clearFind();
+    const CsvSearch& search() const { return search_; }
     std::function<void()> changed, save, statusChanged;
+    // Height reserved above the table, such as the viewer's find bar.
+    std::function<int()> inset;
 private:
+    int top() const { return inset ? inset() : 0; }
+    int headerTop() const { return top() + px(34); }
     int px(int value) const { return MulDiv(value, dpi_, 96); }
     int rowHeight() const { return std::max(px(28), renderer_->textHeight() + px(8)); }
-    int bodyTop() const { return px(34) + rowHeight(); }
+    int bodyTop() const { return headerTop() + rowHeight(); }
     int rowGutter() const;
     int pageRows() const;
     size_t gridRows() const { return std::min(CsvTable::maxCells, table_.rows() + 1); }
@@ -64,6 +75,7 @@ private:
     std::shared_ptr<const Document> document_;
     std::shared_ptr<EditBuffer> edit_;
     CsvTable table_;
+    CsvSearch search_;
     UINT dpi_ = 96;
     bool active_ = false, valid_ = false, editing_ = false, editChanged_ = false, selecting_ = false, inputSelecting_ = false;
     // Column widths use 96-DPI units; the scroll range uses physical pixels.

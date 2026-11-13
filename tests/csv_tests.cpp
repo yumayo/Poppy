@@ -1,4 +1,5 @@
 #include "csv_table.h"
+#include "csv_search.h"
 #include "edit_buffer.h"
 #include <iostream>
 #include <limits>
@@ -13,7 +14,7 @@ EditBuffer load(std::string source) {
     check(decodeText(source, buffer.document.text, buffer.document.encoding, error), "Cannot decode CSV fixture");
     indexDocument(buffer.document); buffer.initialize(std::move(source)); return buffer;
 }
-std::string apply(std::string source, const std::optional<CsvReplacement>& change) {
+std::string applyChange(std::string source, const std::optional<CsvReplacement>& change) {
     check(change.has_value(), "CSV edit was rejected");
     source.replace(change->begin, change->end - change->begin, change->text); return source;
 }
@@ -51,25 +52,25 @@ void parsing() {
 void edits() {
     const std::string original = "\"keep\",001,\"old\"\r\nlast\nend,,\r\n";
     CsvTable table; check(table.parse(original), "Cannot parse editing fixture");
-    auto edited = apply(original, table.replace(original, {0, 2}, {{"new,\"value\"\nline"}}));
+    auto edited = applyChange(original, table.replace(original, {0, 2}, {{"new,\"value\"\nline"}}));
     check(edited == "\"keep\",001,\"new,\"\"value\"\"\nline\"\r\nlast\nend,,\r\n", "Editing normalized unrelated bytes or failed to quote a cell");
-    check(apply(original, table.replace(original, {0, 2}, {{"old"}})) == original, "Editing an unchanged value removed its original quoting");
-    edited = apply(original, table.replace(original, {1, 1}, {{"A", "B"}, {"C", "D"}}));
+    check(applyChange(original, table.replace(original, {0, 2}, {{"old"}})) == original, "Editing an unchanged value removed its original quoting");
+    edited = applyChange(original, table.replace(original, {1, 1}, {{"A", "B"}, {"C", "D"}}));
     check(edited == "\"keep\",001,\"old\"\r\nlast,A,B\nend,C,D\r\n", "Rectangular paste changed unrelated fields or separators");
-    edited = apply(original, table.clear(original, {0, 1, 2, 2}));
+    edited = applyChange(original, table.clear(original, {0, 1, 2, 2}));
     check(edited == "\"keep\",,\r\nlast\nend,,\r\n", "Clear expanded ragged records or changed other cells");
     for (const auto& source : {std::string("a,b"), std::string("a,b\n"), std::string("a,b\r\n")}) {
         check(table.parse(source), "Cannot parse append fixture");
         const auto newline = source.find('\r') != std::string::npos ? "\r\n" : "\n";
-        edited = apply(source, table.replace(source, {1, 2}, {{"tail"}}));
+        edited = applyChange(source, table.replace(source, {1, 2}, {{"tail"}}));
         check(edited == std::string("a,b") + newline + ",,tail" + (source.back() == '\n' ? newline : ""), "Appending lost the terminal newline convention");
         check(table.parse(edited) && table.rows() == 2 && table.value(edited, {1, 2}) == "tail", "Appended record did not round trip");
     }
     check(table.parse("a\nb"), "Cannot parse clear fixture");
-    edited = apply("a\nb", table.clear("a\nb", {0, 0, 1, 0}));
+    edited = applyChange("a\nb", table.clear("a\nb", {0, 0, 1, 0}));
     check(table.parse(edited) && table.rows() == 2 && table.value(edited, {1, 0}).empty(), "Clearing a single-column final record removed the row");
     check(table.parse(""), "Cannot parse empty CSV");
-    edited = apply("", table.replace("", {2, 1}, {{u8"日本語😀"}}));
+    edited = applyChange("", table.replace("", {2, 1}, {{u8"日本語😀"}}));
     check(table.parse(edited) && table.rows() == 3 && table.columns() == 2 && table.value(edited, {2, 1}) == u8"日本語😀", "Appending into an empty file lost blank rows");
     check(!table.replace(edited, {0, CsvTable::maxColumns}, {{"bad"}}) && !table.replace(edited, {CsvTable::maxCells, 0}, {{"bad"}}), "Out-of-range paste accepted");
     check(!table.replace(edited, {std::numeric_limits<size_t>::max(), 0}, {{"bad"}}), "Paste coordinates overflowed");
@@ -142,20 +143,52 @@ void rectangularEdits() {
         const CsvPosition first{random() % 7, random() % 5};
         CsvValues incoming(1 + random() % 3, std::vector<std::string>(1 + random() % 3));
         for (auto& row : incoming) for (auto& value : row) value = samples[random() % samples.size()];
-        const auto edited = apply(source, table.replace(source, first, incoming));
+        const auto edited = applyChange(source, table.replace(source, first, incoming));
         expected.resize(std::max(expected.size(), first.row + incoming.size()), {""});
         for (size_t r = 0; r < incoming.size(); ++r) {
             auto& row = expected[first.row + r]; row.resize(std::max(row.size(), first.column + incoming[r].size()));
             for (size_t c = 0; c < incoming[r].size(); ++c) row[first.column + c] = incoming[r][c];
         }
         check(table.parse(edited) && table.values(edited) == expected, "Rectangular edit changed data outside its destination");
-        const auto cleared = apply(edited, table.clear(edited, {first.row, first.column, first.row + incoming.size() - 1, first.column + incoming[0].size() - 1}));
+        const auto cleared = applyChange(edited, table.clear(edited, {first.row, first.column, first.row + incoming.size() - 1, first.column + incoming[0].size() - 1}));
         for (size_t r = 0; r < incoming.size(); ++r) for (size_t c = 0; c < incoming[r].size(); ++c) expected[first.row + r][first.column + c].clear();
         check(table.parse(cleared) && table.values(cleared) == expected, "Clearing a rectangle changed record dimensions or other values");
     }
 }
+void search() {
+    const std::string source = u8"Name,Note\r\napple,\"say \"\"Apple\"\"\"\r\n豆腐,\"a,b\"\r\nshort\r\n,\"multi\r\nAPPLE pie\"\r\n";
+    CsvTable table; check(table.parse(source), "Search fixture rejected");
+    const auto run = [&](CsvSearch& search, CsvPosition origin, bool backwards = false, bool skip = false, size_t budget = 1) {
+        search.start(origin, backwards, skip);
+        size_t slices = 0;
+        while (!search.step(table, source, budget)) ++slices;
+        return slices;
+    };
+    const auto at = [](const CsvSearch& search, size_t row, size_t column) {
+        return search.current() && search.current()->row == row && search.current()->column == column;
+    };
+    CsvSearch search; search.query("apple");
+    check(run(search, {}) > 1, "Cell search did not split into slices");
+    check(search.count() == 3 && search.ordinal() == 1 && at(search, 1, 0), "Case-insensitive cell search found the wrong cells");
+    run(search, {1, 0}); check(at(search, 1, 0) && search.ordinal() == 1, "Typing did not keep a matching current cell");
+    run(search, {1, 0}, false, true); check(at(search, 1, 1) && search.ordinal() == 2, "Next did not move past the current cell");
+    run(search, {4, 1}, false, true); check(at(search, 1, 0) && search.ordinal() == 1, "Next did not wrap to the first cell");
+    run(search, {1, 0}, true); check(at(search, 4, 1) && search.ordinal() == 3, "Previous did not wrap to the last cell");
+    run(search, {4, 1}, true); check(at(search, 1, 1) && search.ordinal() == 2, "Previous did not select the earlier cell");
+    search.query("\"apple\"", true); run(search, {}, false, false, 1000);
+    check(search.count() == 0, "Case-sensitive search matched a different case");
+    search.query("\"Apple\""); run(search, {}, false, false, 1000);
+    check(search.count() == 1 && at(search, 1, 1), "Quoted values were not searched after decoding");
+    search.query("a,b"); run(search, {}, false, false, 1000); check(search.count() == 1 && at(search, 2, 1), "A delimiter inside a quoted value was not matched");
+    search.query("Name,Note"); run(search, {}, false, false, 1000); check(search.count() == 0, "A match crossed a cell boundary");
+    search.query("multi\r\nAPPLE"); run(search, {}, false, false, 1000); check(search.count() == 1 && at(search, 4, 1), "A multiline cell was not searched");
+    search.query(u8"豆"); run(search, {}, false, false, 1000); check(search.count() == 1 && search.matches(table, source, {2, 0}) && !search.matches(table, source, {2, 1}), "Japanese cell search failed");
+    check(!search.matches(table, source, {3, 1}) && !search.matches(table, source, {99, 0}), "Missing cells matched the query");
+    search.query(""); check(search.ready() && search.count() == 0 && !search.current(), "An empty query started a scan");
+    search.query("missing"); run(search, {2, 1}); check(search.count() == 0 && !search.current(), "A missing value selected a cell");
+}
 }
 int main() {
-    try { parsing(); edits(); clipboard(); historyAndEncoding(); rectangularEdits(); std::cout << "CSV tests passed\n"; }
+    try { parsing(); edits(); clipboard(); historyAndEncoding(); rectangularEdits(); search(); std::cout << "CSV tests passed\n"; }
     catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
 }
