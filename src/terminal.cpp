@@ -396,8 +396,8 @@ void Terminal::finishComposition() {
     sentComposition_.clear(); compositionAnchor_.reset();
     ime_.cancel(window_);
 }
-void Terminal::paste() {
-    auto text = utf8(clipboardText(window_)); if (text.empty()) return;
+bool Terminal::paste() {
+    auto text = utf8(clipboardText(window_)); if (text.empty()) return false;
     // Normalize clipboard CRLF to CR for console input.
     std::string input; input.reserve(text.size());
     for (size_t i = 0; i < text.size(); ++i) {
@@ -406,6 +406,7 @@ void Terminal::paste() {
     }
     if (model_.bracketedPaste()) input = "\x1b[200~" + input + "\x1b[201~";
     send(std::move(input));
+    return true;
 }
 int Terminal::point(int x, int y) const {
     const int columns = std::max(1, display_.columns()), rows = std::max(1, display_.rows());
@@ -592,6 +593,9 @@ LRESULT Terminal::handle(UINT m, WPARAM a, LPARAM b) {
         // Handle Ctrl+C's character here so copying cannot also send ETX after
         // clearing the selection. A plain click is not a selection.
         if (a == 3 && !(GetKeyState(VK_MENU) & 0x8000) && hasSelection()) { copy(); return 0; }
+        // Like Windows Terminal, Ctrl+V pastes clipboard text. Without text,
+        // pass ^V through so CLIs such as Claude Code can paste an image.
+        if (a == 22 && (GetKeyState(VK_CONTROL) & 0x8000) && !(GetKeyState(VK_SHIFT) & 0x8000) && !(GetKeyState(VK_MENU) & 0x8000) && paste()) return 0;
         // Windows emits BS for Backspace and DEL for Ctrl+Backspace;
         // Send DEL for one character and Ctrl+W for a word, which is understood
         // by both PSReadLine and Readline (Git Bash / WSL).

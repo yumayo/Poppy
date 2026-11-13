@@ -49,7 +49,8 @@ private:
     void completeStart();
     void stopProcesses();
     void send(std::string text, bool userInput = true);
-    void paste();
+    // Returns false when the clipboard has no text.
+    bool paste();
     void copy();
     bool hasSelection() const { return display_.hasSelection(); }
     void paint();
