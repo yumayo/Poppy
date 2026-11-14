@@ -1303,6 +1303,7 @@ void ProjectRuntime::Impl::selectGitRepository(size_t index) {
     pendingGitSelection_.clear(); restoreGitTop_ = restoreGitLeft_ = 0;
     updateCommitRepositories();
     updateGitFiles();
+    statusDirty_ = true;
     selectSidebar(Sidebar::Git);
 }
 void ProjectRuntime::Impl::refreshAllChanges() {
@@ -1964,7 +1965,12 @@ void ProjectRuntime::Impl::revealInFileExplorer(ResourceId resource) {
 void ProjectRuntime::Impl::status(std::wstring message) { status_ = std::move(message); if (active_) statusBar_.message(status_); }
 void ProjectRuntime::Impl::updateStatusBar() {
     if (!active_) return;
-    const std::wstring gitLabel = !git_ ? L"Git" : !git_->error.empty() ? L"Git unavailable" : git_->repositories.empty() ? L"No Git repository" : (git_->repositories.size() == 1 ? git_->repositories.front()->branch : std::to_wstring(git_->repositories.size()) + L" repositories") + L"  ·  " + groupedCount(git_->changed) + L" changed  ·  " + groupedCount(git_->untracked) + L" untracked";
+    // With several repositories, describe the one chosen in the activity bar.
+    const auto repo = selectedRepository();
+    const auto repoName = repo && git_->repositories.size() > 1 ? repositoryLabel(repo->root) + L": " : std::wstring{};
+    const std::wstring gitLabel = !git_ ? L"Git" : !git_->error.empty() ? L"Git unavailable" : !repo ? L"No Git repository" :
+        !repo->error.empty() ? repoName + L"Git unavailable" :
+        repoName + repo->branch + L"  ·  " + groupedCount(repo->changed) + L" changed  ·  " + groupedCount(repo->untracked) + L" untracked";
     std::vector<LimitStatus> limits;
     if (!root_.empty()) {
         if (root_.wsl()) { limits.push_back(watchLimitStatus(watchUsage_)); limits.push_back(fileLimitStatus(quickOpen_.index(), quickOpen_.indexing())); }
