@@ -10,6 +10,7 @@ public:
     void setDpi(UINT dpi) { dpi_ = dpi; renderer_.setDpi(dpi); InvalidateRect(window_, nullptr, FALSE); }
     void select(bool value) { selected_ = value; InvalidateRect(window_, nullptr, FALSE); }
     void setBadgeCount(size_t count);
+    void setTitle(std::wstring title);
     std::function<void()> clicked;
 private:
     static LRESULT CALLBACK procedure(HWND, UINT, WPARAM, LPARAM);

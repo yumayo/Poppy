@@ -422,7 +422,7 @@ private:
     void status(std::wstring message);
     void updateStatusBar();
     void toggleTerminal();
-    HWND window_ = nullptr, tree_ = nullptr, gitTree_ = nullptr, explorerButton_ = nullptr, gitButton_ = nullptr, searchButton_ = nullptr, tooltips_ = nullptr;
+    HWND window_ = nullptr, tree_ = nullptr, gitTree_ = nullptr, explorerButton_ = nullptr, searchButton_ = nullptr, tooltips_ = nullptr;
     HINSTANCE instance_ = nullptr;
     Tree explorer_, changes_;
     Renderer renderer_;
@@ -430,7 +430,17 @@ private:
     bool statusDirty_ = true;
     size_t partialFolders_ = 0;
     std::optional<WatchUsage> watchUsage_;
-    ActivityButton explorerActivity_, gitActivity_, searchActivity_;
+    ActivityButton explorerActivity_, searchActivity_;
+    // One Source Control button per repository; each shows only its own repository.
+    std::vector<std::unique_ptr<ActivityButton>> gitActivities_;
+    ResourceId gitRepository_;
+    const GitResult* selectedRepository() const;
+    HWND gitButton() const;
+    void resizeGitActivities(size_t count);
+    void syncGitActivities();
+    void selectGitRepository(size_t index);
+    void updateCommitRepositories();
+    void selectActivities();
     UINT dpi_ = 96;
     int sidebar_ = 245, terminalHeight_ = 260, splitter_ = 5;
     int activityWidth_ = 48, sidebarHeader_ = 34, gitHeader_ = 180;
@@ -738,18 +748,17 @@ void ProjectRuntime::Impl::create() {
         if (source->directory && !source->group) refreshAllChanges();
     };
     explorerActivity_.create(window_, instance_, L"Explorer", explorerCommand, false); explorerButton_ = explorerActivity_.window();
-    gitActivity_.create(window_, instance_, L"Source Control", gitCommand, true); gitButton_ = gitActivity_.window();
     searchActivity_.create(window_, instance_, L"Search", searchCommand, false, false, true); searchButton_ = searchActivity_.window();
     explorerActivity_.clicked = [this] { selectSidebar(Sidebar::Explorer, true); };
-    gitActivity_.clicked = [this] { selectSidebar(Sidebar::Git, true); };
     searchActivity_.clicked = [this] { selectSidebar(Sidebar::Search, true); };
     explorerActivity_.select(true);
     tooltips_ = CreateWindowExW(WS_EX_TOPMOST, TOOLTIPS_CLASSW, nullptr, WS_POPUP | TTS_ALWAYSTIP | TTS_NOPREFIX, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, window_, nullptr, instance_, nullptr);
-    for (const auto button : {explorerButton_, gitButton_, searchButton_}) {
+    for (const auto button : {explorerButton_, searchButton_}) {
         TOOLINFOW tip{}; tip.cbSize = sizeof(tip); tip.uFlags = TTF_IDISHWND | TTF_SUBCLASS; tip.hwnd = window_; tip.uId = reinterpret_cast<UINT_PTR>(button);
-        tip.lpszText = const_cast<wchar_t*>(button == explorerButton_ ? L"Explorer (Ctrl+Shift+E)" : button == gitButton_ ? L"Source Control (Ctrl+Shift+G)" : L"Search (Ctrl+Shift+F)");
+        tip.lpszText = const_cast<wchar_t*>(button == explorerButton_ ? L"Explorer (Ctrl+Shift+E)" : L"Search (Ctrl+Shift+F)");
         SendMessageW(tooltips_, TTM_ADDTOOLW, 0, reinterpret_cast<LPARAM>(&tip));
     }
+    resizeGitActivities(1);
     TOOLINFOW collapseTip{}; collapseTip.cbSize = sizeof(collapseTip); collapseTip.uFlags = TTF_SUBCLASS;
     collapseTip.hwnd = window_; collapseTip.uId = 50; collapseTip.lpszText = const_cast<wchar_t*>(L"Collapse All");
     SendMessageW(tooltips_, TTM_ADDTOOLW, 0, reinterpret_cast<LPARAM>(&collapseTip));
@@ -787,7 +796,7 @@ void ProjectRuntime::Impl::create() {
         return result;
     };
     // Each underlying pane must clip the palette when repainting beneath it.
-    for (const auto pane : {tree_, gitTree_, searchPane_.window(), viewers_[0].window(), viewers_[1].window(), terminal_.container(), explorerButton_, gitButton_, searchButton_})
+    for (const auto pane : {tree_, gitTree_, searchPane_.window(), viewers_[0].window(), viewers_[1].window(), terminal_.container(), explorerButton_, searchButton_})
         SetWindowLongPtrW(pane, GWL_STYLE, GetWindowLongPtrW(pane, GWL_STYLE) | WS_CLIPSIBLINGS);
     const BOOL dark = TRUE; DwmSetWindowAttribute(window_, 20, &dark, sizeof(dark));
     dpi(GetDpiForWindow(window_));
@@ -902,7 +911,7 @@ void ProjectRuntime::Impl::pruneGroups() {
 void ProjectRuntime::Impl::dpi(UINT value) {
     dpi_ = value; renderer_.setDpi(dpi_);
     explorer_.setDpi(dpi_); changes_.setDpi(dpi_, 28);
-    explorerActivity_.setDpi(dpi_); gitActivity_.setDpi(dpi_); searchActivity_.setDpi(dpi_); searchPane_.setDpi(dpi_);
+    explorerActivity_.setDpi(dpi_); searchActivity_.setDpi(dpi_); for (auto& button : gitActivities_) button->setDpi(dpi_); searchPane_.setDpi(dpi_);
     splitter_ = MulDiv(5, dpi_, 96);
     activityWidth_ = MulDiv(48, dpi_, 96); sidebarHeader_ = MulDiv(34, dpi_, 96); gitHeader_ = MulDiv(180, dpi_, 96);
     gitCommit_.setDpi(dpi_);
@@ -1001,13 +1010,14 @@ void ProjectRuntime::Impl::layout(bool revealTab) {
     std::vector<Placement> panes{
         {explorerButton_, activityButtonLeft, 0, activityWidth_ - 1, activityWidth_, SWP_SHOWWINDOW},
         {searchButton_, activityButtonLeft, activityWidth_, activityWidth_ - 1, activityWidth_, SWP_SHOWWINDOW},
-        {gitButton_, activityButtonLeft, 2 * activityWidth_, activityWidth_ - 1, activityWidth_, SWP_SHOWWINDOW},
         {tree_, sidebarLeft, sidebarHeader_, side, std::max(0, content - sidebarHeader_), showExplorer ? SWP_SHOWWINDOW : SWP_HIDEWINDOW},
         {gitTree_, sidebarLeft, gitTop, side, std::max(0, content - gitTop), showGitFiles ? SWP_SHOWWINDOW : SWP_HIDEWINDOW},
         {gitCommit_.window(), sidebarLeft + MulDiv(12, dpi_, 96), sidebarHeader_ + MulDiv(56, dpi_, 96), std::max(0, side - MulDiv(24, dpi_, 96)), MulDiv(90, dpi_, 96), sidebarVisible_ && activeSidebar_ == Sidebar::Git ? SWP_SHOWWINDOW : SWP_HIDEWINDOW},
         {searchPane_.window(), sidebarLeft, sidebarHeader_, side, std::max(0, content - sidebarHeader_), sidebarVisible_ && activeSidebar_ == Sidebar::Search ? SWP_SHOWWINDOW : SWP_HIDEWINDOW},
         {terminal_.container(), 0, 0, 0, 0, SWP_HIDEWINDOW}
     };
+    for (size_t i = 0; i < gitActivities_.size(); ++i)
+        panes.push_back({gitActivities_[i]->window(), activityButtonLeft, static_cast<int>(2 + i) * activityWidth_, activityWidth_ - 1, activityWidth_, SWP_SHOWWINDOW});
     for (int group = 0; group < groupCount(); ++group) {
         const auto& rect = editorGroups_[group].body;
         const auto selected = groupTab(group);
@@ -1063,9 +1073,9 @@ void ProjectRuntime::Impl::paint() {
         }
         dc.fill({sidebarRect_.left, top - 1, sidebarRect_.right, top}, border);
         if (activeSidebar_ == Sidebar::Git) {
-            const bool repository = git_ && !git_->repositories.empty();
-            dc.label({left, top, edge, top + scaled(28)}, repository ? (git_->repositories.size() == 1 ? git_->repositories.front()->branch : std::to_wstring(git_->repositories.size()) + L" repositories") : L"Git", repository ? accent : muted);
-            const auto summary = repository ? std::to_wstring(git_->changed + git_->untracked) + L" pending changes" : L"";
+            const auto repository = selectedRepository();
+            dc.label({left, top, edge, top + scaled(28)}, repository ? (git_->repositories.size() == 1 ? repository->branch : repositoryLabel(repository->root) + L" · " + repository->branch) : L"Git", repository ? accent : muted);
+            const auto summary = repository ? std::to_wstring(repository->changed + repository->untracked) + L" pending changes" : L"";
             dc.label({left, top + scaled(28), edge, top + scaled(56)}, summary, muted);
             for (const bool tree : {true, false}) {
                 const auto button = gitViewButton(tree);
@@ -1140,14 +1150,13 @@ void ProjectRuntime::Impl::paint() {
 void ProjectRuntime::Impl::selectSidebar(Sidebar sidebar, bool toggle, const std::optional<std::wstring>& seed) {
     sidebarVisible_ = !toggle || !sidebarVisible_ || activeSidebar_ != sidebar;
     activeSidebar_ = sidebar; layout();
-    explorerActivity_.select(sidebarVisible_ && sidebar == Sidebar::Explorer); gitActivity_.select(sidebarVisible_ && sidebar == Sidebar::Git);
-    searchActivity_.select(sidebarVisible_ && sidebar == Sidebar::Search); searchPane_.active(sidebarVisible_ && sidebar == Sidebar::Search && active_);
+    selectActivities(); searchPane_.active(sidebarVisible_ && sidebar == Sidebar::Search && active_);
     if (owner_ && owner_->changed) owner_->changed();
     if (!sidebarVisible_) { SetFocus(selectedWindow()); return; }
     if (sidebar == Sidebar::Search) { searchPane_.focus(seed); return; }
     if (sidebar == Sidebar::Git) refreshGit();
     if (sidebar == Sidebar::Explorer) explorer_.showSelection();
-    SetFocus(sidebar == Sidebar::Explorer ? (IsWindowVisible(tree_) ? tree_ : explorerButton_) : (IsWindowVisible(gitTree_) ? gitTree_ : gitButton_));
+    SetFocus(sidebar == Sidebar::Explorer ? (IsWindowVisible(tree_) ? tree_ : explorerButton_) : (IsWindowVisible(gitTree_) ? gitTree_ : gitButton()));
 }
 RECT ProjectRuntime::Impl::collapseButton() const {
     if (!sidebarVisible_ || activeSidebar_ == Sidebar::Search) return {};
@@ -1223,6 +1232,83 @@ std::wstring ProjectRuntime::Impl::gitVisibilityPath(TreeItem item) const {
     const auto n = historyNode(item);
     return n && n->kind == HistoryKind::File ? gitVisibilityPrefix(n->root, n->diffKind, n->revision) + n->path.lexically_relative(n->root).generic_wstring() : std::wstring{};
 }
+const GitResult* ProjectRuntime::Impl::selectedRepository() const {
+    if (!git_ || git_->repositories.empty()) return nullptr;
+    for (const auto& repo : git_->repositories) if (pathKey(repo->root) == pathKey(gitRepository_)) return repo.get();
+    return git_->repositories.front().get();
+}
+HWND ProjectRuntime::Impl::gitButton() const {
+    const auto repo = selectedRepository();
+    if (repo && gitActivities_.size() == git_->repositories.size())
+        for (size_t i = 0; i < gitActivities_.size(); ++i) if (git_->repositories[i].get() == repo) return gitActivities_[i]->window();
+    return gitActivities_.front()->window();
+}
+void ProjectRuntime::Impl::selectActivities() {
+    const auto repo = selectedRepository();
+    const bool git = sidebarVisible_ && activeSidebar_ == Sidebar::Git;
+    explorerActivity_.select(sidebarVisible_ && activeSidebar_ == Sidebar::Explorer);
+    searchActivity_.select(sidebarVisible_ && activeSidebar_ == Sidebar::Search);
+    for (size_t i = 0; i < gitActivities_.size(); ++i)
+        gitActivities_[i]->select(git && (gitActivities_.size() == 1 || (git_ && i < git_->repositories.size() && git_->repositories[i].get() == repo)));
+}
+void ProjectRuntime::Impl::resizeGitActivities(size_t count) {
+    while (gitActivities_.size() > count) {
+        const auto button = gitActivities_.back()->window();
+        TOOLINFOW tip{}; tip.cbSize = sizeof(tip); tip.hwnd = window_; tip.uId = reinterpret_cast<UINT_PTR>(button);
+        SendMessageW(tooltips_, TTM_DELTOOLW, 0, reinterpret_cast<LPARAM>(&tip));
+        if (GetFocus() == button) SetFocus(gitActivities_.front()->window());
+        DestroyWindow(button); gitActivities_.pop_back();
+    }
+    while (gitActivities_.size() < count) {
+        const auto index = gitActivities_.size();
+        auto button = std::make_unique<ActivityButton>();
+        button->create(window_, instance_, L"Source Control", gitCommand, true);
+        button->setDpi(dpi_);
+        button->clicked = [this, index] { selectGitRepository(index); };
+        const auto window = button->window();
+        // The palette must clip every pane beneath it.
+        SetWindowLongPtrW(window, GWL_STYLE, GetWindowLongPtrW(window, GWL_STYLE) | WS_CLIPSIBLINGS);
+        TOOLINFOW tip{}; tip.cbSize = sizeof(tip); tip.uFlags = TTF_IDISHWND | TTF_SUBCLASS; tip.hwnd = window_; tip.uId = reinterpret_cast<UINT_PTR>(window);
+        tip.lpszText = const_cast<wchar_t*>(L"Source Control (Ctrl+Shift+G)");
+        SendMessageW(tooltips_, TTM_ADDTOOLW, 0, reinterpret_cast<LPARAM>(&tip));
+        gitActivities_.push_back(std::move(button));
+    }
+}
+void ProjectRuntime::Impl::syncGitActivities() {
+    const bool multiple = git_ && git_->repositories.size() > 1;
+    const size_t count = multiple ? git_->repositories.size() : 1;
+    const bool resized = gitActivities_.size() != count;
+    resizeGitActivities(count);
+    for (size_t i = 0; i < count; ++i) {
+        const auto repo = multiple ? git_->repositories[i].get() : nullptr;
+        auto title = repo ? L"Source Control: " + repositoryLabel(repo->root) : std::wstring(L"Source Control");
+        auto& button = *gitActivities_[i];
+        button.setTitle(title);
+        title += L" (Ctrl+Shift+G)";
+        TOOLINFOW tip{}; tip.cbSize = sizeof(tip); tip.hwnd = window_; tip.uId = reinterpret_cast<UINT_PTR>(button.window()); tip.lpszText = title.data();
+        SendMessageW(tooltips_, TTM_UPDATETIPTEXTW, 0, reinterpret_cast<LPARAM>(&tip));
+        button.setBadgeCount(repo ? repo->changed + repo->untracked : git_ ? git_->changed + git_->untracked : 0);
+    }
+    selectActivities();
+    if (resized) layout(false);
+}
+void ProjectRuntime::Impl::updateCommitRepositories() {
+    std::vector<GitCommitPane::Repository> repositories;
+    if (const auto repo = selectedRepository(); repo && repo->error.empty()) repositories.push_back({repo->root, repositoryLabel(repo->root)});
+    gitCommit_.repositories(std::move(repositories));
+}
+void ProjectRuntime::Impl::selectGitRepository(size_t index) {
+    const auto current = selectedRepository();
+    const auto target = git_ && git_->repositories.size() > 1 && index < git_->repositories.size() ? git_->repositories[index].get() : current;
+    if (target == current) { selectSidebar(Sidebar::Git, true); return; }
+    // Never mix repositories: drop the previous repository's rows before loading.
+    gitRepository_ = target->root;
+    changes_.clear(); branchesLoaded_ = false; branchError_.clear(); ++branchRequest_; branchesLoading_ = true;
+    pendingGitSelection_.clear(); restoreGitTop_ = restoreGitLeft_ = 0;
+    updateCommitRepositories();
+    updateGitFiles();
+    selectSidebar(Sidebar::Git);
+}
 void ProjectRuntime::Impl::refreshAllChanges() {
     if (collapsingSidebar_) return;
     saveTab();
@@ -1248,7 +1334,7 @@ void ProjectRuntime::Impl::sortHistory(TreeItem item) {
 }
 void ProjectRuntime::Impl::updateGitFiles() {
     const size_t gitChanges = git_ ? git_->changed + git_->untracked : 0;
-    gitActivity_.setBadgeCount(gitChanges);
+    syncGitActivities();
     if (gitChanges_ != gitChanges) { gitChanges_ = gitChanges; if (owner_ && owner_->changed) owner_->changed(); }
     std::wstring selected = wide(pendingGitSelection_);
     const int oldTop = changes_.top(), oldLeft = changes_.left();
@@ -1514,14 +1600,18 @@ TreeItem ProjectRuntime::Impl::insertHistory(TreeItem parent, std::wstring text,
     return item;
 }
 void ProjectRuntime::Impl::refreshBranches() {
-    if (!git_ || git_->repositories.empty() || (root_.wsl() && !connected_)) return;
+    const auto selected = selectedRepository();
+    if (!selected || (root_.wsl() && !connected_)) return;
     const auto workspace = git_; const auto generation = generation_, request = ++branchRequest_;
+    const auto selectedRoot = selected->root;
     branchesLoading_ = true;
-    gitWorker_->submit(L"branches", [this, workspace, generation, request] {
+    gitWorker_->submit(L"branches", [this, workspace, generation, request, selectedRoot] {
         struct Listing { ResourceId root; std::wstring branch, error; std::vector<GitBranch> refs; };
         std::vector<Listing> listings;
         for (const auto& repo : workspace->repositories) {
             if (*gitWorker_->cancellation()) return;
+            // Source Control shows one repository; the others have their own buttons.
+            if (pathKey(repo->root) != pathKey(selectedRoot)) continue;
             Listing listing{repo->root, repo->branch, repo->error, {}};
             if (listing.error.empty()) {
                 auto result = provider_->git({L"git.exe", L"--no-optional-locks", L"for-each-ref", L"--sort=refname",
@@ -2449,6 +2539,7 @@ void ProjectRuntime::Impl::connectRemote() {
                 expandedPaths_ = std::move(expanded); expandedPaths_[pathKey(root_)] = root_;
                 pendingTreeSelection_ = relocateResource(pendingTreeSelection_, previous, root_);
                 pendingExplorerFile_ = relocateResource(pendingExplorerFile_, previous, root_);
+                gitRepository_ = relocateResource(gitRepository_, previous, root_);
                 for (auto& tab : tabs_) { tab.path = relocateResource(tab.path, previous, root_); tab.gitRoot = relocateResource(tab.gitRoot, previous, root_); tab.comparePath = relocateResource(tab.comparePath, previous, root_); }
                 for (const auto& weak : navigationTabs_) if (const auto entry = weak.lock()) {
                     entry->tab.path = relocateResource(entry->tab.path, previous, root_);
@@ -2515,7 +2606,7 @@ void ProjectRuntime::Impl::restoreProject(const ProjectSession& original) {
     activeSidebar_ = state.searchSidebar ? Sidebar::Search : (state.branchSidebar || state.gitSidebar) ? Sidebar::Git : Sidebar::Explorer;
     searchPane_.restore(state.search);
     searchActivity_.select(activeSidebar_ == Sidebar::Search); searchPane_.active(active_ && activeSidebar_ == Sidebar::Search);
-    explorerActivity_.select(activeSidebar_ == Sidebar::Explorer); gitActivity_.select(activeSidebar_ == Sidebar::Git);
+    selectActivities();
     for (const auto& path : state.expanded) {
         auto directory = root_.at(path).lexically_normal().make_preferred();
         const auto key = pathKey(directory);
@@ -3531,9 +3622,8 @@ void ProjectRuntime::Impl::refreshGit(bool rescan) {
             if (generation != generation_) return;
             if (scanRevision == gitScanRevision_) gitScanDirty_ = false;
             git_ = result;
-            std::vector<GitCommitPane::Repository> repositories;
-            for (const auto& repo : result->repositories) if (repo->error.empty()) repositories.push_back({repo->root, repositoryLabel(repo->root)});
-            gitCommit_.repositories(std::move(repositories));
+            if (const auto repo = selectedRepository()) gitRepository_ = repo->root;
+            updateCommitRepositories();
             statusDirty_ = true;
             if (result->repositories.empty()) {
                 changes_.clear(); branchesLoaded_ = branchesLoading_ = false; branchError_.clear(); ++branchRequest_;
@@ -3900,7 +3990,7 @@ bool ProjectRuntime::Impl::key(const MSG& message) {
         if (key && message.wParam == VK_F6 && GetFocus() != terminal_.window()) { showDiff(); return true; }
         if (key && message.wParam == VK_F7 && GetFocus() != terminal_.window()) { const bool inlineView = !viewer().diffInline(); for (auto& view : viewers_) view.setDiffLayout(inlineView); return true; }
         if (key && message.wParam == VK_TAB && GetFocus() != terminal_.window() && std::none_of(viewers_.begin(), viewers_.end(), [](const Viewer& view) { return GetFocus() == view.window(); })) {
-            const HWND files = !sidebarVisible_ ? explorerButton_ : activeSidebar_ == Sidebar::Search ? searchPane_.window() : activeSidebar_ == Sidebar::Explorer ? (IsWindowVisible(tree_) ? tree_ : explorerButton_) : (IsWindowVisible(gitTree_) ? gitTree_ : gitButton_);
+            const HWND files = !sidebarVisible_ ? explorerButton_ : activeSidebar_ == Sidebar::Search ? searchPane_.window() : activeSidebar_ == Sidebar::Explorer ? (IsWindowVisible(tree_) ? tree_ : explorerButton_) : (IsWindowVisible(gitTree_) ? gitTree_ : gitButton());
             SetFocus(GetFocus() == files ? viewer().window() : terminalVisible_ ? terminal_.window() : files); return true;
         }
 

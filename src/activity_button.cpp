@@ -10,6 +10,12 @@ void ActivityButton::create(HWND parent, HINSTANCE instance, const wchar_t* titl
     window_ = CreateWindowExW(0, activityButtonClassName, title, WS_CHILD | WS_VISIBLE | WS_TABSTOP,
         0, 0, 0, 0, parent, reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), instance, this);
 }
+void ActivityButton::setTitle(std::wstring title) {
+    if (title_ == title) return;
+    title_ = std::move(title);
+    const auto text = title_ + (badgeCount_ ? L" (" + std::to_wstring(badgeCount_) + L")" : L"");
+    SetWindowTextW(window_, text.c_str());
+}
 void ActivityButton::setBadgeCount(size_t count) {
     if (badgeCount_ == count) return;
     badgeCount_ = count;
