@@ -115,6 +115,12 @@ void positionImeCandidate(HWND window, HIMC context, POINT point, int height) {
     CANDIDATEFORM candidate{}; candidate.dwStyle = CFS_EXCLUDE;
     candidate.ptCurrentPos = {point.x, point.y + height};
     candidate.rcArea = {area.left, point.y, area.right, point.y + height};
+    // Re-setting an unchanged position makes the IME rebuild its candidate
+    // window, which drops a selection made with Tab while output arrives.
+    CANDIDATEFORM current{};
+    if (ImmGetCandidateWindow(context, 0, &current) && current.dwStyle == candidate.dwStyle &&
+        current.ptCurrentPos.x == candidate.ptCurrentPos.x && current.ptCurrentPos.y == candidate.ptCurrentPos.y &&
+        EqualRect(&current.rcArea, &candidate.rcArea)) return;
     ImmSetCandidateWindow(context, &candidate);
 }
 void positionIme(HWND window, POINT point, int height, const LOGFONTW& font) {
@@ -136,7 +142,10 @@ void positionIme(HWND window, POINT point, int height, const LOGFONTW& font) {
         ImmSetCompositionFontW(context, &updated);
     }
     COMPOSITIONFORM form{}; form.dwStyle = CFS_POINT; form.ptCurrentPos = point;
-    ImmSetCompositionWindow(context, &form);
+    COMPOSITIONFORM currentForm{};
+    if (!ImmGetCompositionWindow(context, &currentForm) || currentForm.dwStyle != form.dwStyle ||
+        currentForm.ptCurrentPos.x != point.x || currentForm.ptCurrentPos.y != point.y)
+        ImmSetCompositionWindow(context, &form);
     positionImeCandidate(window, context, point, height);
     ImmReleaseContext(window, context);
 }

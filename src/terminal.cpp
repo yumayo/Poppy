@@ -612,7 +612,10 @@ LRESULT Terminal::handle(UINT m, WPARAM a, LPARAM b) {
     case WM_IME_STARTCOMPOSITION: case WM_IME_ENDCOMPOSITION: case WM_IME_COMPOSITION:
     {
         if (m == WM_IME_STARTCOMPOSITION) { stopSelection(); display_.clearSelection(); if (scroll_) scroll(0); }
-        const auto result = ime_.handle(window_, m, a, b, [this] { imePosition(); },
+        // Position once the composition has been sent: before that the IME
+        // caret is placed at the previous echo and the candidate list jumps.
+        bool reposition = false;
+        const auto result = ime_.handle(window_, m, a, b, [&reposition] { reposition = true; },
             [this](std::wstring text) {
                 // Replace the sent composition with the committed text.
                 const std::u16string result(text.begin(), text.end());
@@ -626,6 +629,7 @@ LRESULT Terminal::handle(UINT m, WPARAM a, LPARAM b) {
             });
         // Send what remains in composition, including an empty string on cancel.
         if (m == WM_IME_COMPOSITION || m == WM_IME_ENDCOMPOSITION) sendComposition(ime_.text().text);
+        if (reposition) imePosition();
         return result;
     }
     default: break;
