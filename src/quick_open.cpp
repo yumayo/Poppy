@@ -36,7 +36,13 @@ void QuickOpen::layout() {
     const int count = rows();
     if (selected_ < first_) first_ = selected_;
     if (selected_ >= first_ + count) first_ = selected_ - count + 1;
-    const int x = (parent.right - width) / 2, y = px(8), height = px(116 + count * 44);
+    // Center on the top-level window so every palette (Ctrl+P, Ctrl+R, ...)
+    // appears at the same place, even when the parent is offset by a sidebar.
+    // Stay inside the parent so the child window is never clipped.
+    RECT root{}; const auto top = GetAncestor(GetParent(window_), GA_ROOT);
+    GetClientRect(top, &root); MapWindowPoints(top, GetParent(window_), reinterpret_cast<POINT*>(&root), 2);
+    const int centered = static_cast<int>(root.left + root.right - width) / 2;
+    const int x = std::clamp(centered, 0, std::max(0, static_cast<int>(parent.right) - width)), y = px(8), height = px(116 + count * 44);
     RECT current{}; GetWindowRect(window_, &current);
     MapWindowPoints(nullptr, GetParent(window_), reinterpret_cast<POINT*>(&current), 2);
     const RECT desired{x, y, x + width, y + height};
