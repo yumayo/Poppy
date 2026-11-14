@@ -443,7 +443,7 @@ private:
     void selectActivities();
     UINT dpi_ = 96;
     int sidebar_ = 245, terminalHeight_ = 260, splitter_ = 5;
-    int activityWidth_ = 48, sidebarHeader_ = 34, gitHeader_ = 180;
+    int activityWidth_ = 48, sidebarHeader_ = 34, gitHeader_ = 104;
     RECT activityRect_{}, sidebarRect_{}, sidebarSplitter_{};
     int dragging_ = 0, dragOffset_ = 0;
     bool terminalVisible_ = true;
@@ -913,7 +913,7 @@ void ProjectRuntime::Impl::dpi(UINT value) {
     explorer_.setDpi(dpi_); changes_.setDpi(dpi_, 28);
     explorerActivity_.setDpi(dpi_); searchActivity_.setDpi(dpi_); for (auto& button : gitActivities_) button->setDpi(dpi_); searchPane_.setDpi(dpi_);
     splitter_ = MulDiv(5, dpi_, 96);
-    activityWidth_ = MulDiv(48, dpi_, 96); sidebarHeader_ = MulDiv(34, dpi_, 96); gitHeader_ = MulDiv(180, dpi_, 96);
+    activityWidth_ = MulDiv(48, dpi_, 96); sidebarHeader_ = MulDiv(34, dpi_, 96); gitHeader_ = MulDiv(104, dpi_, 96);
     gitCommit_.setDpi(dpi_);
     for (auto& view : viewers_) view.setDpi(dpi_);
     terminal_.setDpi(dpi_); quickOpen_.setDpi(dpi_); comparePicker_.setDpi(dpi_); layout();
@@ -1012,7 +1012,7 @@ void ProjectRuntime::Impl::layout(bool revealTab) {
         {searchButton_, activityButtonLeft, activityWidth_, activityWidth_ - 1, activityWidth_, SWP_SHOWWINDOW},
         {tree_, sidebarLeft, sidebarHeader_, side, std::max(0, content - sidebarHeader_), showExplorer ? SWP_SHOWWINDOW : SWP_HIDEWINDOW},
         {gitTree_, sidebarLeft, gitTop, side, std::max(0, content - gitTop), showGitFiles ? SWP_SHOWWINDOW : SWP_HIDEWINDOW},
-        {gitCommit_.window(), sidebarLeft + MulDiv(12, dpi_, 96), sidebarHeader_ + MulDiv(56, dpi_, 96), std::max(0, side - MulDiv(24, dpi_, 96)), MulDiv(90, dpi_, 96), sidebarVisible_ && activeSidebar_ == Sidebar::Git ? SWP_SHOWWINDOW : SWP_HIDEWINDOW},
+        {gitCommit_.window(), sidebarLeft + MulDiv(12, dpi_, 96), sidebarHeader_ + MulDiv(8, dpi_, 96), std::max(0, side - MulDiv(24, dpi_, 96)), MulDiv(62, dpi_, 96), sidebarVisible_ && activeSidebar_ == Sidebar::Git ? SWP_SHOWWINDOW : SWP_HIDEWINDOW},
         {searchPane_.window(), sidebarLeft, sidebarHeader_, side, std::max(0, content - sidebarHeader_), sidebarVisible_ && activeSidebar_ == Sidebar::Search ? SWP_SHOWWINDOW : SWP_HIDEWINDOW},
         {terminal_.container(), 0, 0, 0, 0, SWP_HIDEWINDOW}
     };
@@ -1073,10 +1073,6 @@ void ProjectRuntime::Impl::paint() {
         }
         dc.fill({sidebarRect_.left, top - 1, sidebarRect_.right, top}, border);
         if (activeSidebar_ == Sidebar::Git) {
-            const auto repository = selectedRepository();
-            dc.label({left, top, edge, top + scaled(28)}, repository ? (git_->repositories.size() == 1 ? repository->branch : repositoryLabel(repository->root) + L" · " + repository->branch) : L"Git", repository ? accent : muted);
-            const auto summary = repository ? std::to_wstring(repository->changed + repository->untracked) + L" pending changes" : L"";
-            dc.label({left, top + scaled(28), edge, top + scaled(56)}, summary, muted);
             for (const bool tree : {true, false}) {
                 const auto button = gitViewButton(tree);
                 dc.fill(button, tree == gitTreeView_ ? rgb(50, 70, 94) : background);

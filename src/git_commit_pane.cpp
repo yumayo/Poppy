@@ -36,76 +36,63 @@ void GitCommitPane::committed(const ResourceId& root, const std::wstring& messag
         if (message_.text() == message) SetWindowTextW(input_, L"");
     } else if (drafts_[root.key()] == message) drafts_.erase(root.key());
 }
+// The repository comes from the selected Source Control button; the pane only
+// holds the message input, Commit (part 1) and its Amend dropdown (part 2).
 RECT GitCommitPane::button(int part) const {
     RECT rect{}; GetClientRect(window_, &rect);
-    if (!part) return {0, 0, rect.right, px(26)};
-    return {part == 1 ? 0 : std::max(0L, rect.right - px(28)), px(62),
-        part == 1 ? std::max(0L, rect.right - px(28)) : rect.right, px(90)};
+    return {part == 1 ? 0 : std::max(0L, rect.right - px(28)), px(34),
+        part == 1 ? std::max(0L, rect.right - px(28)) : rect.right, px(62)};
 }
 int GitCommitPane::hit(LPARAM point) const {
-    for (int part = 0; part < 3; ++part) { const auto rect = button(part); if (PtInRect(&rect, {GET_X_LPARAM(point), GET_Y_LPARAM(point)})) return part; }
+    for (int part = 1; part < 3; ++part) { const auto rect = button(part); if (PtInRect(&rect, {GET_X_LPARAM(point), GET_Y_LPARAM(point)})) return part; }
     return -1;
 }
 void GitCommitPane::layout() {
     if (!input_) return;
     RECT rect{}; GetClientRect(window_, &rect);
-    SetWindowPos(input_, nullptr, px(6), px(29), std::max(0L, rect.right - px(12)), px(28), SWP_NOZORDER | SWP_NOACTIVATE);
+    SetWindowPos(input_, nullptr, px(6), px(1), std::max(0L, rect.right - px(12)), px(28), SWP_NOZORDER | SWP_NOACTIVATE);
     InvalidateRect(window_, nullptr, FALSE);
 }
 void GitCommitPane::paint() {
     Renderer::Paint paint(renderer_, window_); if (!paint) return;
     RECT rect{}; GetClientRect(window_, &rect); renderer_.fill(rect, panel);
-    const auto found = std::find_if(repositories_.begin(), repositories_.end(), [this](const auto& repo) { return repo.root == root_; });
-    for (int part = 0; part < 3; ++part) {
+    for (int part = 1; part < 3; ++part) {
         const auto area = button(part);
         if (enabled() && (hover_ == part || pressed_ == part)) renderer_.fill(area, RGB(50, 55, 63));
         const auto color = enabled() ? foreground : muted;
-        if (!part) {
-            renderer_.label({px(6), area.top, area.right - px(22), area.bottom}, found == repositories_.end() ? L"No repository" : found->label, color);
-        } else if (part == 1) renderer_.label(area, busy_ ? L"Committing…" : L"Commit", color, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-        if (part != 1) {
+        if (part == 1) renderer_.label(area, busy_ ? L"Committing…" : L"Commit", color, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        else {
             const float x = static_cast<float>(area.right - px(13)), y = static_cast<float>((area.top + area.bottom) / 2);
             renderer_.line(x - px(4), y - px(2), x, y + px(2), color, static_cast<float>(dpi_) / 96);
             renderer_.line(x, y + px(2), x + px(4), y - px(2), color, static_cast<float>(dpi_) / 96);
         }
         if (GetFocus() == window_ && focus_ == part) { auto outline = area; InflateRect(&outline, -1, -1); renderer_.outline(outline, muted); }
     }
-    renderer_.outline({0, px(28), rect.right, px(58)}, border);
-    renderer_.outline({0, px(62), rect.right, px(90)}, border);
-    renderer_.fill({rect.right - px(28), px(62), rect.right - px(28) + 1, px(90)}, border);
+    renderer_.outline({0, 0, rect.right, px(30)}, border);
+    renderer_.outline({0, px(34), rect.right, px(62)}, border);
+    renderer_.fill({rect.right - px(28), px(34), rect.right - px(28) + 1, px(62)}, border);
 }
 void GitCommitPane::submit(bool amend) {
     if (enabled() && requested) requested(root_, message_.text(), amend);
 }
 void GitCommitPane::activate(int part) {
-    if (!enabled() || part < 0) return;
+    if (!enabled() || part < 1) return;
     if (part == 1) { submit(false); return; }
     const auto menu = CreatePopupMenu(); if (!menu) return;
-    if (!part) {
-        for (size_t i = 0; i < repositories_.size(); ++i) {
-            auto label = repositories_[i].label;
-            for (size_t at = 0; (at = label.find(L'&', at)) != label.npos; at += 2) label.insert(at, 1, L'&');
-            AppendMenuW(menu, MF_STRING | (repositories_[i].root == root_ ? MF_CHECKED : 0), i + 1, label.c_str());
-        }
-    } else AppendMenuW(menu, MF_STRING, 1, L"Commit (Amend)");
+    AppendMenuW(menu, MF_STRING, 1, L"Commit (Amend)");
     const auto area = button(part); POINT point{area.left, area.bottom}; ClientToScreen(window_, &point);
-    // A popup dispatches worker completions; retain the roots represented by it.
-    const auto repositories = repositories_; const auto root = root_;
+    // A popup dispatches worker completions; retain the root represented by it.
+    const auto root = root_;
     const auto command = static_cast<size_t>(TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, point.x, point.y, 0, window_, nullptr));
     DestroyMenu(menu);
-    if (!enabled() || !command) return;
-    if (!part && command <= repositories.size()) {
-        const auto selected = repositories[command - 1].root;
-        const auto found = std::find_if(repositories_.begin(), repositories_.end(), [&](const auto& repo) { return repo.root == selected; });
-        if (found != repositories_.end()) select(static_cast<size_t>(found - repositories_.begin()));
-    } else if (part == 2 && command == 1 && root == root_) submit(true);
+    if (enabled() && command == 1 && root == root_) submit(true);
 }
 bool GitCommitPane::key(const MSG& message) {
     if (!contains(message.hwnd) || message.message != WM_KEYDOWN || message.wParam != VK_TAB) return false;
     const bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
-    if (message.hwnd == input_) { focus_ = shift ? 0 : 1; SetFocus(window_); }
-    else if ((focus_ == 0 && !shift) || (focus_ == 1 && shift)) SetFocus(input_);
-    else focus_ = (focus_ + (shift ? 2 : 1)) % 3;
+    if (message.hwnd == input_) { focus_ = shift ? 2 : 1; SetFocus(window_); }
+    else if ((focus_ == 2 && !shift) || (focus_ == 1 && shift)) SetFocus(input_);
+    else focus_ = shift ? 1 : 2;
     InvalidateRect(window_, nullptr, FALSE); return true;
 }
 LRESULT CALLBACK GitCommitPane::procedure(HWND window, UINT message, WPARAM a, LPARAM b) {

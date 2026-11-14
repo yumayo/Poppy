@@ -723,7 +723,7 @@ void gitCommitInput() {
     for (const auto dpi : {96u, 144u, 192u}) {
         GitCommitPane pane; pane.create(parent, instance); pane.setDpi(dpi);
         const auto px = [dpi](int value) { return MulDiv(value, dpi, 96); };
-        SetWindowPos(pane.window(), nullptr, 0, 0, px(240), px(90), SWP_NOZORDER | SWP_SHOWWINDOW);
+        SetWindowPos(pane.window(), nullptr, 0, 0, px(240), px(62), SWP_NOZORDER | SWP_SHOWWINDOW);
         const auto input = GetDlgItem(pane.window(), 1002);
         check(input != nullptr && !IsWindowEnabled(input), "Commit input was enabled without a repository");
         size_t requests = 0; ResourceId requestedRoot; std::wstring requestedMessage; bool amended = false;
@@ -736,8 +736,8 @@ void gitCommitInput() {
         check(requests == 1 && requestedRoot == first && requestedMessage == L"日本語 \"message\"" && !amended, "Enter did not submit the selected repository and message");
         pane.busy(true);
         SendMessageW(input, WM_KEYDOWN, VK_RETURN, 0);
-        SendMessageW(pane.window(), WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(px(50), px(76)));
-        SendMessageW(pane.window(), WM_LBUTTONUP, 0, MAKELPARAM(px(50), px(76)));
+        SendMessageW(pane.window(), WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(px(50), px(48)));
+        SendMessageW(pane.window(), WM_LBUTTONUP, 0, MAKELPARAM(px(50), px(48)));
         check(requests == 1 && !IsWindowEnabled(input), "A pending commit allowed another submission");
         pane.busy(false);
         pane.repositories({{second, L"second"}}); SetWindowTextW(input, L"second draft");
@@ -750,18 +750,18 @@ void gitCommitInput() {
         check(std::wstring(text) == L"second draft", "A successful commit cleared another repository's draft");
         pane.committed(second, L"older draft"); GetWindowTextW(input, text, 128);
         check(std::wstring(text) == L"second draft", "An older completion cleared a newer draft");
-        SendMessageW(pane.window(), WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(px(50), px(76)));
-        SendMessageW(pane.window(), WM_LBUTTONUP, 0, MAKELPARAM(px(50), px(96)));
+        SendMessageW(pane.window(), WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(px(50), px(48)));
+        SendMessageW(pane.window(), WM_LBUTTONUP, 0, MAKELPARAM(px(50), px(68)));
         check(requests == 1, "Releasing outside the commit button submitted a commit");
-        SendMessageW(pane.window(), WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(px(50), px(76)));
-        SendMessageW(pane.window(), WM_LBUTTONUP, 0, MAKELPARAM(px(50), px(76)));
+        SendMessageW(pane.window(), WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(px(50), px(48)));
+        SendMessageW(pane.window(), WM_LBUTTONUP, 0, MAKELPARAM(px(50), px(48)));
         check(requests == 2 && requestedRoot == second && !amended, "The commit button targeted the wrong repository");
         // The menu's nested message loop receives the same keys as a user.
         check(SetTimer(pane.window(), 99, 10, [](HWND window, UINT, UINT_PTR id, DWORD) {
             KillTimer(window, id); PostMessageW(window, WM_KEYDOWN, VK_HOME, 0); PostMessageW(window, WM_KEYDOWN, VK_RETURN, 0);
         }) != 0, "Cannot schedule amend menu selection");
-        SendMessageW(pane.window(), WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(px(226), px(76)));
-        SendMessageW(pane.window(), WM_LBUTTONUP, 0, MAKELPARAM(px(226), px(76)));
+        SendMessageW(pane.window(), WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(px(226), px(48)));
+        SendMessageW(pane.window(), WM_LBUTTONUP, 0, MAKELPARAM(px(226), px(48)));
         check(requests == 3 && amended && requestedRoot == second && requestedMessage == L"second draft", "The dropdown did not submit Commit (Amend)");
         DestroyWindow(pane.window());
     }
