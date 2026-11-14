@@ -22,6 +22,7 @@ void CsvView::setDpi(UINT dpi) { dpi_ = dpi; if (active_) layout(); }
 void CsvView::show(std::shared_ptr<const Document> document, bool preserve) {
     finishEdit(); stopDrag();
     document_ = std::move(document); edit_.reset(); active_ = true;
+    settle();
     if (!preserve) { top_ = left_ = 0; anchor_ = caret_ = {}; widths_.clear(); }
     rebuild(); layout();
 }
@@ -58,10 +59,21 @@ void CsvView::scrollTo(int top, std::optional<int> left) {
     top_ = top; if (left) left_ = *left;
     layout(); InvalidateRect(window_, nullptr, FALSE);
 }
-void CsvView::selectOffsets(size_t anchor, size_t caret) {
+void CsvView::selectMarks(Mark anchor, Mark caret, std::wstring caretName, std::wstring caretValue) {
     if (!valid_) return;
-    anchor_ = table_.position(anchor); caret_ = table_.position(caret);
+    // A cell outside the window stands at the edge it lies beyond, so the
+    // selected range still reaches that edge, and keeps its own column.
+    const auto place = [&](const Mark& mark) {
+        if (!mark.side) return table_.position(mark.offset);
+        return CsvPosition{mark.side < 0 ? 0 : gridRows() - 1, std::min(mark.column, gridColumns() - 1)};
+    };
+    anchor_ = place(anchor); caret_ = place(caret); anchorSide_ = anchor.side; caretSide_ = caret.side;
+    caretName_ = std::move(caretName); caretValue_ = std::move(caretValue);
     InvalidateRect(window_, nullptr, FALSE);
+}
+std::wstring CsvView::caretValue() const {
+    if (caretSide_) return caretValue_;
+    return valid_ ? wide(table_.value(document_->text, caret_)) : std::wstring{};
 }
 void CsvView::moveCaret(size_t row, size_t column, bool extend) {
     if (!valid_) return;
@@ -122,7 +134,7 @@ int CsvView::resizeColumn(POINT point) const {
     return edge != edges_.end() && std::abs(*edge - x) <= px(4) ? static_cast<int>(edge - edges_.begin() - 1) : -1;
 }
 void CsvView::select(CsvPosition cell, bool extend, bool scrollIntoView) {
-    finishEdit(); caret_ = cell; if (!extend) anchor_ = caret_;
+    finishEdit(); caret_ = cell; caretSide_ = 0; if (!extend) { anchor_ = caret_; anchorSide_ = 0; }
     if (scrollIntoView) reveal();
     InvalidateRect(window_, nullptr, FALSE); if (statusChanged) statusChanged();
 }
@@ -145,7 +157,7 @@ void CsvView::dragCaret() {
     const auto r = Scrollbars::contentRect(window_);
     point.x = std::clamp<LONG>(point.x, rowGutter(), std::max<LONG>(rowGutter(), r.right - 1));
     point.y = std::clamp<LONG>(point.y, bodyTop(), std::max<LONG>(bodyTop(), r.bottom - 1));
-    caret_ = hit(point);
+    caret_ = hit(point); caretSide_ = 0;
     if (dragHeader_ == 1) caret_.column = table_.columns() - 1;
     if (dragHeader_ == 2) caret_.row = table_.rows() - 1;
 }
@@ -198,8 +210,24 @@ void CsvView::move(WPARAM key, bool shift, bool ctrl) {
         } else {
             const int64_t step = key == VK_PRIOR || key == VK_NEXT ? pageRows() : 1;
             const int64_t target = static_cast<int64_t>(cell.row) + (backwards ? -step : step);
-            if ((target < 0 || target >= static_cast<int64_t>(table_.rows())) && moveRows(backwards ? -step : step, extend)) return;
+            // A caret outside the window moves from its own record.
+            if ((caretSide_ || target < 0 || target >= static_cast<int64_t>(table_.rows())) && moveRows(backwards ? -step : step, extend)) return;
         }
+    } else if (partial() && moveRows && caretSide_ && (key == VK_LEFT || key == VK_RIGHT || key == VK_HOME || key == VK_END || key == VK_TAB)) {
+        // A sideways move of a caret outside the window loads its record.
+        int64_t rows = 0; size_t column = caret_.column;
+        const size_t columns = std::max<size_t>(1, table_.columns());
+        if (key == VK_HOME) column = 0;
+        else if (key == VK_END) column = columns - 1;
+        else if (key == VK_TAB) {
+            if (shift) { if (column) --column; else { rows = -1; column = columns - 1; } }
+            else if (column + 1 < columns) ++column;
+            else { rows = 1; column = 0; }
+        } else if (key == VK_LEFT) column = ctrl ? 0 : column - std::min<size_t>(column, 1);
+        else column = ctrl ? columns - 1 : std::min(gridColumns() - 1, column + 1);
+        const auto previous = caret_.column; caret_.column = column;
+        if (moveRows(rows, shift && key != VK_TAB)) return;
+        caret_.column = previous;
     }
     if (key == VK_HOME) { cell.column = 0; if (ctrl) cell.row = 0; }
     else if (key == VK_END) { cell.column = table_.columns() - 1; if (ctrl) cell.row = table_.rows() - 1; }
@@ -227,7 +255,8 @@ bool CsvView::apply(const std::optional<CsvReplacement>& replacement, bool join)
     return true;
 }
 void CsvView::copy(bool cut) {
-    if (!valid_) return;
+    // Cells outside a large file's window are not loaded and cannot be copied.
+    if (!valid_ || anchorSide_ || caretSide_) { MessageBeep(MB_ICONWARNING); return; }
     const auto value = table_.copy(document_->text, selection());
     if (!value || !copyText(window_, wide(*value))) { MessageBeep(MB_ICONWARNING); return; }
     if (cut && edit_) clear();
@@ -341,14 +370,14 @@ void CsvView::restore(const ViewState& state) {
     finishEdit();
     const auto row = std::min(static_cast<size_t>(std::max(0, state.top)), document_->lines.size() - 1);
     top_ = static_cast<int>(table_.position(document_->lines[row]).row); left_ = state.left;
-    anchor_ = table_.position(state.anchor); caret_ = table_.position(state.caret); layout(); InvalidateRect(window_, nullptr, FALSE);
+    anchor_ = table_.position(state.anchor); caret_ = table_.position(state.caret); settle(); layout(); InvalidateRect(window_, nullptr, FALSE);
 }
 std::wstring CsvView::status() const {
     if (!valid_) return L"Invalid CSV · switch to Source";
     const auto range = selection();
-    return wide(csvColumnName(caret_.column)) + rowName(caret_.row) + L"  ·  " +
+    return wide(csvColumnName(caret_.column)) + caretName() + L"  ·  " +
         std::to_wstring(table_.rows()) + (partial() ? L" rows loaded × " : L" rows × ") + std::to_wstring(table_.columns()) + L" columns" +
-        (range.firstRow != range.lastRow || range.firstColumn != range.lastColumn ? L"  ·  " + std::to_wstring(range.lastRow - range.firstRow + 1) + L" × " + std::to_wstring(range.lastColumn - range.firstColumn + 1) + L" selected" : L"");
+        (!anchorSide_ && !caretSide_ && (range.firstRow != range.lastRow || range.firstColumn != range.lastColumn) ? L"  ·  " + std::to_wstring(range.lastRow - range.firstRow + 1) + L" × " + std::to_wstring(range.lastColumn - range.firstColumn + 1) + L" selected" : L"");
 }
 std::optional<std::wstring> CsvView::searchSeed() const {
     if (!valid_) return {};
@@ -383,7 +412,7 @@ void CsvView::paint() {
         dc.label({px(24), px(24), rect.right - px(24), rect.bottom}, L"CSV table unavailable\n\n" + wide(table_.error()) + L"\n\nSwitch to Source to view or fix this file.", muted, DT_LEFT | DT_TOP | DT_WORDBREAK);
         scrollbars_->paint(window_, dc, background); return;
     }
-    const auto range = selection(); const int rh = rowHeight(), gutter = rowGutter();
+    const auto range = selection(); const bool loaded = selectionLoaded(); const int rh = rowHeight(), gutter = rowGutter();
     const size_t firstColumn = hit({gutter, bodyTop()}).column;
     const size_t lastColumn = hit({rect.right, bodyTop()}).column;
     const size_t lastRow = std::min(gridRows(), static_cast<size_t>(top_ + std::max(0, static_cast<int>(rect.bottom) - bodyTop() + rh - 1) / rh));
@@ -392,7 +421,7 @@ void CsvView::paint() {
             auto cell = cellRect({r, c}); const int right = cell.right;
             cell.left = std::max<LONG>(gutter, cell.left); cell.right = std::min(cell.right, rect.right); cell.bottom = std::min(cell.bottom, rect.bottom);
             if (cell.right <= cell.left) continue;
-            const bool selected = r >= range.firstRow && r <= range.lastRow && c >= range.firstColumn && c <= range.lastColumn;
+            const bool selected = loaded && r >= range.firstRow && r <= range.lastRow && c >= range.firstColumn && c <= range.lastColumn;
             dc.fill(cell, selected ? selectedCell : !search_.empty() && search_.matches(table_, document_->text, {r, c}) ? matchedCell : background);
             dc.fill({cell.left, cell.bottom - 1, cell.right, cell.bottom}, border);
             if (right <= rect.right) dc.fill({right - 1, cell.top, right, cell.bottom}, border);
@@ -401,14 +430,15 @@ void CsvView::paint() {
         }
         const int y = bodyTop() + (static_cast<int>(r) - top_) * rh;
         const RECT rowHeader{0, y, std::min<LONG>(gutter, rect.right), std::min<LONG>(y + rh, rect.bottom)};
-        dc.fill(rowHeader, r >= range.firstRow && r <= range.lastRow ? activeHeader : panel);
-        dc.label({0, y, gutter, y + rh}, rowHeader, rowName(r), r == caret_.row ? accent : muted, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        dc.fill(rowHeader, loaded && r >= range.firstRow && r <= range.lastRow ? activeHeader : panel);
+        dc.label({0, y, gutter, y + rh}, rowHeader, rowName(r), !caretSide_ && r == caret_.row ? accent : muted, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
         dc.fill({0, rowHeader.bottom - 1, rowHeader.right, rowHeader.bottom}, border);
     }
     // Fill the caret frame as whole-pixel strips over the cell's grid lines so it never straddles a pixel boundary.
+    // A caret outside a large file's window has no frame here.
     auto current = cellRect(caret_); current.left -= 1; current.top -= 1;
     const RECT clip{gutter, bodyTop(), rect.right, rect.bottom}; const int thick = std::max(1, px(2));
-    for (const RECT& strip : {RECT{current.left, current.top, current.right, current.top + thick}, RECT{current.left, current.bottom - thick, current.right, current.bottom},
+    if (!caretSide_) for (const RECT& strip : {RECT{current.left, current.top, current.right, current.top + thick}, RECT{current.left, current.bottom - thick, current.right, current.bottom},
                               RECT{current.left, current.top, current.left + thick, current.bottom}, RECT{current.right - thick, current.top, current.right, current.bottom}}) {
         RECT visible{}; if (IntersectRect(&visible, &strip, &clip)) dc.fill(visible, accent);
     }
@@ -424,10 +454,10 @@ void CsvView::paint() {
     dc.fill({0, bodyTop() - 1, rect.right, bodyTop()}, border);
     dc.fill({gutter - 1, headerTop(), gutter, rect.bottom}, border);
     dc.fill({0, insetTop(), rect.right, std::min<LONG>(headerTop(), rect.bottom)}, panel);
-    dc.label({0, insetTop(), nameWidth(), headerTop()}, wide(csvColumnName(caret_.column)) + rowName(caret_.row), accent, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    dc.label({0, insetTop(), nameWidth(), headerTop()}, wide(csvColumnName(caret_.column)) + caretName(), accent, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     const auto box = formula(); dc.fill(box, background); dc.outline(box, editing_ ? accent : border);
     if (editing_) input_.draw(dc, foreground, RGB(50, 70, 94), GetFocus() == window_);
-    else dc.label({box.left + px(6), box.top, box.right - px(4), box.bottom}, displayValue(wide(table_.value(document_->text, caret_))), foreground);
+    else dc.label({box.left + px(6), box.top, box.right - px(4), box.bottom}, displayValue(caretValue()), foreground);
     scrollbars_->paint(window_, dc, background);
 }
 bool CsvView::handle(UINT message, WPARAM a, LPARAM b, LRESULT& result) {
@@ -459,14 +489,14 @@ bool CsvView::handle(UINT message, WPARAM a, LPARAM b, LRESULT& result) {
         resizing_ = resizeColumn(point);
         if (resizing_ >= 0) { resizeX_ = point.x; resizeWidth_ = widths_[resizing_]; SetCapture(window_); return true; }
         if (point.x < rowGutter() && point.y < bodyTop()) {
-            anchor_ = {}; caret_ = {table_.rows() - 1, table_.columns() - 1}; InvalidateRect(window_, nullptr, FALSE); if (statusChanged) statusChanged(); return true;
+            anchor_ = {}; caret_ = {table_.rows() - 1, table_.columns() - 1}; settle(); InvalidateRect(window_, nullptr, FALSE); if (statusChanged) statusChanged(); return true;
         }
         // Scrolling a partial cell under a stationary pointer would make the
         // following mouse-up select a different row or column.
         select(hit(point), (a & MK_SHIFT) != 0, false);
         dragHeader_ = point.x < rowGutter() ? 1 : point.y < bodyTop() ? 2 : 0;
         if (dragHeader_ == 1) { anchor_.column = 0; caret_.column = table_.columns() - 1; }
-        if (dragHeader_ == 2) { anchor_.row = 0; caret_.row = table_.rows() - 1; }
+        if (dragHeader_ == 2) { anchor_.row = 0; caret_.row = table_.rows() - 1; settle(); }
         if (message == WM_LBUTTONDBLCLK && !dragHeader_) { startEdit(); return true; }
         selecting_ = true; dragScrolling_ = false; dragPoint_ = point; dragCarryX_ = dragCarryY_ = 0; SetCapture(window_); return true;
     }
@@ -521,7 +551,7 @@ bool CsvView::handle(UINT message, WPARAM a, LPARAM b, LRESULT& result) {
         if (editing_) return true;
         if (ctrl && (a == 'C' || a == 'X')) { copy(a == 'X'); return true; }
         if ((ctrl && a == 'V') || (shift && a == VK_INSERT)) { paste(); return true; }
-        if (ctrl && a == 'A') { anchor_ = {}; caret_ = {table_.rows() - 1, table_.columns() - 1}; InvalidateRect(window_, nullptr, FALSE); if (statusChanged) statusChanged(); return true; }
+        if (ctrl && a == 'A') { anchor_ = {}; caret_ = {table_.rows() - 1, table_.columns() - 1}; settle(); InvalidateRect(window_, nullptr, FALSE); if (statusChanged) statusChanged(); return true; }
         if (a == VK_F2 || a == VK_BACK) { startEdit(a == VK_BACK); if (a == VK_BACK) replaceInput(L""); return true; }
         if (a == VK_DELETE) { clear(); return true; }
         if (a == VK_ESCAPE) { stopDrag(); return true; }
@@ -559,7 +589,7 @@ bool CsvView::handle(UINT message, WPARAM a, LPARAM b, LRESULT& result) {
         const auto command = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, point.x, point.y, 0, window_, nullptr); DestroyMenu(menu);
         if (editing && command >= 1 && command <= 4) inputKey(command == 1 ? 'C' : command == 2 ? 'A' : command == 3 ? 'X' : 'V', true, false);
         else if (command == 1) copy();
-        else if (command == 2) { anchor_ = {}; caret_ = {table_.rows() - 1, table_.columns() - 1}; InvalidateRect(window_, nullptr, FALSE); }
+        else if (command == 2) { anchor_ = {}; caret_ = {table_.rows() - 1, table_.columns() - 1}; settle(); InvalidateRect(window_, nullptr, FALSE); }
         else if (edit_) {
             if (command == 3) copy(true); else if (command == 4) paste(); else if (command == 5 || command == 6) undo(command == 6);
             else if (command == 7) startEdit(); else if (command == 8) { finishEdit(); clear(); } else if (command == 9) { finishEdit(); if (save) save(); }

@@ -108,15 +108,33 @@ std::optional<Viewer::CsvCarry> Viewer::present(std::shared_ptr<const Document> 
     if (preview) setHtmlPreview(true);
     if (table) setCsvTable(true);
     if (previous && csv_.active()) restore(*previous);
-    if (carry && csv_.active()) { csv_.selectOffsets(fileTextAt(carry->anchor), fileTextAt(carry->caret)); csv_.scrollTo(csv_.top(), carry->left); }
+    if (carry && csv_.active()) {
+        csvMarks_ = *carry;
+        csv_.selectMarks(csvMark(carry->anchor, carry->anchorColumn), csvMark(carry->caret, carry->column), carry->name, carry->value);
+        csv_.scrollTo(csv_.top(), carry->left);
+    }
     if (statusChanged) statusChanged();
     return carry;
 }
 Viewer::CsvCarry Viewer::captureCsv() const {
+    // A cell outside the window keeps the bytes it was placed with rather
+    // than the window edge it is drawn at.
     CsvCarry carry;
-    carry.anchor = fileByteAt(csv_.anchorOffset()); carry.caret = fileByteAt(csv_.caretOffset());
-    carry.column = csv_.caretColumn(); carry.left = csv_.left();
+    carry.anchor = csv_.anchorSide() ? csvMarks_.anchor : fileByteAt(csv_.anchorOffset());
+    carry.caret = csv_.caretSide() ? csvMarks_.caret : fileByteAt(csv_.caretOffset());
+    carry.record = csv_.caretSide() ? csvMarks_.record : fileByteAt(csv_.rowOffset(csv_.caretRow()));
+    carry.anchorColumn = csv_.anchorColumn(); carry.column = csv_.caretColumn(); carry.left = csv_.left();
+    carry.name = csv_.caretName(); carry.value = csv_.caretValue();
     return carry;
+}
+CsvView::Mark Viewer::csvMark(uint64_t byte, size_t column) const {
+    // Records dropped from either end of the window count as outside it.
+    if (byte < document_->tailOffset || !csv_.rows()) return {-1, 0, column};
+    if (byte >= document_->tailEndOffset) return {1, 0, column};
+    const auto text = fileTextAt(byte);
+    if (text < csv_.rowOffset(0)) return {-1, 0, column};
+    if (text >= csv_.rowOffset(csv_.rows())) return {1, 0, column};
+    return {0, text, column};
 }
 void Viewer::showRevision(std::shared_ptr<const Document> d, const DiffDocument& changes, const ResourceId& path, bool preserve) {
     show(std::move(d), path, preserve, false);
@@ -132,7 +150,8 @@ void Viewer::showTail(std::shared_ptr<const Document> d, const ResourceId& path,
     if (preserve && path_ == path && tailPaused()) return;
     if (preserve && path_ == path && tailPreview() && document_->tailOffset == d->tailOffset &&
         document_->fileBytes == d->fileBytes && document_->text == d->text) return;
-    const bool follow = !preserve || path_ != path || !document_ || scrollRange_.atTail(top_);
+    // A table tracks its own scroll position rather than the text rows.
+    const bool follow = !preserve || path_ != path || !document_ || atTail();
     show(std::move(d), path, preserve, false);
     scrollbars(follow); caretPosition(); InvalidateRect(window_, nullptr, FALSE);
 }
@@ -587,9 +606,10 @@ bool Viewer::moveTableCaret(int64_t rows, bool extend) {
         return true;
     }
     const bool backwards = rows < 0;
-    if (backwards ? document_->tailOffset <= bomBytes() : document_->tailEndOffset >= document_->fileBytes) return false;
+    // A caret outside the window always reads its own record's window.
+    if (!csv_.caretSide() && (backwards ? document_->tailOffset <= bomBytes() : document_->tailEndOffset >= document_->fileBytes)) return false;
     auto carry = captureCsv(); carry.move = true; carry.extend = extend;
-    const auto record = fileByteAt(csv_.rowOffset(csv_.caretRow()));
+    const auto record = carry.record;
     if (rows == std::numeric_limits<int64_t>::min()) requestFileWindow(0, 0, carry);
     else if (rows == std::numeric_limits<int64_t>::max()) requestFileWindow(std::numeric_limits<uint64_t>::max(), 0, carry);
     else if (backwards) requestFileWindow(record - std::min<uint64_t>(record, 1), static_cast<int>(std::max<int64_t>(rows + 1, -1000000)), carry);

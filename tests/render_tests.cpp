@@ -2936,6 +2936,9 @@ void largeCsvTable() {
         check(requests.size() == 1 && requests.back() == std::numeric_limits<uint64_t>::max(), "End seek did not request the latest CSV window");
         viewer.showFileWindow(snapshot(last - 200, 200), L"huge.csv", requests.back());
         check(!viewer.tailPaused() && atBottom(), "Returning to EOF did not resume CSV following");
+        // The tail reload that follows an end seek keeps the table at EOF.
+        viewer.showTail(snapshot(last - 100, 100), L"huge.csv", true);
+        check(!viewer.tailPaused() && atBottom(), "Reloading the tail after an end seek left the CSV table above EOF");
 
         // Moving the caret above the window loads the preceding records and
         // keeps the column.
@@ -2959,6 +2962,24 @@ void largeCsvTable() {
         check(requests.back() == std::numeric_limits<uint64_t>::max(), "Ctrl+End did not load the end of a large CSV");
         viewer.showFileWindow(snapshot(last - 200, 200), L"huge.csv", requests.back());
         check(viewer.state().caret == 199 * 16 + 7 && !viewer.tailPaused(), "Ctrl+End did not select the last record and follow");
+
+        // A selected cell outside the loaded window keeps its record rather
+        // than moving to the window's edge, and comes back with its window.
+        viewer.showFileWindow(snapshot(middle, 200), L"huge.csv", static_cast<uint64_t>(middle) * 16);
+        auto chosen = viewer.state(); chosen.anchor = chosen.caret = 50 * 16 + 7; viewer.restore(chosen);
+        const auto chosenName = L"B" + std::to_wstring((static_cast<uint64_t>(middle) + 50) * 2 + 1) + L"  ";
+        check(viewer.textStatus().find(chosenName) != std::wstring::npos, "The chosen CSV cell was not named by its line");
+        for (const int away : {middle + 300, middle - 300}) {
+            viewer.showFileWindow(snapshot(away, 200), L"huge.csv", static_cast<uint64_t>(away) * 16);
+            check(viewer.textStatus().find(chosenName) != std::wstring::npos, "A CSV cell outside the window moved to the window's edge");
+        }
+        viewer.showFileWindow(snapshot(middle, 200), L"huge.csv", static_cast<uint64_t>(middle) * 16);
+        check(viewer.state().caret == 50 * 16 + 7, "A CSV cell outside the window did not return with its window");
+        viewer.showFileWindow(snapshot(middle + 300, 200), L"huge.csv", static_cast<uint64_t>(middle + 300) * 16);
+        key(VK_DOWN);
+        check(requests.back() == (static_cast<uint64_t>(middle) + 50) * 16, "Moving a CSV caret outside the window did not read its record");
+        viewer.showFileWindow(snapshot(middle, 200), L"huge.csv", requests.back());
+        check(viewer.state().caret == 51 * 16 + 7, "A CSV caret outside the window did not move from its own record");
 
         // A window beginning inside a quoted field resumes at the next record.
         auto inside = snapshot(middle, 200); inside->text.erase(0, 9); inside->tailOffset += 9; inside->tailChunkLines = unknownLines; indexDocument(*inside);

@@ -78,9 +78,14 @@ private:
     // Table cells of a large file's window, kept by file byte so they survive
     // loading another window. A move places the caret rows after the
     // requested offset's record once that window arrives.
-    struct CsvCarry { uint64_t anchor = 0, caret = 0; size_t column = 0; int left = 0; bool move = false, extend = false; };
+    // Cells outside the window keep their record's byte, row name and value.
+    struct CsvCarry {
+        uint64_t anchor = 0, caret = 0, record = 0; size_t anchorColumn = 0, column = 0; int left = 0; bool move = false, extend = false;
+        std::wstring name, value;
+    };
     std::optional<CsvCarry> present(std::shared_ptr<const Document> document, const ResourceId& path, bool preserve, bool allowHtml);
     CsvCarry captureCsv() const;
+    CsvView::Mark csvMark(uint64_t byte, size_t column) const;
     void scrollTable(int vertical);
     bool moveTableCaret(int64_t rows, bool extend);
     bool atTail() const { return csv_.active() ? csv_.atBottom() : scrollRange_.atTail(top_); }
@@ -169,6 +174,9 @@ private:
     bool tailWasPaused_ = false;
     std::optional<uint64_t> pendingFileOffset_;
     std::optional<CsvCarry> csvCarry_;
+    // The cells last placed in the table, whose bytes stand for any selected
+    // cell outside the loaded window.
+    CsvCarry csvMarks_;
     int pendingFileRows_ = 0;
     // UTF-16 positions use original code units, while the displayed text is UTF-8.
     std::vector<uint32_t> fileLineBytes_;

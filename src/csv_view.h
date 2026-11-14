@@ -63,7 +63,16 @@ public:
     size_t caretOffset() const { return valid_ ? table_.offset(caret_) : 0; }
     size_t caretRow() const { return caret_.row; }
     size_t caretColumn() const { return caret_.column; }
-    void selectOffsets(size_t anchor, size_t caret);
+    size_t anchorColumn() const { return anchor_.column; }
+    // A large file's selected cell may lie outside the loaded window: -1
+    // before it, 1 after it, 0 inside. The owner keeps such a cell's file
+    // byte; the view keeps its column and shows its remembered name and value.
+    struct Mark { int side = 0; size_t offset = 0, column = 0; };
+    int anchorSide() const { return anchorSide_; }
+    int caretSide() const { return caretSide_; }
+    std::wstring caretName() const { return caretSide_ ? caretName_ : rowName(caret_.row); }
+    std::wstring caretValue() const;
+    void selectMarks(Mark anchor, Mark caret, std::wstring caretName = {}, std::wstring caretValue = {});
     void moveCaret(size_t row, size_t column, bool extend);
 private:
     int insetTop() const { return inset ? inset() : 0; }
@@ -82,6 +91,10 @@ private:
     RECT cellRect(CsvPosition cell) const;
     CsvPosition hit(POINT point) const;
     CsvRange selection() const;
+    // Whether the selection covers any loaded row, which it does not when both
+    // of its ends lie beyond the same edge of a large file's window.
+    bool selectionLoaded() const { return !(anchorSide_ < 0 && caretSide_ < 0) && !(anchorSide_ > 0 && caretSide_ > 0); }
+    void settle() { anchorSide_ = caretSide_ = 0; }
     int resizeColumn(POINT point) const;
     void rebuild();
     void reveal();
@@ -117,6 +130,8 @@ private:
     std::vector<int> widths_, edges_;
     int top_ = 0, left_ = 0, resizing_ = -1, resizeX_ = 0, resizeWidth_ = 0, wheel_ = 0;
     CsvPosition anchor_, caret_;
+    int anchorSide_ = 0, caretSide_ = 0;
+    std::wstring caretName_, caretValue_;
     POINT dragPoint_{};
     int dragHeader_ = 0;
     std::chrono::steady_clock::time_point dragTick_;
