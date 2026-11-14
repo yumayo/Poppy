@@ -3853,8 +3853,13 @@ bool ProjectRuntime::Impl::key(const MSG& message) {
             !(GetKeyState(VK_SHIFT) & 0x8000) && !(GetKeyState(VK_MENU) & 0x8000) &&
             (message.wParam == VK_OEM_3 || (message.wParam == 'J' && !terminal_.contains(message.hwnd)))) { quickOpen_.close(); comparePicker_.close(); toggleTerminal(); return true; }
         if (terminal_.key(message)) return true;
-        // Let every terminal session (and its rename input) receive its own keys.
-        if (terminal_.contains(message.hwnd)) return false;
+        // Let every terminal session (and its rename input) receive its own keys,
+        // except Ctrl+P which still opens Quick Open from a terminal.
+        if (terminal_.contains(message.hwnd)) {
+            if (message.message == WM_KEYDOWN && message.wParam == 'P' && (GetKeyState(VK_CONTROL) & 0x8000) &&
+                !(GetKeyState(VK_SHIFT) & 0x8000) && !(GetKeyState(VK_MENU) & 0x8000)) { comparePicker_.close(); quickOpen_.show(); return true; }
+            return false;
+        }
         if (gitCommit_.contains(message.hwnd)) return gitCommit_.key(message);
         if (explorer_.dragging() && (message.message == WM_KEYDOWN || message.message == WM_CHAR)) {
             SendMessageW(tree_, message.message, message.wParam, message.lParam); return true;

@@ -215,10 +215,12 @@ int Workspace::run(HINSTANCE instance,int show,const StartupOptions& options,Sin
         if(recent_.visible() && message.hwnd!=recent_.window() &&
             (message.message==WM_LBUTTONDOWN || message.message==WM_MBUTTONDOWN || message.message==WM_RBUTTONDOWN))recent_.close();
         // Application shortcuts must not intercept input destined for a terminal.
-        const bool key=message.message==WM_KEYDOWN && !errors_.contains(message.hwnd) && (projects_.empty() || !projects_[active_].runtime->terminalInput(message.hwnd));
+        // Ctrl+R (recent projects) is the exception and still works from a terminal.
+        const bool keyDown=message.message==WM_KEYDOWN && !errors_.contains(message.hwnd);
+        const bool key=keyDown && (projects_.empty() || !projects_[active_].runtime->terminalInput(message.hwnd));
         if(key && message.wParam==VK_ESCAPE && projectDrag_){endProjectDrag();continue;}
         if(key && (GetKeyState(VK_CONTROL)&0x8000) && message.wParam=='O'){choose();continue;}
-        if(key && (GetKeyState(VK_CONTROL)&0x8000) && !(GetKeyState(VK_SHIFT)&0x8000) && !(GetKeyState(VK_MENU)&0x8000) && message.wParam=='R'){showRecent();continue;}
+        if(keyDown && (GetKeyState(VK_CONTROL)&0x8000) && !(GetKeyState(VK_SHIFT)&0x8000) && !(GetKeyState(VK_MENU)&0x8000) && message.wParam=='R'){showRecent();continue;}
         if(!projects_.empty() && (message.hwnd==window_ || IsChild(projects_[active_].runtime->window(),message.hwnd) || message.hwnd==projects_[active_].runtime->window())) {
             if((message.message>=WM_KEYFIRST&&message.message<=WM_KEYLAST)||(message.message>=WM_MOUSEFIRST&&message.message<=WM_MOUSELAST))markDirty();
             if (key && message.wParam == VK_F5) checkFolder(projects_[active_]);
