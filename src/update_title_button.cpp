@@ -1,5 +1,6 @@
 #include "update_title_button.h"
 #include <dwmapi.h>
+#include <algorithm>
 #include <stdexcept>
 
 namespace poppy {
@@ -34,9 +35,17 @@ void UpdateTitleButton::layout() {
     const auto dpi = GetDpiForWindow(owner_);
     if (dpi_ != dpi) { dpi_ = dpi; renderer_.setDpi(dpi); }
     // DWM supplies the actual minimize-button edge, including maximized/DPI layouts.
+    // A maximized window extends past the monitor by its resize border, so the
+    // top of the caption-button band is off screen. Center within the visible part.
+    int top = frame.top + buttons.top;
+    const int bottom = frame.top + buttons.bottom;
+    MONITORINFO monitor{}; monitor.cbSize = sizeof(monitor);
+    if (IsZoomed(owner_) && GetMonitorInfoW(MonitorFromWindow(owner_, MONITOR_DEFAULTTONEAREST), &monitor))
+        top = (std::max)(top, static_cast<int>(monitor.rcWork.top));
     const int width = MulDiv(80, dpi_, 96), margin = MulDiv(6, dpi_, 96);
-    SetWindowPos(window_, nullptr, frame.left + buttons.left - width, frame.top + buttons.top + margin,
-        width, buttons.bottom - buttons.top - 2 * margin, SWP_NOACTIVATE | SWP_NOZORDER | SWP_SHOWWINDOW);
+    const int height = (std::max)(bottom - top - 2 * margin, 1);
+    SetWindowPos(window_, nullptr, frame.left + buttons.left - width, top + (bottom - top - height) / 2,
+        width, height, SWP_NOACTIVATE | SWP_NOZORDER | SWP_SHOWWINDOW);
     InvalidateRect(window_, nullptr, FALSE);
 }
 bool UpdateTitleButton::contains(LPARAM point) const {
