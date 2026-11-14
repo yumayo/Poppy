@@ -695,19 +695,19 @@ bool Viewer::findKey(const MSG& message) {
 void Viewer::requestFind(bool navigate, bool backwards, bool reveal) {
     KillTimer(window_, findTimer);
     if (!findBar_.visible() || !document_) return;
-    revealFind_ = reveal;
+    revealFind_ = reveal; findStarted_ = std::chrono::steady_clock::now();
     if (csv_.active()) {
         csv_.find(utf8(findBar_.query()), findBar_.matchCase(), navigate, backwards);
-        findBar_.status(csv_.search().ready() ? L"" : L"Searching…");
-        if (!csv_.search().ready()) SetTimer(window_, findTimer, navigate ? 1 : 60, nullptr);
+        if (csv_.search().ready()) findBar_.status(L"");
+        else SetTimer(window_, findTimer, navigate ? 1 : 60, nullptr);
         return;
     }
     size_t origin = std::min(anchor_, caret_);
     if (navigate) origin = backwards ? std::min(anchor_, caret_) : std::max(anchor_, caret_);
     search_.query(utf8(findBar_.query()), findBar_.matchCase());
     search_.start(origin, backwards);
-    findBar_.status(search_.ready() ? L"" : L"Searching…");
-    if (!search_.ready()) SetTimer(window_, findTimer, navigate ? 1 : 60, nullptr);
+    if (search_.ready()) findBar_.status(L"");
+    else SetTimer(window_, findTimer, navigate ? 1 : 60, nullptr);
     InvalidateRect(window_, nullptr, FALSE);
 }
 void Viewer::searchSlice() {
@@ -726,7 +726,7 @@ void Viewer::searchSlice() {
                 return;
             }
         } while (std::chrono::steady_clock::now() < deadline);
-        SetTimer(window_, findTimer, 1, nullptr);
+        searchingStatus(); SetTimer(window_, findTimer, 1, nullptr);
         return;
     }
     const std::function<bool(TextMatch)> accept = diff_ ? std::function<bool(TextMatch)>([this](TextMatch match) { return diff_->inlineRowForText(match.begin, match.end).has_value(); }) : std::function<bool(TextMatch)>{};
@@ -739,7 +739,10 @@ void Viewer::searchSlice() {
             return;
         }
     } while (std::chrono::steady_clock::now() < deadline);
-    SetTimer(window_, findTimer, 1, nullptr);
+    searchingStatus(); SetTimer(window_, findTimer, 1, nullptr);
+}
+void Viewer::searchingStatus() {
+    if (std::chrono::steady_clock::now() - findStarted_ >= std::chrono::seconds(1)) findBar_.status(L"Searching…");
 }
 void Viewer::revealMatch() {
     if (!search_.current()) { InvalidateRect(window_, nullptr, FALSE); return; }

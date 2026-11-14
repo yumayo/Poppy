@@ -1,4 +1,5 @@
 #pragma once
+#include <chrono>
 #include "scrollbars.h"
 #include "diff.h"
 #include "diff_layout.h"
@@ -104,6 +105,7 @@ private:
     void findLayout();
     void requestFind(bool navigate = false, bool backwards = false, bool reveal = true);
     void searchSlice();
+    void searchingStatus();
     void revealMatch();
     void revealRange(TextMatch match);
     POINT caretPoint() const;
@@ -127,6 +129,9 @@ private:
     FindBar findBar_;
     TextSearch search_;
     bool revealFind_ = false;
+    // When the current search started. "Searching…" appears only after a
+    // second, so quick searches and jumps keep the previous status.
+    std::chrono::steady_clock::time_point findStarted_{};
     Scrollbars scrollbars_;
     UINT dpi_ = 96;
     int cellWidth_ = 8, cellHeight_ = 20, header_ = 34, gutter_ = 66;
