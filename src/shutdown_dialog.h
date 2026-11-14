@@ -1,21 +1,21 @@
 #pragma once
 #include "render.h"
+#include "shutdown_progress.h"
 #include <optional>
 
 namespace poppy {
 // Used only after closing has been accepted. Waits keep this modal surface
 // responsive without dispatching application work or terminal input again.
-class ShutdownDialog {
+class ShutdownDialog final : public ShutdownProgress {
 public:
     enum class Stage { Saving, Stopping, Finishing };
     ShutdownDialog(HWND owner, HINSTANCE instance);
-    ~ShutdownDialog();
+    ~ShutdownDialog() override;
     ShutdownDialog(const ShutdownDialog&) = delete;
     ShutdownDialog& operator=(const ShutdownDialog&) = delete;
     void stage(Stage stage, std::wstring context = {});
-    void detail(std::wstring text);
-    // The task must contain only blocking I/O or waits, never UI operations.
-    void wait(const std::function<void()>& task);
+    void detail(std::wstring text) override;
+    void wait(const std::function<void()>& task) override;
     HWND window() const { return window_; }
 private:
     static LRESULT CALLBACK procedure(HWND, UINT, WPARAM, LPARAM);

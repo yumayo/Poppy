@@ -1,5 +1,5 @@
 #include "terminal.h"
-#include "shutdown_dialog.h"
+#include "shutdown_progress.h"
 #include "terminal_profile.h"
 #include "selection_scroll.h"
 #include <imm.h>
@@ -144,7 +144,8 @@ void Terminal::completeStart() {
     }
     InvalidateRect(window_, nullptr, FALSE);
 }
-void Terminal::stop(ShutdownDialog* progress) {
+void Terminal::stop(ShutdownProgress* progress) {
+    const bool halting = std::exchange(halting_, true);
     stopSelection();
     finishComposition();
     stopping_ = true; condition_.notify_all();
@@ -162,6 +163,7 @@ void Terminal::stop(ShutdownDialog* progress) {
     continuationPosted_ = false;
     display_.update(model_, scroll_, GetTickCount64(), true);
     scrollbars();
+    halting_ = halting;
 }
 void Terminal::stopProcesses() {
     stopping_ = true; condition_.notify_all();
@@ -180,7 +182,7 @@ void Terminal::stopProcesses() {
     catch (const std::exception& failure) { if (shutdownError_.empty()) shutdownError_ = wide(failure.what()); }
     running_ = false; relayRunning_ = false;
 }
-void Terminal::detach(ShutdownDialog* progress) {
+void Terminal::detach(ShutdownProgress* progress) {
     preserve_ = true;
     stop(progress);
 }
@@ -228,7 +230,7 @@ bool Terminal::receive() {
     return true;
 }
 void Terminal::pump() {
-    for (const auto terminal : liveTerminals) terminal->completeStart();
+    for (const auto terminal : liveTerminals) if (!terminal->halting_) terminal->completeStart();
     LONGLONG spent = 0;
     LARGE_INTEGER frequency{}; QueryPerformanceFrequency(&frequency);
     HWND root = nullptr;
@@ -238,7 +240,7 @@ void Terminal::pump() {
     while (idle < liveTerminals.size() && spent < frequency.QuadPart / 200) {
         if (nextTerminal >= liveTerminals.size()) nextTerminal = 0;
         auto terminal = liveTerminals[nextTerminal++];
-        if (!terminal->window_) { ++idle; continue; }
+        if (!terminal->window_ || terminal->halting_) { ++idle; continue; }
         root = GetAncestor(terminal->window_, GA_ROOT);
         LARGE_INTEGER begin{}, end{}; QueryPerformanceCounter(&begin);
         const bool received = terminal->receive();
@@ -247,7 +249,7 @@ void Terminal::pump() {
     }
     uint64_t syncDeadline = 0;
     for (const auto terminal : liveTerminals) {
-        if (!terminal->window_) continue;
+        if (!terminal->window_ || terminal->halting_) continue;
         root = GetAncestor(terminal->window_, GA_ROOT);
         bool queued = false;
         { std::lock_guard<std::mutex> lock(terminal->mutex_); queued = !terminal->received_.empty(); }

@@ -9,7 +9,7 @@
 #include <set>
 
 namespace poppy {
-class ShutdownDialog;
+class ShutdownProgress;
 // Each session retains its ConPTY, VT model and view while other tabs are shown.
 struct TerminalSession {
     ~TerminalSession() { if (terminal) { terminal->stop(); terminal->starting = {}; terminal->ended = {}; terminal->stopping = {}; terminal->shutdownFailed = {}; } }
@@ -43,8 +43,8 @@ public:
     std::string activeSessionId() const { return sessions_.empty() ? std::string{} : active().configuration.id; }
     AiSummary summary() const;
     std::wstring description() const;
-    void stop(ShutdownDialog* progress = nullptr);
-    void detach(ShutdownDialog* progress = nullptr);
+    void stop(ShutdownProgress* progress = nullptr);
+    void detach(ShutdownProgress* progress = nullptr);
     bool key(const MSG& message);
     bool contains(HWND window) const;
     size_t dockCount() const { return sessions_.size(); }

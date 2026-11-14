@@ -3,7 +3,7 @@
 #include "viewer.h"
 #include "terminal_pane.h"
 #include "project_runtime.h"
-#include "shutdown_dialog.h"
+#include "shutdown_progress.h"
 #include "tree.h"
 #include "git_changes.h"
 #include "git_history.h"
@@ -374,7 +374,7 @@ private:
     void recordExplorer(ExplorerEdit edit);
     void recordCreation(const ResourceId& path, const ResourceId& selection = {});
     void discardBackups(std::vector<ResourceId> paths);
-    void stopExplorerHistory(ShutdownDialog* progress = nullptr);
+    void stopExplorerHistory(ShutdownProgress* progress = nullptr);
     bool canPasteImage(TreeItem item) const;
     void pasteImage(TreeItem item);
     wchar_t stateFor(const ResourceId& path) const;
@@ -418,7 +418,7 @@ private:
     void watch();
     void armWatch();
     void pollWatch();
-    void stopWatch(ShutdownDialog* progress = nullptr);
+    void stopWatch(ShutdownProgress* progress = nullptr);
     void status(std::wstring message);
     void updateStatusBar();
     void toggleTerminal();
@@ -2341,7 +2341,7 @@ void ProjectRuntime::Impl::discardBackups(std::vector<ResourceId> paths) {
 void ProjectRuntime::Impl::recordExplorer(ExplorerEdit edit) {
     discardBackups(explorerHistory_.record(std::move(edit)));
 }
-void ProjectRuntime::Impl::stopExplorerHistory(ShutdownDialog* progress) {
+void ProjectRuntime::Impl::stopExplorerHistory(ShutdownProgress* progress) {
     if (historyStopped_ || !worker_) return;
     historyStopped_ = true;
     if (progress) progress->wait([this] { worker_->drain(); }); else worker_->drain();
@@ -3649,7 +3649,7 @@ void ProjectRuntime::Impl::pollWatch() {
     if (dirty_ && (now - lastEvent_ >= 500 || now - dirtySince_ >= 2000)) { dirty_ = false; refresh(false); }
     if (statusDirty_) { statusDirty_ = false; updateStatusBar(); }
 }
-void ProjectRuntime::Impl::stopWatch(ShutdownDialog* progress) {
+void ProjectRuntime::Impl::stopWatch(ShutdownProgress* progress) {
     KillTimer(window_, timerId);
     if (watchDirectory_ && watchPending_) {
         const auto cancel = [this] { CancelIoEx(watchDirectory_.value, &watchOperation_); DWORD bytes = 0; GetOverlappedResult(watchDirectory_.value, &watchOperation_, &bytes, TRUE); };
@@ -3912,7 +3912,7 @@ void ProjectRuntime::create(HWND parent, HINSTANCE instance, AiEventQueue* hooks
     impl_->window_ = CreateWindowExW(0, cls.lpszClassName, L"Project", WS_CHILD | WS_CLIPCHILDREN | WS_CLIPSIBLINGS, 0, 0, 0, 0, parent, nullptr, instance, impl_.get());
     impl_->terminal_.connect(hooks);
 }
-void ProjectRuntime::shutdown(ShutdownDialog* progress, bool preserveTerminals) {
+void ProjectRuntime::shutdown(ShutdownProgress* progress, bool preserveTerminals) {
     if (progress) progress->detail(L"Stopping file watchers and search tasks…");
     impl_->stopWatch(progress); impl_->quickOpen_.stop(progress); impl_->comparePicker_.stop(progress); impl_->searchPane_.stop(progress);
     if (progress) progress->detail(L"Stopping Git tasks…");
@@ -3929,7 +3929,7 @@ void ProjectRuntime::shutdown(ShutdownDialog* progress, bool preserveTerminals) 
     }
     if (preserveTerminals) impl_->terminal_.detach(progress); else impl_->terminal_.stop(progress);
 }
-void ProjectRuntime::disconnect(ShutdownDialog* progress) {
+void ProjectRuntime::disconnect(ShutdownProgress* progress) {
     if (!impl_->provider_) return;
     if (progress) progress->wait([this] { impl_->provider_->disconnect(); }); else impl_->provider_->disconnect();
 }

@@ -5,7 +5,7 @@
 #include <memory>
 
 namespace poppy {
-class ShutdownDialog;
+class ShutdownProgress;
 struct QuickOpenItem { std::string id; std::wstring label, description; };
 enum class QuickOpenMode { Files, Projects, Picker };
 class QuickOpen {
@@ -23,7 +23,7 @@ public:
     void close(bool restoreFocus = true);
     void layout();
     void refresh();
-    void stop(ShutdownDialog* progress = nullptr);
+    void stop(ShutdownProgress* progress = nullptr);
     bool visible() const { return visible_; }
     HWND window() const { return window_; }
     const FileIndex* index() const { return index_.get(); }

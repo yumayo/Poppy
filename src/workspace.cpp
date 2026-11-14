@@ -1,4 +1,5 @@
 #include "project_runtime.h"
+#include "background_shutdown.h"
 #include "shutdown_dialog.h"
 #include "storage.h"
 #include "terminal.h"
@@ -26,6 +27,8 @@
 namespace poppy {
 namespace {
 constexpr UINT wmStartup = WM_APP + 22;
+// A closed project finished a background shutdown wait. WPARAM is its id.
+constexpr UINT wmProjectStopped = WM_APP + 23;
 constexpr UINT_PTR aiAnimationTimerId = 2;
 constexpr int projectHeadingHeight = 40;
 constexpr int projectMessageLineHeight = 18;
@@ -71,6 +74,13 @@ struct OpenProject {
     ULONGLONG used = 0, changedAt = 0;
     uint64_t statRequest = 0;
 };
+// A closed project whose workers and terminals are still stopping. Its window
+// stays hidden, and messages to it are dropped until it is destroyed.
+struct ClosingProject {
+    uint64_t id = 0;
+    std::unique_ptr<ProjectRuntime> runtime;
+    std::unique_ptr<BackgroundShutdown> shutdown;
+};
 struct ProjectDrag {
     uint64_t id;
     POINT origin, point;
@@ -101,6 +111,10 @@ private:
     void select(size_t index, bool attention = false);
     void navigate(bool forward);
     void close(size_t index);
+    void stopProject(uint64_t id, std::unique_ptr<ProjectRuntime> runtime);
+    void finishStoppingProjects(ShutdownProgress* progress);
+    void releaseStoppedProjects();
+    bool stopping(HWND window) const;
     void tick();
     void checkUpdate();
     void animateAiStatus();
@@ -147,6 +161,7 @@ private:
     // This connection is created, used and destroyed on storageWorker_ only.
     std::unique_ptr<Storage> storage_;
     std::vector<OpenProject> projects_;
+    std::vector<ClosingProject> closingProjects_;
     std::vector<ResourceId> history_;
     NavigationHistory navigation_;
     std::optional<ProjectDrag> projectDrag_;
@@ -189,6 +204,9 @@ int Workspace::run(HINSTANCE instance,int show,const StartupOptions& options,Sin
         constexpr UINT uiMessages = PM_REMOVE | ((QS_INPUT | QS_PAINT | QS_TIMER) << 16);
         if (!PeekMessageW(&message, nullptr, 0, 0, uiMessages) && GetMessageW(&message, nullptr, 0, 0) <= 0) break;
         if (message.message == WM_QUIT) break;
+        // A closed project may be suspended between shutdown steps. Its
+        // windows are hidden and must not run application work meanwhile.
+        if (stopping(message.hwnd)) continue;
         if ((message.hwnd == window_ || IsChild(window_, message.hwnd)) &&
             (message.message == WM_XBUTTONDOWN || message.message == WM_XBUTTONUP || message.message == WM_XBUTTONDBLCLK)) {
             if (message.message != WM_XBUTTONUP) navigate(GET_XBUTTON_WPARAM(message.wParam) == XBUTTON2);
@@ -475,6 +493,10 @@ void Workspace::finishClose(){
     if(progress)progress->detail(L"Saving project state and open tabs…");
     if(progress)progress->wait([this]{storageWorker_->drain();});else storageWorker_->drain();
     storageWorker_->dispatch();
+    if(!closingProjects_.empty()){
+        if(progress){progress->stage(ShutdownDialog::Stage::Stopping);progress->detail(L"Stopping closed projects…");}
+        finishStoppingProjects(progress.get());
+    }
     for(size_t i=0;i<projects_.size();++i){
         const auto& path=projects_[i].path;
         const auto name=path.filename().empty()?path.native():path.filename().native();
@@ -496,10 +518,42 @@ void Workspace::finishClose(){
 void Workspace::close(size_t index){
     endProjectDrag();
     if(index>=projects_.size() || !projects_[index].runtime->canClose())return;
-    save(projects_[index]);projects_.erase(projects_.begin()+static_cast<std::ptrdiff_t>(index));
+    save(projects_[index]);
+    const auto id=projects_[index].id;auto runtime=std::move(projects_[index].runtime);
+    projects_.erase(projects_.begin()+static_cast<std::ptrdiff_t>(index));
+    // Release the shared status bar and hide the surface before the next project is shown.
+    runtime->activate(false);
     if(index<active_)--active_;
     if(!projects_.empty())select(std::min(active_,projects_.size()-1));else{active_=0;layout();}
     appDirty_=true;appChanged_=GetTickCount64();updateTools();InvalidateRect(window_,nullptr,FALSE);
+    stopProject(id,std::move(runtime));
+}
+void Workspace::stopProject(uint64_t id, std::unique_ptr<ProjectRuntime> runtime){
+    // Terminal hosts can take seconds to clean up their Windows/WSL processes,
+    // and Git tasks may still be running. Stop them without blocking the UI.
+    const auto project=runtime.get();
+    auto shutdown=std::make_unique<BackgroundShutdown>(window_,wmProjectStopped,static_cast<WPARAM>(id),[project](ShutdownProgress& progress){project->shutdown(&progress);});
+    const auto stopping=shutdown.get();
+    closingProjects_.push_back({id,std::move(runtime),std::move(shutdown)});
+    stopping->start();
+    releaseStoppedProjects();
+}
+void Workspace::finishStoppingProjects(ShutdownProgress* progress){
+    for(size_t i=0;i<closingProjects_.size();++i)closingProjects_[i].shutdown->finish(progress);
+    releaseStoppedProjects();
+}
+void Workspace::releaseStoppedProjects(){
+    // Destroy a runtime only after its fiber has left the shutdown sequence.
+    for(size_t i=0;i<closingProjects_.size();){
+        if(!closingProjects_[i].shutdown->done()){++i;continue;}
+        auto closing=std::move(closingProjects_[i]);closingProjects_.erase(closingProjects_.begin()+static_cast<std::ptrdiff_t>(i));
+        closing.runtime.reset();
+    }
+}
+bool Workspace::stopping(HWND window) const{
+    if(!window||closingProjects_.empty())return false;
+    for(const auto& closing:closingProjects_){const auto root=closing.runtime->window();if(window==root||IsChild(root,window))return true;}
+    return false;
 }
 void Workspace::checkFolder(OpenProject& project) {
     if (!project.runtime->ready() || project.path.wsl()) return;
@@ -782,6 +836,12 @@ case WM_ENABLE: updateButton_.layout(); break;
 case WM_DWMCOMPOSITIONCHANGED:case WM_THEMECHANGED:updateButton_.layout();break;
 case wmWork:if(!closing_&&storageWorker_)storageWorker_->dispatch();return 0;
 case wmStartup:applyStartupRequests();return 0;
+case wmProjectStopped:{
+    BackgroundShutdown* shutdown=nullptr;
+    for(auto& closing:closingProjects_)if(closing.id==static_cast<uint64_t>(a)){shutdown=closing.shutdown.get();break;}
+    if(shutdown)shutdown->resume();
+    releaseStoppedProjects();return 0;
+}
 case WM_APP + 21:{ const auto project = find(static_cast<uint64_t>(a)); if (!project || project->runtime->hasUnsaved()) return 0; const bool active = project == &projects_[active_]; const auto index = static_cast<size_t>(project - projects_.data()); close(index); if (active) for (size_t i = 0; i < projects_.size(); ++i) if (projects_[i].id == static_cast<uint64_t>(b)) { select(i); break; } return 0; }
 case wmAiEvent:for(const auto& event:events_.drain())for(auto& project:projects_)if(project.runtime->apply(event))break;if(!closing_)animateAiStatus();return 0;
 case WM_TIMER:if(closing_)return 0;if(a==77)Terminal::pump();else if(a==aiAnimationTimerId)animateAiStatus();else if(a==1)tick();return 0;
@@ -845,7 +905,7 @@ case WM_COPYDATA:{
     }catch(const std::exception&){return FALSE;}
 }
 case WM_QUERYENDSESSION:if(!closing_){for(auto& project:projects_)if(!project.runtime->canClose())return FALSE;saveAll();}return TRUE;
-case WM_ENDSESSION:if(a&&!closing_){closing_=true;saveAll();for(auto& project:projects_)project.runtime->shutdown();DestroyWindow(window_);}return 0;
+case WM_ENDSESSION:if(a&&!closing_){closing_=true;saveAll();finishStoppingProjects(nullptr);for(auto& project:projects_)project.runtime->shutdown();DestroyWindow(window_);}return 0;
 case WM_SYSCOMMAND:
     if((a&0xFFF0)==restartUpdateCommand){
         if(closing_||restoring_)return 0;
@@ -855,7 +915,7 @@ case WM_SYSCOMMAND:
     }
     break;
 case WM_CLOSE:if(closing_)return 0;for(auto& project:projects_)if(!project.runtime->canClose())return 0;finishClose();return 0;
-case WM_DESTROY:singleInstance_->unpublish(window_);KillTimer(window_,1);KillTimer(window_,aiAnimationTimerId);errors_.destroy();projects_.clear();if(storageWorker_){storageWorker_->submit(L"release-storage",[this]{storage_.reset();});storageWorker_->drain();storageWorker_->stop();}PostQuitMessage(0);return 0;
+case WM_DESTROY:singleInstance_->unpublish(window_);KillTimer(window_,1);KillTimer(window_,aiAnimationTimerId);errors_.destroy();finishStoppingProjects(nullptr);projects_.clear();if(storageWorker_){storageWorker_->submit(L"release-storage",[this]{storage_.reset();});storageWorker_->drain();storageWorker_->stop();}PostQuitMessage(0);return 0;
 }return DefWindowProcW(window_,m,a,b);}
 }
 }

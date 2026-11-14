@@ -1,5 +1,5 @@
 #include "terminal_pane.h"
-#include "shutdown_dialog.h"
+#include "shutdown_progress.h"
 #include <commctrl.h>
 #include <algorithm>
 #include <cstdlib>
@@ -233,13 +233,13 @@ void TerminalPane::close(size_t index) {
     if (sessions_.empty()) { active_ = 0; layout(); if (changed) changed(); }
     else select(std::min(active_,sessions_.size()-1));
 }
-void TerminalPane::stop(ShutdownDialog* progress) {
+void TerminalPane::stop(ShutdownProgress* progress) {
     for (size_t i = 0; i < sessions_.size(); ++i) {
         if (progress) progress->detail(L"Stopping terminal " + std::to_wstring(i+1) + L" / " + std::to_wstring(sessions_.size()) + L" · " + sessionName(*sessions_[i]));
         sessions_[i]->terminal->stop(progress);
     }
 }
-void TerminalPane::detach(ShutdownDialog* progress) {
+void TerminalPane::detach(ShutdownProgress* progress) {
     for (const auto& session : sessions_) {
         if (progress) progress->detail(L"Keeping terminal for restart · " + sessionName(*session));
         session->terminal->detach(progress);

@@ -1,5 +1,5 @@
 #include "search_pane.h"
-#include "shutdown_dialog.h"
+#include "shutdown_progress.h"
 #include "content_search_protocol.h"
 #include <algorithm>
 #include <chrono>
@@ -81,7 +81,7 @@ void SearchPane::cancel() {
     if (worker_) worker_->cancelPending();
     if (searching_) { searching_ = false; status(stoppedStatus()); }
 }
-void SearchPane::stop(ShutdownDialog* progress) {
+void SearchPane::stop(ShutdownProgress* progress) {
     cancel();
     if (worker_) { if (progress) progress->wait([this] { worker_->stop(); }); else worker_->stop(); }
 }

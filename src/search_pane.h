@@ -6,7 +6,7 @@
 #include "session.h"
 
 namespace poppy {
-class ShutdownDialog;
+class ShutdownProgress;
 struct SearchOverlay { std::string relative; std::shared_ptr<EditBuffer> buffer; };
 class SearchPane {
 public:
@@ -18,7 +18,7 @@ public:
     void focus(const std::optional<std::wstring>& seed = {}) { input_.show(seed); }
     void refresh();
     void cancel();
-    void stop(ShutdownDialog* progress = nullptr);
+    void stop(ShutdownProgress* progress = nullptr);
     SavedSearch snapshot();
     void restore(const SavedSearch& state);
     HWND window() const { return window_; }

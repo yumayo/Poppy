@@ -4,7 +4,7 @@
 #include "terminal_host.h"
 
 namespace poppy {
-class ShutdownDialog;
+class ShutdownProgress;
 class Terminal {
 public:
     struct LaunchOptions : TerminalHostLaunch {
@@ -25,8 +25,8 @@ public:
     bool launch() { return start(); }
     void setSessionIdentity(std::string id) { sessionId_ = std::move(id); }
     void reconnect() { start(true); }
-    void detach(ShutdownDialog* progress = nullptr);
-    void stop(ShutdownDialog* progress = nullptr);
+    void detach(ShutdownProgress* progress = nullptr);
+    void stop(ShutdownProgress* progress = nullptr);
     void setEnvironment(std::vector<std::pair<std::wstring, std::wstring>> values) { environment_ = std::move(values); }
     std::function<StartupTask()> starting;
     std::function<void()> ended, focused, stopping;
@@ -92,6 +92,9 @@ private:
     std::atomic<bool> stopping_{false};
     NativeThread launcher_, reader_;
     bool launching_ = false;
+    // Set while stop() may be suspended in a background wait. pump() must not
+    // join the launcher or feed the model of a terminal that is being stopped.
+    bool halting_ = false;
     std::atomic<bool> launchFinished_{false};
     std::function<void()> launchReady_;
     std::wstring launchError_;
