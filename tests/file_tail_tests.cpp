@@ -213,7 +213,14 @@ void lineNumbers() {
     check(failed, "A file truncated while counting kept a partial line count");
 }
 }
+void byteSizes() {
+    check(formatByteSize(0) == L"0 B" && formatByteSize(1023) == L"1023 B", "Small sizes stay in bytes");
+    check(formatByteSize(1024) == L"1.00 KB" && formatByteSize(1536) == L"1.50 KB", "Kilobytes use two decimals");
+    check(formatByteSize(1024 * 1024 - 1) == L"1.00 MB", "Rounding carries into the next unit");
+    check(formatByteSize(3ull * 1024 * 1024 * 1024 + 512ull * 1024 * 1024) == L"3.50 GB", "Gigabytes use two decimals");
+    check(formatByteSize(5ull << 40) == L"5.00 TB" && formatByteSize(2048ull << 40) == L"2048.00 TB", "Terabytes are the largest unit");
+}
 int main() {
-    try { lineWindows(); boundedReads(); byteWindows(); lineNumbers(); std::cout << "File tail tests passed\n"; }
+    try { lineWindows(); boundedReads(); byteWindows(); lineNumbers(); byteSizes(); std::cout << "File tail tests passed\n"; }
     catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
 }

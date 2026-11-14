@@ -1,5 +1,7 @@
 #include "file_tail.h"
 #include <algorithm>
+#include <cstdio>
+#include <iterator>
 #include <stdexcept>
 
 namespace poppy {
@@ -28,6 +30,15 @@ uint64_t chunkLines(uint64_t fileBytes, uint64_t offset, LineFormat format, cons
 }
 LineFormat lineFormat(const std::string& encoding) {
     return encoding == "UTF-16 LE" ? LineFormat::Utf16Le : encoding == "UTF-16 BE" ? LineFormat::Utf16Be : LineFormat::Utf8;
+}
+std::wstring formatByteSize(uint64_t bytes) {
+    if (bytes < 1024) return std::to_wstring(bytes) + L" B";
+    static const wchar_t* const units[] = {L"KB", L"MB", L"GB", L"TB"};
+    size_t unit = 0; double value = static_cast<double>(bytes) / 1024;
+    // Round first so 1023.999 KB becomes 1.00 MB instead of 1024.00 KB.
+    while (unit + 1 < std::size(units) && value >= 1024 - 0.005) { value /= 1024; ++unit; }
+    wchar_t text[32]; std::swprintf(text, std::size(text), L"%.2f %ls", value, units[unit]);
+    return text;
 }
 FileLineScan scanFileLines(uint64_t fileBytes, uint64_t from, const ReadFileRange& read, const std::function<bool()>& cancelled) {
     if (fileBytes > maxLineIndexBytes) throw std::runtime_error("The file is too large to count its lines.");

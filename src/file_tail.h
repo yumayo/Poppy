@@ -50,4 +50,6 @@ struct FileLineIndex {
 // nothing when the scan does not continue previous (e.g. a changed BOM).
 std::optional<FileLineIndex> mergeFileLines(const FileLineIndex* previous, const FileLineScan& scan);
 LineFormat lineFormat(const std::string& encoding);
+// Binary units with two decimals, e.g. "512 B", "1.50 KB", "4.00 GB".
+std::wstring formatByteSize(uint64_t bytes);
 }

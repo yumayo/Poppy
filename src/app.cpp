@@ -3315,7 +3315,7 @@ void ProjectRuntime::Impl::loadFileWindow(int group, uint64_t offset) {
             tabs_[index].buffer.reset(); tabs_[index].searchTarget.reset();
             view.showFileWindow(result->document, path, offset);
             countFileLines(path, result->document->fileBytes);
-            status(L"Large file · " + std::to_wstring(result->document->fileBytes) + L" bytes · READ ONLY");
+            status(L"Large file · " + formatByteSize(result->document->fileBytes) + L" · READ ONLY");
             // Watch events may have arrived while navigation held the old
             // snapshot. Catch up once at EOF even if the writer has stopped.
             if (!view.tailPaused()) loadTab(true, group);
@@ -3473,7 +3473,7 @@ void ProjectRuntime::Impl::loadTab(bool preserve, int group, bool revealExplorer
                     tab.buffer.reset(); tab.searchTarget.reset();
                     viewers_[group].showTail(result->document, path, preserve);
                     countFileLines(path, result->document->fileBytes);
-                    status(L"Large file · " + std::to_wstring(result->document->fileBytes) + L" bytes · READ ONLY");
+                    status(L"Large file · " + formatByteSize(result->document->fileBytes) + L" · READ ONLY");
                 } else if (result->document) {
                     const auto buffer = shareBuffer(path, result->buffer);
                     viewers_[group].edit(buffer, path, preserve); if (!preserve) viewers_[group].restore(state);
@@ -3893,7 +3893,7 @@ LRESULT ProjectRuntime::Impl::handle(UINT m, WPARAM a, LPARAM b) {
     case WM_SIZE: layout(); return 0;
     case WM_GETMINMAXINFO: { auto info = reinterpret_cast<MINMAXINFO*>(b); info->ptMinTrackSize = {MulDiv(720, dpi_, 96), MulDiv(480, dpi_, 96)}; return 0; }
     case WM_DPICHANGED: { dpi(HIWORD(a)); const auto r = reinterpret_cast<RECT*>(b); SetWindowPos(window_, nullptr, r->left, r->top, r->right - r->left, r->bottom - r->top, SWP_NOZORDER | SWP_NOACTIVATE); return 0; }
-    case wmWork: worker_->dispatch(); gitWorker_->dispatch(); diffWorker_->dispatch(); return 0;
+    case wmWork: worker_->dispatch(); gitWorker_->dispatch(); diffWorker_->dispatch(); lineWorker_->dispatch(); return 0;
     case WM_TIMER: if (a == timerId) pollWatch(); else if (a == tabDragTimerId) scrollTabDrag(); return 0;
     case WM_APP + 15:
         if (!restoringProject_) { saveTab(); const bool changed = syncTerminalTabs(); if (changed) pruneGroups(); layout(false); if (changed) loadGroups(); }

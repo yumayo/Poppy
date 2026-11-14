@@ -365,8 +365,8 @@ std::wstring Viewer::textStatus() const {
         else if (lineIndex_ && lineIndex_->bytes == document_->fileBytes && lineBase()) lines = std::to_wstring(lineIndex_->lines + 1) + L" lines  ·  ";
         else if (lineCounting_) lines = L"Counting lines…  ·  ";
     }
-    const auto mode = tailPreview() ? L"LARGE FILE · READ ONLY  ·  " + lines + std::to_wstring(document_->tailOffset) + L"–" +
-        std::to_wstring(document_->tailEndOffset) + L" / " + std::to_wstring(document_->fileBytes) + L" bytes  ·  " :
+    const auto mode = tailPreview() ? L"LARGE FILE · READ ONLY  ·  " + lines + formatByteSize(document_->tailOffset) + L"–" +
+        formatByteSize(document_->tailEndOffset) + L" / " + formatByteSize(document_->fileBytes) + L"  ·  " :
         csv_.active() ? csv_.status() + L"  ·  " : L"";
     return mode +
         wide(document_->encoding) + (crlf ? L"  ·  CRLF" : L"  ·  LF");
