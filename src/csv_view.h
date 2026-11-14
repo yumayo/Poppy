@@ -47,9 +47,9 @@ public:
     std::function<std::wstring(size_t)> rowLabel;
     std::function<void(SCROLLINFO&, int rows, int page)> fileScroll;
     std::function<bool(int64_t rows, bool extend)> moveRows;
-    // A drag that scrolls past the window's top (-1) or bottom (1) asks the
-    // owner once per window to load the records beyond it around the rows on
-    // screen. The owner holds the drag while it shows that window, and the
+    // A drag that scrolls onto the window's top (-1) or bottom (1) edge asks
+    // the owner once per window to load the records beyond it around the rows
+    // on screen. The owner holds the drag while it shows that window, and the
     // drag scrolls on from there.
     std::function<void(int direction)> loadRows;
     bool dragging() const { return selecting_; }

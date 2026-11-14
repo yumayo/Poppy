@@ -2984,11 +2984,12 @@ void largeCsvTable() {
         viewer.showFileWindow(snapshot(middle, 200), L"huge.csv", requests.back());
         check(viewer.state().caret == 51 * 16 + 7, "A CSV caret outside the window did not move from its own record");
 
-        // Dragging a selection past the window's top reads the preceding
+        // A selection dragged above the window scrolls its top row onto the
+        // window's edge and, with the pointer held still, reads the preceding
         // records once, keeps the rows on screen in place, and selects on
-        // through them while the drag continues.
+        // through them. Only the paints the drag itself asks for are run.
         viewer.showFileWindow(snapshot(middle, 200), L"huge.csv", static_cast<uint64_t>(middle) * 16);
-        auto start = viewer.state(); start.left = 0; start.anchor = start.caret = 0; viewer.restore(start);
+        auto start = viewer.state(); start.top = 2; start.left = 0; start.anchor = start.caret = 0; viewer.restore(start);
         ShowWindow(parent, SW_SHOWNOACTIVATE);
         {
             const auto px = [&](int value) { return MulDiv(value, dpi, 96); };
@@ -2999,14 +3000,15 @@ void largeCsvTable() {
             const auto reads = requests.size();
             SendMessageW(window, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(x, bodyTop + rowHeight * 2 + rowHeight / 2));
             SendMessageW(window, WM_MOUSEMOVE, MK_LBUTTON, MAKELPARAM(x, bodyTop - 1));
-            SendMessageW(window, WM_PAINT, 0, 0);
-            check(requests.size() == reads + 1 && requests.back() == static_cast<uint64_t>(middle) * 16 - 1, "Dragging past a CSV window did not read the preceding records once");
+            UpdateWindow(window);
+            check(viewer.state().top == 0 && requests.size() == reads + 1 && requests.back() == static_cast<uint64_t>(middle) * 16 - 1,
+                "A CSV drag stopped at the edge of its window without reading the preceding records once");
             viewer.showFileWindow(snapshot(middle - 100, 300), L"huge.csv", requests.back());
             check(viewer.state().top == 100 * 2, "Records loaded for a CSV drag moved the rows on screen");
-            SendMessageW(window, WM_PAINT, 0, 0);
+            UpdateWindow(window);
             SendMessageW(window, WM_LBUTTONUP, 0, MAKELPARAM(x, bodyTop + rowHeight / 2));
             const auto dragged = viewer.state();
-            check(dragged.top == 99 * 2 && dragged.anchor == 102 * 16 + 7 && dragged.caret == 99 * 16 + 7, "A CSV drag stopped at the edge of its window");
+            check(dragged.top == 99 * 2 && dragged.anchor == 103 * 16 + 7 && dragged.caret == 99 * 16 + 7, "A CSV drag did not select on into the preceding records");
         }
         ShowWindow(parent, SW_HIDE);
 

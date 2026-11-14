@@ -199,17 +199,18 @@ bool CsvView::advanceDrag() {
     };
     const int top = top_, left = left_;
     top_ += advance(dragCarryY_, vertical); left_ += advance(dragCarryX_, horizontal);
-    // Past either end of a large file's window, the owner loads the records
-    // beyond it. Scrolling pauses at the edge until they arrive.
-    const int beyond = top_ < 0 ? -1 : top_ > std::max(0, static_cast<int>(gridRows()) - pageRows()) ? 1 : 0;
     layout();
-    if (beyond && partial() && loadRows && !dragLoading_) { dragLoading_ = true; loadRows(beyond); }
     // Keep requesting frames while a partial row accumulates, and stop once
     // the table is at its limit in every direction the pointer points.
     const int bottom = std::max(0, static_cast<int>(gridRows()) - pageRows());
     const int right = std::max(0, edges_.back() - std::max(1, static_cast<int>(r.right) - rowGutter()));
     dragScrolling_ = (vertical < 0 && top_ > 0) || (vertical > 0 && top_ < bottom) || (horizontal < 0 && left_ > 0) || (horizontal > 0 && left_ < right);
     if (top != top_ || left != left_) { dragCaret(); dragStatus(); }
+    // Once the drag reaches either end of a large file's window, which stops
+    // the frames above, the owner loads the records beyond it. The window it
+    // shows repaints, so scrolling goes on without the pointer moving.
+    const int edge = vertical < 0 && top_ <= 0 ? -1 : vertical > 0 && top_ >= bottom ? 1 : 0;
+    if (edge && partial() && loadRows && !dragLoading_) { dragLoading_ = true; loadRows(edge); }
     return dragScrolling_;
 }
 void CsvView::move(WPARAM key, bool shift, bool ctrl) {
