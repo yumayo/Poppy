@@ -43,6 +43,7 @@ void Viewer::create(HWND parent, HINSTANCE instance, bool textOnly) {
         info.nMin = 0; info.nMax = range.range() - 1; info.nPage = static_cast<UINT>(range.page()); info.nPos = range.position(byte);
     };
     csv_.moveRows = [this](int64_t rows, bool extend) { return moveTableCaret(rows, extend); };
+    csv_.loadRows = [this](int direction) { loadTableRows(direction); };
     findBar_.create(window_, instance);
     findBar_.changed = [this] { requestFind(); };
     findBar_.navigate = [this](bool backwards) { findNext(backwards); };
@@ -83,8 +84,13 @@ std::optional<Viewer::CsvCarry> Viewer::present(std::shared_ptr<const Document> 
     // widths and the selected cells, which are remembered by file byte.
     const bool window = d->tail && tailPreview() && path_ == path;
     std::optional<CsvCarry> carry;
-    if (window && csv_.active() && csv_.valid()) carry = csvCarry_ ? *csvCarry_ : captureCsv();
+    // The cells on screen are current, including a drag's latest cell, unless
+    // a pending caret move placed them: that move goes on from its capture.
+    if (window && csv_.active() && csv_.valid()) carry = csvCarry_ && csvCarry_->move ? *csvCarry_ : captureCsv();
     csvCarry_.reset();
+    // A cell drag goes on in the file's next window.
+    const bool drag = window && csv_.active() && csv_.dragging();
+    if (drag) csv_.holdDrag(true);
     const bool keep = (preserve || window) && path_ == path;
     const bool preview = preserve && path_ == path && htmlAvailable() ? html_.active() : true;
     const bool table = keep && csvAvailable() ? csv_.active() : true;
@@ -111,8 +117,13 @@ std::optional<Viewer::CsvCarry> Viewer::present(std::shared_ptr<const Document> 
     if (carry && csv_.active()) {
         csvMarks_ = *carry;
         csv_.selectMarks(csvMark(carry->anchor, carry->anchorColumn), csvMark(carry->caret, carry->column), carry->name, carry->value);
-        csv_.scrollTo(csv_.top(), carry->left);
+        // Keep the rows on screen in place, so a caret stepping past the old
+        // window scrolls only as far as it must rather than from the new
+        // window's first row. Rows beyond the new window leave its near end.
+        const auto top = csvMark(carry->top, 0);
+        csv_.scrollTo(top.side < 0 ? 0 : top.side > 0 ? std::numeric_limits<int>::max() / 2 : static_cast<int>(csv_.rowAt(top.offset)), carry->left);
     }
+    if (drag) csv_.holdDrag(false);
     if (statusChanged) statusChanged();
     return carry;
 }
@@ -123,6 +134,7 @@ Viewer::CsvCarry Viewer::captureCsv() const {
     carry.anchor = csv_.anchorSide() ? csvMarks_.anchor : fileByteAt(csv_.anchorOffset());
     carry.caret = csv_.caretSide() ? csvMarks_.caret : fileByteAt(csv_.caretOffset());
     carry.record = csv_.caretSide() ? csvMarks_.record : fileByteAt(csv_.rowOffset(csv_.caretRow()));
+    carry.top = fileByteAt(csv_.rowOffset(static_cast<size_t>(csv_.top())));
     carry.anchorColumn = csv_.anchorColumn(); carry.column = csv_.caretColumn(); carry.left = csv_.left();
     carry.name = csv_.caretName(); carry.value = csv_.caretValue();
     return carry;
@@ -616,6 +628,16 @@ bool Viewer::moveTableCaret(int64_t rows, bool extend) {
     else requestFileWindow(record, static_cast<int>(std::min<int64_t>(rows, 1000000)), carry);
     UpdateWindow(window_);
     return true;
+}
+void Viewer::loadTableRows(int direction) {
+    // Runs while the table paints a drag frame, so it never repaints itself.
+    // A window already on its way carries the drag on once it arrives.
+    if (!tailPreview() || !fileWindowRequested || pendingFileOffset_ || !csv_.valid()) return;
+    if (direction < 0 ? document_->tailOffset <= bomBytes() : document_->tailEndOffset >= document_->fileBytes) return;
+    // Read around the top record as scrolling does, but leave it in place:
+    // the drag scrolls on through the arriving rows at its own pace.
+    const auto top = fileByteAt(csv_.rowOffset(static_cast<size_t>(csv_.top())));
+    requestFileWindow(direction < 0 ? top - 1 : top, direction < 0 ? 1 : 0);
 }
 void Viewer::scroll(int vertical, int horizontal) {
     if (csv_.active()) { scrollTable(vertical); return; }

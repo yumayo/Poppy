@@ -20,16 +20,22 @@ void CsvView::attach(HWND window, Renderer& renderer, Scrollbars& scrollbars) {
 }
 void CsvView::setDpi(UINT dpi) { dpi_ = dpi; if (active_) layout(); }
 void CsvView::show(std::shared_ptr<const Document> document, bool preserve) {
-    finishEdit(); stopDrag();
-    document_ = std::move(document); edit_.reset(); active_ = true;
+    finishEdit(); if (!dragHeld_) stopDrag();
+    document_ = std::move(document); edit_.reset(); active_ = true; dragLoading_ = false;
     settle();
     if (!preserve) { top_ = left_ = 0; anchor_ = caret_ = {}; widths_.clear(); }
     rebuild(); layout();
 }
 void CsvView::hide(bool release) {
-    finishEdit(); stopDrag(); active_ = false;
+    finishEdit(); if (release || !dragHeld_) stopDrag(); active_ = false;
     search_ = {};
     if (release) { document_.reset(); edit_.reset(); table_ = {}; widths_ = {}; edges_ = {}; text_ = {}; }
+}
+void CsvView::holdDrag(bool hold) {
+    dragHeld_ = hold;
+    // The drag outlives its hold only in a table showing the new window that
+    // still has the mouse captured.
+    if (!hold && selecting_ && (!active_ || !valid_ || GetCapture() != window_)) stopDrag();
 }
 void CsvView::rebuild() {
     valid_ = document_ && (partial() ? table_.parseWindow(document_->text, document_->tailOffset <= 3) : table_.parse(document_->text));
@@ -57,7 +63,10 @@ std::wstring CsvView::rowName(size_t row) const {
 }
 void CsvView::scrollTo(int top, std::optional<int> left) {
     top_ = top; if (left) left_ = *left;
-    layout(); InvalidateRect(window_, nullptr, FALSE);
+    layout();
+    // A drag selects through the cell that scrolled under the pointer.
+    if (selecting_ && valid_) { dragCaret(); dragStatus(); }
+    InvalidateRect(window_, nullptr, FALSE);
 }
 void CsvView::selectMarks(Mark anchor, Mark caret, std::wstring caretName, std::wstring caretValue) {
     if (!valid_) return;
@@ -190,7 +199,11 @@ bool CsvView::advanceDrag() {
     };
     const int top = top_, left = left_;
     top_ += advance(dragCarryY_, vertical); left_ += advance(dragCarryX_, horizontal);
+    // Past either end of a large file's window, the owner loads the records
+    // beyond it. Scrolling pauses at the edge until they arrive.
+    const int beyond = top_ < 0 ? -1 : top_ > std::max(0, static_cast<int>(gridRows()) - pageRows()) ? 1 : 0;
     layout();
+    if (beyond && partial() && loadRows && !dragLoading_) { dragLoading_ = true; loadRows(beyond); }
     // Keep requesting frames while a partial row accumulates, and stop once
     // the table is at its limit in every direction the pointer points.
     const int bottom = std::max(0, static_cast<int>(gridRows()) - pageRows());
@@ -498,7 +511,7 @@ bool CsvView::handle(UINT message, WPARAM a, LPARAM b, LRESULT& result) {
         if (dragHeader_ == 1) { anchor_.column = 0; caret_.column = table_.columns() - 1; }
         if (dragHeader_ == 2) { anchor_.row = 0; caret_.row = table_.rows() - 1; settle(); }
         if (message == WM_LBUTTONDBLCLK && !dragHeader_) { startEdit(); return true; }
-        selecting_ = true; dragScrolling_ = false; dragPoint_ = point; dragCarryX_ = dragCarryY_ = 0; SetCapture(window_); return true;
+        selecting_ = true; dragScrolling_ = dragLoading_ = false; dragPoint_ = point; dragCarryX_ = dragCarryY_ = 0; SetCapture(window_); return true;
     }
     case WM_MOUSEMOVE: {
         const POINT point{GET_X_LPARAM(b), GET_Y_LPARAM(b)};

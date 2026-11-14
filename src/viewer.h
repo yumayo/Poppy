@@ -79,8 +79,9 @@ private:
     // loading another window. A move places the caret rows after the
     // requested offset's record once that window arrives.
     // Cells outside the window keep their record's byte, row name and value.
+    // The top row's byte keeps the rows on screen in place.
     struct CsvCarry {
-        uint64_t anchor = 0, caret = 0, record = 0; size_t anchorColumn = 0, column = 0; int left = 0; bool move = false, extend = false;
+        uint64_t anchor = 0, caret = 0, record = 0, top = 0; size_t anchorColumn = 0, column = 0; int left = 0; bool move = false, extend = false;
         std::wstring name, value;
     };
     std::optional<CsvCarry> present(std::shared_ptr<const Document> document, const ResourceId& path, bool preserve, bool allowHtml);
@@ -88,6 +89,7 @@ private:
     CsvView::Mark csvMark(uint64_t byte, size_t column) const;
     void scrollTable(int vertical);
     bool moveTableCaret(int64_t rows, bool extend);
+    void loadTableRows(int direction);
     bool atTail() const { return csv_.active() ? csv_.atBottom() : scrollRange_.atTail(top_); }
     uint64_t bomBytes() const { return document_->encoding.compare(0, 6, "UTF-16") == 0 ? 2u : 3u; }
     LRESULT handle(UINT, WPARAM, LPARAM);

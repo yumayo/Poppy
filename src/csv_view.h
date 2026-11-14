@@ -47,6 +47,13 @@ public:
     std::function<std::wstring(size_t)> rowLabel;
     std::function<void(SCROLLINFO&, int rows, int page)> fileScroll;
     std::function<bool(int64_t rows, bool extend)> moveRows;
+    // A drag that scrolls past the window's top (-1) or bottom (1) asks the
+    // owner once per window to load the records beyond it around the rows on
+    // screen. The owner holds the drag while it shows that window, and the
+    // drag scrolls on from there.
+    std::function<void(int direction)> loadRows;
+    bool dragging() const { return selecting_; }
+    void holdDrag(bool hold);
     bool valid() const { return valid_; }
     bool truncated() const { return valid_ && table_.truncated(); }
     size_t rows() const { return valid_ ? table_.rows() : 0; }
@@ -136,7 +143,7 @@ private:
     int dragHeader_ = 0;
     std::chrono::steady_clock::time_point dragTick_;
     double dragCarryX_ = 0, dragCarryY_ = 0;
-    bool dragScrolling_ = false, statusPending_ = false;
+    bool dragScrolling_ = false, statusPending_ = false, dragHeld_ = false, dragLoading_ = false;
     // The status bar repaints its own windows, each waiting for vertical sync,
     // so a drag reports at most this often instead of on every frame.
     std::chrono::steady_clock::time_point statusTick_;
