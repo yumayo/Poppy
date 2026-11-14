@@ -308,10 +308,32 @@ public:
             result.tail = field(response.metadata, "tail") == "1";
             if (result.tail) {
                 result.offset = number(response.metadata, "offset"); result.fileBytes = number(response.metadata, "fileBytes"); result.endOffset = number(response.metadata, "endOffset");
+                if (!field(response.metadata, "chunkLines").empty()) result.chunkLines = number(response.metadata, "chunkLines");
                 if (mode == FileReadMode::Full || result.offset > result.endOffset || result.endOffset > result.fileBytes || result.endOffset - result.offset > maxTailBytes || result.bytes.size() > maxTailBytes + 2) throw std::runtime_error("Invalid WSL file window");
             }
             return result;
         } catch (const std::exception& error) { return {{}, {}, wide(error.what())}; }
+    }
+    ProviderLineScan scanLines(const ResourceId& path, uint64_t from, const std::function<bool()>& cancelled) override {
+        ProviderLineScan result;
+        try {
+            // Reading 4 GiB can take minutes on slow disks. Only an explicit
+            // cancellation should stop it, not the ordinary request timeout.
+            const auto response = call("scanLines", path, {{"from", std::to_string(from)}}, nullptr, cancelled, 60 * 60 * 1000);
+            auto& scan = result.scan;
+            scan.from = number(response.metadata, "from"); scan.fileBytes = number(response.metadata, "fileBytes");
+            const auto format = field(response.metadata, "format");
+            scan.format = format == "utf16le" ? LineFormat::Utf16Le : format == "utf16be" ? LineFormat::Utf16Be : LineFormat::Utf8;
+            const auto& bytes = response.bytes;
+            if (scan.from != from || scan.fileBytes > maxLineIndexBytes || scan.fileBytes < from || bytes.size() % 4 ||
+                bytes.size() / 4 != (scan.fileBytes - from + lineIndexChunkBytes - 1) / lineIndexChunkBytes) throw std::runtime_error("Invalid WSL line count");
+            for (size_t at = 0; at < bytes.size(); at += 4) {
+                uint32_t count = 0;
+                for (int shift = 0; shift < 4; ++shift) count |= static_cast<uint32_t>(static_cast<unsigned char>(bytes[at + shift])) << (8 * shift);
+                scan.chunks.push_back(count);
+            }
+        } catch (const std::exception& error) { result.error = wide(error.what()); }
+        return result;
     }
     ProviderSave saveFile(const ResourceId& path, const std::string& bytes, const std::string& version, const std::string&) override {
         try { if (bytes.size() > maxFileBytes || version.empty()) throw std::runtime_error("File cannot be saved without a valid version and a size below 16 MiB"); const auto response = call("saveFile", path, {{"size", std::to_string(bytes.size())}, {"version", version}}, &bytes); return {field(response.metadata, "version"), {}}; } catch (const std::exception& error) { return {{}, wide(error.what())}; }

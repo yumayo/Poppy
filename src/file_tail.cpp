@@ -3,6 +3,73 @@
 #include <stdexcept>
 
 namespace poppy {
+namespace {
+LineFormat formatOf(const std::string& header) {
+    return header.compare(0, 2, "\xff\xfe") == 0 ? LineFormat::Utf16Le : header.compare(0, 2, "\xfe\xff") == 0 ? LineFormat::Utf16Be : LineFormat::Utf8;
+}
+// bytes must start at an even file offset for UTF-16. A trailing odd byte
+// is not a complete code unit.
+uint64_t countNewlines(const char* bytes, size_t size, LineFormat format) {
+    if (format == LineFormat::Utf8) return static_cast<uint64_t>(std::count(bytes, bytes + size, '\n'));
+    const size_t newline = format == LineFormat::Utf16Le ? 0 : 1;
+    uint64_t count = 0;
+    for (size_t at = 0; at + 1 < size; at += 2) count += bytes[at + newline] == '\n' && bytes[at + 1 - newline] == 0;
+    return count;
+}
+uint64_t chunkLines(uint64_t fileBytes, uint64_t offset, LineFormat format, const ReadFileRange& read) {
+    if (fileBytes > maxLineIndexBytes) return unknownLines;
+    const auto start = offset / lineIndexChunkBytes * lineIndexChunkBytes;
+    if (start == offset) return 0;
+    const auto count = static_cast<size_t>(offset - start);
+    const auto bytes = read(start, count);
+    // A truncated file only loses line numbers, not the visible window.
+    return bytes.size() == count ? countNewlines(bytes.data(), bytes.size(), format) : unknownLines;
+}
+}
+LineFormat lineFormat(const std::string& encoding) {
+    return encoding == "UTF-16 LE" ? LineFormat::Utf16Le : encoding == "UTF-16 BE" ? LineFormat::Utf16Be : LineFormat::Utf8;
+}
+FileLineScan scanFileLines(uint64_t fileBytes, uint64_t from, const ReadFileRange& read, const std::function<bool()>& cancelled) {
+    if (fileBytes > maxLineIndexBytes) throw std::runtime_error("The file is too large to count its lines.");
+    if (from % lineIndexChunkBytes || from > fileBytes) throw std::runtime_error("Invalid line count offset.");
+    FileLineScan result; result.from = from; result.fileBytes = fileBytes;
+    const auto headerBytes = static_cast<size_t>(std::min<uint64_t>(2, fileBytes));
+    const auto header = read(0, headerBytes);
+    if (header.size() != headerBytes) throw std::runtime_error("File changed while counting its lines; retry.");
+    result.format = formatOf(header);
+    result.chunks.reserve(static_cast<size_t>((fileBytes - from + lineIndexChunkBytes - 1) / lineIndexChunkBytes));
+    constexpr uint64_t block = 16 * lineIndexChunkBytes;
+    for (uint64_t at = from; at < fileBytes; at += block) {
+        if (cancelled && cancelled()) throw std::runtime_error("Line counting was cancelled.");
+        const auto count = static_cast<size_t>(std::min(block, fileBytes - at));
+        const auto bytes = read(at, count);
+        if (bytes.size() != count) throw std::runtime_error("File changed while counting its lines; retry.");
+        for (size_t chunk = 0; chunk < count; chunk += lineIndexChunkBytes)
+            result.chunks.push_back(static_cast<uint32_t>(countNewlines(bytes.data() + chunk, std::min<size_t>(lineIndexChunkBytes, count - chunk), result.format)));
+    }
+    return result;
+}
+std::optional<uint64_t> FileLineIndex::linesBefore(uint64_t offset, uint64_t inChunk) const {
+    const auto chunk = offset / lineIndexChunkBytes;
+    if (inChunk == unknownLines || chunk >= checkpoints.size()) return std::nullopt;
+    return checkpoints[static_cast<size_t>(chunk)] + inChunk;
+}
+std::optional<FileLineIndex> mergeFileLines(const FileLineIndex* previous, const FileLineScan& scan) {
+    FileLineIndex result; result.format = scan.format; result.bytes = scan.fileBytes;
+    const auto first = scan.from / lineIndexChunkBytes;
+    if (scan.from) {
+        if (!previous || previous->format != scan.format || scan.from % lineIndexChunkBytes || first >= previous->checkpoints.size()) return std::nullopt;
+        result.checkpoints.assign(previous->checkpoints.begin(), previous->checkpoints.begin() + static_cast<std::ptrdiff_t>(first + 1));
+    }
+    if (scan.chunks.size() != (scan.fileBytes - scan.from + lineIndexChunkBytes - 1) / lineIndexChunkBytes) return std::nullopt;
+    result.lines = result.checkpoints.back();
+    uint64_t start = scan.from;
+    for (const auto count : scan.chunks) {
+        result.lines += count; start += lineIndexChunkBytes;
+        if (start <= scan.fileBytes) result.checkpoints.push_back(result.lines);
+    }
+    return result;
+}
 FileTail readFileTail(uint64_t fileBytes, const ReadFileRange& read) {
     FileTail result; result.fileBytes = result.endOffset = fileBytes;
     const auto header = read(0, static_cast<size_t>(std::min<uint64_t>(3, fileBytes)));
@@ -50,6 +117,7 @@ FileTail readFileTail(uint64_t fileBytes, const ReadFileRange& read) {
     // decodeText needs the original UTF-16 byte order even for a suffix.
     if (unit == 2) bytes.insert(0, header.substr(0, 2));
     result.bytes = std::move(bytes);
+    result.chunkLines = chunkLines(fileBytes, result.offset, formatOf(header), read);
     return result;
 }
 FileTail readFileWindow(uint64_t fileBytes, uint64_t requestedOffset, const ReadFileRange& read) {
@@ -110,6 +178,7 @@ FileTail readFileWindow(uint64_t fileBytes, uint64_t requestedOffset, const Read
     bytes = bytes.substr(start, end - start);
     if (unit == 2) bytes.insert(0, header.substr(0, 2));
     result.bytes = std::move(bytes);
+    result.chunkLines = chunkLines(fileBytes, result.offset, formatOf(header), read);
     return result;
 }
 }

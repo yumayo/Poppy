@@ -188,7 +188,7 @@ std::shared_ptr<FileResult> readDocument(ProjectProvider& provider, const Resour
     if (static_cast<size_t>(std::count(document->text.begin(), document->text.end(), '\n')) >= maxLines) { result->error = L"This file exceeds the 1,000,000-line preview limit."; return result; }
     document->language = path.filename() == L"CMakeLists.txt" ? Language::Config : languageFor(utf8(path.extension().native()));
     if (file.tail) {
-        document->tail = true; document->tailOffset = file.offset; document->tailEndOffset = file.endOffset; document->fileBytes = file.fileBytes;
+        document->tail = true; document->tailOffset = file.offset; document->tailEndOffset = file.endOffset; document->fileBytes = file.fileBytes; document->tailChunkLines = file.chunkLines;
         indexDocument(*document); result->document = std::move(document); return result;
     }
     indexDocument(*document); buffer->initialize(std::move(bytes)); buffer->fileVersion = std::move(file.version); result->buffer = std::move(buffer); result->document = std::move(document); return result;
@@ -399,6 +399,10 @@ private:
     void tabMenu(POINT screen);
     void loadTab(bool preserve = false, int group = -1, bool revealExplorer = true);
     void loadFileWindow(int group, uint64_t offset);
+    // Counts the newlines of a large file in the background so its windows
+    // show exact line numbers. Appends extend the previous count.
+    void countFileLines(const ResourceId& path, uint64_t fileBytes);
+    void publishLineIndex(const ResourceId& path);
     void refreshEditorGit(int group);
     void updateTabs(bool reveal = true);
     bool tabVisible(size_t index) const;
@@ -496,7 +500,14 @@ private:
     QuickOpen quickOpen_;
     QuickOpen comparePicker_;
     SearchPane searchPane_;
-    std::unique_ptr<Worker> worker_, gitWorker_, diffWorker_;
+    std::unique_ptr<Worker> worker_, gitWorker_, diffWorker_, lineWorker_;
+    struct LineCount {
+        ResourceId path;
+        std::shared_ptr<const FileLineIndex> index;
+        std::shared_ptr<std::atomic<bool>> cancel;
+        uint64_t failedBytes = UINT64_MAX;
+    };
+    std::map<std::wstring, LineCount> lineCounts_;
     ProjectRuntime* owner_ = nullptr;
     std::optional<ProjectSession> initialState_;
     HWND lastFocus_ = nullptr;
@@ -550,6 +561,8 @@ void ProjectRuntime::Impl::create() {
     // Diffs never wait behind repository scans, status or Explorer ignore
     // checks queued for the Changes list.
     diffWorker_ = std::make_unique<Worker>(window_);
+    // Counting a multi-GB file must not delay opening or scrolling files.
+    lineWorker_ = std::make_unique<Worker>(window_);
     explorer_.create(window_, instance_, L"Files", 1); tree_ = explorer_.window();
     changes_.create(window_, instance_, L"Source Control", 4); gitTree_ = changes_.window();
     gitCommit_.create(window_, instance_);
@@ -3301,10 +3314,74 @@ void ProjectRuntime::Impl::loadFileWindow(int group, uint64_t offset) {
             }
             tabs_[index].buffer.reset(); tabs_[index].searchTarget.reset();
             view.showFileWindow(result->document, path, offset);
+            countFileLines(path, result->document->fileBytes);
             status(L"Large file · " + std::to_wstring(result->document->fileBytes) + L" bytes · READ ONLY");
             // Watch events may have arrived while navigation held the old
             // snapshot. Catch up once at EOF even if the writer has stopped.
             if (!view.tailPaused()) loadTab(true, group);
+        });
+    });
+}
+void ProjectRuntime::Impl::publishLineIndex(const ResourceId& path) {
+    const auto found = lineCounts_.find(pathKey(path));
+    for (int group = 0; group < static_cast<int>(viewers_.size()); ++group) {
+        const auto index = groupTab(group);
+        if (index >= tabs_.size() || tabs_[index].path != path || !viewers_[group].tailPreview()) continue;
+        if (found == lineCounts_.end()) viewers_[group].setLineIndex(nullptr, false);
+        else viewers_[group].setLineIndex(found->second.index, found->second.cancel != nullptr);
+    }
+}
+void ProjectRuntime::Impl::countFileLines(const ResourceId& path, uint64_t fileBytes) {
+    // Forget counts for files that no tab shows any more.
+    for (auto it = lineCounts_.begin(); it != lineCounts_.end();) {
+        const bool open = std::any_of(tabs_.begin(), tabs_.end(), [&](const auto& tab) { return tab.path == it->second.path && tab.terminalId.empty(); });
+        if (open) { ++it; continue; }
+        if (it->second.cancel) *it->second.cancel = true;
+        it = lineCounts_.erase(it);
+    }
+    if (fileBytes > maxLineIndexBytes) { publishLineIndex(path); return; }
+    const auto key = pathKey(path);
+    auto& count = lineCounts_[key];
+    count.path = path;
+    // A running count catches up with later appends when it finishes.
+    if (count.cancel || (count.index && count.index->bytes == fileBytes) || (!count.index && count.failedBytes == fileBytes)) { publishLineIndex(path); return; }
+    // Appends keep the counted prefix. A smaller file was rewritten.
+    if (count.index && count.index->bytes > fileBytes) count.index.reset();
+    const auto previous = count.index;
+    const auto from = previous ? previous->bytes / lineIndexChunkBytes * lineIndexChunkBytes : 0;
+    auto cancel = std::make_shared<std::atomic<bool>>(false);
+    count.cancel = cancel;
+    publishLineIndex(path);
+    lineWorker_->submit(L"lines:" + key, [this, path, key, from, previous, cancel, fileBytes, provider = fileProvider(path)] {
+        const auto cancelled = [this, cancel] { return cancel->load() || lineWorker_->cancellation()->load(); };
+        auto scan = provider->scanLines(path, from, cancelled);
+        std::optional<FileLineIndex> merged;
+        if (scan.error.empty()) {
+            merged = mergeFileLines(previous.get(), scan.scan);
+            // The prefix no longer matches, e.g. a rewritten byte order mark.
+            if (!merged && from) {
+                scan = provider->scanLines(path, 0, cancelled);
+                if (scan.error.empty()) merged = mergeFileLines(nullptr, scan.scan);
+            }
+        }
+        auto index = merged ? std::make_shared<const FileLineIndex>(std::move(*merged)) : nullptr;
+        lineWorker_->complete([this, path, key, cancel, fileBytes, index] {
+            const auto found = lineCounts_.find(key);
+            if (found == lineCounts_.end() || found->second.cancel != cancel) return;
+            auto& count = found->second;
+            count.cancel.reset();
+            if (index) { count.index = index; count.failedBytes = UINT64_MAX; }
+            else { count.index.reset(); count.failedBytes = fileBytes; }
+            publishLineIndex(path);
+            // The file may have grown while it was being counted.
+            if (!index) return;
+            for (int group = 0; group < static_cast<int>(viewers_.size()); ++group) {
+                const auto tab = groupTab(group);
+                const auto document = viewers_[group].document();
+                if (tab < tabs_.size() && tabs_[tab].path == path && viewers_[group].tailPreview() && document && document->fileBytes != index->bytes) {
+                    countFileLines(path, document->fileBytes); break;
+                }
+            }
         });
     });
 }
@@ -3395,6 +3472,7 @@ void ProjectRuntime::Impl::loadTab(bool preserve, int group, bool revealExplorer
                     auto& tab = tabs_[groupTab(group)];
                     tab.buffer.reset(); tab.searchTarget.reset();
                     viewers_[group].showTail(result->document, path, preserve);
+                    countFileLines(path, result->document->fileBytes);
                     status(L"Large file · " + std::to_wstring(result->document->fileBytes) + L" bytes · READ ONLY");
                 } else if (result->document) {
                     const auto buffer = shareBuffer(path, result->buffer);
@@ -3962,7 +4040,7 @@ LRESULT ProjectRuntime::Impl::handle(UINT m, WPARAM a, LPARAM b) {
     case WM_CLOSE: return 0;
     case WM_DESTROY:
         if (fileDropTarget_) { RevokeDragDrop(window_); fileDropTarget_->Release(); fileDropTarget_ = nullptr; }
-        KillTimer(window_, timerId); stopWatch(); quickOpen_.stop(); comparePicker_.stop(); searchPane_.stop(); if (gitWorker_) gitWorker_->stop(); if (diffWorker_) diffWorker_->stop(); stopExplorerHistory(); if (worker_) worker_->stop(); terminal_.stop(); explorer_.clear(); changes_.clear();
+        KillTimer(window_, timerId); stopWatch(); quickOpen_.stop(); comparePicker_.stop(); searchPane_.stop(); if (gitWorker_) gitWorker_->stop(); if (diffWorker_) diffWorker_->stop(); if (lineWorker_) lineWorker_->stop(); stopExplorerHistory(); if (worker_) worker_->stop(); terminal_.stop(); explorer_.clear(); changes_.clear();
         return 0;
     default: break;
     }
@@ -4048,6 +4126,9 @@ void ProjectRuntime::shutdown(ShutdownProgress* progress, bool preserveTerminals
     }
     if (impl_->diffWorker_) {
         if (progress) progress->wait([this] { impl_->diffWorker_->stop(); }); else impl_->diffWorker_->stop();
+    }
+    if (impl_->lineWorker_) {
+        if (progress) progress->wait([this] { impl_->lineWorker_->stop(); }); else impl_->lineWorker_->stop();
     }
     if (progress) progress->detail(L"Cleaning up file operation history…");
     impl_->stopExplorerHistory(progress);

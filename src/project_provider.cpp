@@ -68,7 +68,7 @@ public:
                     bytes.resize(offset); return bytes;
                 };
                 auto tail = mode == FileReadMode::Window ? readFileWindow(static_cast<uint64_t>(size.QuadPart), requestedOffset, range) : readFileTail(static_cast<uint64_t>(size.QuadPart), range);
-                result.bytes = std::move(tail.bytes); result.tail = true; result.offset = tail.offset; result.fileBytes = tail.fileBytes; result.endOffset = tail.endOffset;
+                result.bytes = std::move(tail.bytes); result.tail = true; result.offset = tail.offset; result.fileBytes = tail.fileBytes; result.endOffset = tail.endOffset; result.chunkLines = tail.chunkLines;
             } catch (const std::exception& error) { result.error = wide(error.what()); }
             return result;
         }
@@ -76,6 +76,27 @@ public:
         result.bytes.resize(static_cast<size_t>(size.QuadPart)); size_t offset = 0;
         while (offset < result.bytes.size()) { DWORD count = 0; if (!ReadFile(file.value, result.bytes.data() + offset, static_cast<DWORD>(result.bytes.size() - offset), &count, nullptr)) { result.error = winError(); return result; } if (!count) break; offset += count; }
         result.bytes.resize(offset); return result;
+    }
+    ProviderLineScan scanLines(const ResourceId& path, uint64_t from, const std::function<bool()>& cancelled) override {
+        ProviderLineScan result;
+        Handle file(CreateFileW(path.local().c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN, nullptr));
+        if (!file) { result.error = winError(); return result; }
+        LARGE_INTEGER size{}; if (!GetFileSizeEx(file.value, &size) || size.QuadPart < 0) { result.error = winError(); return result; }
+        try {
+            result.scan = scanFileLines(static_cast<uint64_t>(size.QuadPart), from, [&](uint64_t at, size_t count) {
+                LARGE_INTEGER position{}; position.QuadPart = static_cast<LONGLONG>(at);
+                if (!SetFilePointerEx(file.value, position, nullptr, FILE_BEGIN)) throw std::runtime_error(utf8(winError()));
+                std::string bytes(count, 0); size_t offset = 0;
+                while (offset < count) {
+                    DWORD received = 0;
+                    if (!ReadFile(file.value, bytes.data() + offset, static_cast<DWORD>(count - offset), &received, nullptr)) throw std::runtime_error(utf8(winError()));
+                    if (!received) break;
+                    offset += received;
+                }
+                bytes.resize(offset); return bytes;
+            }, cancelled);
+        } catch (const std::exception& error) { result.error = wide(error.what()); }
+        return result;
     }
     ProviderSave saveFile(const ResourceId& path, const std::string& bytes, const std::string&, const std::string& baseline) override {
         if (bytes.size() > maxFileBytes) return {{}, L"Save exceeds the 16 MiB limit."};

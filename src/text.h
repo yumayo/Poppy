@@ -16,9 +16,12 @@ struct Document {
     Language language = Language::Plain;
     std::string encoding = "UTF-8";
     uint32_t maxColumns = 0;
-    // Large-file windows are partial, read-only documents with local line numbers.
+    // Large-file windows are partial, read-only documents. Their line numbers
+    // come from a separate file line index (see FileLineIndex).
     bool tail = false;
     uint64_t tailOffset = 0, tailEndOffset = 0, fileBytes = 0;
+    // Newlines between tailOffset's line index chunk and tailOffset, or UINT64_MAX.
+    uint64_t tailChunkLines = UINT64_MAX;
     std::string_view line(size_t row) const;
 };
 constexpr size_t maxFileBytes = 16 * 1024 * 1024;

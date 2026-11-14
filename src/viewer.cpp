@@ -57,7 +57,7 @@ void Viewer::setDpi(UINT dpi) {
     dpi_ = dpi;
     renderer_.setDpi(dpi);
     cellWidth_ = renderer_.cellWidth(); cellHeight_ = renderer_.textHeight() + MulDiv(3, dpi, 96);
-    header_ = MulDiv(34, dpi, 96); gutter_ = MulDiv(textOnly_ ? 12 : 70, dpi, 96);
+    header_ = MulDiv(34, dpi, 96); baseGutter_ = MulDiv(textOnly_ ? 12 : 70, dpi, 96); updateGutter();
     findBar_.setDpi(dpi);
     csv_.setDpi(dpi);
     scrollbars(); findLayout(); htmlLayout(); caretPosition(); InvalidateRect(window_, nullptr, FALSE);
@@ -75,8 +75,9 @@ void Viewer::show(std::shared_ptr<const Document> d, const ResourceId& path, boo
     image_.reset(); renderer_.setImage({});
     edit_.reset(); diffBefore_.reset(); gitBefore_.reset(); gitChangedLines_ = {}; gitChangeRanges_ = {}; highSurrogate_ = 0;
     diffLayout_ = {}; layoutDirty_ = true; caretTrailing_ = false;
+    if (path_ != path) { lineIndex_.reset(); lineCounting_ = false; }
     diff_.reset(); diffChangeRanges_ = {}; document_ = std::move(d); path_ = path; message_.clear();
-    pendingFileOffset_.reset(); pendingFileRows_ = 0; indexFileBytes();
+    pendingFileOffset_.reset(); pendingFileRows_ = 0; indexFileBytes(); updateGutter();
     if (!preserve) { top_ = left_ = 0; anchor_ = caret_ = 0; after_ = false; }
     else { anchor_ = std::min(anchor_, document_->text.size()); caret_ = std::min(caret_, document_->text.size()); }
     scrollbars(); findLayout(); requestFind(false, false, false); caretPosition(); InvalidateRect(window_, nullptr, FALSE);
@@ -120,6 +121,32 @@ void Viewer::showFileWindow(std::shared_ptr<const Document> d, const ResourceId&
 void Viewer::cancelFileWindowRequest() {
     pendingFileOffset_.reset(); pendingFileRows_ = 0;
     scrollbars(); InvalidateRect(window_, nullptr, FALSE);
+}
+void Viewer::setLineIndex(std::shared_ptr<const FileLineIndex> index, bool counting) {
+    if (lineIndex_ == index && lineCounting_ == counting) return;
+    lineIndex_ = std::move(index); lineCounting_ = counting;
+    InvalidateRect(window_, nullptr, FALSE);
+    if (statusChanged) statusChanged();
+}
+std::optional<uint64_t> Viewer::lineBase() const {
+    if (!tailPreview() || !lineIndex_ || lineIndex_->format != lineFormat(document_->encoding) || lineIndex_->bytes > document_->fileBytes) return std::nullopt;
+    return lineIndex_->linesBefore(document_->tailOffset, document_->tailChunkLines);
+}
+std::wstring Viewer::lineLabel(size_t line, const std::optional<uint64_t>& base) const {
+    if (!tailPreview()) return std::to_wstring(line + 1);
+    if (document_->fileBytes > maxLineIndexBytes) return std::to_wstring(fileByteAt(document_->lines[line]));
+    return base ? std::to_wstring(*base + line + 1) : std::wstring{};
+}
+void Viewer::updateGutter() {
+    const int previous = gutter_;
+    gutter_ = baseGutter_;
+    // Line numbers and byte offsets never exceed the file size. Size the
+    // gutter for it once so counting lines or scrolling never reflows text.
+    if (!textOnly_ && tailPreview()) {
+        const auto digits = static_cast<int>(std::to_string(document_->fileBytes + 1).size());
+        gutter_ = std::max(baseGutter_, digits * cellWidth_ + MulDiv(22, dpi_, 96));
+    }
+    if (gutter_ != previous) layoutDirty_ = true;
 }
 void Viewer::indexFileBytes() {
     fileLineBytes_.clear();
@@ -332,7 +359,13 @@ std::wstring Viewer::textStatus() const {
     if (!document_ || diff_) return {};
     const auto newline = document_->text.find('\n');
     const bool crlf = newline != std::string::npos && newline > 0 && document_->text[newline - 1] == '\r';
-    const auto mode = tailPreview() ? L"LARGE FILE · READ ONLY  ·  " + std::to_wstring(document_->tailOffset) + L"–" +
+    std::wstring lines;
+    if (tailPreview()) {
+        if (document_->fileBytes > maxLineIndexBytes) lines = L"BYTE OFFSETS (over 4 GiB)  ·  ";
+        else if (lineIndex_ && lineIndex_->bytes == document_->fileBytes && lineBase()) lines = std::to_wstring(lineIndex_->lines + 1) + L" lines  ·  ";
+        else if (lineCounting_) lines = L"Counting lines…  ·  ";
+    }
+    const auto mode = tailPreview() ? L"LARGE FILE · READ ONLY  ·  " + lines + std::to_wstring(document_->tailOffset) + L"–" +
         std::to_wstring(document_->tailEndOffset) + L" / " + std::to_wstring(document_->fileBytes) + L" bytes  ·  " :
         csv_.active() ? csv_.status() + L"  ·  " : L"";
     return mode +
@@ -1029,6 +1062,7 @@ void Viewer::paint() {
         const int rows = std::max(0, (static_cast<int>(r.bottom) - body + cellHeight_ - 1) / cellHeight_);
         const size_t selectionStart = std::min(anchor_, caret_), selectionEnd = std::max(anchor_, caret_);
         std::vector<Token> tokens;
+        const auto base = lineBase();
         for (int side = 0; side < (splitDiff() ? 2 : 1); ++side) {
             const int paneLeft = side ? middle + 1 : 0, paneRight = splitDiff() && !side ? middle : static_cast<int>(r.right);
             const int textLeft = paneLeft + textGutter();
@@ -1059,7 +1093,7 @@ void Viewer::paint() {
                     if (firstRow && change.after.number) dc.label({gutter_, y, std::min(paneRight, textLeft - 14), y + cellHeight_}, std::to_wstring(change.after.number), muted, DT_RIGHT | DT_SINGLELINE);
                 } else if (firstRow && !textOnly_) {
                     RECT number{paneLeft, y, std::min(paneRight, textLeft - 14), y + cellHeight_};
-                    dc.label(number, std::to_wstring(diff_ ? source.number : logicalRow + 1), muted, DT_RIGHT | DT_SINGLELINE);
+                    dc.label(number, diff_ ? std::to_wstring(source.number) : lineLabel(logicalRow, base), muted, DT_RIGHT | DT_SINGLELINE);
                 }
                 auto line = diff_ ? diff_->line(source) : document_->line(logicalRow);
                 const size_t lineOffset = diff_ ? diff_->offset(source) : document_->lines[logicalRow];

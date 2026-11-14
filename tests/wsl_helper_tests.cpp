@@ -418,6 +418,9 @@ void largeFiles(const std::string& executable) {
     check(range.bytes == entries(1, 140) && number(range.metadata, "endOffset") == fs::file_size(file), "A byte offset beyond EOF did not clamp to the last window");
     for (const auto& offset : {"-1", "18446744073709551616", "abc"}) helper.call("readFile", file, {{"readMode", "window"}, {"offset", offset}}, nullptr, false);
     helper.call("readFile", file, {{"readMode", "window"}}, nullptr, false);
+    // Files above the line index limit show byte offsets instead of lines.
+    check(field(range.metadata, "chunkLines").empty(), "A file above the line index limit reported a line count prefix");
+    helper.call("scanLines", file, {{"from", "0"}}, nullptr, false);
     append(entries(140, 170));
     snapshot = helper.call("readFile", file, {{"readMode", "tail"}});
     check(snapshot.bytes == entries(70, 170), "A sparse file tail did not advance after appending");
@@ -439,6 +442,30 @@ void largeFiles(const std::string& executable) {
     range = helper.call("readFile", file, {{"readMode", "window"}, {"offset", "18446744073709551615"}});
     check(range.bytes.empty() && range.last && number(range.metadata, "endOffset") == 0, "An empty byte window lost its EOF marker or final chunk");
     helper.call("readFile", file, {{"readMode", "unsupported"}}, nullptr, false);
+    // Line counts arrive as little-endian newline counts per index chunk.
+    write(file, entries(0, 200000));
+    const auto text = disk(file);
+    const auto counts = [](const Result& result) {
+        std::vector<uint64_t> values;
+        for (size_t at = 0; at + 4 <= result.bytes.size(); at += 4) {
+            uint64_t value = 0;
+            for (size_t i = 0; i < 4; ++i) value |= static_cast<uint64_t>(static_cast<unsigned char>(result.bytes[at + i])) << (8 * i);
+            values.push_back(value);
+        }
+        return values;
+    };
+    auto scan = helper.call("scanLines", file, {{"from", "0"}});
+    auto chunks = counts(scan);
+    check(number(scan.metadata, "fileBytes") == text.size() && field(scan.metadata, "format") == "utf8" && chunks.size() == (text.size() + poppy::lineIndexChunkBytes - 1) / poppy::lineIndexChunkBytes, "A line count did not cover the file");
+    uint64_t total = 0; for (const auto value : chunks) total += value;
+    check(total == 200000 && chunks[1] == static_cast<uint64_t>(std::count(text.begin() + poppy::lineIndexChunkBytes, text.begin() + 2 * poppy::lineIndexChunkBytes, '\n')), "A line count miscounted newlines");
+    scan = helper.call("scanLines", file, {{"from", std::to_string(poppy::lineIndexChunkBytes)}});
+    check(counts(scan).size() == chunks.size() - 1 && counts(scan)[0] == chunks[1], "A continued line count did not start at its offset");
+    helper.call("scanLines", file, {{"from", "1"}}, nullptr, false);
+    range = helper.call("readFile", file, {{"readMode", "window"}, {"offset", std::to_string(text.size() / 2)}});
+    const auto offset = number(range.metadata, "offset");
+    const auto start = offset / poppy::lineIndexChunkBytes * poppy::lineIndexChunkBytes;
+    check(number(range.metadata, "chunkLines") == static_cast<uint64_t>(std::count(text.begin() + static_cast<std::ptrdiff_t>(start), text.begin() + static_cast<std::ptrdiff_t>(offset), '\n')), "A window reported a wrong line count prefix");
     helper.eof();
 }
 void moving(const std::string& executable) {

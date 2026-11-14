@@ -1,16 +1,26 @@
 #pragma once
 #include <cstdint>
 #include <functional>
+#include <optional>
 #include <string>
+#include <vector>
 
 namespace poppy {
 constexpr size_t tailLineCount = 100;
 constexpr size_t maxTailBytes = 1024 * 1024;
 constexpr size_t maxFileWindowBytes = 512 * 1024;
+// Large files up to this size get exact line numbers from a full newline
+// scan. Larger files show byte offsets instead.
+constexpr uint64_t maxLineIndexBytes = 4ull * 1024 * 1024 * 1024;
+constexpr uint64_t lineIndexChunkBytes = 64 * 1024;
+constexpr uint64_t unknownLines = UINT64_MAX;
 enum class FileReadMode { Full, Preview, Tail, Window };
+enum class LineFormat : uint8_t { Utf8, Utf16Le, Utf16Be };
 struct FileTail {
     std::string bytes;
     uint64_t offset = 0, fileBytes = 0, endOffset = 0;
+    // Newlines between the line index chunk containing offset and offset.
+    uint64_t chunkLines = unknownLines;
 };
 // Read only the BOM and a bounded suffix, even for multi-GB files. The callback
 // reads from an absolute byte offset and may return fewer bytes at EOF.
@@ -20,4 +30,24 @@ FileTail readFileTail(uint64_t fileBytes, const ReadFileRange& read);
 // preferred without dropping the requested position; oversized lines remain
 // bounded fragments. UTF-16 windows include a synthetic decoding BOM.
 FileTail readFileWindow(uint64_t fileBytes, uint64_t offset, const ReadFileRange& read);
+// Newline counts for each lineIndexChunkBytes chunk of [from, fileBytes).
+// from must be chunk aligned. Throws if the file shrinks or is cancelled.
+struct FileLineScan {
+    uint64_t from = 0, fileBytes = 0;
+    LineFormat format = LineFormat::Utf8;
+    std::vector<uint32_t> chunks;
+};
+FileLineScan scanFileLines(uint64_t fileBytes, uint64_t from, const ReadFileRange& read, const std::function<bool()>& cancelled = {});
+struct FileLineIndex {
+    uint64_t bytes = 0, lines = 0;
+    LineFormat format = LineFormat::Utf8;
+    // checkpoints[k] counts the newlines before byte k * lineIndexChunkBytes.
+    std::vector<uint64_t> checkpoints{0};
+    // Newlines before offset, from FileTail::chunkLines of a window there.
+    std::optional<uint64_t> linesBefore(uint64_t offset, uint64_t chunkLines) const;
+};
+// Appends a scan to previous, or starts over when previous is null. Returns
+// nothing when the scan does not continue previous (e.g. a changed BOM).
+std::optional<FileLineIndex> mergeFileLines(const FileLineIndex* previous, const FileLineScan& scan);
+LineFormat lineFormat(const std::string& encoding);
 }

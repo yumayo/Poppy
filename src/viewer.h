@@ -12,6 +12,7 @@
 #include "editor_scroll.h"
 #include "html_preview.h"
 #include "csv_view.h"
+#include "file_tail.h"
 #include <memory>
 
 namespace poppy {
@@ -28,6 +29,11 @@ public:
     void showTail(std::shared_ptr<const Document> document, const ResourceId& path, bool preserve = false);
     void showFileWindow(std::shared_ptr<const Document> document, const ResourceId& path, uint64_t requestedOffset);
     void cancelFileWindowRequest();
+    // Exact line numbers for large-file windows. Without an index, windows of
+    // files up to maxLineIndexBytes omit line numbers; larger files show the
+    // byte offset of each line instead.
+    void setLineIndex(std::shared_ptr<const FileLineIndex> index, bool counting);
+    const Document* document() const { return document_.get(); }
     bool tailPreview() const { return document_ && document_->tail && !diff_; }
     bool tailPaused() const { return tailPreview() && (pendingFileOffset_ || document_->tailEndOffset < document_->fileBytes || !scrollRange_.atTail(top_)); }
     void showRevision(std::shared_ptr<const Document> document, const DiffDocument& changes, const ResourceId& path, bool preserve = false);
@@ -80,6 +86,9 @@ private:
     uint64_t fileByteAt(size_t offset) const;
     size_t fileTextAt(uint64_t offset) const;
     uint64_t fileRowByte(int row) const;
+    std::optional<uint64_t> lineBase() const;
+    std::wstring lineLabel(size_t line, const std::optional<uint64_t>& base) const;
+    void updateGutter();
     void extendSelection(int x, int y);
     void extendColumns(int x, int y);
     void clearColumns();
@@ -134,7 +143,7 @@ private:
     std::chrono::steady_clock::time_point findStarted_{};
     Scrollbars scrollbars_;
     UINT dpi_ = 96;
-    int cellWidth_ = 8, cellHeight_ = 20, header_ = 34, gutter_ = 66;
+    int cellWidth_ = 8, cellHeight_ = 20, header_ = 34, gutter_ = 66, baseGutter_ = 66;
     int top_ = 0, left_ = 0;
     EditorScrollRange scrollRange_;
     size_t anchor_ = 0, caret_ = 0;
@@ -151,6 +160,8 @@ private:
     int pendingFileRows_ = 0;
     // UTF-16 positions use original code units, while the displayed text is UTF-8.
     std::vector<uint32_t> fileLineBytes_;
+    std::shared_ptr<const FileLineIndex> lineIndex_;
+    bool lineCounting_ = false;
     TextLayout textLayout_;
     DiffLayout diffLayout_;
     static constexpr UINT_PTR caretTimer = 0x5056;

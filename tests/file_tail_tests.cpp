@@ -4,6 +4,7 @@
 #include <iostream>
 #include <limits>
 #include <stdexcept>
+#include <vector>
 
 using namespace poppy;
 namespace {
@@ -158,8 +159,61 @@ void byteWindows() {
     catch (const std::runtime_error&) { failed = true; }
     check(failed, "A concurrently truncated window silently published an incomplete snapshot");
 }
+FileLineIndex lineIndex(const std::string& bytes, const FileLineIndex* previous = nullptr) {
+    const auto from = previous ? previous->bytes / lineIndexChunkBytes * lineIndexChunkBytes : 0;
+    const auto scan = scanFileLines(bytes.size(), from, [&](uint64_t at, size_t count) { return bytes.substr(static_cast<size_t>(at), count); });
+    const auto merged = mergeFileLines(previous, scan);
+    check(merged.has_value(), "A line count could not be merged");
+    return *merged;
+}
+void lineNumbers() {
+    // Entries span several index chunks, so windows start inside chunks.
+    const auto text = entries(0, 60000, "\r\n");
+    for (const int encoding : {0, 1, 2}) {
+        const auto bytes = encoding ? utf16(text, encoding == 1) : text;
+        const auto index = lineIndex(bytes);
+        check(index.bytes == bytes.size() && index.lines == 60000 && index.checkpoints.size() == bytes.size() / lineIndexChunkBytes + 1, "The line index miscounted newlines");
+        check(index.format == (encoding == 0 ? LineFormat::Utf8 : encoding == 1 ? LineFormat::Utf16Le : LineFormat::Utf16Be), "The line index lost the byte order");
+        for (const auto requested : {uint64_t{0}, uint64_t{lineIndexChunkBytes}, static_cast<uint64_t>(bytes.size() / 3), static_cast<uint64_t>(bytes.size() / 2 + 7), std::numeric_limits<uint64_t>::max()}) {
+            const auto snapshot = window(bytes, requested);
+            const auto base = index.linesBefore(snapshot.offset, snapshot.chunkLines);
+            // Every complete entry in the window starts with its own number.
+            const auto content = decoded(snapshot, encoding == 0 ? "UTF-8" : encoding == 1 ? "UTF-16 LE" : "UTF-16 BE");
+            check(base && std::to_string(*base) == content.substr(0, content.find(' ')), "A window's first line number differs from the file");
+        }
+        const auto last = tail(bytes);
+        const auto base = index.linesBefore(last.offset, last.chunkLines);
+        check(base && *base == 59900, "The tail's first line number differs from the file");
+    }
+    // Appending extends the counted prefix without recounting it.
+    const auto first = text.substr(0, lineIndexChunkBytes * 3 + 123);
+    const auto previous = lineIndex(first);
+    const auto extended = lineIndex(text, &previous);
+    check(extended.lines == 60000 && extended.checkpoints == lineIndex(text).checkpoints, "An appended line count differs from a full count");
+    std::vector<uint64_t> reads;
+    scanFileLines(text.size(), lineIndexChunkBytes * 3, [&](uint64_t at, size_t count) { reads.push_back(at); return text.substr(static_cast<size_t>(at), count); });
+    check(reads.size() > 1 && reads[0] == 0 && reads[1] == lineIndexChunkBytes * 3, "An appended count rescanned the counted prefix");
+    // A changed byte order mark cannot continue an earlier count.
+    const auto scan = scanFileLines(utf16(text, true).size(), lineIndexChunkBytes, [&, bytes = utf16(text, true)](uint64_t at, size_t count) { return bytes.substr(static_cast<size_t>(at), count); });
+    check(!mergeFileLines(&previous, scan), "A count with a different encoding was merged");
+    check(lineIndex("").lines == 0 && lineIndex("x").lines == 0 && lineIndex(std::string(lineIndexChunkBytes, '\n')).checkpoints.size() == 2, "Small files were miscounted");
+    // Files above the index limit read no prefix for line numbers.
+    const uint64_t size = maxLineIndexBytes + 1;
+    readFileWindow(size, size / 2, [&](uint64_t at, size_t count) {
+        check(at == 0 || size / 2 - at <= maxFileWindowBytes, "A file above the line index limit read a line count prefix");
+        return std::string(count, 'x');
+    });
+    bool failed = false;
+    try { scanFileLines(size, 0, [](uint64_t, size_t count) { return std::string(count, 'x'); }); }
+    catch (const std::runtime_error&) { failed = true; }
+    check(failed, "A file above the line index limit was scanned");
+    failed = false;
+    try { scanFileLines(lineIndexChunkBytes * 20, 0, [](uint64_t at, size_t count) { return std::string(at ? count - 1 : count, 'x'); }); }
+    catch (const std::runtime_error&) { failed = true; }
+    check(failed, "A file truncated while counting kept a partial line count");
+}
 }
 int main() {
-    try { lineWindows(); boundedReads(); byteWindows(); std::cout << "File tail tests passed\n"; }
+    try { lineWindows(); boundedReads(); byteWindows(); lineNumbers(); std::cout << "File tail tests passed\n"; }
     catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
 }

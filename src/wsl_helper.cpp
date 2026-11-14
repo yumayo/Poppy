@@ -157,7 +157,7 @@ std::string stamp(const struct stat& s) {
 }
 struct Snapshot {
     std::string bytes, version, target; struct stat info{};
-    bool tail = false; uint64_t offset = 0, endOffset = 0;
+    bool tail = false; uint64_t offset = 0, endOffset = 0, chunkLines = unknownLines;
 };
 Snapshot read(const std::string& p, const std::atomic<bool>* cancelled = nullptr, FileReadMode mode = FileReadMode::Full, uint64_t requestedOffset = 0) {
     Snapshot result; struct stat link{}; if (lstat(p.c_str(), &link)) failure("Cannot inspect file");
@@ -183,7 +183,7 @@ Snapshot read(const std::string& p, const std::atomic<bool>* cancelled = nullptr
         // The descriptor and captured size bound this snapshot. Concurrent
         // appends are allowed; hashing/revalidating the whole file would
         // prevent following a continuously written log.
-        result.bytes = std::move(tail.bytes); result.tail = true; result.offset = tail.offset; result.endOffset = tail.endOffset;
+        result.bytes = std::move(tail.bytes); result.tail = true; result.offset = tail.offset; result.endOffset = tail.endOffset; result.chunkLines = tail.chunkLines;
         return result;
     }
     if (result.info.st_size < 0 || static_cast<uint64_t>(result.info.st_size) > maxFileBytes) throw std::runtime_error("File exceeds the 16 MiB limit");
@@ -199,6 +199,23 @@ Snapshot read(const std::string& p, const std::atomic<bool>* cancelled = nullptr
     if (stamp(after) != stamp(result.info) || stamp(link) != stamp(afterLink) || stamp(targetNow) != stamp(result.info) || real(p) != result.target) throw std::runtime_error("File changed while it was being read; retry");
     result.version = sha256(stamp(result.info) + ':' + stamp(link) + ':' + result.target + ':' + sha256(result.bytes));
     return result;
+}
+// Counts the newlines of a regular file in chunks for the editor's line index.
+FileLineScan scanLines(const std::string& p, const std::atomic<bool>& cancelled, uint64_t from) {
+    const auto target = real(p);
+    Fd fd(open(target.c_str(), O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW)); if (fd.value < 0) failure("Cannot open file");
+    struct stat info{}; if (fstat(fd.value, &info)) failure("Cannot inspect open file");
+    if (!S_ISREG(info.st_mode) || info.st_size < 0) throw std::runtime_error("Only regular files can be opened");
+    return scanFileLines(static_cast<uint64_t>(info.st_size), from, [&](uint64_t at, size_t count) {
+        std::string bytes(count, 0); size_t offset = 0;
+        while (offset < count) {
+            const auto received = pread(fd.value, bytes.data() + offset, count - offset, static_cast<off_t>(at + offset));
+            if (received < 0) { if (errno == EINTR) continue; failure("Cannot read file"); }
+            if (!received) break;
+            offset += static_cast<size_t>(received);
+        }
+        bytes.resize(offset); return bytes;
+    }, [&] { return cancelled.load(); });
 }
 struct Request {
     explicit Request(std::function<void(std::string_view)> write) : replies(std::move(write)) {}
@@ -502,7 +519,7 @@ void Server::execute(const std::shared_ptr<Request>& r) {
         if (op == "hello") {
             if (number(r->message, "protocolVersion") != protocolVersion) throw std::runtime_error("WSL protocol version mismatch");
             utsname system{}; if (uname(&system)) failure("Cannot detect architecture");
-            reply(*r, {{"protocolVersion", std::to_string(protocolVersion)}, {"helperVersion", helperVersion}, {"uid", std::to_string(getuid())}, {"home", home()}, {"shell", shell()}, {"executable", real("/proc/self/exe")}, {"architecture", system.machine}, {"capabilities", "list,read,save,create,mkdir,rename,copy,remove,index,git,repositories,inotify,terminal,search"}, {"done", "1"}});
+            reply(*r, {{"protocolVersion", std::to_string(protocolVersion)}, {"helperVersion", helperVersion}, {"uid", std::to_string(getuid())}, {"home", home()}, {"shell", shell()}, {"executable", real("/proc/self/exe")}, {"architecture", system.machine}, {"capabilities", "list,read,save,create,mkdir,rename,copy,remove,index,git,repositories,inotify,terminal,search,lines"}, {"done", "1"}});
         } else if (op == "connect") {
             const auto p = real(path(r->message)); struct stat info{}; if (stat(p.c_str(), &info)) failure("Cannot inspect project"); if (!S_ISDIR(info.st_mode)) throw std::runtime_error("The project path is not a directory"); watch(p); reply(*r, {{"path", p}, {"done", "1"}});
         } else if (op == "stat") {
@@ -521,8 +538,16 @@ void Server::execute(const std::shared_ptr<Request>& r) {
                 else { watchLimited_ = true; watchReason_ = "aliases"; watchFailedPath_ = p; watchError_.clear(); }
             }
             reply(*r, {{"body", "1"}, {"size", std::to_string(snapshot.bytes.size())}, {"version", snapshot.version},
-                {"tail", snapshot.tail ? "1" : "0"}, {"offset", std::to_string(snapshot.offset)}, {"fileBytes", std::to_string(snapshot.info.st_size)}, {"endOffset", std::to_string(snapshot.endOffset)}});
+                {"tail", snapshot.tail ? "1" : "0"}, {"offset", std::to_string(snapshot.offset)}, {"fileBytes", std::to_string(snapshot.info.st_size)}, {"endOffset", std::to_string(snapshot.endOffset)},
+                {"chunkLines", snapshot.chunkLines == unknownLines ? std::string{} : std::to_string(snapshot.chunkLines)}});
             body(*r, snapshot.bytes); reply(*r, {{"done", "1"}});
+        } else if (op == "scanLines") {
+            const auto scan = scanLines(path(r->message), r->cancelled, number(r->message, "from"));
+            std::string bytes; bytes.reserve(scan.chunks.size() * 4);
+            for (const auto count : scan.chunks) for (int shift = 0; shift < 32; shift += 8) bytes += static_cast<char>((count >> shift) & 255);
+            reply(*r, {{"body", "1"}, {"size", std::to_string(bytes.size())}, {"from", std::to_string(scan.from)}, {"fileBytes", std::to_string(scan.fileBytes)},
+                {"format", scan.format == LineFormat::Utf16Le ? "utf16le" : scan.format == LineFormat::Utf16Be ? "utf16be" : "utf8"}});
+            body(*r, bytes); reply(*r, {{"done", "1"}});
         } else if (op == "saveFile") save(*r);
         else if (op == "createFile") create(*r);
         else if (op == "copyResource") {
