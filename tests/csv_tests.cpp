@@ -187,8 +187,31 @@ void search() {
     search.query(""); check(search.ready() && search.count() == 0 && !search.current(), "An empty query started a scan");
     search.query("missing"); run(search, {2, 1}); check(search.count() == 0 && !search.current(), "A missing value selected a cell");
 }
+void windows() {
+    CsvTable table;
+    // A complete window parses exactly like a file.
+    const std::string whole = "a,b\n\"x\ny\",2\n";
+    check(table.parseWindow(whole, true) && table.rows() == 2 && !table.truncated() && table.value(whole, {1, 0}) == "x\ny", "A complete window changed its records");
+    // The window began inside a quoted field: skip its continuation lines.
+    const std::string inside = "tail of field\",1\nc,d\ne,f\n";
+    check(!table.parse(inside), "A window starting inside a field parsed as a file");
+    check(table.parseWindow(inside, false) && table.rows() == 2 && table.offset({0, 0}) == inside.find("c,d") && table.value(inside, {1, 1}) == "f",
+        "A window starting inside a quoted field did not resume at the next record");
+    check(table.position(0).row == 0, "Skipped bytes did not map to the first record");
+    check(!table.parseWindow(inside, true), "A window at the file's start skipped malformed records");
+    // The read limit cut the final quoted field.
+    const std::string cut = "a,b\nc,\"open\nfield";
+    check(table.parseWindow(cut, false) && table.truncated() && table.rows() == 1 && table.value(cut, {0, 1}) == "b", "A record cut by the window end was kept");
+    check(!table.parseWindow("\"never closed", false) && !table.error().empty(), "A window without a complete record was accepted");
+    // Beyond the table limit, keep the complete records before it.
+    std::string many; for (size_t i = 0; i < CsvTable::maxCells / 2 + 1; ++i) many += "1,2\n";
+    check(table.parseWindow(many, true) && table.truncated() && table.rows() == CsvTable::maxCells / 2, "A window over the table limit was not truncated");
+    check(!table.parse(many), "A file over the table limit was accepted");
+    // The window flag resets for the next parse.
+    check(table.parse("a\n") && !table.truncated(), "A file parse inherited a truncated window");
+}
 }
 int main() {
-    try { parsing(); edits(); clipboard(); historyAndEncoding(); rectangularEdits(); search(); std::cout << "CSV tests passed\n"; }
+    try { parsing(); edits(); clipboard(); historyAndEncoding(); rectangularEdits(); search(); windows(); std::cout << "CSV tests passed\n"; }
     catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
 }

@@ -15,6 +15,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdio>
 #include <fstream>
 #include <iostream>
 #include <stdexcept>
@@ -2873,12 +2874,105 @@ void largeFileTailPreview() {
         viewer.showTail(snapshot(0, 100), L"large.log", true);
         check(atBottom(), "A truncated tail stopped following growth");
         viewer.showTail(snapshot(0, 100), L"large.csv");
-        check(!viewer.csvAvailable() && !viewer.csvTable(), "A partial CSV opened as a complete table");
+        check(viewer.csvAvailable() && viewer.csvTable() && !viewer.buffer() && atBottom(), "A partial CSV did not open as a read-only table at EOF");
+        check(viewer.textStatus().find(L"100 rows loaded") != std::wstring::npos && viewer.textStatus().find(L"BYTE OFFSETS") != std::wstring::npos,
+            "A partial CSV table did not describe its loaded records");
+        viewer.setCsvTable(false); viewer.showTail(snapshot(30, 100), L"large.csv", true);
+        check(!viewer.csvTable(), "Reloading a partial CSV lost Source mode");
         viewer.showTail(snapshot(0, 100), L"large.html");
         check(!viewer.htmlAvailable() && !viewer.htmlPreview(), "A partial HTML document launched a whole-file browser preview");
         viewer.show(std::make_shared<Document>(), L"ordinary.txt");
         check(!viewer.tailPreview() && viewer.textStatus().find(L"LARGE FILE") == std::wstring::npos, "An ordinary file inherited tail mode");
     }
+}
+void largeCsvTable() {
+    const auto instance = GetModuleHandleW(nullptr);
+    const auto parent = CreateWindowExW(0, L"STATIC", L"Large CSV table test", WS_POPUP | WS_CLIPCHILDREN,
+        0, 0, 800, 480, nullptr, nullptr, instance, nullptr);
+    check(parent != nullptr, "Could not create the large CSV test window");
+    struct WindowOwner { HWND value; ~WindowOwner() { DestroyWindow(value); } } owner{parent};
+    Viewer viewer; viewer.create(parent, instance); MoveWindow(viewer.window(), 0, 0, 800, 480, FALSE);
+    const auto window = viewer.window();
+    BYTE originalKeys[256]{}; GetKeyboardState(originalKeys);
+    struct Keys { BYTE* value; ~Keys() { SetKeyboardState(value); } } keys{originalKeys};
+    const auto key = [&](WPARAM code, bool ctrl = false, bool shift = false) {
+        BYTE state[256]{}; state[VK_CONTROL] = ctrl ? 0x80 : 0; state[VK_SHIFT] = shift ? 0x80 : 0;
+        SetKeyboardState(state); SendMessageW(window, WM_KEYDOWN, code, 0); SetKeyboardState(originalKeys);
+    };
+    constexpr uint64_t size = 3ull * 1024 * 1024 * 1024;
+    // Records of 16 bytes with an embedded newline: 000123,"vv\nx",1\n
+    const auto record = [](int row) { char text[32]; std::snprintf(text, sizeof(text), "%06d,\"vv\nx\",1\n", row); return std::string(text); };
+    const auto snapshot = [&](int first, int count, uint64_t fileBytes = 3ull * 1024 * 1024 * 1024) {
+        auto document = std::make_shared<Document>(); document->tail = true; document->fileBytes = fileBytes;
+        document->tailOffset = static_cast<uint64_t>(first) * 16;
+        document->tailChunkLines = document->tailOffset % lineIndexChunkBytes / 8;
+        for (int row = first; row < first + count; ++row) document->text += record(row);
+        document->tailEndOffset = document->tailOffset + document->text.size(); indexDocument(*document); return document;
+    };
+    std::vector<uint64_t> requests; int tails = 0;
+    viewer.fileWindowRequested = [&](uint64_t offset) { requests.push_back(offset); };
+    viewer.tailRequested = [&] { ++tails; };
+    const auto info = [&] { return ScrollbarWindow::info(window, SB_VERT); };
+    const auto atBottom = [&] { const auto i = info(); return i.nPos == std::max(0, i.nMax - static_cast<int>(i.nPage) + 1); };
+    for (const UINT dpi : {96u, 144u, 192u}) {
+        viewer.setDpi(dpi); requests.clear();
+        const int last = static_cast<int>(size / 16);
+        viewer.showTail(snapshot(last - 200, 200), L"huge.csv");
+        check(viewer.csvTable() && !viewer.buffer() && !viewer.tailPaused() && atBottom(), "A large CSV did not open as a table following EOF");
+        check(viewer.textStatus().find(L"200 rows loaded × 3 columns") != std::wstring::npos, "Quoted newlines split large CSV records");
+        // Line numbers count the embedded newline of every earlier record.
+        FileLineIndex index; index.bytes = size; index.lines = static_cast<uint64_t>(last) * 2;
+        index.checkpoints.clear();
+        for (uint64_t chunk = 0; chunk * lineIndexChunkBytes <= size; ++chunk) index.checkpoints.push_back(chunk * lineIndexChunkBytes / 8);
+        viewer.setLineIndex(std::make_shared<FileLineIndex>(index), false);
+        SendMessageW(window, WM_CHAR, 'x', 0); key(VK_DELETE); key(VK_F2);
+        check(!viewer.buffer() && viewer.csvTable(), "A large CSV table accepted edits");
+
+        // Scrolling inside the window performs no I/O; above it, it reads.
+        const auto oldTop = viewer.state().top;
+        SendMessageW(window, WM_MOUSEWHEEL, MAKEWPARAM(0, static_cast<WORD>(WHEEL_DELTA)), 0);
+        check(viewer.state().top < oldTop && requests.empty() && viewer.tailPaused(), "Scrolling a loaded CSV window read the file or kept following");
+        SendMessageW(window, WM_VSCROLL, SB_BOTTOM, 0);
+        check(requests.size() == 1 && requests.back() == std::numeric_limits<uint64_t>::max(), "End seek did not request the latest CSV window");
+        viewer.showFileWindow(snapshot(last - 200, 200), L"huge.csv", requests.back());
+        check(!viewer.tailPaused() && atBottom(), "Returning to EOF did not resume CSV following");
+
+        // Moving the caret above the window loads the preceding records and
+        // keeps the column.
+        const int middle = last / 2;
+        viewer.showFileWindow(snapshot(middle, 200), L"huge.csv", static_cast<uint64_t>(middle) * 16);
+        auto first = viewer.state(); first.anchor = first.caret = 0; viewer.restore(first);
+        key(VK_RIGHT); key(VK_UP);
+        check(requests.back() == static_cast<uint64_t>(middle) * 16 - 1, "Moving above a CSV window did not read the preceding record");
+        const auto pending = requests.size(); key(VK_UP);
+        check(requests.size() == pending, "Pending CSV caret movement queued duplicate reads");
+        viewer.showFileWindow(snapshot(middle - 100, 300), L"huge.csv", requests.back());
+        const auto caret = viewer.state().caret;
+        check(caret == 98 * 16 + 7, "The CSV caret did not move two records up in its column");
+        check(viewer.textStatus().find(L"B" + std::to_wstring((static_cast<uint64_t>(middle) - 2) * 2 + 1)) != std::wstring::npos,
+            "The CSV cell name did not use the file line number");
+        key(VK_HOME, true);
+        check(requests.back() == 0, "Ctrl+Home did not load the start of a large CSV");
+        viewer.showFileWindow(snapshot(0, 200), L"huge.csv", 0);
+        check(viewer.state().caret == 7 && info().nPos == 0, "Ctrl+Home did not select the first record");
+        key(VK_END, true);
+        check(requests.back() == std::numeric_limits<uint64_t>::max(), "Ctrl+End did not load the end of a large CSV");
+        viewer.showFileWindow(snapshot(last - 200, 200), L"huge.csv", requests.back());
+        check(viewer.state().caret == 199 * 16 + 7 && !viewer.tailPaused(), "Ctrl+End did not select the last record and follow");
+
+        // A window beginning inside a quoted field resumes at the next record.
+        auto inside = snapshot(middle, 200); inside->text.erase(0, 9); inside->tailOffset += 9; inside->tailChunkLines = unknownLines; indexDocument(*inside);
+        viewer.showFileWindow(inside, L"huge.csv", inside->tailOffset);
+        check(viewer.csvTable() && viewer.textStatus().find(L"199 rows loaded") != std::wstring::npos, "A window inside a quoted field broke the table");
+        viewer.setCsvTable(false);
+        check(!viewer.csvTable(), "A large CSV could not switch to Source");
+        viewer.showFileWindow(snapshot(middle, 200), L"huge.csv", static_cast<uint64_t>(middle) * 16);
+        check(!viewer.csvTable(), "Loading another window lost Source mode");
+        viewer.setCsvTable(true); viewer.cancelFileWindowRequest();
+        viewer.show(std::make_shared<Document>(), L"ordinary.txt");
+        check(!viewer.csvTable() && !viewer.tailPreview(), "Large CSV mode leaked into another file");
+    }
+    (void)tails;
 }
 void largeFileByteScrolling() {
     const auto instance = GetModuleHandleW(nullptr);
@@ -3579,7 +3673,7 @@ int main(int argc, char** argv) {
             editorBodyFileDrops(); continuousDraggedTab(); terminalDropPreviewClipping();
             shutdownProgress();
             persistentErrorPopup();
-            editorBottomPadding(); editorTailFollowing(); largeFileTailPreview(); largeFileByteScrolling();
+            editorBottomPadding(); editorTailFollowing(); largeFileTailPreview(); largeFileByteScrolling(); largeCsvTable();
             csvTables(); htmlPreviewSwitching();
             terminalAsyncStartup(); terminalProcessShutdown(); terminalImeOutput();
             statusBarLimits(); treeMultipleSelection(); commitMessagePopup(); inlineTreeInput(); inlineTreeCreation(); gitCommitInput(); cellPositions(); colorsAndClipping(); imagePreviews(); fractionalMarkers(); smoothIcons(); windowTargets(); editableDiff(); editorCaret(); delayedLoadingMessages(); imeCellRendering(); imeTerminalInsertion(); imeUiRendering(); imePositions(); editorWordSelection(); editorColumnSelection(); editorWordMovement(); editorWordDeletion(); editorLineShortcuts(); editorWrapping(); diffWrapping(); documentFind(); horizontalWheelScrolling(); continuousViewerScrolling(); selectionAutoScrolling(); terminalGitBashSocketEnvironment(); terminalSelectionAutoScrolling(); themedScrollbars(); quickOpenStability();

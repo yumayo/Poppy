@@ -31,7 +31,7 @@ void CsvView::hide(bool release) {
     if (release) { document_.reset(); edit_.reset(); table_ = {}; widths_ = {}; edges_ = {}; text_ = {}; }
 }
 void CsvView::rebuild() {
-    valid_ = document_ && table_.parse(document_->text);
+    valid_ = document_ && (partial() ? table_.parseWindow(document_->text, document_->tailOffset <= 3) : table_.parse(document_->text));
     if (valid_) {
         caret_.row = std::min(caret_.row, gridRows() - 1); anchor_.row = std::min(anchor_.row, gridRows() - 1);
         caret_.column = std::min(caret_.column, gridColumns() - 1); anchor_.column = std::min(anchor_.column, gridColumns() - 1);
@@ -41,12 +41,37 @@ void CsvView::refresh() {
     finishEdit(); rebuild(); layout(); InvalidateRect(window_, nullptr, FALSE);
 }
 int CsvView::rowGutter() const {
-    return std::max(px(52), static_cast<int>(std::to_wstring(gridRows()).size()) * renderer_->cellWidth() + px(18));
+    // Size a large file's gutter for its byte count, which bounds both line
+    // numbers and byte offsets, so loading another window never shifts cells.
+    const auto digits = partial() ? std::to_string(document_->fileBytes + 1).size() : std::to_wstring(gridRows()).size();
+    return std::max(px(52), static_cast<int>(digits) * renderer_->cellWidth() + px(18));
+}
+int CsvView::nameWidth() const {
+    if (!partial()) return px(78);
+    return std::max(px(78), static_cast<int>(std::to_string(document_->fileBytes + 1).size() + 3) * renderer_->cellWidth() + px(12));
+}
+std::wstring CsvView::rowName(size_t row) const {
+    if (!partial() || !rowLabel) return std::to_wstring(row + 1);
+    return valid_ && row < table_.rows() ? rowLabel(rowOffset(row)) : std::wstring{};
+}
+void CsvView::scrollTo(int top, std::optional<int> left) {
+    top_ = top; if (left) left_ = *left;
+    layout(); InvalidateRect(window_, nullptr, FALSE);
+}
+void CsvView::selectOffsets(size_t anchor, size_t caret) {
+    if (!valid_) return;
+    anchor_ = table_.position(anchor); caret_ = table_.position(caret);
+    InvalidateRect(window_, nullptr, FALSE);
+}
+void CsvView::moveCaret(size_t row, size_t column, bool extend) {
+    if (!valid_) return;
+    select({std::min(row, gridRows() - 1), std::min(column, gridColumns() - 1)}, extend);
 }
 int CsvView::pageRows() const { return std::max(1, static_cast<int>(Scrollbars::contentRect(window_).bottom - bodyTop()) / rowHeight()); }
 RECT CsvView::formula() const {
     const auto rect = Scrollbars::contentRect(window_);
-    return {px(82), top() + px(4), std::max<LONG>(px(82), rect.right - px(6)), top() + px(30)};
+    const int left = nameWidth() + px(4);
+    return {left, insetTop() + px(4), std::max<LONG>(left, rect.right - px(6)), insetTop() + px(30)};
 }
 RECT CsvView::cellRect(CsvPosition cell) const {
     if (cell.column + 1 >= edges_.size()) return {};
@@ -66,6 +91,7 @@ void CsvView::layout() {
         top_ = std::clamp(top_, 0, std::max(0, rows - page)); left_ = std::clamp(left_, 0, std::max(0, columns - width));
         SCROLLINFO vertical{sizeof(vertical), SIF_RANGE | SIF_PAGE | SIF_POS, 0, rows - 1, static_cast<UINT>(page), top_, 0};
         SCROLLINFO horizontal{sizeof(horizontal), SIF_RANGE | SIF_PAGE | SIF_POS, 0, columns - 1, static_cast<UINT>(width), left_, 0};
+        if (partial() && fileScroll) fileScroll(vertical, rows, page);
         SetScrollInfo(window_, SB_VERT, &vertical, FALSE); SetScrollInfo(window_, SB_HORZ, &horizontal, FALSE);
     }
     inputChanged();
@@ -163,6 +189,18 @@ bool CsvView::advanceDrag() {
 }
 void CsvView::move(WPARAM key, bool shift, bool ctrl) {
     auto cell = caret_;
+    const bool vertical = key == VK_UP || key == VK_DOWN || key == VK_RETURN || key == VK_PRIOR || key == VK_NEXT;
+    if (partial() && moveRows && (vertical || (ctrl && (key == VK_HOME || key == VK_END)))) {
+        const bool backwards = key == VK_UP || key == VK_PRIOR || key == VK_HOME || (key == VK_RETURN && shift);
+        const bool extend = shift && key != VK_RETURN;
+        if (ctrl && key != VK_RETURN) {
+            if (moveRows(backwards ? std::numeric_limits<int64_t>::min() : std::numeric_limits<int64_t>::max(), extend)) return;
+        } else {
+            const int64_t step = key == VK_PRIOR || key == VK_NEXT ? pageRows() : 1;
+            const int64_t target = static_cast<int64_t>(cell.row) + (backwards ? -step : step);
+            if ((target < 0 || target >= static_cast<int64_t>(table_.rows())) && moveRows(backwards ? -step : step, extend)) return;
+        }
+    }
     if (key == VK_HOME) { cell.column = 0; if (ctrl) cell.row = 0; }
     else if (key == VK_END) { cell.column = table_.columns() - 1; if (ctrl) cell.row = table_.rows() - 1; }
     else if (key == VK_TAB) {
@@ -170,7 +208,6 @@ void CsvView::move(WPARAM key, bool shift, bool ctrl) {
         else if (cell.column + 1 < table_.columns()) ++cell.column;
         else { cell.column = 0; cell.row = std::min(gridRows() - 1, cell.row + 1); }
     } else {
-        const bool vertical = key == VK_UP || key == VK_DOWN || key == VK_RETURN || key == VK_PRIOR || key == VK_NEXT;
         const int direction = key == VK_UP || key == VK_LEFT || key == VK_PRIOR || (key == VK_RETURN && shift) ? -1 : 1;
         auto& at = vertical ? cell.row : cell.column;
         const size_t limit = (vertical ? gridRows() : gridColumns()) - 1;
@@ -309,8 +346,8 @@ void CsvView::restore(const ViewState& state) {
 std::wstring CsvView::status() const {
     if (!valid_) return L"Invalid CSV · switch to Source";
     const auto range = selection();
-    return wide(csvColumnName(caret_.column)) + std::to_wstring(caret_.row + 1) + L"  ·  " +
-        std::to_wstring(table_.rows()) + L" rows × " + std::to_wstring(table_.columns()) + L" columns" +
+    return wide(csvColumnName(caret_.column)) + rowName(caret_.row) + L"  ·  " +
+        std::to_wstring(table_.rows()) + (partial() ? L" rows loaded × " : L" rows × ") + std::to_wstring(table_.columns()) + L" columns" +
         (range.firstRow != range.lastRow || range.firstColumn != range.lastColumn ? L"  ·  " + std::to_wstring(range.lastRow - range.firstRow + 1) + L" × " + std::to_wstring(range.lastColumn - range.firstColumn + 1) + L" selected" : L"");
 }
 std::optional<std::wstring> CsvView::searchSeed() const {
@@ -365,7 +402,7 @@ void CsvView::paint() {
         const int y = bodyTop() + (static_cast<int>(r) - top_) * rh;
         const RECT rowHeader{0, y, std::min<LONG>(gutter, rect.right), std::min<LONG>(y + rh, rect.bottom)};
         dc.fill(rowHeader, r >= range.firstRow && r <= range.lastRow ? activeHeader : panel);
-        dc.label({0, y, gutter, y + rh}, rowHeader, std::to_wstring(r + 1), r == caret_.row ? accent : muted, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        dc.label({0, y, gutter, y + rh}, rowHeader, rowName(r), r == caret_.row ? accent : muted, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
         dc.fill({0, rowHeader.bottom - 1, rowHeader.right, rowHeader.bottom}, border);
     }
     // Fill the caret frame as whole-pixel strips over the cell's grid lines so it never straddles a pixel boundary.
@@ -386,8 +423,8 @@ void CsvView::paint() {
     dc.fill({0, headerTop(), std::min<LONG>(gutter, rect.right), std::min<LONG>(bodyTop(), rect.bottom)}, panel);
     dc.fill({0, bodyTop() - 1, rect.right, bodyTop()}, border);
     dc.fill({gutter - 1, headerTop(), gutter, rect.bottom}, border);
-    dc.fill({0, top(), rect.right, std::min<LONG>(headerTop(), rect.bottom)}, panel);
-    dc.label({0, top(), px(78), headerTop()}, wide(csvColumnName(caret_.column)) + std::to_wstring(caret_.row + 1), accent, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    dc.fill({0, insetTop(), rect.right, std::min<LONG>(headerTop(), rect.bottom)}, panel);
+    dc.label({0, insetTop(), nameWidth(), headerTop()}, wide(csvColumnName(caret_.column)) + rowName(caret_.row), accent, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     const auto box = formula(); dc.fill(box, background); dc.outline(box, editing_ ? accent : border);
     if (editing_) input_.draw(dc, foreground, RGB(50, 70, 94), GetFocus() == window_);
     else dc.label({box.left + px(6), box.top, box.right - px(4), box.bottom}, displayValue(wide(table_.value(document_->text, caret_))), foreground);
@@ -449,9 +486,12 @@ bool CsvView::handle(UINT message, WPARAM a, LPARAM b, LRESULT& result) {
         if (statusPending_) dragStatus(true);
         return true;
     case WM_MOUSEWHEEL:
+        // The owner scrolls a large file's window and loads its neighbours.
+        if (partial()) return false;
         wheel_ += GET_WHEEL_DELTA_WPARAM(a); top_ -= wheel_ / WHEEL_DELTA * 3; wheel_ %= WHEEL_DELTA;
         layout(); InvalidateRect(window_, nullptr, FALSE); UpdateWindow(window_); return true;
     case WM_VSCROLL: case WM_HSCROLL: {
+        if (message == WM_VSCROLL && partial()) return false;
         const bool vertical = message == WM_VSCROLL; int& at = vertical ? top_ : left_;
         SCROLLINFO info{sizeof(info), SIF_ALL, 0, 0, 0, 0, 0}; GetScrollInfo(window_, vertical ? SB_VERT : SB_HORZ, &info);
         switch (LOWORD(a)) {
@@ -473,6 +513,8 @@ bool CsvView::handle(UINT message, WPARAM a, LPARAM b, LRESULT& result) {
         if (ime_.active()) { result = DefWindowProcW(window_, message, a, b); return true; }
         const bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0, shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
         if (ctrl && a == 'S') { finishEdit(); if (save) save(); return true; }
+        // An unparsable window can still move to the file's start or end.
+        if (!valid_ && partial() && moveRows && ctrl && (a == VK_HOME || a == VK_END)) { moveRows(a == VK_HOME ? std::numeric_limits<int64_t>::min() : std::numeric_limits<int64_t>::max(), false); return true; }
         if (!valid_) return true;
         if (ctrl && (a == 'Z' || a == 'Y')) { undo(a == 'Y' || shift); return true; }
         if (editing_ && inputKey(a, ctrl, shift)) return true;

@@ -30,6 +30,19 @@ void Viewer::create(HWND parent, HINSTANCE instance, bool textOnly) {
     };
     csv_.save = [this] { if (save) save(); };
     csv_.statusChanged = [this] { if (statusChanged) statusChanged(); };
+    csv_.rowLabel = [this](size_t offset) {
+        const auto line = std::upper_bound(document_->lines.begin(), document_->lines.end(), offset) - document_->lines.begin() - 1;
+        return lineLabel(static_cast<size_t>(std::max<ptrdiff_t>(0, line)), lineBase());
+    };
+    csv_.fileScroll = [this](SCROLLINFO& info, int rows, int page) {
+        if (!tailPreview()) return;
+        const auto viewportBytes = scaleFileBytes(static_cast<uint64_t>(page), static_cast<uint64_t>(std::max(1, rows)), document_->tailEndOffset - document_->tailOffset);
+        const FileByteScroll range{document_->fileBytes, viewportBytes};
+        const auto byte = pendingFileOffset_.value_or(!tailPaused() ? document_->fileBytes :
+            csv_.valid() ? fileByteAt(csv_.rowOffset(static_cast<size_t>(csv_.top()))) : document_->tailOffset);
+        info.nMin = 0; info.nMax = range.range() - 1; info.nPage = static_cast<UINT>(range.page()); info.nPos = range.position(byte);
+    };
+    csv_.moveRows = [this](int64_t rows, bool extend) { return moveTableCaret(rows, extend); };
     findBar_.create(window_, instance);
     findBar_.changed = [this] { requestFind(); };
     findBar_.navigate = [this](bool backwards) { findNext(backwards); };
@@ -63,10 +76,20 @@ void Viewer::setDpi(UINT dpi) {
     scrollbars(); findLayout(); htmlLayout(); caretPosition(); InvalidateRect(window_, nullptr, FALSE);
 }
 void Viewer::show(std::shared_ptr<const Document> d, const ResourceId& path, bool preserve, bool allowHtml) {
+    present(std::move(d), path, preserve, allowHtml);
+}
+std::optional<Viewer::CsvCarry> Viewer::present(std::shared_ptr<const Document> d, const ResourceId& path, bool preserve, bool allowHtml) {
+    // Successive windows of one large file keep Table / Source, the column
+    // widths and the selected cells, which are remembered by file byte.
+    const bool window = d->tail && tailPreview() && path_ == path;
+    std::optional<CsvCarry> carry;
+    if (window && csv_.active() && csv_.valid()) carry = csvCarry_ ? *csvCarry_ : captureCsv();
+    csvCarry_.reset();
+    const bool keep = (preserve || window) && path_ == path;
     const bool preview = preserve && path_ == path && htmlAvailable() ? html_.active() : true;
-    const bool table = preserve && path_ == path && csvAvailable() ? csv_.active() : true;
-    const auto previous = preserve && document_ ? std::optional<State>(state()) : std::nullopt;
-    csv_.hide(!preserve || path_ != path);
+    const bool table = keep && csvAvailable() ? csv_.active() : true;
+    const auto previous = preserve && document_ && !carry ? std::optional<State>(state()) : std::nullopt;
+    csv_.hide(!keep);
     html_.hide();
     htmlAllowed_ = allowHtml;
     stopLoading();
@@ -85,7 +108,15 @@ void Viewer::show(std::shared_ptr<const Document> d, const ResourceId& path, boo
     if (preview) setHtmlPreview(true);
     if (table) setCsvTable(true);
     if (previous && csv_.active()) restore(*previous);
+    if (carry && csv_.active()) { csv_.selectOffsets(fileTextAt(carry->anchor), fileTextAt(carry->caret)); csv_.scrollTo(csv_.top(), carry->left); }
     if (statusChanged) statusChanged();
+    return carry;
+}
+Viewer::CsvCarry Viewer::captureCsv() const {
+    CsvCarry carry;
+    carry.anchor = fileByteAt(csv_.anchorOffset()); carry.caret = fileByteAt(csv_.caretOffset());
+    carry.column = csv_.caretColumn(); carry.left = csv_.left();
+    return carry;
 }
 void Viewer::showRevision(std::shared_ptr<const Document> d, const DiffDocument& changes, const ResourceId& path, bool preserve) {
     show(std::move(d), path, preserve, false);
@@ -109,8 +140,20 @@ void Viewer::showFileWindow(std::shared_ptr<const Document> d, const ResourceId&
     const int rows = path_ == path && pendingFileOffset_ == requestedOffset ? pendingFileRows_ : 0;
     const int horizontal = path_ == path ? left_ : 0;
     const bool follow = requestedOffset >= d->fileBytes && rows >= 0;
-    show(std::move(d), path, false, false);
+    const auto carry = present(std::move(d), path, false, false);
     const auto text = fileTextAt(requestedOffset);
+    if (csv_.active()) {
+        const auto row = static_cast<int64_t>(csv_.rowAt(text)) + rows;
+        const auto last = static_cast<int64_t>(std::max<size_t>(1, csv_.rows())) - 1;
+        if (carry && carry->move) {
+            csv_.moveCaret(static_cast<size_t>(std::clamp<int64_t>(row, 0, last)), carry->column, carry->extend);
+            if (follow) csv_.scrollToBottom();
+        } else if (follow) csv_.scrollToBottom();
+        else csv_.scrollTo(static_cast<int>(std::clamp<int64_t>(row, 0, last)));
+        scrollbars(); InvalidateRect(window_, nullptr, FALSE);
+        if (statusChanged) statusChanged();
+        return;
+    }
     const int row = wrapping() ? static_cast<int>(textLayout_.rowForOffset(*document_, text)) :
         static_cast<int>(std::upper_bound(document_->lines.begin(), document_->lines.end(), text) - document_->lines.begin() - 1);
     top_ = static_cast<int>(std::clamp<int64_t>(static_cast<int64_t>(row) + rows, 0, scrollRange_.maximumTop()));
@@ -119,7 +162,7 @@ void Viewer::showFileWindow(std::shared_ptr<const Document> d, const ResourceId&
     if (statusChanged) statusChanged();
 }
 void Viewer::cancelFileWindowRequest() {
-    pendingFileOffset_.reset(); pendingFileRows_ = 0;
+    pendingFileOffset_.reset(); pendingFileRows_ = 0; csvCarry_.reset();
     scrollbars(); InvalidateRect(window_, nullptr, FALSE);
 }
 void Viewer::setLineIndex(std::shared_ptr<const FileLineIndex> index, bool counting) {
@@ -191,8 +234,12 @@ uint64_t Viewer::fileRowByte(int row) const {
     const auto wrapped = textLayout_.row(*document_, static_cast<size_t>(row));
     return fileByteAt(document_->lines[wrapped.line] + wrapped.begin);
 }
-void Viewer::requestFileWindow(uint64_t offset, int rows) {
+void Viewer::requestFileWindow(uint64_t offset, int rows, std::optional<CsvCarry> carry) {
     if (!fileWindowRequested) return;
+    // Cells are captured from the current window, which stays loaded until
+    // the reply, so a superseding request may reuse the earlier capture.
+    if (!carry && csv_.active() && csv_.valid()) { carry = csvCarry_ ? *csvCarry_ : captureCsv(); carry->move = false; }
+    csvCarry_ = carry;
     pendingFileOffset_ = offset; pendingFileRows_ = rows;
     scrollbars(); InvalidateRect(window_, nullptr, FALSE);
     fileWindowRequested(*pendingFileOffset_);
@@ -208,6 +255,13 @@ void Viewer::seekFileByte(uint64_t offset) {
     }
     const bool wasPaused = tailPaused();
     const size_t text = fileTextAt(offset);
+    if (csv_.active()) {
+        if (offset >= document_->fileBytes) csv_.scrollToBottom();
+        else csv_.scrollTo(static_cast<int>(csv_.rowAt(text)));
+        scrollbars();
+        if (wasPaused && !tailPaused() && tailRequested) tailRequested();
+        UpdateWindow(window_); return;
+    }
     top_ = wrapping() ? static_cast<int>(textLayout_.rowForOffset(*document_, text)) :
         static_cast<int>(std::upper_bound(document_->lines.begin(), document_->lines.end(), text) - document_->lines.begin() - 1);
     scrollbars(offset >= document_->fileBytes); caretPosition(); InvalidateRect(window_, nullptr, FALSE);
@@ -230,7 +284,7 @@ void Viewer::updateGitLines() {
     gitChangedLines_ = gitBefore_ && document_ && !diff_ ? changedWorkingLines(*gitBefore_, *document_, &gitChangeRanges_) : std::vector<bool>{};
 }
 void Viewer::showDiff(std::shared_ptr<const DiffDocument> d, const ResourceId& path, bool preserve) {
-    pendingFileOffset_.reset(); pendingFileRows_ = 0; fileLineBytes_.clear();
+    pendingFileOffset_.reset(); pendingFileRows_ = 0; fileLineBytes_.clear(); csvCarry_.reset();
     csv_.hide(true);
     html_.hide();
     stopLoading();
@@ -287,7 +341,7 @@ void Viewer::refreshBuffer(bool externalUpdate) {
     layoutDirty_ = true; requestFind(false, false, false); scrollbars(followTail); caretPosition(); InvalidateRect(window_, nullptr, FALSE);
 }
 void Viewer::message(const std::wstring& text, const ResourceId& path) {
-    pendingFileOffset_.reset(); pendingFileRows_ = 0; fileLineBytes_.clear();
+    pendingFileOffset_.reset(); pendingFileRows_ = 0; fileLineBytes_.clear(); csvCarry_.reset();
     csv_.hide(true);
     html_.hide();
     stopLoading();
@@ -365,7 +419,7 @@ std::wstring Viewer::textStatus() const {
         else if (lineIndex_ && lineIndex_->bytes == document_->fileBytes && lineBase()) lines = std::to_wstring(lineIndex_->lines + 1) + L" lines  ·  ";
         else if (lineCounting_) lines = L"Counting lines…  ·  ";
     }
-    const auto mode = tailPreview() ? L"LARGE FILE · READ ONLY  ·  " + lines + formatByteSize(document_->tailOffset) + L"–" +
+    const auto mode = tailPreview() ? L"LARGE FILE · READ ONLY  ·  " + (csv_.active() ? csv_.status() + L"  ·  " : L"") + lines + formatByteSize(document_->tailOffset) + L"–" +
         formatByteSize(document_->tailEndOffset) + L" / " + formatByteSize(document_->fileBytes) + L"  ·  " :
         csv_.active() ? csv_.status() + L"  ·  " : L"";
     return mode +
@@ -447,7 +501,10 @@ RECT Viewer::contentRect() const {
 int Viewer::visibleRows() const { const auto r = contentRect(); return std::max(1, (static_cast<int>(r.bottom) - contentTop()) / cellHeight_); }
 void Viewer::scrollbars(bool followTail) {
     if (!window_) return;
-    if (csv_.active()) { csv_.layout(); return; }
+    if (csv_.active()) {
+        if (followTail) csv_.scrollToBottom();
+        csv_.layout(); tailWasPaused_ = tailPaused(); return;
+    }
     if (html_.active()) {
         SCROLLINFO info{sizeof(info), SIF_RANGE | SIF_PAGE | SIF_POS, 0, 0, 1, 0, 0};
         SetScrollInfo(window_, SB_VERT, &info, FALSE); SetScrollInfo(window_, SB_HORZ, &info, FALSE);
@@ -491,7 +548,57 @@ void Viewer::scrollbars(bool followTail) {
     }
     tailWasPaused_ = tailPaused();
 }
+void Viewer::scrollTable(int vertical) {
+    const bool wasPaused = tailWasPaused_;
+    revealFind_ = false;
+    if (tailPreview() && fileWindowRequested && vertical) {
+        if (pendingFileOffset_) {
+            pendingFileRows_ = static_cast<int>(std::clamp<int64_t>(static_cast<int64_t>(pendingFileRows_) + vertical, -1000000, 1000000));
+            scrollbars(); UpdateWindow(window_); return;
+        }
+        // An unparsable window has no rows; step past it by bytes instead.
+        if (!csv_.valid()) {
+            if (vertical < 0 && document_->tailOffset > bomBytes()) requestFileWindow(document_->tailOffset - 1);
+            else if (vertical > 0 && document_->tailEndOffset < document_->fileBytes) requestFileWindow(document_->tailEndOffset);
+            UpdateWindow(window_); return;
+        }
+        const auto next = static_cast<int64_t>(csv_.top()) + vertical;
+        const bool before = next < 0 && document_->tailOffset > bomBytes();
+        const bool after = vertical > 0 && next + csv_.page() >= static_cast<int64_t>(csv_.rows()) && document_->tailEndOffset < document_->fileBytes;
+        if (before || after) {
+            // Anchor on the top record; the byte before it lies in the
+            // preceding record, so a backward read includes that record.
+            const auto anchor = fileByteAt(csv_.rowOffset(static_cast<size_t>(csv_.top())));
+            requestFileWindow(before ? anchor - 1 : anchor, before ? vertical + 1 : vertical);
+            UpdateWindow(window_); return;
+        }
+    }
+    csv_.scrollTo(csv_.top() + vertical); scrollbars();
+    if (wasPaused && tailPreview() && !tailPaused() && tailRequested) tailRequested();
+    UpdateWindow(window_);
+}
+bool Viewer::moveTableCaret(int64_t rows, bool extend) {
+    if (!tailPreview() || !fileWindowRequested || !csv_.valid()) return false;
+    if (pendingFileOffset_) {
+        // Keep moving relative to an outstanding caret move. A pending scroll
+        // or seek decides the next window, so further moves wait for it.
+        if (csvCarry_ && csvCarry_->move && rows != std::numeric_limits<int64_t>::min() && rows != std::numeric_limits<int64_t>::max())
+            pendingFileRows_ = static_cast<int>(std::clamp<int64_t>(static_cast<int64_t>(pendingFileRows_) + rows, -1000000, 1000000));
+        return true;
+    }
+    const bool backwards = rows < 0;
+    if (backwards ? document_->tailOffset <= bomBytes() : document_->tailEndOffset >= document_->fileBytes) return false;
+    auto carry = captureCsv(); carry.move = true; carry.extend = extend;
+    const auto record = fileByteAt(csv_.rowOffset(csv_.caretRow()));
+    if (rows == std::numeric_limits<int64_t>::min()) requestFileWindow(0, 0, carry);
+    else if (rows == std::numeric_limits<int64_t>::max()) requestFileWindow(std::numeric_limits<uint64_t>::max(), 0, carry);
+    else if (backwards) requestFileWindow(record - std::min<uint64_t>(record, 1), static_cast<int>(std::max<int64_t>(rows + 1, -1000000)), carry);
+    else requestFileWindow(record, static_cast<int>(std::min<int64_t>(rows, 1000000)), carry);
+    UpdateWindow(window_);
+    return true;
+}
 void Viewer::scroll(int vertical, int horizontal) {
+    if (csv_.active()) { scrollTable(vertical); return; }
     const bool wasPaused = tailWasPaused_;
     revealFind_ = false;
     if (tailPreview() && fileWindowRequested && vertical) {
@@ -1297,7 +1404,8 @@ LRESULT Viewer::handle(UINT m, WPARAM a, LPARAM b) {
         if (vertical && tailPreview()) {
             switch (LOWORD(a)) {
             case SB_LINEUP: scroll(-1, 0); break; case SB_LINEDOWN: scroll(1, 0); break;
-            case SB_PAGEUP: scroll(-visibleRows(), 0); break; case SB_PAGEDOWN: scroll(visibleRows(), 0); break;
+            case SB_PAGEUP: scroll(csv_.active() ? -csv_.page() : -visibleRows(), 0); break;
+            case SB_PAGEDOWN: scroll(csv_.active() ? csv_.page() : visibleRows(), 0); break;
             case SB_TOP: seekFileByte(0); break;
             case SB_BOTTOM: seekFileByte(std::numeric_limits<uint64_t>::max()); break;
             case SB_THUMBTRACK: case SB_THUMBPOSITION: {

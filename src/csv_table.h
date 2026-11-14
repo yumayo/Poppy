@@ -20,6 +20,12 @@ class CsvTable {
 public:
     static constexpr size_t maxCells = 1000000, maxColumns = 16384;
     bool parse(std::string_view source, char delimiter = ',');
+    // Parses a bounded window of a larger file. A window after the file's
+    // start may skip a few leading lines that continue an earlier quoted
+    // field. A final record cut by the read limit or beyond the table limit
+    // is dropped.
+    bool parseWindow(std::string_view source, bool fileStart, char delimiter = ',');
+    bool truncated() const { return truncated_; }
     const std::string& error() const { return error_; }
     size_t rows() const { return rows_.size(); }
     size_t columns() const { return columns_; }
@@ -35,11 +41,13 @@ public:
 private:
     struct Field { uint32_t begin, end; };
     struct Row { uint32_t first, count, begin, end, next; };
+    bool parse(std::string_view source, char delimiter, size_t start, bool window);
     std::optional<CsvReplacement> change(std::string_view source, CsvRange range, const CsvValues* values) const;
     std::vector<Field> fields_;
     std::vector<Row> rows_;
     size_t columns_ = 0;
     char delimiter_ = ',';
+    bool truncated_ = false;
     std::string error_;
 };
 }

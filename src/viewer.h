@@ -35,7 +35,7 @@ public:
     void setLineIndex(std::shared_ptr<const FileLineIndex> index, bool counting);
     const Document* document() const { return document_.get(); }
     bool tailPreview() const { return document_ && document_->tail && !diff_; }
-    bool tailPaused() const { return tailPreview() && (pendingFileOffset_ || document_->tailEndOffset < document_->fileBytes || !scrollRange_.atTail(top_)); }
+    bool tailPaused() const { return tailPreview() && (pendingFileOffset_ || document_->tailEndOffset < document_->fileBytes || !atTail()); }
     void showRevision(std::shared_ptr<const Document> document, const DiffDocument& changes, const ResourceId& path, bool preserve = false);
     void edit(std::shared_ptr<EditBuffer> buffer, const ResourceId& path, bool preserve = false);
     void setGitBase(std::shared_ptr<const Document> before);
@@ -68,12 +68,23 @@ public:
     bool htmlAvailable() const { return htmlAllowed_ && document_ && !diff_ && isHtmlExtension(path_.extension().native()); }
     void setHtmlPreview(bool enabled);
     bool htmlPreview() const { return html_.active(); }
-    bool csvAvailable() const { return !textOnly_ && htmlAllowed_ && document_ && !diff_ && isCsvExtension(path_.extension().native()); }
+    // A large file's window is shown as a read-only table of its records.
+    bool csvAvailable() const { return !textOnly_ && (htmlAllowed_ || tailPreview()) && document_ && !diff_ && isCsvExtension(path_.extension().native()); }
     void setCsvTable(bool enabled);
     bool csvTable() const { return csv_.active(); }
     HWND window() const { return window_; }
 private:
     static LRESULT CALLBACK procedure(HWND, UINT, WPARAM, LPARAM);
+    // Table cells of a large file's window, kept by file byte so they survive
+    // loading another window. A move places the caret rows after the
+    // requested offset's record once that window arrives.
+    struct CsvCarry { uint64_t anchor = 0, caret = 0; size_t column = 0; int left = 0; bool move = false, extend = false; };
+    std::optional<CsvCarry> present(std::shared_ptr<const Document> document, const ResourceId& path, bool preserve, bool allowHtml);
+    CsvCarry captureCsv() const;
+    void scrollTable(int vertical);
+    bool moveTableCaret(int64_t rows, bool extend);
+    bool atTail() const { return csv_.active() ? csv_.atBottom() : scrollRange_.atTail(top_); }
+    uint64_t bomBytes() const { return document_->encoding.compare(0, 6, "UTF-16") == 0 ? 2u : 3u; }
     LRESULT handle(UINT, WPARAM, LPARAM);
     void paint();
     void paintGitMarks();
@@ -81,7 +92,7 @@ private:
     void scrollbars(bool followTail = false);
     void scroll(int vertical, int horizontal);
     void seekFileByte(uint64_t offset);
-    void requestFileWindow(uint64_t offset, int rows = 0);
+    void requestFileWindow(uint64_t offset, int rows = 0, std::optional<CsvCarry> carry = std::nullopt);
     void indexFileBytes();
     uint64_t fileByteAt(size_t offset) const;
     size_t fileTextAt(uint64_t offset) const;
@@ -157,6 +168,7 @@ private:
     bool textOnly_ = false;
     bool tailWasPaused_ = false;
     std::optional<uint64_t> pendingFileOffset_;
+    std::optional<CsvCarry> csvCarry_;
     int pendingFileRows_ = 0;
     // UTF-16 positions use original code units, while the displayed text is UTF-8.
     std::vector<uint32_t> fileLineBytes_;

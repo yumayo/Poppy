@@ -5,6 +5,7 @@
 #include "session.h"
 #include <algorithm>
 #include <chrono>
+#include <limits>
 
 namespace poppy {
 // Uses the viewer's body window so focus, file drops and tab shortcuts keep
@@ -37,16 +38,46 @@ public:
     std::function<void()> changed, save, statusChanged;
     // Height reserved above the table, such as the viewer's find bar.
     std::function<int()> inset;
+    // A large file's bounded window. The owner names rows by their text
+    // offset, maps the vertical bar to file bytes, and loads neighbouring
+    // windows when the caret leaves the loaded records. moveRows receives
+    // INT64_MIN / INT64_MAX for the file's start / end and returns false when
+    // the file has no further records in that direction.
+    bool partial() const { return document_ && document_->tail; }
+    std::function<std::wstring(size_t)> rowLabel;
+    std::function<void(SCROLLINFO&, int rows, int page)> fileScroll;
+    std::function<bool(int64_t rows, bool extend)> moveRows;
+    bool valid() const { return valid_; }
+    bool truncated() const { return valid_ && table_.truncated(); }
+    size_t rows() const { return valid_ ? table_.rows() : 0; }
+    int top() const { return top_; }
+    int left() const { return left_; }
+    int page() const { return pageRows(); }
+    bool atBottom() const { return !valid_ || top_ >= std::max(0, static_cast<int>(gridRows()) - pageRows()); }
+    void scrollTo(int top, std::optional<int> left = std::nullopt);
+    void scrollToBottom() { scrollTo(std::numeric_limits<int>::max() / 2); }
+    // Text offsets of a row's first byte and of the selected cells.
+    size_t rowOffset(size_t row) const { return table_.offset({row, 0}); }
+    size_t rowAt(size_t offset) const { return valid_ ? table_.position(offset).row : 0; }
+    size_t anchorOffset() const { return valid_ ? table_.offset(anchor_) : 0; }
+    size_t caretOffset() const { return valid_ ? table_.offset(caret_) : 0; }
+    size_t caretRow() const { return caret_.row; }
+    size_t caretColumn() const { return caret_.column; }
+    void selectOffsets(size_t anchor, size_t caret);
+    void moveCaret(size_t row, size_t column, bool extend);
 private:
-    int top() const { return inset ? inset() : 0; }
-    int headerTop() const { return top() + px(34); }
+    int insetTop() const { return inset ? inset() : 0; }
+    int headerTop() const { return insetTop() + px(34); }
     int px(int value) const { return MulDiv(value, dpi_, 96); }
     int rowHeight() const { return std::max(px(28), renderer_->textHeight() + px(8)); }
     int bodyTop() const { return headerTop() + rowHeight(); }
     int rowGutter() const;
+    int nameWidth() const;
+    std::wstring rowName(size_t row) const;
     int pageRows() const;
-    size_t gridRows() const { return std::min(CsvTable::maxCells, table_.rows() + 1); }
-    size_t gridColumns() const { return std::min(CsvTable::maxColumns, table_.columns() + 1); }
+    // An editable table adds an input row and column after its data.
+    size_t gridRows() const { return std::min(CsvTable::maxCells, table_.rows() + (partial() ? 0 : 1)); }
+    size_t gridColumns() const { return std::min(CsvTable::maxColumns, table_.columns() + (partial() ? 0 : 1)); }
     RECT formula() const;
     RECT cellRect(CsvPosition cell) const;
     CsvPosition hit(POINT point) const;

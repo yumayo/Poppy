@@ -24,16 +24,37 @@ std::string csvQuote(std::string_view value, char delimiter) {
     for (const auto ch : value) { result += ch; if (ch == '"') result += '"'; }
     result += '"'; return result;
 }
-bool CsvTable::parse(std::string_view source, char delimiter) {
-    fields_.clear(); rows_.clear(); columns_ = 0; delimiter_ = delimiter; error_.clear();
+bool CsvTable::parse(std::string_view source, char delimiter) { return parse(source, delimiter, 0, false); }
+bool CsvTable::parseWindow(std::string_view source, bool fileStart, char delimiter) {
+    if (fileStart) return parse(source, delimiter, 0, true);
+    // A window begins at a line boundary, which may lie inside a quoted field
+    // with embedded newlines. Such a start fails soon, so retry from the next
+    // few lines before reporting the error of the window's first line.
+    size_t start = 0;
+    for (int attempt = 0; attempt < 16; ++attempt) {
+        if (parse(source, delimiter, start, true)) return true;
+        const auto newline = source.find('\n', start);
+        if (newline == std::string_view::npos) break;
+        start = newline + 1;
+    }
+    return parse(source, delimiter, 0, true);
+}
+bool CsvTable::parse(std::string_view source, char delimiter, size_t start, bool window) {
+    fields_.clear(); rows_.clear(); columns_ = 0; delimiter_ = delimiter; error_.clear(); truncated_ = false;
     const auto fail = [&](const char* message, size_t offset) {
         error_ = std::string(message) + " (byte " + std::to_string(offset + 1) + ")";
         fields_.clear(); rows_.clear(); columns_ = 0; return false;
     };
     if (source.size() > maxFileBytes) return fail("CSV exceeds the file size limit", 0);
-    size_t p = 0;
+    size_t p = start;
     do {
         Row row{static_cast<uint32_t>(fields_.size()), 0, static_cast<uint32_t>(p), 0, 0};
+        // A window ends at a read limit. Drop a record cut there, or one past
+        // the table limit, and keep the complete records before it.
+        const auto cut = [&] {
+            if (!window || rows_.empty()) return false;
+            fields_.resize(row.first); truncated_ = true; return true;
+        };
         while (true) {
             const size_t begin = p;
             if (p < source.size() && source[p] == '"') {
@@ -43,7 +64,7 @@ bool CsvTable::parse(std::string_view source, char delimiter) {
                     if (p < source.size() && source[p] == '"') { ++p; continue; }
                     closed = true; break;
                 }
-                if (!closed) return fail("Unclosed quoted field", begin);
+                if (!closed) return cut() || fail("Unclosed quoted field", begin);
                 if (p < source.size() && source[p] != delimiter && source[p] != '\r' && source[p] != '\n')
                     return fail("Unexpected character after a quoted field", p);
             } else {
@@ -52,7 +73,7 @@ bool CsvTable::parse(std::string_view source, char delimiter) {
                     ++p;
                 }
             }
-            if (fields_.size() >= maxCells || row.count >= maxColumns) return fail("CSV exceeds the table size limit; use Source", p);
+            if (fields_.size() >= maxCells || row.count >= maxColumns) return cut() || fail("CSV exceeds the table size limit; use Source", p);
             fields_.push_back({static_cast<uint32_t>(begin), static_cast<uint32_t>(p)}); ++row.count;
             if (p == source.size() || source[p] != delimiter) break;
             ++p;
