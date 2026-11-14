@@ -2842,18 +2842,33 @@ void largeFileTailPreview() {
         document->tailOffset = document->fileBytes - document->text.size(); document->tailEndOffset = document->fileBytes;
         indexDocument(*document); return document;
     };
-    const auto atBottom = [&] {
+    // The first entries of the file, as opening it reads them.
+    const auto head = [&] {
+        auto document = snapshot(0, 100);
+        document->tailOffset = 0; document->tailEndOffset = document->text.size(); return document;
+    };
+    const auto scrollInfo = [&] {
         SCROLLINFO info{sizeof(info), SIF_RANGE | SIF_PAGE | SIF_POS, 0, 0, 0, 0, 0};
-        GetScrollInfo(viewer.window(), SB_VERT, &info);
+        GetScrollInfo(viewer.window(), SB_VERT, &info); return info;
+    };
+    const auto atBottom = [&] {
+        const auto info = scrollInfo();
         return info.nPos == std::max(0, info.nMax - static_cast<int>(info.nPage) + 1);
     };
     int requests = 0; viewer.tailRequested = [&] { ++requests; };
     for (const bool wrap : {false, true}) for (const UINT dpi : {96u, 144u, 192u}) {
         viewer.setDpi(dpi); viewer.setWordWrap(wrap);
-        auto first = snapshot(0, 100);
-        viewer.showTail(first, L"large.log");
-        check(viewer.tailPreview() && !viewer.tailPaused() && atBottom() && !viewer.buffer(), "A large file did not open read-only at EOF");
+        viewer.showTail(head(), L"large.log");
+        check(viewer.tailPreview() && viewer.tailPaused() && viewer.state().top == 0 && scrollInfo().nPos == 0 && !viewer.buffer(),
+            "A large file did not open read-only at its beginning");
         check(viewer.textStatus().find(L"LARGE FILE") != std::wstring::npos && viewer.textStatus().find(L"READ ONLY") != std::wstring::npos, "Large file status did not explain the partial view");
+        // Opening never follows the end, even when the window reaches EOF.
+        auto first = snapshot(0, 100);
+        const auto opened = requests;
+        viewer.showTail(first, L"large.log");
+        check(viewer.tailPaused() && viewer.state().top == 0 && !atBottom() && requests == opened, "Opening a large file followed its end");
+        SendMessageW(viewer.window(), WM_VSCROLL, SB_BOTTOM, 0);
+        check(requests == opened + 1 && !viewer.tailPaused() && atBottom(), "Moving to EOF did not follow the end of a large file");
         SendMessageW(viewer.window(), WM_CHAR, 'x', 0);
         SendMessageW(viewer.window(), WM_KEYDOWN, VK_DELETE, 0);
         check(first->text == snapshot(0, 100)->text && !viewer.buffer(), "Typing changed a partial tail document");
@@ -2874,15 +2889,32 @@ void largeFileTailPreview() {
         viewer.showTail(snapshot(0, 100), L"large.log", true);
         check(atBottom(), "A truncated tail stopped following growth");
         viewer.showTail(snapshot(0, 100), L"large.csv");
-        check(viewer.csvAvailable() && viewer.csvTable() && !viewer.buffer() && atBottom(), "A partial CSV did not open as a read-only table at EOF");
+        check(viewer.csvAvailable() && viewer.csvTable() && !viewer.buffer() && viewer.state().top == 0 && viewer.tailPaused(),
+            "A partial CSV did not open as a read-only table at its first record");
         check(viewer.textStatus().find(L"100 rows loaded") != std::wstring::npos && viewer.textStatus().find(L"BYTE OFFSETS") != std::wstring::npos,
             "A partial CSV table did not describe its loaded records");
-        viewer.setCsvTable(false); viewer.showTail(snapshot(30, 100), L"large.csv", true);
-        check(!viewer.csvTable(), "Reloading a partial CSV lost Source mode");
+        viewer.setCsvTable(false); SendMessageW(viewer.window(), WM_VSCROLL, SB_BOTTOM, 0);
+        viewer.showTail(snapshot(30, 100), L"large.csv", true);
+        check(!viewer.csvTable() && !viewer.tailPaused() && atBottom(), "Reloading a partial CSV lost Source mode");
         viewer.showTail(snapshot(0, 100), L"large.html");
         check(!viewer.htmlAvailable() && !viewer.htmlPreview(), "A partial HTML document launched a whole-file browser preview");
         viewer.show(std::make_shared<Document>(), L"ordinary.txt");
         check(!viewer.tailPreview() && viewer.textStatus().find(L"LARGE FILE") == std::wstring::npos, "An ordinary file inherited tail mode");
+
+        // A file that outgrows the full-read limit follows its end only when
+        // the view did; otherwise the first window keeps the rows on screen.
+        auto growing = std::make_shared<EditBuffer>(); growing->document.text = first->text;
+        indexDocument(growing->document); growing->initialize(growing->document.text);
+        viewer.edit(growing, L"growing.log");
+        SendMessageW(viewer.window(), WM_VSCROLL, SB_BOTTOM, 0);
+        check(viewer.followsTail(), "An ordinary file shown to its end did not follow it");
+        viewer.showTail(snapshot(30, 100), L"growing.log", true);
+        check(viewer.tailPreview() && !viewer.tailPaused() && atBottom() && !viewer.buffer(), "A followed file stopped following once it outgrew the full-read limit");
+        viewer.edit(growing, L"growing.log");
+        auto reading = viewer.state(); reading.top = 40; viewer.restore(reading);
+        check(!viewer.followsTail(), "An ordinary file above its end followed it");
+        viewer.showTail(head(), L"growing.log", true);
+        check(viewer.tailPaused() && viewer.state().top == 40, "A file that outgrew the full-read limit moved the rows on screen");
     }
 }
 void largeCsvTable() {
@@ -2917,8 +2949,9 @@ void largeCsvTable() {
     for (const UINT dpi : {96u, 144u, 192u}) {
         viewer.setDpi(dpi); requests.clear();
         const int last = static_cast<int>(size / 16);
-        viewer.showTail(snapshot(last - 200, 200), L"huge.csv");
-        check(viewer.csvTable() && !viewer.buffer() && !viewer.tailPaused() && atBottom(), "A large CSV did not open as a table following EOF");
+        viewer.showTail(snapshot(0, 200), L"huge.csv");
+        check(viewer.csvTable() && !viewer.buffer() && viewer.tailPaused() && viewer.state().top == 0 && info().nPos == 0 && requests.empty(),
+            "A large CSV did not open as a table at its first record");
         check(viewer.textStatus().find(L"200 rows loaded × 3 columns") != std::wstring::npos, "Quoted newlines split large CSV records");
         // Line numbers count the embedded newline of every earlier record.
         FileLineIndex index; index.bytes = size; index.lines = static_cast<uint64_t>(last) * 2;
@@ -2928,17 +2961,19 @@ void largeCsvTable() {
         SendMessageW(window, WM_CHAR, 'x', 0); key(VK_DELETE); key(VK_F2);
         check(!viewer.buffer() && viewer.csvTable(), "A large CSV table accepted edits");
 
-        // Scrolling inside the window performs no I/O; above it, it reads.
-        const auto oldTop = viewer.state().top;
-        SendMessageW(window, WM_MOUSEWHEEL, MAKEWPARAM(0, static_cast<WORD>(WHEEL_DELTA)), 0);
-        check(viewer.state().top < oldTop && requests.empty() && viewer.tailPaused(), "Scrolling a loaded CSV window read the file or kept following");
+        // Scrolling inside the window performs no I/O.
+        SendMessageW(window, WM_MOUSEWHEEL, MAKEWPARAM(0, static_cast<WORD>(-WHEEL_DELTA)), 0);
+        check(viewer.state().top > 0 && requests.empty() && viewer.tailPaused(), "Scrolling a loaded CSV window read the file or followed its end");
         SendMessageW(window, WM_VSCROLL, SB_BOTTOM, 0);
         check(requests.size() == 1 && requests.back() == std::numeric_limits<uint64_t>::max(), "End seek did not request the latest CSV window");
         viewer.showFileWindow(snapshot(last - 200, 200), L"huge.csv", requests.back());
-        check(!viewer.tailPaused() && atBottom(), "Returning to EOF did not resume CSV following");
+        check(!viewer.tailPaused() && atBottom(), "Moving to EOF did not follow the end of a large CSV");
         // The tail reload that follows an end seek keeps the table at EOF.
         viewer.showTail(snapshot(last - 100, 100), L"huge.csv", true);
         check(!viewer.tailPaused() && atBottom(), "Reloading the tail after an end seek left the CSV table above EOF");
+        const auto oldTop = viewer.state().top;
+        SendMessageW(window, WM_MOUSEWHEEL, MAKEWPARAM(0, static_cast<WORD>(WHEEL_DELTA)), 0);
+        check(viewer.state().top < oldTop && requests.size() == 1 && viewer.tailPaused(), "Scrolling up a loaded CSV window read the file or kept following");
 
         // Moving the caret above the window loads the preceding records and
         // keeps the column.
@@ -3046,21 +3081,21 @@ void largeFileByteScrolling() {
     const auto info = [&] { return ScrollbarWindow::info(window, SB_VERT); };
     for (const bool wrap : {false, true}) for (const UINT dpi : {96u, 144u, 192u}) {
         viewer.setDpi(dpi); viewer.setWordWrap(wrap); requests.clear();
-        viewer.showTail(snapshot(size - 6400, 100), L"huge.log");
-        SendMessageW(window, WM_VSCROLL, SB_TOP, 0);
-        check(requests.size() == 1 && requests.back() == 0 && viewer.tailPaused(), "File beginning did not request a byte window or pause following");
-        viewer.showTail(snapshot(size - 6400, 100), L"huge.log", true);
-        check(viewer.tailPaused(), "An external refresh cancelled pending navigation");
-        viewer.showFileWindow(snapshot(0, 100), L"huge.log", 0);
-        check(viewer.state().top == 0 && info().nPos == 0 && viewer.tailPaused(), "Beginning window did not land at the global beginning");
-        const auto oldRequests = requests.size();
+        viewer.showTail(snapshot(0, 100), L"huge.log");
+        check(viewer.state().top == 0 && info().nPos == 0 && viewer.tailPaused() && requests.empty(), "A large file did not open at its global beginning");
         SendMessageW(window, WM_MOUSEWHEEL, MAKEWPARAM(0, static_cast<WORD>(-WHEEL_DELTA)), 0);
-        check(viewer.state().top > 0 && requests.size() == oldRequests, "Scrolling within a cached window performed I/O");
+        check(viewer.state().top > 0 && requests.empty(), "Scrolling within a cached window performed I/O");
         SendMessageW(window, WM_VSCROLL, SB_BOTTOM, 0);
-        check(requests.back() == std::numeric_limits<uint64_t>::max(), "End seek used the stale file size");
+        check(requests.size() == 1 && requests.back() == std::numeric_limits<uint64_t>::max(), "End seek used the stale file size");
         viewer.showFileWindow(snapshot(size + 6400 - 6400, 100, size + 6400), L"huge.log", requests.back());
         check(!viewer.tailPaused() && info().nPos == info().nMax - static_cast<int>(info().nPage) + 1,
             "End seek did not follow data appended during the read");
+        SendMessageW(window, WM_VSCROLL, SB_TOP, 0);
+        check(requests.size() == 2 && requests.back() == 0 && viewer.tailPaused(), "File beginning did not request a byte window or pause following");
+        viewer.showTail(snapshot(size, 100, size + 6400), L"huge.log", true);
+        check(viewer.tailPaused(), "An external refresh cancelled pending navigation");
+        viewer.showFileWindow(snapshot(0, 100), L"huge.log", 0);
+        check(viewer.state().top == 0 && info().nPos == 0 && viewer.tailPaused(), "Beginning window did not land at the global beginning");
 
         // Crossing a cache boundary preserves an existing row as its anchor.
         constexpr uint64_t middle = size / 2;

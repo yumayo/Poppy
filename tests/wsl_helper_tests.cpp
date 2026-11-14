@@ -395,13 +395,19 @@ void largeFiles(const std::string& executable) {
     append(entries(0, 140));
     Helper helper(executable); helper.hello(); helper.call("connect", fixture.root);
     helper.call("readFile", file, {}, nullptr, false);
-    auto snapshot = helper.call("readFile", file, {{"readMode", "preview"}});
-    check(snapshot.bytes == entries(40, 140) && field(snapshot.metadata, "tail") == "1" && version(snapshot).empty(), "A multi-GB preview was not a read-only tail");
-    check(number(snapshot.metadata, "fileBytes") == fs::file_size(file) && number(snapshot.metadata, "offset") > 0xffffffffull && snapshot.bytes.size() <= poppy::maxTailBytes, "Sparse log metadata overflowed or exceeded the receive bound");
-    check(number(snapshot.metadata, "endOffset") == fs::file_size(file), "A tail snapshot did not identify EOF");
+    // A multi-GB preview opens at the beginning. A reload that follows the
+    // end asks for the last window instead.
+    auto snapshot = helper.call("readFile", file, {{"readMode", "preview"}, {"offset", "0"}});
+    check(snapshot.bytes == "log\n" && number(snapshot.metadata, "offset") == 0 && number(snapshot.metadata, "endOffset") == 4 &&
+        field(snapshot.metadata, "tail") == "1" && version(snapshot).empty(), "A multi-GB preview did not open its beginning read only");
+    snapshot = helper.call("readFile", file, {{"readMode", "preview"}, {"offset", "18446744073709551615"}});
+    check(snapshot.bytes == entries(1, 140) && field(snapshot.metadata, "tail") == "1" && version(snapshot).empty(), "A multi-GB preview did not read its end read only");
+    check(number(snapshot.metadata, "fileBytes") == fs::file_size(file) && number(snapshot.metadata, "offset") > 0xffffffffull && snapshot.bytes.size() <= poppy::maxFileWindowBytes, "Sparse log metadata overflowed or exceeded the receive bound");
+    check(number(snapshot.metadata, "endOffset") == fs::file_size(file), "A preview of the end did not identify EOF");
+    helper.call("readFile", file, {{"readMode", "preview"}}, nullptr, false);
     const std::string edited = "must not overwrite a partial file";
     helper.call("saveFile", file, {{"version", version(snapshot)}, {"size", std::to_string(edited.size())}}, &edited, false);
-    check(fs::file_size(file) == number(snapshot.metadata, "fileBytes"), "A tail snapshot could overwrite the full file");
+    check(fs::file_size(file) == number(snapshot.metadata, "fileBytes"), "A partial snapshot could overwrite the full file");
     const uint64_t middle = 4ull * 1024 * 1024 * 1024 + 123;
     const std::string marker = u8"\nMIDDLE 日本😀\r\n";
     {
@@ -426,7 +432,9 @@ void largeFiles(const std::string& executable) {
     check(snapshot.bytes == entries(70, 170), "A sparse file tail did not advance after appending");
     const auto link = fixture.root / "alias.log";
     fs::create_symlink(file.filename(), link);
-    check(helper.call("readFile", link, {{"readMode", "preview"}}).bytes == snapshot.bytes, "A large symlink target could not be tailed");
+    check(helper.call("readFile", link, {{"readMode", "tail"}}).bytes == snapshot.bytes, "A large symlink target could not be tailed");
+    const auto linked = helper.call("readFile", link, {{"readMode", "preview"}, {"offset", "0"}});
+    check(linked.bytes == "log\n" && field(linked.metadata, "tail") == "1", "A large symlink target could not be previewed");
     fs::rename(file, fixture.root / "rotated.log"); write(file, "new log\n");
     snapshot = helper.call("readFile", file, {{"readMode", "tail"}});
     check(snapshot.bytes == "new log\n" && field(snapshot.metadata, "tail") == "1" && number(snapshot.metadata, "offset") == 0, "Log rotation did not retain read-only tail mode");
@@ -434,8 +442,10 @@ void largeFiles(const std::string& executable) {
     check(range.bytes == "new log\n" && number(range.metadata, "offset") == 0 && number(range.metadata, "endOffset") == 8 && version(range).empty(), "A byte request from before rotation did not clamp to the replacement file");
     append(entries(0, 140));
     check(helper.call("readFile", file, {{"readMode", "tail"}}).bytes == entries(40, 140), "A truncated tail did not resume growing");
-    snapshot = helper.call("readFile", file, {{"readMode", "preview"}});
-    check(snapshot.bytes == disk(file) && field(snapshot.metadata, "tail") == "0" && !version(snapshot).empty(), "Small previews lost full-file editing");
+    for (const auto& offset : {"0", "18446744073709551615"}) {
+        snapshot = helper.call("readFile", file, {{"readMode", "preview"}, {"offset", offset}});
+        check(snapshot.bytes == disk(file) && field(snapshot.metadata, "tail") == "0" && !version(snapshot).empty(), "Small previews lost full-file editing");
+    }
     write(file, "");
     snapshot = helper.call("readFile", file, {{"readMode", "tail"}});
     check(snapshot.bytes.empty() && snapshot.last && field(snapshot.metadata, "tail") == "1", "An empty tailed file omitted its final chunk");

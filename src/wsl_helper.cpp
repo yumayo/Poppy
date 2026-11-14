@@ -179,7 +179,7 @@ Snapshot read(const std::string& p, const std::atomic<bool>* cancelled = nullptr
             }
             bytes.resize(offset); return bytes;
         };
-        auto tail = mode == FileReadMode::Window ? readFileWindow(static_cast<uint64_t>(result.info.st_size), requestedOffset, range) : readFileTail(static_cast<uint64_t>(result.info.st_size), range);
+        auto tail = mode == FileReadMode::Tail ? readFileTail(static_cast<uint64_t>(result.info.st_size), range) : readFileWindow(static_cast<uint64_t>(result.info.st_size), requestedOffset, range);
         // The descriptor and captured size bound this snapshot. Concurrent
         // appends are allowed; hashing/revalidating the whole file would
         // prevent following a continuously written log.
@@ -530,7 +530,7 @@ void Server::execute(const std::shared_ptr<Request>& r) {
             if (!mode.empty() && mode != "preview" && mode != "tail" && mode != "window") throw std::runtime_error("Unsupported file read mode");
             const auto p = path(r->message);
             const auto snapshot = read(p, &r->cancelled, mode == "tail" ? FileReadMode::Tail : mode == "window" ? FileReadMode::Window : mode == "preview" ? FileReadMode::Preview : FileReadMode::Full,
-                mode == "window" ? number(r->message, "offset") : 0);
+                mode == "window" || mode == "preview" ? number(r->message, "offset") : 0);
             watch(std::filesystem::path(snapshot.target).parent_path().string());
             if (snapshot.target != p) {
                 std::lock_guard<std::mutex> lock(watchMutex_);

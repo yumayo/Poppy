@@ -154,6 +154,17 @@ void byteWindows() {
         return std::string(count, 'x');
     });
     check(reads == 2 && total <= maxFileWindowBytes + 3 && snapshot.offset > 0xffffffffull && snapshot.endOffset < size, "A multi-GB byte window overflowed or performed unbounded reads");
+    // Opening a multi-GB file reads only the complete lines of its first window.
+    reads = total = 0;
+    const auto opened = readFileWindow(size, 0, [&](uint64_t at, size_t count) {
+        check(at + count <= maxFileWindowBytes, "Opening a multi-GB file read past its first window");
+        ++reads; total += count;
+        std::string bytes(count, 'x');
+        for (size_t i = 99 - static_cast<size_t>(at % 100); i < count; i += 100) bytes[i] = '\n';
+        return bytes;
+    });
+    check(reads == 2 && total <= maxFileWindowBytes + 3 && opened.offset == 0 && opened.endOffset == maxFileWindowBytes / 100 * 100 &&
+        opened.bytes.size() == opened.endOffset, "Opening a multi-GB file did not read its first complete lines");
     bool failed = false;
     try { readFileWindow(size, requested, [](uint64_t at, size_t count) { return std::string(at ? count - 1 : count, 'x'); }); }
     catch (const std::runtime_error&) { failed = true; }

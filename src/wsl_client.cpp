@@ -302,7 +302,7 @@ public:
         try {
             Message options;
             if (mode != FileReadMode::Full) options["readMode"] = mode == FileReadMode::Tail ? "tail" : mode == FileReadMode::Window ? "window" : "preview";
-            if (mode == FileReadMode::Window) options["offset"] = std::to_string(requestedOffset);
+            if (mode == FileReadMode::Window || mode == FileReadMode::Preview) options["offset"] = std::to_string(requestedOffset);
             auto response = call("readFile", path, options);
             ProviderFile result{std::move(response.bytes), field(response.metadata, "version"), {}};
             result.tail = field(response.metadata, "tail") == "1";

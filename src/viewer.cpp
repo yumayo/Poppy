@@ -162,8 +162,9 @@ void Viewer::showTail(std::shared_ptr<const Document> d, const ResourceId& path,
     if (preserve && path_ == path && tailPaused()) return;
     if (preserve && path_ == path && tailPreview() && document_->tailOffset == d->tailOffset &&
         document_->fileBytes == d->fileBytes && document_->text == d->text) return;
-    // A table tracks its own scroll position rather than the text rows.
-    const bool follow = !preserve || path_ != path || !document_ || atTail();
+    // Opening never jumps to the end. A table tracks its own scroll position
+    // rather than the text rows.
+    const bool follow = preserve && path_ == path && followsTail();
     show(std::move(d), path, preserve, false);
     scrollbars(follow); caretPosition(); InvalidateRect(window_, nullptr, FALSE);
 }

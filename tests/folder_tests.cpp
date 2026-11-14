@@ -705,16 +705,21 @@ void editorLargeFileScrollTests(const fs::path& executable) {
         file.close(); check(!file.fail(), "Cannot append to the large scrolling fixture");
     };
     send(tree, treeSelect, large);
-    waitFor([&] { return text().find(L"block-17 ") == 0 && atBottom(); }, "Large file did not open at its tail");
-    const auto initial = text();
-    check(std::count(initial.begin(), initial.end(), L'\n') == 100, "Initial large-file preview did not contain 100 entries");
-    // Page through the initial snapshot into an earlier part of the file.
-    for (int i = 0; i < 20; ++i) key(VK_PRIOR);
-    waitFor([&] { return text().size() > initial.size() && !atBottom(); }, "Paging up stopped at the initial 100-line snapshot");
-    key(VK_HOME, true);
-    waitFor(atStart, "Ctrl+Home did not load the real beginning of a large file");
+    waitFor(atStart, "Large file did not open at its beginning");
     const auto start = text();
     check(start.size() <= 512 * 1024, "Large-file navigation loaded more than its bounded window");
+    // Ctrl+End follows the last 100 entries. Paging up leaves that snapshot
+    // for an earlier part of the file.
+    key(VK_END, true);
+    waitFor([&] {
+        const auto loaded = text();
+        return loaded.find(L"block-17 ") == 0 && std::count(loaded.begin(), loaded.end(), L'\n') == 100 && atBottom();
+    }, "Ctrl+End did not follow the last 100 entries of a large file");
+    const auto tailText = text();
+    for (int i = 0; i < 20; ++i) key(VK_PRIOR);
+    waitFor([&] { return text().size() > tailText.size() && !atBottom(); }, "Paging up stopped at the 100-line tail snapshot");
+    key(VK_HOME, true);
+    waitFor([&] { return atStart() && text() == start; }, "Ctrl+Home did not load the real beginning of a large file");
     // Exercise the actual custom scrollbar, including its 32-bit track position.
     RECT rect{}; GetClientRect(viewer, &rect);
     const auto dpi = GetDpiForWindow(viewer);

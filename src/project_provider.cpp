@@ -67,7 +67,7 @@ public:
                     }
                     bytes.resize(offset); return bytes;
                 };
-                auto tail = mode == FileReadMode::Window ? readFileWindow(static_cast<uint64_t>(size.QuadPart), requestedOffset, range) : readFileTail(static_cast<uint64_t>(size.QuadPart), range);
+                auto tail = mode == FileReadMode::Tail ? readFileTail(static_cast<uint64_t>(size.QuadPart), range) : readFileWindow(static_cast<uint64_t>(size.QuadPart), requestedOffset, range);
                 result.bytes = std::move(tail.bytes); result.tail = true; result.offset = tail.offset; result.fileBytes = tail.fileBytes; result.endOffset = tail.endOffset; result.chunkLines = tail.chunkLines;
             } catch (const std::exception& error) { result.error = wide(error.what()); }
             return result;

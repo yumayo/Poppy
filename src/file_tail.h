@@ -14,6 +14,10 @@ constexpr size_t maxFileWindowBytes = 512 * 1024;
 constexpr uint64_t maxLineIndexBytes = 4ull * 1024 * 1024 * 1024;
 constexpr uint64_t lineIndexChunkBytes = 64 * 1024;
 constexpr uint64_t unknownLines = UINT64_MAX;
+// Full reads a file up to maxFileBytes. Preview does too, but reads only the
+// window around the requested offset of a larger file; offset 0 opens it at
+// its beginning. Tail and Window read the end or the window around an offset
+// of a file of any size. Partial reads are shown read only.
 enum class FileReadMode { Full, Preview, Tail, Window };
 enum class LineFormat : uint8_t { Utf8, Utf16Le, Utf16Be };
 struct FileTail {

@@ -26,6 +26,8 @@ public:
     void setFileDropTarget(FileDropTarget* target);
     void setDpi(UINT dpi);
     void show(std::shared_ptr<const Document> document, const ResourceId& path, bool preserve = false, bool allowHtml = true);
+    // Shows a large file's partial document. A newly opened one starts at its
+    // first row; a reload follows the end only while the view follows it.
     void showTail(std::shared_ptr<const Document> document, const ResourceId& path, bool preserve = false);
     void showFileWindow(std::shared_ptr<const Document> document, const ResourceId& path, uint64_t requestedOffset);
     void cancelFileWindowRequest();
@@ -36,6 +38,8 @@ public:
     const Document* document() const { return document_.get(); }
     bool tailPreview() const { return document_ && document_->tail && !diff_; }
     bool tailPaused() const { return tailPreview() && (pendingFileOffset_ || document_->tailEndOffset < document_->fileBytes || !atTail()); }
+    // The view shows the end of its file, so reloads follow appended text.
+    bool followsTail() const { return tailPreview() ? !tailPaused() : document_ && !diff_ && !html_.active() && atTail(); }
     void showRevision(std::shared_ptr<const Document> document, const DiffDocument& changes, const ResourceId& path, bool preserve = false);
     void edit(std::shared_ptr<EditBuffer> buffer, const ResourceId& path, bool preserve = false);
     void setGitBase(std::shared_ptr<const Document> before);
