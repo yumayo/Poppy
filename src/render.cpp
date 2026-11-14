@@ -117,6 +117,15 @@ struct Factories {
                 path({{3, 8}, {16, 8}, {16, 21}, {3, 21}}, true);
                 path({{7, 14.5f}, {12, 14.5f}});
                 break;
+            case Renderer::Icon::More:
+                for (const float x : {5.0f, 12.0f, 19.0f}) {
+                    constexpr float radius = 0.9f;
+                    sink->BeginFigure({x - radius, 12}, D2D1_FIGURE_BEGIN_FILLED);
+                    for (const float side : {1.0f, -1.0f})
+                        sink->AddArc(D2D1::ArcSegment({x + side * radius, 12}, {radius, radius}, 0.0f, D2D1_SWEEP_DIRECTION_CLOCKWISE, D2D1_ARC_SIZE_SMALL));
+                    sink->EndFigure(D2D1_FIGURE_END_CLOSED);
+                }
+                break;
             case Renderer::Icon::Spinner:
                 sink->BeginFigure({12, 2}, D2D1_FIGURE_BEGIN_HOLLOW);
                 sink->AddArc(D2D1::ArcSegment({2, 12}, {10, 10}, 0, D2D1_SWEEP_DIRECTION_CLOCKWISE, D2D1_ARC_SIZE_LARGE));

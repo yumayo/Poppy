@@ -19,6 +19,7 @@ namespace fs = std::filesystem;
 using namespace poppy;
 namespace {
 constexpr int projectRowHeight = 118; // Project heading plus three message lines, padding and card spacing.
+constexpr WPARAM gitViewTreeCommand = 0x5301, gitViewListCommand = 0x5302; // Source Control "More Actions..." menu commands.
 void check(bool condition, const char* message) {
     if (!condition) throw std::runtime_error(message);
 }
@@ -2853,8 +2854,7 @@ void gitSidebarTests(const fs::path& executable) {
         waitFor([&] { return IsWindowVisible(changes) && gitChangeCount(changes) == 8; }, "Default Git Tree did not load all untracked files");
         const auto px = [dpi = GetDpiForWindow(app.window)](int value) { return MulDiv(value, dpi, 96); };
         const auto view = [&](bool tree) {
-            const auto rect = bounds(app.window, changes);
-            click(app.window, rect.left + (rect.right - rect.left) * (tree ? 1 : 3) / 4, rect.top - px(14));
+            send(app.window, WM_COMMAND, tree ? gitViewTreeCommand : gitViewListCommand);
             check(gitChangeCount(changes) == (tree ? 8 : 5), "Git layout toggle did not rebuild the hierarchy");
         };
         view(false); view(true);
@@ -2943,7 +2943,7 @@ void gitSidebarTests(const fs::path& executable) {
         const auto branch = gitBranch(changes);
         const auto inner = nextItem(changes, TreeRelation::Child, src);
         const auto rect = bounds(app.window, changes);
-        click(app.window, rect.right - px(23), px(17));
+        click(app.window, rect.right - px(49), px(17));
         check(!expanded(changes, branch) && !expanded(changes, group) && !expanded(changes, docs) &&
             !expanded(changes, src) && !expanded(changes, inner), "Source Control Collapse All skipped a branch, group or nested folder");
         check(gitChangeCount(changes) == 8 && scrollInfo(changes).nPos == 0, "Source Control Collapse All changed entries or retained a stale scroll position");
@@ -2957,7 +2957,7 @@ void gitSidebarTests(const fs::path& executable) {
         send(app.window, WM_KEYDOWN, VK_F5);
         waitFor([&] { return gitGroup(changes, false) != beforeRefresh; }, "Collapsed Git changes did not refresh");
         check(!expanded(changes, gitGroup(changes, false)), "Refreshing reopened a collapsed Changes group");
-        click(app.window, rect.right - px(23), px(17));
+        click(app.window, rect.right - px(49), px(17));
     }
     {
         Application app(executable, fixture.root); app.tree();
@@ -2965,8 +2965,7 @@ void gitSidebarTests(const fs::path& executable) {
         waitFor([&] { return IsWindowVisible(changes) && gitChangeCount(changes) == 8; }, "Restart lost the Git Tree layout");
         check(!expanded(changes, gitBranch(changes)) && !expanded(changes, gitGroup(changes, false)),
             "Restart forgot Collapse All in Source Control");
-        const auto rect = bounds(app.window, changes);
-        click(app.window, rect.left + (rect.right - rect.left) * 3 / 4, rect.top - MulDiv(14, GetDpiForWindow(app.window), 96));
+        send(app.window, WM_COMMAND, gitViewListCommand);
     }
     {
         Application app(executable, fixture.root); app.tree();
@@ -3209,8 +3208,7 @@ void branchSidebarTests(const fs::path& executable) {
         const auto viewer = FindWindowExW(app.window, nullptr, L"PoppyViewer", nullptr);
         send(GetDlgItem(app.window, 3), BM_CLICK);
         waitFor([&] { return IsWindowVisible(changes) && gitGroup(changes, false); }, "Source Control did not load the current branch");
-        const auto pane = bounds(app.window, changes);
-        click(app.window, pane.left + (pane.right - pane.left) * 3 / 4, pane.top - MulDiv(14, GetDpiForWindow(app.window), 96));
+        send(app.window, WM_COMMAND, gitViewListCommand);
         waitFor([&] { return gitChangeCount(changes) == 5; }, "Source Control did not separate partially staged changes");
         check(!GetDlgItem(app.window, 5) && !GetDlgItem(app.window, 6), "The separate Branch button or pane still exists");
         const auto staged = gitGroup(changes, true), working = nextItem(changes, TreeRelation::Next, staged);
@@ -3382,18 +3380,18 @@ void branchSidebarTests(const fs::path& executable) {
         waitFor([&] { return children(branches, branch) == 54; }, "Clicking the 51st row did not append the remaining commits");
         auto rootCommit = latest;
         while (const auto next = nextItem(branches, TreeRelation::Next, rootCommit)) rootCommit = next;
-        click(app.window, pane.left + (pane.right - pane.left) / 4, pane.top - MulDiv(14, GetDpiForWindow(app.window), 96));
+        send(app.window, WM_COMMAND, gitViewTreeCommand);
         send(branches, treeSelect, latest);
         waitFor([&] { return children(branches, latest) == 2; }, "Opening a commit did not build its changed-file tree");
         const auto directory = nextItem(branches, TreeRelation::Child, latest), file = nextItem(branches, TreeRelation::Child, directory);
         check(file != 0, "Commit files are missing their folder hierarchy");
         send(branches, treeSelect, file); waitLines(viewer, 1);
         clickFileAction(file, 18); checkEditable();
-        click(app.window, pane.left + (pane.right - pane.left) * 3 / 4, pane.top - MulDiv(14, GetDpiForWindow(app.window), 96));
+        send(app.window, WM_COMMAND, gitViewListCommand);
         check(children(branches, latest) == 2 && !nextItem(branches, TreeRelation::Child, nextItem(branches, TreeRelation::Child, latest)), "List did not flatten loaded commit files");
         send(branches, WM_KEYDOWN, VK_RETURN); waitLines(viewer, 1);
         send(branches, WM_KEYDOWN, VK_F4); checkEditable();
-        click(app.window, pane.left + (pane.right - pane.left) / 4, pane.top - MulDiv(14, GetDpiForWindow(app.window), 96));
+        send(app.window, WM_COMMAND, gitViewTreeCommand);
         check(children(branches, nextItem(branches, TreeRelation::Child, latest)) == 1, "Tree did not restore loaded commit folders");
         send(branches, treeSelect, latest); send(branches, WM_KEYDOWN, VK_F4); waitLines(viewer, 4, true);
         const auto previews = visibleTabCount(app);

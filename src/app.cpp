@@ -46,6 +46,7 @@ constexpr UINT_PTR timerId = 1;
 constexpr UINT_PTR tabDragTimerId = 2;
 constexpr size_t maxEntries = 10000, maxTreeNodes = 50000, maxLines = 1000000;
 constexpr int explorerCommand = 2, gitCommand = 3, searchCommand = 7;
+constexpr UINT gitViewTreeCommand = 0x5301, gitViewListCommand = 0x5302;
 enum class Sidebar { Explorer, Git, Search };
 using Entry = ProviderEntry;
 struct Node {
@@ -316,7 +317,8 @@ private:
     void selectSidebar(Sidebar sidebar, bool toggle = false, const std::optional<std::wstring>& seed = {});
     RECT collapseButton() const;
     void collapseSidebar();
-    RECT gitViewButton(bool tree) const;
+    RECT moreButton() const;
+    void moreMenu();
     void setGitView(bool tree);
     void updateGitFiles();
     std::wstring gitVisibilityPrefix(const ResourceId& root, GitDiffKind kind, const std::string& revision = {}) const;
@@ -443,12 +445,12 @@ private:
     void selectActivities();
     UINT dpi_ = 96;
     int sidebar_ = 245, terminalHeight_ = 260, splitter_ = 5;
-    int activityWidth_ = 48, sidebarHeader_ = 34, gitHeader_ = 104;
+    int activityWidth_ = 48, sidebarHeader_ = 34, gitHeader_ = 78;
     RECT activityRect_{}, sidebarRect_{}, sidebarSplitter_{};
     int dragging_ = 0, dragOffset_ = 0;
     bool terminalVisible_ = true;
     bool updatingGitFiles_ = false;
-    bool collapsingSidebar_ = false, collapseHover_ = false;
+    bool collapsingSidebar_ = false, collapseHover_ = false, moreHover_ = false;
     bool renamePending_ = false;
     bool historyStopped_ = false;
     ExplorerHistory explorerHistory_;
@@ -762,6 +764,9 @@ void ProjectRuntime::Impl::create() {
     TOOLINFOW collapseTip{}; collapseTip.cbSize = sizeof(collapseTip); collapseTip.uFlags = TTF_SUBCLASS;
     collapseTip.hwnd = window_; collapseTip.uId = 50; collapseTip.lpszText = const_cast<wchar_t*>(L"Collapse All");
     SendMessageW(tooltips_, TTM_ADDTOOLW, 0, reinterpret_cast<LPARAM>(&collapseTip));
+    TOOLINFOW moreTip{}; moreTip.cbSize = sizeof(moreTip); moreTip.uFlags = TTF_SUBCLASS;
+    moreTip.hwnd = window_; moreTip.uId = 51; moreTip.lpszText = const_cast<wchar_t*>(L"More Actions...");
+    SendMessageW(tooltips_, TTM_ADDTOOLW, 0, reinterpret_cast<LPARAM>(&moreTip));
     ensureGroup(1);
     terminal_.create(window_, instance_, true);
     terminal_.dockChanged = [this] { PostMessageW(window_, WM_APP + 15, 0, 0); };
@@ -913,7 +918,7 @@ void ProjectRuntime::Impl::dpi(UINT value) {
     explorer_.setDpi(dpi_); changes_.setDpi(dpi_, 28);
     explorerActivity_.setDpi(dpi_); searchActivity_.setDpi(dpi_); for (auto& button : gitActivities_) button->setDpi(dpi_); searchPane_.setDpi(dpi_);
     splitter_ = MulDiv(5, dpi_, 96);
-    activityWidth_ = MulDiv(48, dpi_, 96); sidebarHeader_ = MulDiv(34, dpi_, 96); gitHeader_ = MulDiv(104, dpi_, 96);
+    activityWidth_ = MulDiv(48, dpi_, 96); sidebarHeader_ = MulDiv(34, dpi_, 96); gitHeader_ = MulDiv(78, dpi_, 96);
     gitCommit_.setDpi(dpi_);
     for (auto& view : viewers_) view.setDpi(dpi_);
     terminal_.setDpi(dpi_); quickOpen_.setDpi(dpi_); comparePicker_.setDpi(dpi_); layout();
@@ -936,6 +941,10 @@ void ProjectRuntime::Impl::layout(bool revealTab) {
     SendMessageW(tooltips_, TTM_NEWTOOLRECTW, 0, reinterpret_cast<LPARAM>(&collapseTip));
     POINT pointer{}; GetCursorPos(&pointer); ScreenToClient(window_, &pointer);
     collapseHover_ = PtInRect(&collapseTip.rect, pointer) != FALSE;
+    TOOLINFOW moreTip{}; moreTip.cbSize = sizeof(moreTip); moreTip.hwnd = window_; moreTip.uId = 51;
+    moreTip.rect = moreButton();
+    SendMessageW(tooltips_, TTM_NEWTOOLRECTW, 0, reinterpret_cast<LPARAM>(&moreTip));
+    moreHover_ = PtInRect(&moreTip.rect, pointer) != FALSE;
     sidebarSplitter_ = sidebarOnRight ? RECT{editorRight, 0, sidebarLeft, content} : RECT{sidebarRect_.right, 0, editorLeft, content};
     const int gitTop = sidebarHeader_ + gitHeader_;
     const bool showExplorer = sidebarVisible_ && activeSidebar_ == Sidebar::Explorer && !root_.empty();
@@ -1071,13 +1080,14 @@ void ProjectRuntime::Impl::paint() {
             auto icon = collapse; InflateRect(&icon, -scaled(4), -scaled(4));
             dc.icon(Renderer::Icon::CollapseAll, icon, foreground);
         }
+        const auto more = moreButton();
+        if (more.right) {
+            if (moreHover_) dc.fill(more, RGB(255, 255, 255), 0.10f);
+            auto icon = more; InflateRect(&icon, -scaled(4), -scaled(4));
+            dc.icon(Renderer::Icon::More, icon, foreground);
+        }
         dc.fill({sidebarRect_.left, top - 1, sidebarRect_.right, top}, border);
         if (activeSidebar_ == Sidebar::Git) {
-            for (const bool tree : {true, false}) {
-                const auto button = gitViewButton(tree);
-                dc.fill(button, tree == gitTreeView_ ? rgb(50, 70, 94) : background);
-                dc.label(button, tree ? L"Tree" : L"List", tree == gitTreeView_ ? foreground : muted, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-            }
             dc.fill({sidebarRect_.left, top + gitHeader_ - 1, sidebarRect_.right, top + gitHeader_}, border);
             if (!changes_.child()) {
                 const std::wstring message = root_.empty() ? L"Open a folder to view source control." : !git_ || branchesLoading_ ? L"Loading source control…" : !git_->error.empty() ? L"Git unavailable.\n" + git_->error.substr(0, 2048) + L"\nPress F5 to retry." : git_->repositories.empty() ? L"No Git repositories found in this folder." : !branchError_.empty() ? branchError_ + L"\nPress F5 to retry." : L"No branches or commits yet.";
@@ -1156,9 +1166,26 @@ void ProjectRuntime::Impl::selectSidebar(Sidebar sidebar, bool toggle, const std
 }
 RECT ProjectRuntime::Impl::collapseButton() const {
     if (!sidebarVisible_ || activeSidebar_ == Sidebar::Search) return {};
+    const int size = MulDiv(26, dpi_, 96), right = sidebarRect_.right - MulDiv(10, dpi_, 96) - (activeSidebar_ == Sidebar::Git ? size : 0);
+    const int top = (sidebarHeader_ - size) / 2;
+    return {right - size, top, right, top + size};
+}
+// SOURCE CONTROL places its view menu to the right of Collapse All.
+RECT ProjectRuntime::Impl::moreButton() const {
+    if (!sidebarVisible_ || activeSidebar_ != Sidebar::Git) return {};
     const int size = MulDiv(26, dpi_, 96), right = sidebarRect_.right - MulDiv(10, dpi_, 96);
     const int top = (sidebarHeader_ - size) / 2;
     return {right - size, top, right, top + size};
+}
+void ProjectRuntime::Impl::moreMenu() {
+    const auto button = moreButton(); if (!button.right) return;
+    HMENU menu = CreatePopupMenu(); if (!menu) return;
+    // Offer only the layout that is not currently shown.
+    AppendMenuW(menu, MF_STRING, gitTreeView_ ? gitViewListCommand : gitViewTreeCommand, gitTreeView_ ? L"View as List" : L"View as Tree");
+    POINT screen{button.left, button.bottom}; ClientToScreen(window_, &screen);
+    const UINT command = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_LEFTALIGN | TPM_TOPALIGN, screen.x, screen.y, 0, window_, nullptr);
+    DestroyMenu(menu);
+    if (command == gitViewTreeCommand || command == gitViewListCommand) setGitView(command == gitViewTreeCommand);
 }
 void ProjectRuntime::Impl::collapseSidebar() {
     if (!sidebarVisible_ || activeSidebar_ == Sidebar::Search) return;
@@ -1178,12 +1205,6 @@ void ProjectRuntime::Impl::collapseSidebar() {
         if (IsWindowVisible(gitTree_)) SetFocus(gitTree_);
     }
     if (owner_ && owner_->changed) owner_->changed();
-}
-RECT ProjectRuntime::Impl::gitViewButton(bool tree) const {
-    const int padding = MulDiv(12, dpi_, 96), top = sidebarHeader_;
-    const int middle = (sidebarRect_.left + sidebarRect_.right) / 2;
-    return {tree ? sidebarRect_.left + padding : middle, top + gitHeader_ - MulDiv(25, dpi_, 96),
-        tree ? middle : sidebarRect_.right - padding, top + gitHeader_ - MulDiv(3, dpi_, 96)};
 }
 void ProjectRuntime::Impl::setGitView(bool tree) {
     if (gitTreeView_ == tree) return;
@@ -3815,10 +3836,8 @@ LRESULT ProjectRuntime::Impl::handle(UINT m, WPARAM a, LPARAM b) {
         const POINT point{GET_X_LPARAM(b), GET_Y_LPARAM(b)};
         const auto collapse = collapseButton();
         if (PtInRect(&collapse, point)) { collapseSidebar(); return 0; }
-        if (sidebarVisible_ && activeSidebar_ == Sidebar::Git) for (const bool tree : {true, false}) {
-            const auto button = gitViewButton(tree);
-            if (PtInRect(&button, point)) { setGitView(tree); return 0; }
-        }
+        const auto more = moreButton();
+        if (PtInRect(&more, point)) { moreMenu(); return 0; }
         for (int group = 0; group < groupCount(); ++group) {
             const auto& pane = editorGroups_[group];
             if (PtInRect(&pane.add, point) || PtInRect(&pane.dropdown, point)) {
@@ -3859,6 +3878,8 @@ LRESULT ProjectRuntime::Impl::handle(UINT m, WPARAM a, LPARAM b) {
         const POINT point{GET_X_LPARAM(b), GET_Y_LPARAM(b)};
         const auto collapse = collapseButton();
         if (PtInRect(&collapse, point)) { collapseSidebar(); return 0; }
+        const auto more = moreButton();
+        if (PtInRect(&more, point)) { moreMenu(); return 0; }
         if (selectEditorMode(point)) return 0;
         const auto index = tabAt(point);
         if (index < tabs_.size()) {
@@ -3878,7 +3899,10 @@ LRESULT ProjectRuntime::Impl::handle(UINT m, WPARAM a, LPARAM b) {
         const auto collapse = collapseButton();
         const bool hot = PtInRect(&collapse, {GET_X_LPARAM(b), GET_Y_LPARAM(b)}) != FALSE;
         if (hot != collapseHover_) { collapseHover_ = hot; InvalidateRect(window_, &collapse, FALSE); }
-        if (hot) { TRACKMOUSEEVENT track{sizeof(track), TME_LEAVE, window_, 0}; TrackMouseEvent(&track); }
+        const auto more = moreButton();
+        const bool moreHot = PtInRect(&more, {GET_X_LPARAM(b), GET_Y_LPARAM(b)}) != FALSE;
+        if (moreHot != moreHover_) { moreHover_ = moreHot; InvalidateRect(window_, &more, FALSE); }
+        if (hot || moreHot) { TRACKMOUSEEVENT track{sizeof(track), TME_LEAVE, window_, 0}; TrackMouseEvent(&track); }
         if (tabDrag_) { updateTabDrag({GET_X_LPARAM(b), GET_Y_LPARAM(b)}); return 0; }
         if (dragging_) {
             RECT r{}; GetClientRect(window_, &r);
@@ -3896,8 +3920,13 @@ LRESULT ProjectRuntime::Impl::handle(UINT m, WPARAM a, LPARAM b) {
             layout();
         } return 0;
     }
+    // The More Actions menu commands can also be sent directly (used by GUI tests).
+    case WM_COMMAND:
+        if (LOWORD(a) == gitViewTreeCommand || LOWORD(a) == gitViewListCommand) { setGitView(LOWORD(a) == gitViewTreeCommand); return 0; }
+        break;
     case WM_MOUSELEAVE:
         if (collapseHover_) { collapseHover_ = false; const auto collapse = collapseButton(); InvalidateRect(window_, &collapse, FALSE); }
+        if (moreHover_) { moreHover_ = false; const auto more = moreButton(); InvalidateRect(window_, &more, FALSE); }
         return 0;
     case WM_LBUTTONUP:
         if (tabDrag_ && tabDrag_->active) updateTabDrag({GET_X_LPARAM(b), GET_Y_LPARAM(b)});
@@ -3911,7 +3940,8 @@ LRESULT ProjectRuntime::Impl::handle(UINT m, WPARAM a, LPARAM b) {
             if (tabDrag_) return TRUE;
             POINT p{}; GetCursorPos(&p); ScreenToClient(window_, &p);
             const auto collapse = collapseButton();
-            if (PtInRect(&collapse, p)) { SetCursor(LoadCursorW(nullptr, IDC_HAND)); return TRUE; }
+            const auto more = moreButton();
+            if (PtInRect(&collapse, p) || PtInRect(&more, p)) { SetCursor(LoadCursorW(nullptr, IDC_HAND)); return TRUE; }
             for (const auto& pane : editorGroups_) if (PtInRect(&pane.tools, p)) { SetCursor(LoadCursorW(nullptr, IDC_HAND)); return TRUE; }
             if (PtInRect(&sidebarSplitter_, p)) { SetCursor(LoadCursorW(nullptr, IDC_SIZEWE)); return TRUE; }
             for (const auto& divider : dockGeometry_.dividers) {
