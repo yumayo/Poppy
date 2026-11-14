@@ -39,10 +39,12 @@ void UpdateTitleButton::layout() {
     // top of the caption-button band is off screen. Center within the visible part.
     int top = frame.top + buttons.top;
     const int bottom = frame.top + buttons.bottom;
+    const bool zoomed = IsZoomed(owner_) != FALSE;
     MONITORINFO monitor{}; monitor.cbSize = sizeof(monitor);
-    if (IsZoomed(owner_) && GetMonitorInfoW(MonitorFromWindow(owner_, MONITOR_DEFAULTTONEAREST), &monitor))
+    if (zoomed && GetMonitorInfoW(MonitorFromWindow(owner_, MONITOR_DEFAULTTONEAREST), &monitor))
         top = (std::max)(top, static_cast<int>(monitor.rcWork.top));
-    const int width = MulDiv(80, dpi_, 96), margin = MulDiv(6, dpi_, 96);
+    // The maximized caption is much shorter, so use a smaller margin to keep the button readable.
+    const int width = MulDiv(80, dpi_, 96), margin = MulDiv(zoomed ? 4 : 6, dpi_, 96);
     const int height = (std::max)(bottom - top - 2 * margin, 1);
     SetWindowPos(window_, nullptr, frame.left + buttons.left - width, top + (bottom - top - height) / 2,
         width, height, SWP_NOACTIVATE | SWP_NOZORDER | SWP_SHOWWINDOW);
