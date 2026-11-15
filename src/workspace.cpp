@@ -20,6 +20,7 @@
 #include <shobjidl.h>
 #include <shellapi.h>
 #include <algorithm>
+#include <chrono>
 #include <memory>
 #include <map>
 #include <optional>
@@ -30,6 +31,8 @@ constexpr UINT wmStartup = WM_APP + 22;
 // A closed project finished a background shutdown wait. WPARAM is its id.
 constexpr UINT wmProjectStopped = WM_APP + 23;
 constexpr UINT_PTR aiAnimationTimerId = 2;
+// One spinner frame per 60 Hz display refresh when the message loop drives it.
+constexpr auto aiFrameInterval = std::chrono::milliseconds(16);
 constexpr int projectHeadingHeight = 40;
 constexpr int projectMessageLineHeight = 18;
 constexpr int projectMessageLines = 3;
@@ -117,7 +120,9 @@ private:
     bool stopping(HWND window) const;
     void tick();
     void checkUpdate();
-    void animateAiStatus();
+    // present paints the spinners now instead of leaving them to WM_PAINT.
+    void animateAiStatus(bool present = false);
+    void animateAiStatusIfDue();
     void save(OpenProject& project);
     void saveApp();
     void saveAll();
@@ -172,6 +177,7 @@ private:
     uint64_t nextId_ = 1;
     UINT dpi_ = 96;
     UINT_PTR aiAnimationTimer_ = 0;
+    std::chrono::steady_clock::time_point aiFrameDue_{};
     int initialShow_ = SW_SHOWNORMAL;
     int scroll_ = 0, wheel_ = 0;
     bool listingWsl_ = false;
@@ -199,6 +205,9 @@ int Workspace::run(HINSTANCE instance,int show,const StartupOptions& options,Sin
     try { singleInstance.publish(window_); } catch (...) { DestroyWindow(window_); throw; }
     MSG message{};
     for (;;) {
+        // Windows retrieves WM_TIMER only while no input or paint is queued,
+        // which continuous scrolling or a CSV drag selection never allows.
+        animateAiStatusIfDue();
         // Queued terminal output can continue immediately. Give input, paints
         // and timers a turn before taking another posted output notification.
         constexpr UINT uiMessages = PM_REMOVE | ((QS_INPUT | QS_PAINT | QS_TIMER) << 16);
@@ -593,7 +602,7 @@ void Workspace::checkUpdate() {
         });
     });
 }
-void Workspace::animateAiStatus() {
+void Workspace::animateAiStatus(bool present) {
     bool running = false;
     if (!IsIconic(window_) && IsWindowVisible(window_)) {
         const auto client=contentBounds();
@@ -603,12 +612,20 @@ void Workspace::animateAiStatus() {
             const auto icon=aiStatusBounds(item);
             InvalidateRect(window_, &icon, FALSE); running = true;
         }
-        if (!projects_.empty()) running = projects_[active_].runtime->animateAiStatus() || running;
+        if (!projects_.empty()) running = projects_[active_].runtime->animateAiStatus(present) || running;
+        // WM_PAINT is starved by the same input as WM_TIMER.
+        if (present) UpdateWindow(window_);
     }
+    aiFrameDue_ = std::chrono::steady_clock::now() + aiFrameInterval;
     // A 16 ms WM_TIMER can round up to two default Windows clock ticks.
     // Request the minimum interval for roughly one update per display refresh.
     if (running && !aiAnimationTimer_) aiAnimationTimer_ = SetTimer(window_, aiAnimationTimerId, USER_TIMER_MINIMUM, nullptr);
     else if (!running && aiAnimationTimer_) { KillTimer(window_, aiAnimationTimer_); aiAnimationTimer_ = 0; }
+}
+// Advances a running spinner from the message loop once its frame is due,
+// even while every message is input or a paint that keeps WM_TIMER queued.
+void Workspace::animateAiStatusIfDue() {
+    if (aiAnimationTimer_ && !closing_ && std::chrono::steady_clock::now() >= aiFrameDue_) animateAiStatus(true);
 }
 void Workspace::toggleProjectList() {
     endProjectDrag();recent_.close();

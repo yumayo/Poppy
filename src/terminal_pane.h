@@ -35,7 +35,8 @@ public:
     void connect(AiEventQueue* hooks) { events_ = hooks; }
     bool apply(const AiEvent& event);
     void acknowledge();
-    bool animateAiStatus();
+    // present paints the invalidated spinners before returning.
+    bool animateAiStatus(bool present = false);
     void pollNotifications();
     void focusAttention();
     bool hasSession(const std::string& id) const;

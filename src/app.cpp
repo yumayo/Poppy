@@ -442,7 +442,10 @@ private:
     HWND window_ = nullptr, tree_ = nullptr, gitTree_ = nullptr, explorerButton_ = nullptr, searchButton_ = nullptr, tooltips_ = nullptr;
     HINSTANCE instance_ = nullptr;
     Tree explorer_, changes_;
-    Renderer renderer_;
+    // The tab bar repaints for each docked terminal's AI spinner frame, also
+    // in the middle of an editor scroll. Present without waiting for vertical
+    // sync, so the two windows do not wait for a refresh one after the other.
+    Renderer renderer_{D2D1_PRESENT_OPTIONS_IMMEDIATELY};
     StatusBar& statusBar_;
     bool statusDirty_ = true;
     size_t partialFolders_ = 0;
@@ -4247,7 +4250,7 @@ void ProjectRuntime::activate(bool active) {
 }
 void ProjectRuntime::setDpi(UINT dpi) { impl_->dpi(dpi); }
 void ProjectRuntime::poll() { if (ready()) impl_->pollWatch(); impl_->terminal_.pollNotifications(); impl_->terminal_.acknowledge(); }
-bool ProjectRuntime::animateAiStatus() { return impl_->terminal_.animateAiStatus(); }
+bool ProjectRuntime::animateAiStatus(bool present) { return impl_->terminal_.animateAiStatus(present); }
 bool ProjectRuntime::key(const MSG& message) { return impl_->key(message); }
 bool ProjectRuntime::terminalInput(HWND window) const { return impl_->terminal_.contains(window); }
 ProjectSession ProjectRuntime::snapshot() { return impl_->saveSession(); }

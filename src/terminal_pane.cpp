@@ -183,10 +183,10 @@ void TerminalPane::acknowledge() {
     if (GetForegroundWindow() != GetAncestor(window_, GA_ROOT) || IsIconic(GetAncestor(window_, GA_ROOT))) return;
     for (const auto& session : sessions_) if (session->configuration.displayed && IsWindowVisible(session->terminal->window())) session->ai.acknowledge();
 }
-bool TerminalPane::animateAiStatus() {
+bool TerminalPane::animateAiStatus(bool present) {
     if (dockParent_) {
         const bool running = std::any_of(sessions_.begin(), sessions_.end(), [](const auto& s) { return s->ai.state == AiState::Running; });
-        if (running) InvalidateRect(dockParent_, nullptr, FALSE);
+        if (running) { InvalidateRect(dockParent_, nullptr, FALSE); if (present) UpdateWindow(dockParent_); }
         return running;
     }
     if (!IsWindowVisible(window_)) return false;
@@ -200,6 +200,7 @@ bool TerminalPane::animateAiStatus() {
         icon.right = std::min<LONG>(icon.right, icon.left + unit);
         InvalidateRect(window_, &icon, FALSE); running = true;
     }
+    if (running && present) UpdateWindow(window_);
     return running;
 }
 AiSummary TerminalPane::summary() const { std::vector<AiStatus> states; for(const auto& s:sessions_)states.push_back(s->ai);return summarizeAi(states); }
