@@ -36,6 +36,10 @@ public:
     // Counts newlines from a chunk-aligned offset for files up to maxLineIndexBytes.
     virtual ProviderLineScan scanLines(const ResourceId&, uint64_t, const std::function<bool()>&) { return {{}, L"Line counting is unavailable."}; }
     virtual ProviderSave saveFile(const ResourceId& path, const std::string& bytes, const std::string& version, const std::string& baseline) = 0;
+    // Saves a large file's edited window by writing a copy of the file with
+    // the window replaced, then replacing the file. version is the one read
+    // with the window; the result's version is the saved file's.
+    virtual ProviderSave spliceFile(const ResourceId&, const FileSplice&, const std::string&) { return {{}, L"Saving part of a large file is unavailable."}; }
     // Publish a new file only after writing it completely; never replace a name.
     virtual std::wstring createFile(const ResourceId& path, const std::string& bytes) = 0;
     // Intermediate components may reuse an existing directory, never a link.

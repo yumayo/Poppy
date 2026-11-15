@@ -155,6 +155,9 @@ std::string real(const std::string& p) { char* value = realpath(p.c_str(), nullp
 std::string stamp(const struct stat& s) {
     return std::to_string(s.st_dev) + ':' + std::to_string(s.st_ino) + ':' + std::to_string(s.st_size) + ':' + std::to_string(s.st_mtim.tv_sec) + ':' + std::to_string(s.st_mtim.tv_nsec) + ':' + std::to_string(s.st_ctim.tv_sec) + ':' + std::to_string(s.st_ctim.tv_nsec) + ':' + std::to_string(s.st_mode) + ':' + std::to_string(s.st_nlink) + ':' + std::to_string(s.st_uid) + ':' + std::to_string(s.st_gid);
 }
+std::string windowVersion(const struct stat& info, const struct stat& link, const std::string& target) {
+    return "window:" + sha256(stamp(info) + ':' + stamp(link) + ':' + target);
+}
 struct Snapshot {
     std::string bytes, version, target; struct stat info{};
     bool tail = false; uint64_t offset = 0, endOffset = 0, chunkLines = unknownLines;
@@ -184,6 +187,10 @@ Snapshot read(const std::string& p, const std::atomic<bool>* cancelled = nullptr
         // appends are allowed; hashing/revalidating the whole file would
         // prevent following a continuously written log.
         result.bytes = std::move(tail.bytes); result.tail = true; result.offset = tail.offset; result.endOffset = tail.endOffset; result.chunkLines = tail.chunkLines;
+        // A window's version names the file state it was read from, which a
+        // save of the edited window must still find. It never matches the
+        // content version that saveFile expects.
+        result.version = windowVersion(result.info, link, result.target);
         return result;
     }
     if (result.info.st_size < 0 || static_cast<uint64_t>(result.info.st_size) > maxFileBytes) throw std::runtime_error("File exceeds the 16 MiB limit");
@@ -240,6 +247,7 @@ private:
     void watchGit(const std::string& directory);
     void events();
     void save(Request& request);
+    void splice(Request& request);
     void create(Request& request);
     void git(Request& request);
     std::atomic<bool> stopping_{false};
@@ -326,7 +334,7 @@ void Server::accept(Frame frame) {
     number(m, "generation");
     if (requests_.count(id) || requests_.size() >= 128) throw std::runtime_error("WSL request queue is full or ID is reused");
     auto r = std::make_shared<Request>([this](std::string_view bytes) { writeOutput(bytes); }); r->message = std::move(m); requests_[id] = r;
-    if (op == "saveFile" || op == "createFile" || op == "searchContent") {
+    if (op == "saveFile" || op == "spliceFile" || op == "createFile" || op == "searchContent") {
         if (upload_) throw std::runtime_error("Concurrent upload is unsupported");
         r->size = number(r->message, "size"); if (r->size > maxFileBytes || uploadBytes_ + r->size > 64 * 1024 * 1024) throw std::runtime_error("Save exceeds the file or upload queue limit"); uploadBytes_ += r->size; upload_ = r;
     } else { queue_.push_back(r); condition_.notify_all(); }
@@ -457,6 +465,72 @@ void Server::save(Request& request) {
     catch (const std::exception&) { throw std::runtime_error("Replacement completed, but its new version could not be verified. Reload to verify before saving again."); }
     reply(request, {{"version", saved.version}, {"done", "1"}});
 }
+void Server::splice(Request& request) {
+    const auto p = path(request.message);
+    const auto originalSize = number(request.message, "originalSize");
+    if (originalSize > request.bytes.size()) throw std::runtime_error("Invalid file window");
+    FileSplice change{number(request.message, "offset"), number(request.message, "fileBytes"), request.bytes.substr(0, originalSize), request.bytes.substr(originalSize)};
+    // The window's version, and the target and state of the file it names.
+    const auto current = [&](std::string* target = nullptr, struct stat* state = nullptr) {
+        struct stat link{}; if (lstat(p.c_str(), &link)) failure("Cannot inspect file");
+        const auto resolved = real(p);
+        Fd fd(open(resolved.c_str(), O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW)); if (fd.value < 0) failure("Cannot open file");
+        struct stat info{}; if (fstat(fd.value, &info)) failure("Cannot inspect open file");
+        if (!S_ISREG(info.st_mode) || info.st_size < 0) throw std::runtime_error("Only regular files can be saved");
+        if (target) *target = resolved;
+        if (state) *state = info;
+        return windowVersion(info, link, resolved);
+    };
+    std::string target; struct stat info{};
+    const auto version = current(&target, &info);
+    if (version != field(request.message, "version")) throw std::runtime_error(fileSpliceConflict);
+    if (info.st_nlink != 1) throw std::runtime_error("Saving a file with multiple hard links is unsupported; your edits have been kept");
+    if (info.st_uid != getuid()) throw std::runtime_error("Saving a file owned by another user is unsupported");
+    if (info.st_mode & (S_ISUID | S_ISGID)) throw std::runtime_error("Saving a setuid/setgid file is unsupported");
+    Fd source(open(target.c_str(), O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW)); if (source.value < 0) failure("Cannot open file");
+    struct stat opened{}; if (fstat(source.value, &opened)) failure("Cannot inspect open file");
+    if (stamp(opened) != stamp(info)) throw std::runtime_error(fileSpliceConflict);
+    const auto attributes = flistxattr(source.value, nullptr, 0);
+    if (attributes < 0 && errno != ENOTSUP) failure("Cannot inspect extended attributes");
+    if (attributes > 0) throw std::runtime_error("Saving files with ACLs or extended attributes is unsupported; your edits have been kept");
+    if (access(target.c_str(), W_OK)) failure("File is not writable");
+    const auto parent = std::filesystem::path(target).parent_path().string();
+    std::string pattern = parent + "/.poppy-save-XXXXXX"; std::vector<char> name(pattern.begin(), pattern.end()); name.push_back(0);
+    Fd temporary(mkostemp(name.data(), O_CLOEXEC)); if (temporary.value < 0) failure("Cannot create temporary file");
+    struct Cleanup { const char* name; ~Cleanup() { unlink(name); } } cleanup{name.data()};
+    if (fchown(temporary.value, info.st_uid, info.st_gid) || fchmod(temporary.value, info.st_mode & 07777)) failure("Cannot preserve file ownership and mode");
+    const auto newAttributes = flistxattr(temporary.value, nullptr, 0);
+    if (newAttributes > 0 || (newAttributes < 0 && errno != ENOTSUP)) throw std::runtime_error("Cannot preserve extended attributes in this directory");
+    const int input = source.value, output = temporary.value;
+    copySplicedFile(change, static_cast<uint64_t>(info.st_size), [&](uint64_t at, size_t count) {
+        std::string bytes(count, 0); size_t offset = 0;
+        while (offset < count) {
+            const auto received = pread(input, bytes.data() + offset, count - offset, static_cast<off_t>(at + offset));
+            if (received < 0) { if (errno == EINTR) continue; failure("Cannot read file"); }
+            if (!received) break;
+            offset += static_cast<size_t>(received);
+        }
+        bytes.resize(offset); return bytes;
+    }, [&](std::string_view bytes) {
+        while (!bytes.empty()) {
+            const auto count = ::write(output, bytes.data(), bytes.size());
+            if (count < 0) { if (errno == EINTR) continue; failure("Cannot write temporary file"); }
+            if (!count) throw std::runtime_error("Short write");
+            bytes.remove_prefix(static_cast<size_t>(count));
+        }
+    }, [&] { return request.cancelled.load(); });
+    if (fsync(output)) failure("Cannot flush temporary file");
+    // A writer may have changed the file while it was copied.
+    struct stat copied{}; if (fstat(input, &copied)) failure("Cannot inspect open file");
+    if (stamp(copied) != stamp(info) || current() != version) throw std::runtime_error(fileSpliceConflict);
+    if (rename(name.data(), target.c_str())) failure("Cannot replace file");
+    Fd directory(open(parent.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC));
+    if (directory.value < 0 || fsync(directory.value)) throw std::runtime_error("Replacement completed, but directory flush failed. Reload to verify before saving again.");
+    std::string saved;
+    try { saved = current(); }
+    catch (const std::exception&) { throw std::runtime_error("Replacement completed, but its new version could not be verified. Reload to verify before saving again."); }
+    reply(request, {{"version", saved}, {"done", "1"}});
+}
 void Server::create(Request& request) {
     const auto p = path(request.message), parent = std::filesystem::path(p).parent_path().string();
     std::string pattern = parent + "/.poppy-paste-XXXXXX"; std::vector<char> name(pattern.begin(), pattern.end()); name.push_back(0);
@@ -519,7 +593,7 @@ void Server::execute(const std::shared_ptr<Request>& r) {
         if (op == "hello") {
             if (number(r->message, "protocolVersion") != protocolVersion) throw std::runtime_error("WSL protocol version mismatch");
             utsname system{}; if (uname(&system)) failure("Cannot detect architecture");
-            reply(*r, {{"protocolVersion", std::to_string(protocolVersion)}, {"helperVersion", helperVersion}, {"uid", std::to_string(getuid())}, {"home", home()}, {"shell", shell()}, {"executable", real("/proc/self/exe")}, {"architecture", system.machine}, {"capabilities", "list,read,save,create,mkdir,rename,copy,remove,index,git,repositories,inotify,terminal,search,lines"}, {"done", "1"}});
+            reply(*r, {{"protocolVersion", std::to_string(protocolVersion)}, {"helperVersion", helperVersion}, {"uid", std::to_string(getuid())}, {"home", home()}, {"shell", shell()}, {"executable", real("/proc/self/exe")}, {"architecture", system.machine}, {"capabilities", "list,read,save,splice,create,mkdir,rename,copy,remove,index,git,repositories,inotify,terminal,search,lines"}, {"done", "1"}});
         } else if (op == "connect") {
             const auto p = real(path(r->message)); struct stat info{}; if (stat(p.c_str(), &info)) failure("Cannot inspect project"); if (!S_ISDIR(info.st_mode)) throw std::runtime_error("The project path is not a directory"); watch(p); reply(*r, {{"path", p}, {"done", "1"}});
         } else if (op == "stat") {
@@ -549,6 +623,7 @@ void Server::execute(const std::shared_ptr<Request>& r) {
                 {"format", scan.format == LineFormat::Utf16Le ? "utf16le" : scan.format == LineFormat::Utf16Be ? "utf16be" : "utf8"}});
             body(*r, bytes); reply(*r, {{"done", "1"}});
         } else if (op == "saveFile") save(*r);
+        else if (op == "spliceFile") splice(*r);
         else if (op == "createFile") create(*r);
         else if (op == "copyResource") {
             copyResourcePath(std::filesystem::u8path(path(r->message)), std::filesystem::u8path(path({{"path", field(r->message, "destination")}})), field(r->message, "rejectLinks") == "1");

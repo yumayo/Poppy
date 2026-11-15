@@ -211,7 +211,37 @@ void windows() {
     check(table.parse("a\n") && !table.truncated(), "A file parse inherited a truncated window");
 }
 }
+// A large CSV's window edits as a buffer and saves by replacing its bytes.
+EditBuffer window(std::string bytes, uint64_t offset, uint64_t endOffset, uint64_t fileBytes, bool* editable) {
+    EditBuffer buffer; std::string error;
+    check(decodeText(bytes, buffer.document.text, buffer.document.encoding, error), "Cannot decode a window fixture");
+    buffer.document.tail = true; buffer.document.tailOffset = offset; buffer.document.tailEndOffset = endOffset; buffer.document.fileBytes = fileBytes;
+    indexDocument(buffer.document); *editable = buffer.initializeWindow(std::move(bytes)); return buffer;
+}
+void windowEdits() {
+    bool editable = false;
+    const std::string bytes = u8"a,値\r\nc,d\r\n";
+    auto buffer = window(bytes, 100, 100 + bytes.size(), 1000, &editable);
+    check(editable && buffer.window && !buffer.dirty(), "A UTF-8 window was not editable");
+    CsvTable table; check(table.parseWindow(buffer.document.text, false), "A window did not parse");
+    const auto change = table.replace(buffer.document.text, {1, 1}, {{u8"長い,値"}});
+    check(change && buffer.replace(change->begin, change->end, change->text) && buffer.dirty(), "A window cell could not be edited");
+    auto encoded = buffer.encoded(); const auto splice = buffer.windowSplice(encoded);
+    check(splice.offset == 100 && splice.fileBytes == 1000 && splice.original == bytes && splice.replacement == u8"a,値\r\nc,\"長い,値\"\r\n", "A window splice did not replace the window's bytes");
+    buffer.savedWindow(encoded, buffer.document.text);
+    check(!buffer.dirty() && buffer.document.tailEndOffset == 100 + splice.replacement.size() && buffer.document.fileBytes == 1000 - bytes.size() + splice.replacement.size(),
+        "A saved window did not move its end and the file size");
+    check(buffer.windowSplice(buffer.encoded()).original == splice.replacement, "A saved window did not keep the saved bytes as its baseline");
+    // UTF-16 windows carry a byte order mark that is not part of the file.
+    const std::string utf16("\xff\xfe" "a\0,\0b\0\n\0", 10);
+    buffer = window(utf16, 2, 10, 10, &editable);
+    check(editable && buffer.windowSplice(buffer.encoded()).original == utf16.substr(2), "A UTF-16 window lost its bytes or kept its byte order mark");
+    // Bytes that do not decode back exactly keep the window read only.
+    window("a,\xff\n", 3, 6, 10, &editable); check(!editable, "A window with invalid UTF-8 became editable");
+    window("a,b\n", 3, 8, 10, &editable); check(!editable, "A window whose bytes and offsets disagree became editable");
+    buffer = load("a,b\n"); check(!buffer.window, "A whole file became a window");
+}
 int main() {
-    try { parsing(); edits(); clipboard(); historyAndEncoding(); rectangularEdits(); search(); windows(); std::cout << "CSV tests passed\n"; }
+    try { parsing(); edits(); clipboard(); historyAndEncoding(); rectangularEdits(); search(); windows(); windowEdits(); std::cout << "CSV tests passed\n"; }
     catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
 }

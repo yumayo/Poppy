@@ -231,7 +231,42 @@ void byteSizes() {
     check(formatByteSize(3ull * 1024 * 1024 * 1024 + 512ull * 1024 * 1024) == L"3.50 GB", "Gigabytes use two decimals");
     check(formatByteSize(5ull << 40) == L"5.00 TB" && formatByteSize(2048ull << 40) == L"2048.00 TB", "Terabytes are the largest unit");
 }
+void splices() {
+    const std::string file = "header\nfirst\nsecond\nthird\n";
+    const auto read = [&](const std::string& bytes) { return [&bytes](uint64_t at, size_t count) { return at >= bytes.size() ? std::string{} : bytes.substr(static_cast<size_t>(at), count); }; };
+    const auto spliced = [&](const FileSplice& splice, const std::string& bytes, uint64_t size) {
+        std::string output;
+        copySplicedFile(splice, size, read(bytes), [&](std::string_view part) { output.append(part); });
+        return output;
+    };
+    const auto offset = file.find("first");
+    const FileSplice change{offset, file.size(), "first\nsecond\n", u8"最初\n\"二\",番目\n"};
+    check(spliced(change, file, file.size()) == "header\n" + change.replacement + "third\n", "A splice changed bytes outside its window");
+    check(spliced({0, file.size(), file, ""}, file, file.size()).empty() && spliced({file.size(), file.size(), "", "end\n"}, file, file.size()) == file + "end\n",
+        "A splice of the whole file or at its end failed");
+    // Copies span several blocks without losing bytes at their boundaries.
+    std::string large; for (int i = 0; large.size() < 3 * 1024 * 1024 + 17; ++i) large += std::to_string(i) + '\n';
+    const auto middle = large.size() / 2;
+    check(spliced({middle, large.size(), large.substr(middle, 5), "x"}, large, large.size()) == large.substr(0, middle) + "x" + large.substr(middle + 5), "A multi-block splice lost bytes");
+    const auto conflict = [&](const FileSplice& splice, const std::string& bytes, uint64_t size) {
+        std::string output;
+        try { copySplicedFile(splice, size, read(bytes), [&](std::string_view part) { output.append(part); }); }
+        catch (const std::exception& error) { return std::string(error.what()) == fileSpliceConflict; }
+        return false;
+    };
+    // The file changed size, the window's bytes changed, or bytes were
+    // appended after the size was observed.
+    check(conflict(change, file + "x", file.size() + 1), "A splice ignored a changed size");
+    auto changed = file; changed[offset] = 'F';
+    check(conflict(change, changed, changed.size()), "A splice overwrote changed window bytes");
+    check(conflict(change, file + "appended\n", file.size()), "A splice dropped bytes appended while copying");
+    check(conflict({file.size(), file.size(), "x", ""}, file, file.size()), "A splice past the end was accepted");
+    bool cancelled = false;
+    try { copySplicedFile({middle, large.size(), large.substr(middle, 5), "x"}, large.size(), read(large), [](std::string_view) {}, [] { return true; }); }
+    catch (const std::exception&) { cancelled = true; }
+    check(cancelled, "A cancelled splice went on copying");
+}
 int main() {
-    try { lineWindows(); boundedReads(); byteWindows(); lineNumbers(); byteSizes(); std::cout << "File tail tests passed\n"; }
+    try { lineWindows(); boundedReads(); byteWindows(); lineNumbers(); byteSizes(); splices(); std::cout << "File tail tests passed\n"; }
     catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
 }

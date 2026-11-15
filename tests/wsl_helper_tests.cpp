@@ -133,6 +133,8 @@ private:
     Message watchUsage_; size_t usageEvents_ = 0;
 };
 std::string version(const Result& result) { return field(result.metadata,"version"); }
+// A window's version names the file it was read from, never its content.
+bool windowVersion(const Result& result) { return version(result).rfind("window:", 0) == 0; }
 void watching(const std::string& executable) {
     using namespace std::chrono_literals;
     Fixture fixture; const auto project = fixture.root / "nested", git = project / ".git";
@@ -380,6 +382,50 @@ void files(const std::string& executable) {
     write(fixture.root/"notify","external update"); check(helper.event(),"inotify did not request a refresh");
     helper.eof();
 }
+void windowSaves(const std::string& executable) {
+    Fixture fixture;
+    const auto file = fixture.root / "large 日本語.csv";
+    std::string text;
+    for (int i = 0; text.size() < 3 * poppy::maxFileWindowBytes; ++i) text += std::to_string(i) + u8",値" + std::to_string(i) + "\r\n";
+    write(file, text); chmod(file.c_str(), 0640);
+    Helper helper(executable); helper.hello(); helper.call("connect", fixture.root);
+    auto window = helper.call("readFile", file, {{"readMode", "window"}, {"offset", std::to_string(text.size() / 2)}});
+    const auto offset = number(window.metadata, "offset"), end = number(window.metadata, "endOffset");
+    check(windowVersion(window) && offset > 0 && end < text.size() && window.bytes == text.substr(offset, end - offset), "A window to save was not read with its version");
+    const auto splice = [&](const Result& from, const std::string& original, const std::string& replacement, uint64_t at, bool ok = true) {
+        const auto body = original + replacement;
+        return helper.call("spliceFile", file, {{"version", version(from)}, {"offset", std::to_string(at)}, {"fileBytes", field(from.metadata, "fileBytes")},
+            {"originalSize", std::to_string(original.size())}, {"size", std::to_string(body.size())}}, &body, ok);
+    };
+    // Only the window's bytes change, also when the edit changes its length.
+    auto edited = window.bytes; const auto row = edited.find('\n') + 1; edited.insert(row, u8"新しい,\"引用,符\"\r\n");
+    const auto saved = splice(window, window.bytes, edited, offset);
+    auto expected = text.substr(0, offset) + edited + text.substr(end);
+    struct stat mode{}; stat(file.c_str(), &mode);
+    check(disk(file) == expected && windowVersion(saved) && version(saved) != version(window) && (mode.st_mode & 0777) == 0640, "A window save changed more than the window or lost the file mode");
+    for (const auto& entry : fs::directory_iterator(fixture.root)) check(entry.path().filename().string().find(".poppy-save-") != 0, "A window save leaked its temporary file");
+    // The saved version names the file just written. The old one is stale.
+    splice(window, window.bytes, edited, offset, false);
+    check(disk(file) == expected, "A stale window version overwrote the saved file");
+    Result next{}; next.metadata = saved.metadata; next.metadata["fileBytes"] = std::to_string(expected.size());
+    splice(next, window.bytes, edited, offset, false);
+    check(disk(file) == expected, "A window whose bytes changed was saved over");
+    const auto again = splice(next, edited, window.bytes, offset);
+    check(disk(file) == text, "A saved window could not be saved again with the returned version");
+    // External writes, including appends, are conflicts.
+    window = helper.call("readFile", file, {{"readMode", "window"}, {"offset", "0"}});
+    { std::ofstream stream(file, std::ios::binary | std::ios::app); stream << "appended\n"; }
+    splice(window, window.bytes, "x" + window.bytes.substr(1), number(window.metadata, "offset"), false);
+    check(disk(file) == text + "appended\n", "A window save lost an external append");
+    window = helper.call("readFile", file, {{"readMode", "window"}, {"offset", "0"}});
+    const auto bytes = window.bytes;
+    helper.call("spliceFile", file, {{"version", version(window)}, {"offset", "0"}, {"fileBytes", field(window.metadata, "fileBytes")}, {"originalSize", std::to_string(bytes.size() + 1)}, {"size", std::to_string(bytes.size())}}, &bytes, false);
+    // A window's version never saves a whole file.
+    const std::string whole = "whole";
+    helper.call("saveFile", file, {{"version", version(window)}, {"size", std::to_string(whole.size())}}, &whole, false);
+    check(disk(file) == text + "appended\n", "A window version replaced the whole file");
+    helper.eof();
+}
 void largeFiles(const std::string& executable) {
     Fixture fixture;
     const auto file = fixture.root / "large 日本語.log";
@@ -399,9 +445,9 @@ void largeFiles(const std::string& executable) {
     // end asks for the last window instead.
     auto snapshot = helper.call("readFile", file, {{"readMode", "preview"}, {"offset", "0"}});
     check(snapshot.bytes == "log\n" && number(snapshot.metadata, "offset") == 0 && number(snapshot.metadata, "endOffset") == 4 &&
-        field(snapshot.metadata, "tail") == "1" && version(snapshot).empty(), "A multi-GB preview did not open its beginning read only");
+        field(snapshot.metadata, "tail") == "1" && windowVersion(snapshot), "A multi-GB preview did not open its beginning as a window");
     snapshot = helper.call("readFile", file, {{"readMode", "preview"}, {"offset", "18446744073709551615"}});
-    check(snapshot.bytes == entries(1, 140) && field(snapshot.metadata, "tail") == "1" && version(snapshot).empty(), "A multi-GB preview did not read its end read only");
+    check(snapshot.bytes == entries(1, 140) && field(snapshot.metadata, "tail") == "1" && windowVersion(snapshot), "A multi-GB preview did not read its end as a window");
     check(number(snapshot.metadata, "fileBytes") == fs::file_size(file) && number(snapshot.metadata, "offset") > 0xffffffffull && snapshot.bytes.size() <= poppy::maxFileWindowBytes, "Sparse log metadata overflowed or exceeded the receive bound");
     check(number(snapshot.metadata, "endOffset") == fs::file_size(file), "A preview of the end did not identify EOF");
     helper.call("readFile", file, {{"readMode", "preview"}}, nullptr, false);
@@ -417,7 +463,7 @@ void largeFiles(const std::string& executable) {
     }
     auto range = helper.call("readFile", file, {{"readMode", "window"}, {"offset", std::to_string(middle + 1)}});
     check(range.bytes == marker.substr(1) && number(range.metadata, "offset") == middle + 1 && number(range.metadata, "endOffset") == middle + marker.size(), "An arbitrary multi-GB range did not read its requested lines");
-    check(field(range.metadata, "tail") == "1" && version(range).empty() && range.bytes.size() <= poppy::maxFileWindowBytes, "An arbitrary file range became editable or unbounded");
+    check(field(range.metadata, "tail") == "1" && windowVersion(range) && range.bytes.size() <= poppy::maxFileWindowBytes, "An arbitrary file range lost its window version or became unbounded");
     range = helper.call("readFile", file, {{"readMode", "window"}, {"offset", "0"}});
     check(range.bytes == "log\n" && number(range.metadata, "offset") == 0, "A start jump did not read the beginning of a sparse log");
     range = helper.call("readFile", file, {{"readMode", "window"}, {"offset", "18446744073709551615"}});
@@ -439,7 +485,7 @@ void largeFiles(const std::string& executable) {
     snapshot = helper.call("readFile", file, {{"readMode", "tail"}});
     check(snapshot.bytes == "new log\n" && field(snapshot.metadata, "tail") == "1" && number(snapshot.metadata, "offset") == 0, "Log rotation did not retain read-only tail mode");
     range = helper.call("readFile", file, {{"readMode", "window"}, {"offset", std::to_string(middle)}});
-    check(range.bytes == "new log\n" && number(range.metadata, "offset") == 0 && number(range.metadata, "endOffset") == 8 && version(range).empty(), "A byte request from before rotation did not clamp to the replacement file");
+    check(range.bytes == "new log\n" && number(range.metadata, "offset") == 0 && number(range.metadata, "endOffset") == 8 && windowVersion(range), "A byte request from before rotation did not clamp to the replacement file");
     append(entries(0, 140));
     check(helper.call("readFile", file, {{"readMode", "tail"}}).bytes == entries(40, 140), "A truncated tail did not resume growing");
     for (const auto& offset : {"0", "18446744073709551615"}) {
@@ -852,6 +898,6 @@ void terminals(const std::string& executable) {
 }
 int main(int argc,char** argv) {
     signal(SIGPIPE,SIG_IGN);
-    try { check(argc == 2,"Expected helper executable argument"); const std::string executable = argv[1]; installation(executable); watching(executable); missingWatchDirectories(executable); watchFailureDetails(executable); watchLimitIdle(executable); creation(executable); batchedListings(executable); files(executable); largeFiles(executable); moving(executable); copying(executable); explorerHistory(executable); repositories(executable); protocolFailures(executable); gitAndCancellation(executable); contentSearch(executable); terminals(executable); std::cout << "WSL helper integration tests passed\n"; }
+    try { check(argc == 2,"Expected helper executable argument"); const std::string executable = argv[1]; installation(executable); watching(executable); missingWatchDirectories(executable); watchFailureDetails(executable); watchLimitIdle(executable); creation(executable); batchedListings(executable); files(executable); largeFiles(executable); windowSaves(executable); moving(executable); copying(executable); explorerHistory(executable); repositories(executable); protocolFailures(executable); gitAndCancellation(executable); contentSearch(executable); terminals(executable); std::cout << "WSL helper integration tests passed\n"; }
     catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
 }

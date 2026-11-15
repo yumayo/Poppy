@@ -3105,6 +3105,92 @@ void largeCsvTable() {
     }
     (void)tails;
 }
+void largeCsvEditing() {
+    const auto instance = GetModuleHandleW(nullptr);
+    const auto parent = CreateWindowExW(0, L"STATIC", L"Large CSV editing test", WS_POPUP | WS_CLIPCHILDREN,
+        0, 0, 800, 480, nullptr, nullptr, instance, nullptr);
+    check(parent != nullptr, "Could not create the large CSV editing test window");
+    struct WindowOwner { HWND value; ~WindowOwner() { DestroyWindow(value); } } owner{parent};
+    Viewer viewer; viewer.create(parent, instance); MoveWindow(viewer.window(), 0, 0, 800, 480, FALSE);
+    const auto window = viewer.window();
+    BYTE originalKeys[256]{}; GetKeyboardState(originalKeys);
+    struct Keys { BYTE* value; ~Keys() { SetKeyboardState(value); } } keys{originalKeys};
+    const auto key = [&](WPARAM code, bool ctrl = false, bool shift = false) {
+        BYTE state[256]{}; state[VK_CONTROL] = ctrl ? 0x80 : 0; state[VK_SHIFT] = shift ? 0x80 : 0;
+        SetKeyboardState(state); SendMessageW(window, WM_KEYDOWN, code, 0); SetKeyboardState(originalKeys);
+    };
+    constexpr uint64_t size = 3ull * 1024 * 1024 * 1024;
+    const auto record = [](int row) { char text[32]; std::snprintf(text, sizeof(text), "%06d,\"vv\nx\",1\n", row); return std::string(text); };
+    // A window as the app reads it: the buffer owns the document.
+    const auto load = [&](int first, int count, uint64_t fileBytes = 3ull * 1024 * 1024 * 1024) {
+        auto buffer = std::make_shared<EditBuffer>(); auto& document = buffer->document;
+        document.tail = true; document.fileBytes = fileBytes; document.tailOffset = static_cast<uint64_t>(first) * 16;
+        for (int row = first; row < first + count; ++row) document.text += record(row);
+        document.tailEndOffset = document.tailOffset + document.text.size(); indexDocument(document);
+        check(buffer->initializeWindow(document.text), "A large CSV window could not be edited");
+        buffer->fileVersion = "window:test"; return buffer;
+    };
+    const auto show = [&](const std::shared_ptr<EditBuffer>& buffer, bool preserve = false) {
+        viewer.showTail(std::shared_ptr<const Document>(buffer, &buffer->document), L"huge.csv", preserve, buffer);
+    };
+    std::vector<uint64_t> requests; int saves = 0;
+    viewer.fileWindowRequested = [&](uint64_t offset) { requests.push_back(offset); };
+    viewer.tailRequested = [] {};
+    viewer.save = [&] { ++saves; };
+    const int middle = static_cast<int>(size / 16 / 2);
+    auto buffer = load(middle, 200);
+    show(buffer);
+    check(viewer.csvTable() && viewer.buffer() == buffer && viewer.textStatus().find(L"LOADED ROWS EDITABLE") != std::wstring::npos, "A large CSV window did not open editable");
+    // Typing replaces the selected cell, and the edited window stays loaded.
+    SendMessageW(window, WM_CHAR, 'Z', 0); key(VK_RETURN);
+    check(buffer->dirty() && buffer->document.text.compare(0, 14, "Z,\"vv\nx\",1\n00") == 0, "A large CSV cell could not be edited");
+    check(viewer.tailPaused() && viewer.windowLocked() && viewer.textStatus().find(L"UNSAVED") != std::wstring::npos, "An edited large CSV window did not explain that it must be saved");
+    SendMessageW(window, WM_VSCROLL, SB_BOTTOM, 0); key(VK_END, true); key(VK_HOME, true);
+    for (int i = 0; i < 200; ++i) SendMessageW(window, WM_MOUSEWHEEL, MAKEWPARAM(0, static_cast<WORD>(-WHEEL_DELTA)), 0);
+    check(requests.empty() && viewer.buffer() == buffer, "An edited large CSV window loaded other rows over its edits");
+    key('S', true);
+    check(saves == 1, "Ctrl+S did not save an edited large CSV window");
+    // Once saved, the window ends where the saved bytes end and moves on.
+    const auto end = buffer->document.tailEndOffset;
+    buffer->savedWindow(buffer->encoded(), buffer->document.text); viewer.refreshWindow();
+    check(!buffer->dirty() && buffer->document.tailEndOffset == end - 5 && buffer->document.fileBytes == size - 5 && !viewer.windowLocked(), "A saved large CSV window kept its old end");
+    key(VK_END, true);
+    check(requests.size() == 1 && requests.back() == std::numeric_limits<uint64_t>::max(), "A saved large CSV window did not load other rows");
+    viewer.cancelFileWindowRequest();
+    // Undo after saving edits the window again.
+    key('Z', true);
+    check(buffer->dirty() && buffer->document.text.compare(0, 16, record(middle)) == 0, "Undo after saving a large CSV window failed");
+    key('Y', true); check(!buffer->dirty(), "Redo did not return to the saved window");
+
+    // A selected cell outside the window is not loaded and cannot be edited.
+    auto away = viewer.sessionState();
+    check(away.file.has_value(), "A clean large CSV window did not keep its cells by file byte");
+    away.file->anchor = away.file->caret = away.file->record = buffer->document.tailEndOffset + 32; viewer.restore(away);
+    SendMessageW(window, WM_CHAR, 'q', 0); key(VK_DELETE); key(VK_F2);
+    check(!buffer->dirty(), "A cell outside the large CSV window was edited");
+    // Pasting rows past the window would insert them before the file's next rows.
+    auto last = viewer.state(); last.anchor = last.caret = 199 * 16 + 7; viewer.restore(last);
+    check(copyText(window, L"a\r\nb"), "Could not prepare the large CSV paste test");
+    key('V', true);
+    check(!buffer->dirty(), "Rows pasted past a large CSV window were inserted mid-file");
+    // At the end of the file the same paste adds rows.
+    buffer = load(middle, 200, static_cast<uint64_t>(middle + 200) * 16);
+    viewer.show(std::make_shared<Document>(), L"ordinary.txt"); show(buffer);
+    last = viewer.state(); last.anchor = last.caret = 199 * 16 + 7; viewer.restore(last);
+    key('V', true);
+    check(buffer->dirty() && buffer->document.text.size() > 200 * 16 && viewer.textStatus().find(L"201 rows loaded") != std::wstring::npos, "Rows could not be pasted at the end of a large CSV");
+    key('Z', true); check(!buffer->dirty(), "Undo did not remove rows pasted at the end of a large CSV");
+
+    // Source shares the window's text and the same lock.
+    viewer.setCsvTable(false);
+    SendMessageW(window, WM_CHAR, '#', 0);
+    for (int i = 0; i < 200; ++i) SendMessageW(window, WM_MOUSEWHEEL, MAKEWPARAM(0, static_cast<WORD>(-WHEEL_DELTA)), 0);
+    check(buffer->dirty() && requests.size() == 1, "The Source of an edited large CSV window loaded other rows");
+    viewer.setCsvTable(true);
+    check(viewer.csvTable() && viewer.buffer() == buffer, "Switching back to Table lost the edited large CSV window");
+    viewer.show(std::make_shared<Document>(), L"ordinary.txt");
+    check(!viewer.csvTable() && !viewer.tailPreview() && !viewer.buffer(), "An edited large CSV window leaked into another file");
+}
 void largeFileByteScrolling() {
     const auto instance = GetModuleHandleW(nullptr);
     const auto parent = CreateWindowExW(0, L"STATIC", L"Large file byte scroll test", WS_POPUP | WS_CLIPCHILDREN,
@@ -3804,7 +3890,7 @@ int main(int argc, char** argv) {
             editorBodyFileDrops(); continuousDraggedTab(); terminalDropPreviewClipping();
             shutdownProgress();
             persistentErrorPopup();
-            editorBottomPadding(); editorTailFollowing(); largeFileTailPreview(); largeFileByteScrolling(); largeCsvTable();
+            editorBottomPadding(); editorTailFollowing(); largeFileTailPreview(); largeFileByteScrolling(); largeCsvTable(); largeCsvEditing();
             csvTables(); htmlPreviewSwitching();
             terminalAsyncStartup(); terminalProcessShutdown(); terminalImeOutput();
             statusBarLimits(); treeMultipleSelection(); commitMessagePopup(); inlineTreeInput(); inlineTreeCreation(); gitCommitInput(); cellPositions(); colorsAndClipping(); imagePreviews(); fractionalMarkers(); smoothIcons(); windowTargets(); editableDiff(); editorCaret(); delayedLoadingMessages(); imeCellRendering(); imeTerminalInsertion(); imeUiRendering(); imePositions(); editorWordSelection(); editorColumnSelection(); editorWordMovement(); editorWordDeletion(); editorLineShortcuts(); editorWrapping(); diffWrapping(); documentFind(); horizontalWheelScrolling(); continuousViewerScrolling(); selectionAutoScrolling(); terminalGitBashSocketEnvironment(); terminalSelectionAutoScrolling(); themedScrollbars(); quickOpenStability();

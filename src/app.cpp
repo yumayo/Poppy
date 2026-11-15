@@ -189,9 +189,17 @@ std::shared_ptr<FileResult> readDocument(ProjectProvider& provider, const Resour
     document->language = path.filename() == L"CMakeLists.txt" ? Language::Config : languageFor(utf8(path.extension().native()));
     if (file.tail) {
         document->tail = true; document->tailOffset = file.offset; document->tailEndOffset = file.endOffset; document->fileBytes = file.fileBytes; document->tailChunkLines = file.chunkLines;
-        indexDocument(*document); result->document = std::move(document); return result;
+        indexDocument(*document);
+        // A large CSV's window can be edited and saved in place of its bytes.
+        if (isCsvExtension(path.extension().native()) && !file.version.empty() && buffer->initializeWindow(std::move(bytes))) {
+            buffer->fileVersion = std::move(file.version); result->buffer = buffer;
+        }
+        result->document = std::move(document); return result;
     }
     indexDocument(*document); buffer->initialize(std::move(bytes)); buffer->fileVersion = std::move(file.version); result->buffer = std::move(buffer); result->document = std::move(document); return result;
+}
+std::wstring largeFileStatus(const FileResult& result) {
+    return L"Large file · " + formatByteSize(result.document->fileBytes) + (result.buffer ? L" · Ctrl+S: save the loaded rows" : L" · READ ONLY");
 }
 std::shared_ptr<Document> readWorkingBase(ProjectProvider& provider, const ResourceId& root, const std::string& relative, Language language, const std::atomic<bool>* cancelled) {
     const auto entries = provider.git({L"git.exe", L"--literal-pathspecs", L"--no-optional-locks", L"ls-files", L"--stage", L"-z", L"--", wide(relative)}, root, cancelled);
@@ -391,6 +399,9 @@ private:
     void saveTab();
     std::shared_ptr<EditBuffer> shareBuffer(const ResourceId& path, std::shared_ptr<EditBuffer> loaded = {});
     bool saveFile(size_t index, bool wait = false);
+    bool saveWindow(const std::shared_ptr<EditBuffer>& buffer, const ResourceId& path, bool wait);
+    // Drops a large file's line count, e.g. after saving moved its lines.
+    void recountFileLines(const ResourceId& path, uint64_t fileBytes);
     bool confirmTab(size_t index);
     void selectTab(size_t index);
     void closeTab(size_t index);
@@ -500,7 +511,8 @@ private:
     QuickOpen quickOpen_;
     QuickOpen comparePicker_;
     SearchPane searchPane_;
-    std::unique_ptr<Worker> worker_, gitWorker_, diffWorker_, lineWorker_;
+    std::unique_ptr<Worker> worker_, gitWorker_, diffWorker_, lineWorker_, spliceWorker_;
+    uint64_t spliceSerial_ = 0;
     struct LineCount {
         ResourceId path;
         std::shared_ptr<const FileLineIndex> index;
@@ -563,6 +575,9 @@ void ProjectRuntime::Impl::create() {
     diffWorker_ = std::make_unique<Worker>(window_);
     // Counting a multi-GB file must not delay opening or scrolling files.
     lineWorker_ = std::make_unique<Worker>(window_);
+    // Saving a large file's window copies the whole file, which must not
+    // hold up opening, scrolling or saving other files.
+    spliceWorker_ = std::make_unique<Worker>(window_);
     explorer_.create(window_, instance_, L"Files", 1); tree_ = explorer_.window();
     changes_.create(window_, instance_, L"Source Control", 4); gitTree_ = changes_.window();
     gitCommit_.create(window_, instance_);
@@ -809,7 +824,8 @@ void ProjectRuntime::Impl::create() {
     searchPane_.changed = [this] { if (owner_ && owner_->changed) owner_->changed(); };
     searchPane_.overlays = [this] {
         std::vector<SearchOverlay> result; std::set<std::string> seen;
-        for (const auto& tab : tabs_) if (tab.buffer && tab.buffer->dirty() && root_.contains(tab.path) && seen.insert(tab.path.key()).second)
+        // A large file's window is not the file's text; search the file itself.
+        for (const auto& tab : tabs_) if (tab.buffer && !tab.buffer->window && tab.buffer->dirty() && root_.contains(tab.path) && seen.insert(tab.path.key()).second)
             result.push_back({tab.path.lexically_relative(root_).generic_u8string(), tab.buffer});
         return result;
     };
@@ -2984,14 +3000,18 @@ void ProjectRuntime::Impl::saveTab() {
     for (auto& tab : tabs_) if (tab.navigation) rememberEditorTab(tab);
 }
 std::shared_ptr<EditBuffer> ProjectRuntime::Impl::shareBuffer(const ResourceId& path, std::shared_ptr<EditBuffer> loaded) {
+    // Each pane reads its own window of a large file, and a window's buffer
+    // stays with the tab that edits it, so only whole-file buffers are shared.
     std::shared_ptr<EditBuffer> buffer;
-    for (const auto& tab : tabs_) if (tab.path == path && tab.buffer) { buffer = tab.buffer; break; }
+    for (const auto& tab : tabs_) if (tab.path == path && tab.buffer && !tab.buffer->window) { buffer = tab.buffer; break; }
     if (!buffer) buffer = std::move(loaded);
     else if (loaded && !buffer->dirty() && !buffer->saving && (buffer->baseline != loaded->baseline || buffer->fileVersion != loaded->fileVersion)) {
         *buffer = std::move(*loaded);
         for (auto& view : viewers_) if (view.buffer() == buffer) view.refreshBuffer(true);
     }
-    if (buffer) for (auto& tab : tabs_) if (tab.path == path && tab.comparePath.empty() && !tab.allChanges && (tab.diffKind == GitDiffKind::Automatic || tab.diffKind == GitDiffKind::Changes)) tab.buffer = buffer;
+    // Never drop a window's unsaved edits for the shared buffer.
+    if (buffer) for (auto& tab : tabs_) if (tab.path == path && tab.comparePath.empty() && !tab.allChanges && (tab.diffKind == GitDiffKind::Automatic || tab.diffKind == GitDiffKind::Changes) &&
+        !(tab.buffer && tab.buffer->window && (tab.buffer->dirty() || tab.buffer->saving))) tab.buffer = buffer;
     keepModifiedEditorTabs(tabs_);
     return buffer;
 }
@@ -3004,10 +3024,11 @@ bool ProjectRuntime::Impl::saveFile(size_t index, bool wait) {
     saveTab(); if (index >= tabs_.size()) return true;
     const auto buffer = tabs_[index].buffer; const auto path = tabs_[index].path;
     if (!buffer) return true;
-    if (wait && buffer->saving) { worker_->drain(); worker_->dispatch(); }
+    if (wait && buffer->saving) { (buffer->window ? spliceWorker_ : worker_)->drain(); (buffer->window ? spliceWorker_ : worker_)->dispatch(); }
     if (!buffer->dirty()) return true;
     if (buffer->saving) return false;
     if (path.wsl() && (!connected_ || provider_->state() != ConnectionState::Ready)) { status(L"Reconnect WSL before saving. Your edits have been kept."); return false; }
+    if (buffer->window) return saveWindow(buffer, path, wait);
     const auto bytes = buffer->encoded(), text = buffer->document.text, baseline = buffer->baseline;
     buffer->saving = true;
     worker_->submit(L"save:" + pathKey(path), [this, path, buffer, bytes, text, baseline, version = buffer->fileVersion, provider = fileProvider(path)] {
@@ -3023,11 +3044,47 @@ bool ProjectRuntime::Impl::saveFile(size_t index, bool wait) {
     if (wait) { worker_->drain(); worker_->dispatch(); return !buffer->dirty(); }
     return true;
 }
+bool ProjectRuntime::Impl::saveWindow(const std::shared_ptr<EditBuffer>& buffer, const ResourceId& path, bool wait) {
+    const auto bytes = buffer->encoded(), text = buffer->document.text;
+    const auto splice = buffer->windowSplice(bytes);
+    buffer->saving = true;
+    status(L"Saving " + path.filename().native() + L" · copying " + formatByteSize(splice.fileBytes) + L"…");
+    for (auto& view : viewers_) if (view.buffer() == buffer && view.statusChanged) view.statusChanged();
+    // Jobs with one key replace each other while queued. Two windows of one
+    // file saved together each run; the later one reports the conflict.
+    spliceWorker_->submit(L"splice:" + std::to_wstring(++spliceSerial_), [this, path, buffer, bytes, text, splice, version = buffer->fileVersion, provider = fileProvider(path)] {
+        const auto result = provider->spliceFile(path, splice, version);
+        spliceWorker_->complete([this, path, buffer, bytes, text, error = result.error, version = result.version] {
+            buffer->saving = false;
+            if (error.empty()) {
+                buffer->savedWindow(bytes, text); buffer->fileVersion = version;
+                // The saved bytes moved every line after the window.
+                recountFileLines(path, buffer->document.fileBytes);
+                status(L"Saved " + path.filename().native()); refreshGit();
+            } else { status(L"Save failed: " + path.filename().native()); MessageBoxW(window_, (path.native() + L"\n\n" + error).c_str(), L"Poppy — Save", MB_OK | MB_ICONWARNING); }
+            updateTabs(false);
+            for (auto& view : viewers_) {
+                if (view.buffer() == buffer) view.refreshWindow();
+                InvalidateRect(view.window(), nullptr, FALSE);
+            }
+        });
+    });
+    if (wait) { spliceWorker_->drain(); spliceWorker_->dispatch(); return !buffer->dirty(); }
+    return true;
+}
+void ProjectRuntime::Impl::recountFileLines(const ResourceId& path, uint64_t fileBytes) {
+    const auto found = lineCounts_.find(pathKey(path));
+    if (found != lineCounts_.end()) {
+        if (found->second.cancel) *found->second.cancel = true;
+        lineCounts_.erase(found);
+    }
+    countFileLines(path, fileBytes);
+}
 bool ProjectRuntime::Impl::confirmTab(size_t index) {
     saveTab(); if (index >= tabs_.size()) return true;
     const auto buffer = tabs_[index].buffer;
     if (!buffer) return true;
-    if (buffer->saving) { worker_->drain(); worker_->dispatch(); }
+    if (buffer->saving) { (buffer->window ? spliceWorker_ : worker_)->drain(); (buffer->window ? spliceWorker_ : worker_)->dispatch(); }
     if (!buffer->dirty()) return true;
     const auto answer = MessageBoxW(window_, (L"Save changes to " + tabs_[index].path.filename().native() + L"?").c_str(), L"Poppy", MB_YESNOCANCEL | MB_ICONQUESTION);
     return answer == IDNO || (answer == IDYES && saveFile(index, true));
@@ -3304,6 +3361,8 @@ void ProjectRuntime::Impl::loadFileWindow(int group, uint64_t offset) {
             const auto index = groupTab(group);
             auto& view = viewers_[group];
             if (index >= tabs_.size() || tabs_[index].path != path || !view.tailPreview()) { view.cancelFileWindowRequest(); return; }
+            // Edits made while the read was in flight stay in this window.
+            if (view.buffer() && (view.buffer()->dirty() || view.buffer()->saving)) { view.cancelFileWindowRequest(); return; }
             const auto buffer = shareBuffer(path);
             if (buffer && (buffer->dirty() || buffer->saving)) {
                 view.cancelFileWindowRequest(); view.edit(buffer, path);
@@ -3313,9 +3372,9 @@ void ProjectRuntime::Impl::loadFileWindow(int group, uint64_t offset) {
                 view.cancelFileWindowRequest(); status(L"Large file read failed: " + result->error); return;
             }
             tabs_[index].buffer.reset(); tabs_[index].searchTarget.reset();
-            view.showFileWindow(result->document, path, offset);
+            view.showFileWindow(result->document, path, offset, result->buffer);
             countFileLines(path, result->document->fileBytes);
-            status(L"Large file · " + formatByteSize(result->document->fileBytes) + L" · READ ONLY");
+            status(largeFileStatus(*result));
             // Watch events may have arrived while navigation held the old
             // snapshot. Catch up once at EOF even if the writer has stopped.
             if (!view.tailPaused()) loadTab(true, group);
@@ -3409,7 +3468,7 @@ void ProjectRuntime::Impl::loadTab(bool preserve, int group, bool revealExplorer
         const auto comparison = tab.comparePath;
         if ((path.wsl() || comparison.wsl()) && !connected_) { viewers_[group].message(L"WSL disconnected. Press F5 to reconnect.", path); return; }
         const auto snapshot = [this](const ResourceId& file) -> std::shared_ptr<const Document> {
-            for (const auto& tab : tabs_) if (tab.path == file && tab.buffer && (tab.buffer->dirty() || tab.buffer->saving))
+            for (const auto& tab : tabs_) if (tab.path == file && tab.buffer && !tab.buffer->window && (tab.buffer->dirty() || tab.buffer->saving))
                 return std::make_shared<Document>(tab.buffer->document);
             return {};
         };
@@ -3476,10 +3535,10 @@ void ProjectRuntime::Impl::loadTab(bool preserve, int group, bool revealExplorer
                     }
                     auto& tab = tabs_[groupTab(group)];
                     tab.buffer.reset(); tab.searchTarget.reset();
-                    viewers_[group].showTail(result->document, path, preserve);
+                    viewers_[group].showTail(result->document, path, preserve, result->buffer);
                     if (!preserve && state.file) viewers_[group].restore(state);
                     countFileLines(path, result->document->fileBytes);
-                    status(L"Large file · " + formatByteSize(result->document->fileBytes) + L" · READ ONLY");
+                    status(largeFileStatus(*result));
                 } else if (result->document) {
                     const auto buffer = shareBuffer(path, result->buffer);
                     viewers_[group].edit(buffer, path, preserve); if (!preserve) viewers_[group].restore(state);
@@ -3659,7 +3718,7 @@ void ProjectRuntime::Impl::loadTab(bool preserve, int group, bool revealExplorer
 void ProjectRuntime::Impl::refreshEditorGit(int group) {
     const auto request = ++editorGitSerial_[group];
     const auto index = groupTab(group);
-    if (index >= tabs_.size() || !tabs_[index].terminalId.empty() || tabs_[index].diff || !viewers_[group].buffer()) return;
+    if (index >= tabs_.size() || !tabs_[index].terminalId.empty() || tabs_[index].diff || !viewers_[group].buffer() || viewers_[group].buffer()->window) return;
     const auto path = tabs_[index].path;
     const auto repo = git_ ? git_->repository(path) : nullptr;
     if (!repo || !repo->error.empty() || (root_.wsl() && !connected_)) { viewers_[group].setGitBase({}); return; }
@@ -3899,7 +3958,7 @@ LRESULT ProjectRuntime::Impl::handle(UINT m, WPARAM a, LPARAM b) {
     case WM_SIZE: layout(); return 0;
     case WM_GETMINMAXINFO: { auto info = reinterpret_cast<MINMAXINFO*>(b); info->ptMinTrackSize = {MulDiv(720, dpi_, 96), MulDiv(480, dpi_, 96)}; return 0; }
     case WM_DPICHANGED: { dpi(HIWORD(a)); const auto r = reinterpret_cast<RECT*>(b); SetWindowPos(window_, nullptr, r->left, r->top, r->right - r->left, r->bottom - r->top, SWP_NOZORDER | SWP_NOACTIVATE); return 0; }
-    case wmWork: worker_->dispatch(); gitWorker_->dispatch(); diffWorker_->dispatch(); lineWorker_->dispatch(); return 0;
+    case wmWork: worker_->dispatch(); gitWorker_->dispatch(); diffWorker_->dispatch(); lineWorker_->dispatch(); spliceWorker_->dispatch(); return 0;
     case WM_TIMER: if (a == timerId) pollWatch(); else if (a == tabDragTimerId) scrollTabDrag(); return 0;
     case WM_APP + 15:
         if (!restoringProject_) { saveTab(); const bool changed = syncTerminalTabs(); if (changed) pruneGroups(); layout(false); if (changed) loadGroups(); }
@@ -4135,6 +4194,10 @@ void ProjectRuntime::shutdown(ShutdownProgress* progress, bool preserveTerminals
     }
     if (impl_->lineWorker_) {
         if (progress) progress->wait([this] { impl_->lineWorker_->stop(); }); else impl_->lineWorker_->stop();
+    }
+    if (impl_->spliceWorker_) {
+        if (progress) progress->detail(L"Finishing large file saves…");
+        if (progress) progress->wait([this] { impl_->spliceWorker_->drain(); impl_->spliceWorker_->stop(); }); else { impl_->spliceWorker_->drain(); impl_->spliceWorker_->stop(); }
     }
     if (progress) progress->detail(L"Cleaning up file operation history…");
     impl_->stopExplorerHistory(progress);

@@ -3,6 +3,7 @@
 #include <functional>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace poppy {
@@ -54,6 +55,19 @@ struct FileLineIndex {
 // nothing when the scan does not continue previous (e.g. a changed BOM).
 std::optional<FileLineIndex> mergeFileLines(const FileLineIndex* previous, const FileLineScan& scan);
 LineFormat lineFormat(const std::string& encoding);
+// An edited window of a large file is saved by copying the file around it:
+// [0, offset), replacement, then the bytes after original. The copy refuses
+// to start unless the file still has fileBytes and holds original at offset.
+struct FileSplice {
+    uint64_t offset = 0, fileBytes = 0;
+    std::string original, replacement;
+};
+constexpr const char* fileSpliceConflict = "The file changed outside Poppy. Your edits have been kept. Copy them, then reopen the file before saving again.";
+using WriteFileBytes = std::function<void(std::string_view)>;
+// currentBytes is the size the caller observed on the file it reads. Throws
+// fileSpliceConflict when the file no longer matches, and stops when
+// cancelled returns true.
+void copySplicedFile(const FileSplice& splice, uint64_t currentBytes, const ReadFileRange& read, const WriteFileBytes& write, const std::function<bool()>& cancelled = {});
 // Binary units with two decimals, e.g. "512 B", "1.50 KB", "4.00 GB".
 std::wstring formatByteSize(uint64_t bytes);
 }

@@ -27,6 +27,29 @@ std::wstring removeBackup(const fs::path& path) {
     if (attributes & FILE_ATTRIBUTE_READONLY) SetFileAttributesW(path.c_str(), attributes & ~FILE_ATTRIBUTE_READONLY);
     return (attributes & FILE_ATTRIBUTE_DIRECTORY ? RemoveDirectoryW(path.c_str()) : DeleteFileW(path.c_str())) ? std::wstring{} : winError();
 }
+ReadFileRange handleRange(HANDLE file) {
+    return [file](uint64_t at, size_t count) {
+        LARGE_INTEGER position{}; position.QuadPart = static_cast<LONGLONG>(at);
+        if (!SetFilePointerEx(file, position, nullptr, FILE_BEGIN)) throw std::runtime_error(utf8(winError()));
+        std::string bytes(count, 0); size_t offset = 0;
+        while (offset < count) {
+            DWORD received = 0;
+            if (!ReadFile(file, bytes.data() + offset, static_cast<DWORD>(std::min<size_t>(count - offset, 1u << 30)), &received, nullptr)) throw std::runtime_error(utf8(winError()));
+            if (!received) break;
+            offset += received;
+        }
+        bytes.resize(offset); return bytes;
+    };
+}
+// Names one file by its volume and index, and one state of it by its size
+// and last write time. Empty when the file cannot be inspected.
+std::string windowVersion(HANDLE file) {
+    BY_HANDLE_FILE_INFORMATION info{};
+    if (!GetFileInformationByHandle(file, &info)) return {};
+    const auto pair = [](DWORD high, DWORD low) { return std::to_string((static_cast<uint64_t>(high) << 32) | low); };
+    return "window:" + std::to_string(info.dwVolumeSerialNumber) + ':' + pair(info.nFileIndexHigh, info.nFileIndexLow) + ':' +
+        pair(info.nFileSizeHigh, info.nFileSizeLow) + ':' + pair(info.ftLastWriteTime.dwHighDateTime, info.ftLastWriteTime.dwLowDateTime);
+}
 class WindowsProvider final : public ProjectProvider {
 public:
     ResourceId connect(const ResourceId& root) override { return root; }
@@ -55,18 +78,10 @@ public:
         LARGE_INTEGER size{}; if (!GetFileSizeEx(file.value, &size)) { result.error = winError(); return result; }
         if (size.QuadPart >= 0 && (mode == FileReadMode::Tail || mode == FileReadMode::Window || (mode == FileReadMode::Preview && size.QuadPart > static_cast<LONGLONG>(maxFileBytes)))) {
             try {
-                const ReadFileRange range = [&](uint64_t at, size_t count) {
-                    LARGE_INTEGER position{}; position.QuadPart = static_cast<LONGLONG>(at);
-                    if (!SetFilePointerEx(file.value, position, nullptr, FILE_BEGIN)) throw std::runtime_error(utf8(winError()));
-                    std::string bytes(count, 0); size_t offset = 0;
-                    while (offset < count) {
-                        DWORD received = 0;
-                        if (!ReadFile(file.value, bytes.data() + offset, static_cast<DWORD>(count - offset), &received, nullptr)) throw std::runtime_error(utf8(winError()));
-                        if (!received) break;
-                        offset += received;
-                    }
-                    bytes.resize(offset); return bytes;
-                };
+                // The window's file and its size and time, which a save of
+                // the edited window must still find.
+                result.version = windowVersion(file.value);
+                const auto range = handleRange(file.value);
                 auto tail = mode == FileReadMode::Tail ? readFileTail(static_cast<uint64_t>(size.QuadPart), range) : readFileWindow(static_cast<uint64_t>(size.QuadPart), requestedOffset, range);
                 result.bytes = std::move(tail.bytes); result.tail = true; result.offset = tail.offset; result.fileBytes = tail.fileBytes; result.endOffset = tail.endOffset; result.chunkLines = tail.chunkLines;
             } catch (const std::exception& error) { result.error = wide(error.what()); }
@@ -83,18 +98,7 @@ public:
         if (!file) { result.error = winError(); return result; }
         LARGE_INTEGER size{}; if (!GetFileSizeEx(file.value, &size) || size.QuadPart < 0) { result.error = winError(); return result; }
         try {
-            result.scan = scanFileLines(static_cast<uint64_t>(size.QuadPart), from, [&](uint64_t at, size_t count) {
-                LARGE_INTEGER position{}; position.QuadPart = static_cast<LONGLONG>(at);
-                if (!SetFilePointerEx(file.value, position, nullptr, FILE_BEGIN)) throw std::runtime_error(utf8(winError()));
-                std::string bytes(count, 0); size_t offset = 0;
-                while (offset < count) {
-                    DWORD received = 0;
-                    if (!ReadFile(file.value, bytes.data() + offset, static_cast<DWORD>(count - offset), &received, nullptr)) throw std::runtime_error(utf8(winError()));
-                    if (!received) break;
-                    offset += received;
-                }
-                bytes.resize(offset); return bytes;
-            }, cancelled);
+            result.scan = scanFileLines(static_cast<uint64_t>(size.QuadPart), from, handleRange(file.value), cancelled);
         } catch (const std::exception& error) { result.error = wide(error.what()); }
         return result;
     }
@@ -117,6 +121,36 @@ public:
         if (error.empty() && !ReplaceFileW(path.local().c_str(), temporary.c_str(), nullptr, 0, nullptr, nullptr)) error = winError();
         if (!error.empty()) DeleteFileW(temporary.c_str());
         return {{}, error};
+    }
+    ProviderSave spliceFile(const ResourceId& path, const FileSplice& splice, const std::string& version) override {
+        if (version.empty() || splice.original.size() > maxFileBytes || splice.replacement.size() > maxFileBytes) return {{}, L"This part of the file cannot be saved."};
+        // Without FILE_SHARE_WRITE no other process can write the file while
+        // it is copied, and the open fails while one still has it open.
+        Handle original(CreateFileW(path.local().c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN, nullptr));
+        if (!original) return {{}, winError()};
+        LARGE_INTEGER size{}; if (!GetFileSizeEx(original.value, &size) || size.QuadPart < 0) return {{}, winError()};
+        if (windowVersion(original.value) != version) return {{}, wide(fileSpliceConflict)};
+        auto temporary = path.local(); temporary += L".poppy-" + wide(newSessionId()) + L".tmp";
+        Handle output(CreateFileW(temporary.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN, nullptr)); if (!output) return {{}, winError()};
+        std::wstring error;
+        try {
+            copySplicedFile(splice, static_cast<uint64_t>(size.QuadPart), handleRange(original.value), [&](std::string_view bytes) {
+                while (!bytes.empty()) {
+                    DWORD count = 0;
+                    if (!WriteFile(output.value, bytes.data(), static_cast<DWORD>(std::min<size_t>(bytes.size(), 1u << 30)), &count, nullptr) || !count) throw std::runtime_error(utf8(winError()));
+                    bytes.remove_prefix(count);
+                }
+            });
+        } catch (const std::exception& failure) { error = wide(failure.what()); }
+        if (error.empty() && !FlushFileBuffers(output.value)) error = winError();
+        output.reset();
+        if (error.empty() && windowVersion(original.value) != version) error = wide(fileSpliceConflict);
+        if (error.empty() && !ReplaceFileW(path.local().c_str(), temporary.c_str(), nullptr, 0, nullptr, nullptr)) error = winError();
+        original.reset();
+        if (!error.empty()) { DeleteFileW(temporary.c_str()); return {{}, error}; }
+        // The next save of this window checks against the file just written.
+        Handle saved(CreateFileW(path.local().c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr));
+        return {saved ? windowVersion(saved.value) : std::string{}, {}};
     }
     std::wstring createFile(const ResourceId& path, const std::string& bytes) override {
         if (bytes.size() > maxFileBytes) return L"New file exceeds the 16 MiB limit.";

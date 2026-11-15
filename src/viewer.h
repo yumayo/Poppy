@@ -28,8 +28,12 @@ public:
     void show(std::shared_ptr<const Document> document, const ResourceId& path, bool preserve = false, bool allowHtml = true);
     // Shows a large file's partial document. A newly opened one starts at its
     // first row; a reload follows the end only while the view follows it.
-    void showTail(std::shared_ptr<const Document> document, const ResourceId& path, bool preserve = false);
-    void showFileWindow(std::shared_ptr<const Document> document, const ResourceId& path, uint64_t requestedOffset);
+    // A large CSV's window may come with the buffer that owns document,
+    // which makes its rows editable until another window is loaded.
+    void showTail(std::shared_ptr<const Document> document, const ResourceId& path, bool preserve = false, std::shared_ptr<EditBuffer> buffer = {});
+    void showFileWindow(std::shared_ptr<const Document> document, const ResourceId& path, uint64_t requestedOffset, std::shared_ptr<EditBuffer> buffer = {});
+    // Redraws an edited window after it was saved, which moved its end.
+    void refreshWindow();
     void cancelFileWindowRequest();
     // Exact line numbers for large-file windows. Without an index, windows of
     // files up to maxLineIndexBytes omit line numbers; larger files show the
@@ -37,7 +41,10 @@ public:
     void setLineIndex(std::shared_ptr<const FileLineIndex> index, bool counting);
     const Document* document() const { return document_.get(); }
     bool tailPreview() const { return document_ && document_->tail && !diff_; }
-    bool tailPaused() const { return tailPreview() && (pendingFileOffset_ || document_->tailEndOffset < document_->fileBytes || !atTail()); }
+    // An edited window holds the only copy of its edits, so it neither loads
+    // other windows nor follows the file until it is saved or undone.
+    bool windowLocked() const { return tailPreview() && edit_ && (edit_->dirty() || edit_->saving); }
+    bool tailPaused() const { return tailPreview() && (windowLocked() || pendingFileOffset_ || document_->tailEndOffset < document_->fileBytes || !atTail()); }
     // The view shows the end of its file, so reloads follow appended text.
     bool followsTail() const { return tailPreview() ? !tailPaused() : document_ && !diff_ && !html_.active() && atTail(); }
     void showRevision(std::shared_ptr<const Document> document, const DiffDocument& changes, const ResourceId& path, bool preserve = false);
@@ -91,7 +98,10 @@ private:
         uint64_t anchor = 0, caret = 0, record = 0, top = 0; size_t anchorColumn = 0, column = 0; int left = 0; bool move = false, extend = false;
         std::wstring name, value;
     };
-    std::optional<CsvCarry> present(std::shared_ptr<const Document> document, const ResourceId& path, bool preserve, bool allowHtml);
+    std::optional<CsvCarry> present(std::shared_ptr<const Document> document, const ResourceId& path, bool preserve, bool allowHtml, std::shared_ptr<EditBuffer> buffer = {});
+    bool loadsWindows() const { return fileWindowRequested && !windowLocked(); }
+    // Keeps file byte mapping in step with an edited window's text.
+    void windowEdited();
     CsvCarry captureCsv() const;
     void placeCsv(const CsvCarry& carry);
     CsvView::Mark csvMark(uint64_t byte, size_t column) const;

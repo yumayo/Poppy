@@ -37,7 +37,27 @@ WordRange wordRange(std::string_view line, size_t offset) {
 void EditBuffer::initialize(std::string bytes) {
     baseline = std::move(bytes); savedText_ = document.text;
     bom = baseline.compare(0, 3, "\xef\xbb\xbf") == 0;
-    undo_.clear(); redo_.clear(); historyBytes_ = 0; revision = 0;
+    undo_.clear(); redo_.clear(); historyBytes_ = 0; revision = 0; window = false;
+}
+bool EditBuffer::initializeWindow(std::string bytes) {
+    initialize(std::move(bytes));
+    const auto prefix = windowPrefix();
+    // Replacement characters or a cut character would not write back the
+    // bytes they were decoded from.
+    window = document.tail && baseline.size() >= prefix && document.tailOffset <= document.tailEndOffset &&
+        document.tailEndOffset <= document.fileBytes && document.tailEndOffset - document.tailOffset == baseline.size() - prefix && encoded() == baseline;
+    return window;
+}
+FileSplice EditBuffer::windowSplice(const std::string& bytes) const {
+    const auto prefix = windowPrefix();
+    return {document.tailOffset, document.fileBytes, baseline.substr(std::min(prefix, baseline.size())), bytes.substr(std::min(prefix, bytes.size()))};
+}
+void EditBuffer::savedWindow(std::string bytes, std::string text) {
+    const auto prefix = windowPrefix();
+    const uint64_t before = baseline.size() - std::min(prefix, baseline.size()), after = bytes.size() - std::min(prefix, bytes.size());
+    document.fileBytes = document.fileBytes - before + after;
+    document.tailEndOffset = document.tailOffset + after;
+    saved(std::move(bytes), std::move(text));
 }
 void EditBuffer::saved(std::string bytes, std::string text) { baseline = std::move(bytes); savedText_ = std::move(text); }
 size_t EditBuffer::previous(size_t p) const {

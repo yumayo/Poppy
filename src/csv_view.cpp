@@ -275,8 +275,12 @@ void CsvView::copy(bool cut) {
     if (!value || !copyText(window_, wide(*value))) { MessageBeep(MB_ICONWARNING); return; }
     if (cut && edit_) clear();
 }
+bool CsvView::appendable() const {
+    return !partial() || (document_->tailEndOffset >= document_->fileBytes && !table_.truncated());
+}
 void CsvView::paste() {
     if (!edit_ || !valid_) return;
+    if (!editable()) { MessageBeep(MB_ICONWARNING); return; }
     const auto text = utf8(clipboardText(window_)); if (text.empty()) return;
     CsvTable clipboard;
     CsvValues values;
@@ -288,6 +292,9 @@ void CsvView::paste() {
         if (rows > CsvTable::maxCells / columns || (!values[0][0].empty() && rows * columns > maxFileBytes / values[0][0].size())) { MessageBeep(MB_ICONWARNING); return; }
         values = CsvValues(rows, std::vector<std::string>(columns, values[0][0]));
     }
+    // Rows beyond a large file's window would be inserted before the rows
+    // that follow it in the file rather than replace them.
+    if (range.firstRow + values.size() > table_.rows() && !appendable()) { MessageBeep(MB_ICONWARNING); return; }
     if (apply(table_.replace(document_->text, {range.firstRow, range.firstColumn}, values))) {
         size_t columns = 0;
         for (const auto& row : values) columns = std::max(columns, row.size());
@@ -295,18 +302,23 @@ void CsvView::paste() {
         reveal(); InvalidateRect(window_, nullptr, FALSE);
     }
 }
-void CsvView::clear() { if (edit_ && valid_) apply(table_.clear(document_->text, selection())); }
+void CsvView::clear() {
+    if (!edit_ || !valid_) return;
+    if (!editable()) { MessageBeep(MB_ICONWARNING); return; }
+    apply(table_.clear(document_->text, selection()));
+}
 void CsvView::undo(bool redo) {
     if (!edit_) return;
     finishEdit(); size_t anchor = 0, caret = 0;
     if (redo ? edit_->redo(anchor, caret) : edit_->undo(anchor, caret)) {
-        rebuild(); anchor_ = caret_ = table_.position(caret); reveal(); InvalidateRect(window_, nullptr, FALSE);
+        rebuild(); anchor_ = caret_ = table_.position(caret); settle(); reveal(); InvalidateRect(window_, nullptr, FALSE);
         if (changed) changed();
         if (statusChanged) statusChanged();
     }
 }
 void CsvView::startEdit(bool empty) {
     if (!edit_ || !valid_) return;
+    if (!editable()) { MessageBeep(MB_ICONWARNING); return; }
     stopDrag(); editing_ = true; editChanged_ = false; editRevision_ = edit_->revision;
     text_ = empty ? std::wstring{} : wide(table_.value(document_->text, caret_));
     textCaret_ = textAnchor_ = text_.size(); highSurrogate_ = 0; input_.reset(); inputChanged();
@@ -495,6 +507,7 @@ bool CsvView::handle(UINT message, WPARAM a, LPARAM b, LRESULT& result) {
         const POINT point{GET_X_LPARAM(b), GET_Y_LPARAM(b)}; const auto box = formula();
         if (PtInRect(&box, point) && edit_) {
             if (!editing_) startEdit();
+            if (!editing_) return true;
             textCaret_ = input_.hit(point.x); if (!(a & MK_SHIFT)) textAnchor_ = textCaret_;
             inputSelecting_ = true; SetCapture(window_); inputChanged(); return true;
         }

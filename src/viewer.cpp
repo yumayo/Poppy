@@ -24,6 +24,7 @@ void Viewer::create(HWND parent, HINSTANCE instance, bool textOnly) {
     csv_.attach(window_, renderer_, scrollbars_);
     csv_.inset = [this] { return contentTop(); };
     csv_.changed = [this] {
+        windowEdited();
         layoutDirty_ = true; updateGitLines(); requestFind(false, false, false);
         if (changed) changed();
         if (statusChanged) statusChanged();
@@ -79,10 +80,11 @@ void Viewer::setDpi(UINT dpi) {
 void Viewer::show(std::shared_ptr<const Document> d, const ResourceId& path, bool preserve, bool allowHtml) {
     present(std::move(d), path, preserve, allowHtml);
 }
-std::optional<Viewer::CsvCarry> Viewer::present(std::shared_ptr<const Document> d, const ResourceId& path, bool preserve, bool allowHtml) {
+std::optional<Viewer::CsvCarry> Viewer::present(std::shared_ptr<const Document> d, const ResourceId& path, bool preserve, bool allowHtml, std::shared_ptr<EditBuffer> buffer) {
     // Successive windows of one large file keep Table / Source, the column
-    // widths and the selected cells, which are remembered by file byte.
-    const bool window = d->tail && tailPreview() && path_ == path;
+    // widths and the selected cells, which are remembered by file byte. An
+    // edited window shown again keeps its cells by text offset instead.
+    const bool window = d->tail && tailPreview() && path_ == path && d != document_;
     std::optional<CsvCarry> carry;
     // The cells on screen are current, including a drag's latest cell, unless
     // a pending caret move placed them: that move goes on from its capture.
@@ -106,6 +108,7 @@ std::optional<Viewer::CsvCarry> Viewer::present(std::shared_ptr<const Document> 
     diffLayout_ = {}; layoutDirty_ = true; caretTrailing_ = false;
     if (path_ != path) { lineIndex_.reset(); lineCounting_ = false; }
     diff_.reset(); diffChangeRanges_ = {}; document_ = std::move(d); path_ = path; message_.clear();
+    if (buffer && &buffer->document == document_.get()) edit_ = std::move(buffer);
     pendingFileOffset_.reset(); pendingFileRows_ = 0; indexFileBytes(); updateGutter();
     if (!preserve) { top_ = left_ = 0; anchor_ = caret_ = 0; after_ = false; }
     else { anchor_ = std::min(anchor_, document_->text.size()); caret_ = std::min(caret_, document_->text.size()); }
@@ -157,7 +160,7 @@ void Viewer::showRevision(std::shared_ptr<const Document> d, const DiffDocument&
         std::fill(gitChangedLines_.begin() + range.begin, gitChangedLines_.begin() + range.end, true);
     InvalidateRect(window_, nullptr, FALSE);
 }
-void Viewer::showTail(std::shared_ptr<const Document> d, const ResourceId& path, bool preserve) {
+void Viewer::showTail(std::shared_ptr<const Document> d, const ResourceId& path, bool preserve, std::shared_ptr<EditBuffer> buffer) {
     // Keep the old bounded snapshot while the user reads it. Replacing a
     // sliding window would otherwise change the text under their selection.
     if (preserve && path_ == path && tailPaused()) return;
@@ -166,14 +169,14 @@ void Viewer::showTail(std::shared_ptr<const Document> d, const ResourceId& path,
     // Opening never jumps to the end. A table tracks its own scroll position
     // rather than the text rows.
     const bool follow = preserve && path_ == path && followsTail();
-    show(std::move(d), path, preserve, false);
+    present(std::move(d), path, preserve, false, std::move(buffer));
     scrollbars(follow); caretPosition(); InvalidateRect(window_, nullptr, FALSE);
 }
-void Viewer::showFileWindow(std::shared_ptr<const Document> d, const ResourceId& path, uint64_t requestedOffset) {
+void Viewer::showFileWindow(std::shared_ptr<const Document> d, const ResourceId& path, uint64_t requestedOffset, std::shared_ptr<EditBuffer> buffer) {
     const int rows = path_ == path && pendingFileOffset_ == requestedOffset ? pendingFileRows_ : 0;
     const int horizontal = path_ == path ? left_ : 0;
     const bool follow = requestedOffset >= d->fileBytes && rows >= 0;
-    const auto carry = present(std::move(d), path, false, false);
+    const auto carry = present(std::move(d), path, false, false, std::move(buffer));
     const auto text = fileTextAt(requestedOffset);
     if (csv_.active()) {
         const auto row = static_cast<int64_t>(csv_.rowAt(text)) + rows;
@@ -192,6 +195,17 @@ void Viewer::showFileWindow(std::shared_ptr<const Document> d, const ResourceId&
     top_ = static_cast<int>(std::clamp<int64_t>(static_cast<int64_t>(row) + rows, 0, scrollRange_.maximumTop()));
     left_ = horizontal;
     scrollbars(follow); caretPosition(); InvalidateRect(window_, nullptr, FALSE);
+    if (statusChanged) statusChanged();
+}
+void Viewer::windowEdited() {
+    if (!tailPreview()) return;
+    indexFileBytes();
+    // A window read for an earlier position would replace the edits.
+    if (windowLocked() && pendingFileOffset_) cancelFileWindowRequest();
+}
+void Viewer::refreshWindow() {
+    if (!tailPreview()) return;
+    windowEdited(); scrollbars(); InvalidateRect(window_, nullptr, FALSE);
     if (statusChanged) statusChanged();
 }
 void Viewer::cancelFileWindowRequest() {
@@ -282,7 +296,7 @@ void Viewer::seekFileByte(uint64_t offset) {
     revealFind_ = false;
     // An explicit seek supersedes any outstanding read, including when the
     // destination lies in the old cache, so its reply cannot undo this move.
-    if (fileWindowRequested && (pendingFileOffset_ || offset < document_->tailOffset ||
+    if (loadsWindows() && (pendingFileOffset_ || offset < document_->tailOffset ||
         offset >= document_->tailEndOffset)) {
         requestFileWindow(offset); UpdateWindow(window_); return;
     }
@@ -348,7 +362,7 @@ void Viewer::editDiff(std::shared_ptr<EditBuffer> buffer, std::shared_ptr<const 
 }
 void Viewer::refreshBuffer(bool externalUpdate) {
     if (!edit_) return;
-    stopSelection(); clearColumns();
+    stopSelection(); clearColumns(); windowEdited();
     if (csv_.active()) {
         csv_.refresh(); updateGitLines(); layoutDirty_ = true; requestFind(false, false, false);
         if (statusChanged) statusChanged();
@@ -452,7 +466,8 @@ std::wstring Viewer::textStatus() const {
         else if (lineIndex_ && lineIndex_->bytes == document_->fileBytes && lineBase()) lines = std::to_wstring(lineIndex_->lines + 1) + L" lines  ·  ";
         else if (lineCounting_) lines = L"Counting lines…  ·  ";
     }
-    const auto mode = tailPreview() ? L"LARGE FILE · READ ONLY  ·  " + (csv_.active() ? csv_.status() + L"  ·  " : L"") + lines + formatByteSize(document_->tailOffset) + L"–" +
+    const auto access = !edit_ ? L"LARGE FILE · READ ONLY  ·  " : windowLocked() ? L"LARGE FILE · UNSAVED · Ctrl+S: save, then other rows load  ·  " : L"LARGE FILE · LOADED ROWS EDITABLE  ·  ";
+    const auto mode = tailPreview() ? access + (csv_.active() ? csv_.status() + L"  ·  " : L"") + lines + formatByteSize(document_->tailOffset) + L"–" +
         formatByteSize(document_->tailEndOffset) + L" / " + formatByteSize(document_->fileBytes) + L"  ·  " :
         csv_.active() ? csv_.status() + L"  ·  " : L"";
     return mode +
@@ -462,7 +477,9 @@ Viewer::State Viewer::sessionState() const {
     auto saved = state();
     // Offsets in the loaded window mean nothing once another window of the
     // file is loaded, so a large file's rows and cells are kept by file byte.
-    if (!tailPreview()) return saved;
+    // An edited window's text no longer matches the file's bytes, and only
+    // this buffer holds it, so its cells stay by text offset.
+    if (!tailPreview() || windowLocked()) return saved;
     if (csv_.active()) {
         if (!csv_.valid()) return saved;
         const auto carry = captureCsv();
@@ -627,7 +644,7 @@ void Viewer::scrollbars(bool followTail) {
 void Viewer::scrollTable(int vertical) {
     const bool wasPaused = tailWasPaused_;
     revealFind_ = false;
-    if (tailPreview() && fileWindowRequested && vertical) {
+    if (tailPreview() && loadsWindows() && vertical) {
         if (pendingFileOffset_) {
             pendingFileRows_ = static_cast<int>(std::clamp<int64_t>(static_cast<int64_t>(pendingFileRows_) + vertical, -1000000, 1000000));
             scrollbars(); UpdateWindow(window_); return;
@@ -654,7 +671,7 @@ void Viewer::scrollTable(int vertical) {
     UpdateWindow(window_);
 }
 bool Viewer::moveTableCaret(int64_t rows, bool extend) {
-    if (!tailPreview() || !fileWindowRequested || !csv_.valid()) return false;
+    if (!tailPreview() || !loadsWindows() || !csv_.valid()) return false;
     if (pendingFileOffset_) {
         // Keep moving relative to an outstanding caret move. A pending scroll
         // or seek decides the next window, so further moves wait for it.
@@ -677,7 +694,7 @@ bool Viewer::moveTableCaret(int64_t rows, bool extend) {
 void Viewer::loadTableRows(int direction) {
     // Runs while the table paints a drag frame, so it never repaints itself.
     // A window already on its way carries the drag on once it arrives.
-    if (!tailPreview() || !fileWindowRequested || pendingFileOffset_ || !csv_.valid()) return;
+    if (!tailPreview() || !loadsWindows() || pendingFileOffset_ || !csv_.valid()) return;
     if (direction < 0 ? document_->tailOffset <= bomBytes() : document_->tailEndOffset >= document_->fileBytes) return;
     // Read around the top record as scrolling does, but leave it in place:
     // the drag scrolls on through the arriving rows at its own pace.
@@ -688,7 +705,7 @@ void Viewer::scroll(int vertical, int horizontal) {
     if (csv_.active()) { scrollTable(vertical); return; }
     const bool wasPaused = tailWasPaused_;
     revealFind_ = false;
-    if (tailPreview() && fileWindowRequested && vertical) {
+    if (tailPreview() && loadsWindows() && vertical) {
         if (pendingFileOffset_) {
             pendingFileRows_ = static_cast<int>(std::clamp<int64_t>(static_cast<int64_t>(pendingFileRows_) + vertical, -1000000, 1000000));
             left_ += horizontal; scrollbars(); InvalidateRect(window_, nullptr, FALSE); UpdateWindow(window_); return;
@@ -1086,6 +1103,7 @@ bool Viewer::editSelection(size_t& anchor, size_t& caret) const {
     anchor = *first; caret = *last; return true;
 }
 void Viewer::edited() {
+    windowEdited();
     if (diff_) {
         auto comparison = std::make_shared<DiffDocument>(workingDiff(*diffBefore_, edit_->document));
         document_ = std::shared_ptr<const Document>(comparison, &comparison->patch); diff_ = std::move(comparison);

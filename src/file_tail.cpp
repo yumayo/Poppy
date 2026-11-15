@@ -40,6 +40,26 @@ std::wstring formatByteSize(uint64_t bytes) {
     wchar_t text[32]; std::swprintf(text, std::size(text), L"%.2f %ls", value, units[unit]);
     return text;
 }
+void copySplicedFile(const FileSplice& splice, uint64_t currentBytes, const ReadFileRange& read, const WriteFileBytes& write, const std::function<bool()>& cancelled) {
+    const auto conflict = [] { throw std::runtime_error(fileSpliceConflict); };
+    if (currentBytes != splice.fileBytes || splice.offset > currentBytes || splice.original.size() > currentBytes - splice.offset) conflict();
+    if (read(splice.offset, splice.original.size()) != splice.original) conflict();
+    constexpr uint64_t block = 1024 * 1024;
+    const auto copy = [&](uint64_t from, uint64_t to) {
+        for (uint64_t at = from; at < to;) {
+            if (cancelled && cancelled()) throw std::runtime_error("The save was cancelled. The file was not changed.");
+            const auto count = static_cast<size_t>(std::min(block, to - at));
+            const auto bytes = read(at, count);
+            if (bytes.size() != count) conflict();
+            write(bytes); at += count;
+        }
+    };
+    copy(0, splice.offset);
+    write(splice.replacement);
+    copy(splice.offset + splice.original.size(), currentBytes);
+    // Bytes appended while copying would be lost by the replacement.
+    if (!read(currentBytes, 1).empty()) conflict();
+}
 FileLineScan scanFileLines(uint64_t fileBytes, uint64_t from, const ReadFileRange& read, const std::function<bool()>& cancelled) {
     if (fileBytes > maxLineIndexBytes) throw std::runtime_error("The file is too large to count its lines.");
     if (from % lineIndexChunkBytes || from > fileBytes) throw std::runtime_error("Invalid line count offset.");

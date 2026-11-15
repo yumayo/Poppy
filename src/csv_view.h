@@ -102,6 +102,12 @@ private:
     // of its ends lie beyond the same edge of a large file's window.
     bool selectionLoaded() const { return !(anchorSide_ < 0 && caretSide_ < 0) && !(anchorSide_ > 0 && caretSide_ > 0); }
     void settle() { anchorSide_ = caretSide_ = 0; }
+    // A large file's cells outside its window are drawn at the window's edge
+    // and are not loaded, so only a selection inside the window is edited.
+    bool editable() const { return edit_ && valid_ && !anchorSide_ && !caretSide_; }
+    // Whether rows may be added after a large file's window, which they may
+    // only at the end of the file.
+    bool appendable() const;
     int resizeColumn(POINT point) const;
     void rebuild();
     void reveal();

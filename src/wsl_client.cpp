@@ -338,6 +338,16 @@ public:
     ProviderSave saveFile(const ResourceId& path, const std::string& bytes, const std::string& version, const std::string&) override {
         try { if (bytes.size() > maxFileBytes || version.empty()) throw std::runtime_error("File cannot be saved without a valid version and a size below 16 MiB"); const auto response = call("saveFile", path, {{"size", std::to_string(bytes.size())}, {"version", version}}, &bytes); return {field(response.metadata, "version"), {}}; } catch (const std::exception& error) { return {{}, wide(error.what())}; }
     }
+    ProviderSave spliceFile(const ResourceId& path, const FileSplice& splice, const std::string& version) override {
+        try {
+            if (version.empty() || splice.original.size() > maxFileBytes || splice.replacement.size() > maxFileBytes - splice.original.size()) throw std::runtime_error("This part of the file cannot be saved.");
+            const auto body = splice.original + splice.replacement;
+            // Copying a multi-GB file can take minutes; it is not cancelled.
+            const auto response = call("spliceFile", path, {{"size", std::to_string(body.size())}, {"version", version}, {"offset", std::to_string(splice.offset)},
+                {"fileBytes", std::to_string(splice.fileBytes)}, {"originalSize", std::to_string(splice.original.size())}}, &body, {}, 60 * 60 * 1000);
+            return {field(response.metadata, "version"), {}};
+        } catch (const std::exception& error) { return {{}, wide(error.what())}; }
+    }
     std::wstring createFile(const ResourceId& path, const std::string& bytes) override {
         try {
             if (bytes.size() > maxFileBytes) throw std::runtime_error("New file exceeds the 16 MiB limit.");
