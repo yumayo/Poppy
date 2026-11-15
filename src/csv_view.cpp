@@ -100,6 +100,9 @@ RECT CsvView::cellRect(CsvPosition cell) const {
     const int y = bodyTop() + (static_cast<int>(cell.row) - top_) * rowHeight();
     return {x + edges_[cell.column], y, x + edges_[cell.column + 1], y + rowHeight()};
 }
+RECT CsvView::textRect(CsvPosition cell) const {
+    auto rect = cellRect(cell); rect.left += px(7); rect.right -= px(6); return rect;
+}
 void CsvView::layout() {
     if (!active_ || !window_) return;
     widths_.resize(gridColumns(), 160); edges_.resize(widths_.size() + 1); edges_[0] = 0;
@@ -144,7 +147,7 @@ int CsvView::resizeColumn(POINT point) const {
 }
 void CsvView::select(CsvPosition cell, bool extend, bool scrollIntoView) {
     finishEdit(); caret_ = cell; caretSide_ = 0; if (!extend) { anchor_ = caret_; anchorSide_ = 0; }
-    if (scrollIntoView) reveal();
+    if (scrollIntoView) reveal(); else inputChanged();
     InvalidateRect(window_, nullptr, FALSE); if (statusChanged) statusChanged();
 }
 void CsvView::drag(POINT point) {
@@ -175,8 +178,10 @@ void CsvView::stopDrag() {
     dragScrolling_ = false;
     if (statusPending_) dragStatus(true);
     const bool captured = selecting_ || inputSelecting_ || resizing_ >= 0;
+    const bool selecting = selecting_;
     selecting_ = inputSelecting_ = false; resizing_ = -1;
     if (captured && GetCapture() == window_) ReleaseCapture();
+    if (selecting) inputChanged();
 }
 // Called at the start of every frame while a selection is being dragged. It
 // scrolls by the time since the previous frame, so the speed follows the
@@ -316,17 +321,19 @@ void CsvView::undo(bool redo) {
         if (statusChanged) statusChanged();
     }
 }
-void CsvView::startEdit(bool empty) {
+void CsvView::startEdit(bool empty, bool formula) {
     if (!edit_ || !valid_) return;
     if (!editable()) { MessageBeep(MB_ICONWARNING); return; }
-    stopDrag(); editing_ = true; editChanged_ = false; editRevision_ = edit_->revision;
+    stopDrag(); editing_ = true; formulaEdit_ = formula; editChanged_ = false; editRevision_ = edit_->revision;
     text_ = empty ? std::wstring{} : wide(table_.value(document_->text, caret_));
-    textCaret_ = textAnchor_ = text_.size(); highSurrogate_ = 0; input_.reset(); inputChanged();
+    textCaret_ = textAnchor_ = text_.size(); highSurrogate_ = 0; input_.reset();
+    // An in-cell edit scrolls its whole cell into view; reveal() lays it out.
+    if (formula) inputChanged(); else reveal();
     InvalidateRect(window_, nullptr, FALSE);
 }
 void CsvView::finishEdit(bool cancel) {
     if (!editing_) return;
-    editing_ = false; ime_.cancel(window_); highSurrogate_ = 0;
+    editing_ = formulaEdit_ = false; editBox_ = {}; ime_.cancel(window_); highSurrogate_ = 0;
     if (cancel && editChanged_ && edit_ && edit_->revision == editRevision_) {
         size_t anchor = 0, caret = 0;
         if (edit_->undo(anchor, caret)) {
@@ -338,10 +345,46 @@ void CsvView::finishEdit(bool cancel) {
     inputChanged(); InvalidateRect(window_, nullptr, FALSE);
 }
 void CsvView::inputChanged() {
-    if (!editing_ || !renderer_) return;
-    auto rect = formula(); rect.left += px(6); rect.right -= px(4);
-    input_.update(*renderer_, displayValue(text_), textCaret_, textAnchor_, ime_.text(), rect);
-    if (GetFocus() == window_) positionIme(window_, input_.caret(), input_.height(), renderer_->compositionFont(Renderer::Font::Ui));
+    if (!renderer_ || !window_) return;
+    const bool focused = GetFocus() == window_;
+    // Cells use the UI font, so the IME's own windows and metadata match the
+    // proportional text drawn in the cell and the formula bar.
+    const auto& font = renderer_->compositionFont(Renderer::Font::Ui);
+    if (!editing_) {
+        editBox_ = {};
+        // Typing or composing starts an in-cell edit at the selected cell's
+        // text origin, so keep the IME there until then.
+        // A drag repositions it once it stops rather than on every frame.
+        if (focused && active_ && valid_ && !selecting_ && !caretSide_ && caret_.column + 1 < edges_.size()) {
+            input_.update(*renderer_, {}, 0, 0, ime_.text(), textRect(caret_));
+            positionIme(window_, input_.caret(), input_.height(), font);
+        }
+        return;
+    }
+    const auto display = displayValue(text_);
+    if (formulaEdit_) {
+        auto rect = formula(); rect.left += px(6); rect.right -= px(4);
+        input_.update(*renderer_, display, textCaret_, textAnchor_, ime_.text(), rect); editBox_ = {};
+    } else {
+        // Lay the edit out in exactly the rect the cell's label uses.
+        auto box = cellRect(caret_), rect = textRect(caret_); const auto cellRight = box.right;
+        // Like a spreadsheet, text wider than its cell covers the following
+        // columns, and scrolls only once it reaches the table's right edge.
+        // Measure in the widest box so a narrower pass never scrolls it.
+        const auto widest = std::max(cellRight, Scrollbars::contentRect(window_).right);
+        const RECT measure{rect.left, rect.top, std::max(rect.right, widest - px(6)), rect.bottom};
+        input_.update(*renderer_, display, textCaret_, textAnchor_, ime_.text(), measure);
+        const LONG needed = rect.left + input_.width() + input_.caretWidth() + px(6);
+        if (needed > box.right) {
+            const int origin = rowGutter() - left_;
+            for (size_t edge = caret_.column + 1; box.right < needed && edge + 1 < edges_.size();) box.right = origin + edges_[++edge];
+            box.right = std::max(cellRight, std::min(std::max(box.right, needed), widest));
+        }
+        rect.right = box.right - px(6);
+        if (rect.right != measure.right) input_.update(*renderer_, display, textCaret_, textAnchor_, ime_.text(), rect);
+        editBox_ = box;
+    }
+    if (focused) positionIme(window_, input_.caret(), input_.height(), font);
     InvalidateRect(window_, nullptr, FALSE);
 }
 size_t CsvView::previous(size_t offset) const {
@@ -363,7 +406,9 @@ void CsvView::replaceInput(std::wstring text) {
     const auto revision = edit_->revision;
     if (apply(table_.replace(document_->text, caret_, {{utf8(proposed)}}), editChanged_ && revision == editRevision_)) {
         editChanged_ = editChanged_ || edit_->revision != revision; editRevision_ = edit_->revision;
-        text_ = std::move(proposed); textCaret_ = textAnchor_ = begin + text.size(); inputChanged();
+        text_ = std::move(proposed); textCaret_ = textAnchor_ = begin + text.size();
+        // Typing brings a cell scrolled out of view back, with the IME on it.
+        if (formulaEdit_) inputChanged(); else reveal();
     }
 }
 bool CsvView::inputKey(WPARAM key, bool ctrl, bool shift) {
@@ -430,7 +475,9 @@ void CsvView::paint() {
     Renderer::Paint paint(*renderer_, window_);
     // Invalidate after BeginPaint so the request survives into the next frame.
     if (scrolling) InvalidateRect(window_, nullptr, FALSE);
-    if (!paint) return;
+    if (paint) draw();
+}
+void CsvView::draw() {
     auto& dc = *renderer_; dc.font(Renderer::Font::Ui);
     const auto rect = Scrollbars::contentRect(window_);
     dc.fill(rect, background);
@@ -439,6 +486,7 @@ void CsvView::paint() {
         scrollbars_->paint(window_, dc, background); return;
     }
     const auto range = selection(); const bool loaded = selectionLoaded(); const int rh = rowHeight(), gutter = rowGutter();
+    const bool inCell = editingInCell();
     const size_t firstColumn = hit({gutter, bodyTop()}).column;
     const size_t lastColumn = hit({rect.right, bodyTop()}).column;
     const size_t lastRow = std::min(gridRows(), static_cast<size_t>(top_ + std::max(0, static_cast<int>(rect.bottom) - bodyTop() + rh - 1) / rh));
@@ -451,8 +499,9 @@ void CsvView::paint() {
             dc.fill(cell, selected ? selectedCell : !search_.empty() && search_.matches(table_, document_->text, {r, c}) ? matchedCell : background);
             dc.fill({cell.left, cell.bottom - 1, cell.right, cell.bottom}, border);
             if (right <= rect.right) dc.fill({right - 1, cell.top, right, cell.bottom}, border);
-            auto label = cellRect({r, c}); label.left += px(7); label.right -= px(6);
-            dc.label(label, cell, displayValue(wide(table_.value(document_->text, {r, c}))), foreground);
+            // The in-cell input draws the edited value itself, below.
+            if (!inCell || r != caret_.row || c != caret_.column)
+                dc.label(textRect({r, c}), cell, displayValue(wide(table_.value(document_->text, {r, c}))), foreground);
         }
         const int y = bodyTop() + (static_cast<int>(r) - top_) * rh;
         const RECT rowHeader{0, y, std::min<LONG>(gutter, rect.right), std::min<LONG>(y + rh, rect.bottom)};
@@ -462,8 +511,18 @@ void CsvView::paint() {
     }
     // Fill the caret frame as whole-pixel strips over the cell's grid lines so it never straddles a pixel boundary.
     // A caret outside a large file's window has no frame here.
-    auto current = cellRect(caret_); current.left -= 1; current.top -= 1;
     const RECT clip{gutter, bodyTop(), rect.right, rect.bottom}; const int thick = std::max(1, px(2));
+    if (inCell) {
+        // The cell itself is drawn as usual, so an edit that fits differs from
+        // it only by the caret. A wider box covers the cell's right grid line
+        // and the following cells with the selected background; the frame
+        // below covers the grid lines along its edges.
+        const auto cellRight = cellRect(caret_).right; RECT visible{};
+        const RECT extension{cellRight - 1, editBox_.top, editBox_.right, editBox_.bottom};
+        if (editBox_.right > cellRight && IntersectRect(&visible, &extension, &clip)) dc.fill(visible, selectedCell);
+        input_.draw(dc, foreground, RGB(50, 70, 94), GetFocus() == window_, &clip);
+    }
+    auto current = inCell ? editBox_ : cellRect(caret_); current.left -= 1; current.top -= 1;
     if (!caretSide_) for (const RECT& strip : {RECT{current.left, current.top, current.right, current.top + thick}, RECT{current.left, current.bottom - thick, current.right, current.bottom},
                               RECT{current.left, current.top, current.left + thick, current.bottom}, RECT{current.right - thick, current.top, current.right, current.bottom}}) {
         RECT visible{}; if (IntersectRect(&visible, &strip, &clip)) dc.fill(visible, accent);
@@ -481,8 +540,8 @@ void CsvView::paint() {
     dc.fill({gutter - 1, headerTop(), gutter, rect.bottom}, border);
     dc.fill({0, insetTop(), rect.right, std::min<LONG>(headerTop(), rect.bottom)}, panel);
     dc.label({0, insetTop(), nameWidth(), headerTop()}, wide(csvColumnName(caret_.column)) + caretName(), accent, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-    const auto box = formula(); dc.fill(box, background); dc.outline(box, editing_ ? accent : border);
-    if (editing_) input_.draw(dc, foreground, RGB(50, 70, 94), GetFocus() == window_);
+    const auto box = formula(); dc.fill(box, background); dc.outline(box, editing_ && formulaEdit_ ? accent : border);
+    if (editing_ && formulaEdit_) input_.draw(dc, foreground, RGB(50, 70, 94), GetFocus() == window_);
     else dc.label({box.left + px(6), box.top, box.right - px(4), box.bottom}, displayValue(caretValue()), foreground);
     scrollbars_->paint(window_, dc, background);
 }
@@ -499,18 +558,25 @@ bool CsvView::handle(UINT message, WPARAM a, LPARAM b, LRESULT& result) {
     case WM_SETCURSOR:
         if (LOWORD(b) == HTCLIENT) {
             POINT point{}; GetCursorPos(&point); ScreenToClient(window_, &point); const auto box = formula();
-            SetCursor(LoadCursorW(nullptr, resizeColumn(point) >= 0 ? IDC_SIZEWE : PtInRect(&box, point) && edit_ ? IDC_IBEAM : IDC_ARROW)); result = TRUE; return true;
+            const bool text = (PtInRect(&box, point) && edit_) || (editingInCell() && PtInRect(&editBox_, point) && point.x >= rowGutter() && point.y >= bodyTop());
+            SetCursor(LoadCursorW(nullptr, resizeColumn(point) >= 0 ? IDC_SIZEWE : text ? IDC_IBEAM : IDC_ARROW)); result = TRUE; return true;
         }
         return false;
     case WM_LBUTTONDOWN: case WM_LBUTTONDBLCLK: {
         SetFocus(window_); if (!valid_) return true;
         const POINT point{GET_X_LPARAM(b), GET_Y_LPARAM(b)}; const auto box = formula();
-        if (PtInRect(&box, point) && edit_) {
-            if (!editing_) startEdit();
-            if (!editing_) return true;
-            textCaret_ = input_.hit(point.x); if (!(a & MK_SHIFT)) textAnchor_ = textCaret_;
+        // Like the Explorer's rename input, ignore clicks while composing:
+        // hit() indexes the displayed text, which includes the preedit.
+        if (ime_.active()) return true;
+        const bool formulaHit = PtInRect(&box, point) && edit_;
+        if (formulaHit && !editing_) startEdit(false, true);
+        // The formula bar takes over an in-cell edit with its text and caret.
+        else if (formulaHit && !formulaEdit_) { formulaEdit_ = true; input_.reset(); inputChanged(); }
+        if (editing_ && (formulaHit || (!formulaEdit_ && PtInRect(&editBox_, point) && point.x >= rowGutter() && point.y >= bodyTop()))) {
+            textCaret_ = std::min(input_.hit(point.x), text_.size()); if (!(a & MK_SHIFT)) textAnchor_ = textCaret_;
             inputSelecting_ = true; SetCapture(window_); inputChanged(); return true;
         }
+        if (formulaHit) return true;
         finishEdit();
         const auto bounds = Scrollbars::contentRect(window_); if (!PtInRect(&bounds, point) || point.y < headerTop()) return true;
         resizing_ = resizeColumn(point);
@@ -524,13 +590,23 @@ bool CsvView::handle(UINT message, WPARAM a, LPARAM b, LRESULT& result) {
         dragHeader_ = point.x < rowGutter() ? 1 : point.y < bodyTop() ? 2 : 0;
         if (dragHeader_ == 1) { anchor_.column = 0; caret_.column = table_.columns() - 1; }
         if (dragHeader_ == 2) { anchor_.row = 0; caret_.row = table_.rows() - 1; settle(); }
-        if (message == WM_LBUTTONDBLCLK && !dragHeader_) { startEdit(); return true; }
+        if (message == WM_LBUTTONDBLCLK && !dragHeader_) {
+            // Place the text caret under the pointer, following the cell if
+            // starting the edit scrolled it into view.
+            // Hit-test the text unscrolled, as the cell showed it.
+            const auto before = cellRect(caret_).left; startEdit();
+            if (editingInCell()) {
+                textCaret_ = textAnchor_ = 0; input_.reset(); inputChanged();
+                textCaret_ = textAnchor_ = std::min(input_.hit(point.x + cellRect(caret_).left - before), text_.size()); inputChanged();
+            }
+            return true;
+        }
         selecting_ = true; dragScrolling_ = dragLoading_ = false; dragPoint_ = point; dragCarryX_ = dragCarryY_ = 0; SetCapture(window_); return true;
     }
     case WM_MOUSEMOVE: {
         const POINT point{GET_X_LPARAM(b), GET_Y_LPARAM(b)};
         if (resizing_ >= 0) { widths_[resizing_] = std::clamp(resizeWidth_ + MulDiv(point.x - resizeX_, 96, dpi_), 40, 2048); layout(); InvalidateRect(window_, nullptr, FALSE); UpdateWindow(window_); }
-        else if (inputSelecting_) { textCaret_ = input_.hit(point.x); inputChanged(); }
+        else if (inputSelecting_) { if (!ime_.active()) { textCaret_ = std::min(input_.hit(point.x), text_.size()); inputChanged(); } }
         else if (selecting_) drag(point);
         return true;
     }

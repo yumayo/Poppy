@@ -894,6 +894,128 @@ void csvTables() {
         viewer.show(readonly, L"ordinary.txt"); check(!viewer.csvAvailable() && !viewer.csvTable(), "CSV mode leaked into a text file");
     }
 }
+// An in-cell edit lays its text out exactly where the cell drew it: starting
+// the edit changes no pixel except the caret, and the IME uses the cells' font.
+void csvInCellEditing() {
+    struct Canvas {
+        int width, height;
+        ComPtr<IWICImagingFactory> factory; ComPtr<IWICBitmap> bitmap; std::vector<BYTE> pixels;
+        Canvas(int w, int h) : width(w), height(h), pixels(static_cast<size_t>(w) * h * 4) {
+            check(SUCCEEDED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER,
+                __uuidof(IWICImagingFactory), reinterpret_cast<void**>(factory.put()))), "Could not create the WIC factory");
+            check(SUCCEEDED(factory->CreateBitmap(w, h, GUID_WICPixelFormat32bppBGR, WICBitmapCacheOnLoad, bitmap.put())), "Could not create the WIC bitmap");
+        }
+        COLORREF pixel(int x, int y) const {
+            const auto offset = (static_cast<size_t>(y) * width + x) * 4;
+            return RGB(pixels[offset + 2], pixels[offset + 1], pixels[offset]);
+        }
+    };
+    const auto instance = GetModuleHandleW(nullptr);
+    const auto parent = CreateWindowExW(0, L"STATIC", L"CSV in-cell edit test", WS_POPUP | WS_CLIPCHILDREN,
+        0, 0, 1600, 1000, nullptr, nullptr, instance, nullptr);
+    check(parent != nullptr, "Cannot create the CSV in-cell edit owner");
+    struct Owner { HWND window; ~Owner() { DestroyWindow(window); } } owner{parent};
+    ShowWindow(parent, SW_SHOWNOACTIVATE);
+    BYTE originalKeys[256]{}; GetKeyboardState(originalKeys);
+    struct Keys { BYTE* value; ~Keys() { SetKeyboardState(value); } } keys{originalKeys};
+    BYTE released[256]{}; SetKeyboardState(released);
+    constexpr COLORREF selectedCell = RGB(43, 62, 55);
+    for (const auto dpi : {96u, 144u, 192u}) {
+        const auto px = [&](int value) { return MulDiv(value, dpi, 96); };
+        const int width = px(700), height = px(300);
+        const auto window = CreateWindowExW(0, L"STATIC", L"", WS_CHILD | WS_VISIBLE, 0, 0, width, height, parent, nullptr, instance, nullptr);
+        check(window != nullptr, "Cannot create the CSV in-cell edit window");
+        struct Child { HWND window; ~Child() { DestroyWindow(window); } } child{window};
+        // An explicit context needs no IME language pack.
+        struct Context {
+            HWND window; HIMC value = ImmCreateContext(), previous = nullptr;
+            ~Context() { ImmAssociateContext(window, previous); if (value) ImmDestroyContext(value); }
+        } context{window};
+        check(context.value != nullptr, "Cannot create the CSV in-cell edit's IME context");
+        context.previous = ImmAssociateContext(window, context.value);
+        Renderer renderer; renderer.setDpi(dpi); Scrollbars bars; CsvView view;
+        view.attach(window, renderer, bars); view.setDpi(dpi);
+        auto buffer = std::make_shared<EditBuffer>();
+        const std::string source = u8"name,qty\r\n豆腐 Wy,001\r\n" + std::string(40, 'W') + ",x\r\n";
+        buffer->document.text = source; indexDocument(buffer->document); buffer->initialize(source);
+        view.show(std::shared_ptr<const Document>(buffer, &buffer->document), false); view.buffer(buffer);
+        Canvas canvas(width, height);
+        const auto render = [&] {
+            check(renderer.begin(canvas.bitmap.get()), "Cannot draw the CSV table offscreen");
+            view.draw(); finish(renderer);
+            check(SUCCEEDED(canvas.bitmap->CopyPixels(nullptr, width * 4, static_cast<UINT>(canvas.pixels.size()), canvas.pixels.data())), "Could not read WIC pixels");
+            return canvas.pixels;
+        };
+        LRESULT result = 0;
+        const auto send = [&](UINT message, WPARAM a, LPARAM b = 0) { view.handle(message, a, b, result); };
+        const int rowHeight = std::max(px(28), renderer.textHeight() + px(8)), bodyTop = px(34) + rowHeight, thick = std::max(1, px(2));
+        const RECT cell{px(52), bodyTop + rowHeight, px(52) + px(160), bodyTop + 2 * rowHeight};
+        SetFocus(parent);
+        view.moveCaret(1, 0, false);
+        const auto before = render();
+        send(WM_KEYDOWN, VK_F2);
+        check(view.editingInCell(), "F2 did not edit the cell in place");
+        check(render() == before, "Starting an in-cell edit moved the cell's text or changed its frame");
+        // Focused, only the caret differs; the IME sits on it in the UI font.
+        SetFocus(window); view.handle(WM_SETFOCUS, 0, 0, result);
+        render();
+        GUITHREADINFO info{}; info.cbSize = sizeof(info);
+        check(GetGUIThreadInfo(GetCurrentThreadId(), &info) && info.hwndCaret == window, "The in-cell edit has no native IME caret");
+        const auto caret = info.rcCaret;
+        check(caret.left > cell.left + px(7) && caret.right < cell.right && caret.top >= cell.top && caret.bottom <= cell.bottom,
+            "The in-cell edit's caret is outside its cell");
+        bool drawn = false;
+        for (int y = 0; y < height; ++y) for (int x = 0; x < width; ++x) {
+            const auto offset = (static_cast<size_t>(y) * width + x) * 4;
+            const bool same = std::equal(before.begin() + offset, before.begin() + offset + 4, canvas.pixels.begin() + offset);
+            if (x >= caret.left && x < caret.left + std::max(2, px(1) + 1) && y >= caret.top && y < caret.bottom) { drawn |= !same; continue; }
+            check(same, "Focusing an in-cell edit changed a pixel other than its caret");
+        }
+        check(drawn, "The in-cell edit did not draw its caret");
+        COMPOSITIONFORM composition{}; LOGFONTW font{};
+        const bool positioned = ImmGetCompositionWindow(context.value, &composition) && ImmGetCompositionFontW(context.value, &font);
+        const auto& expected = renderer.compositionFont(Renderer::Font::Ui);
+        check(positioned && composition.ptCurrentPos.x == caret.left && composition.ptCurrentPos.y == caret.top,
+            "The IME composition is detached from the in-cell caret");
+        check(std::wstring(font.lfFaceName) == expected.lfFaceName && font.lfHeight == expected.lfHeight && font.lfWeight == expected.lfWeight,
+            "The IME composition font does not match the cell's text");
+        send(WM_CHAR, L'!'); check(buffer->document.text.find(u8"豆腐 Wy!,001") != std::string::npos, "Typing did not edit the cell in place");
+        send(WM_KEYDOWN, VK_ESCAPE); check(buffer->document.text == source && !view.editing(), "Escape did not cancel the in-cell edit");
+        // Composing starts an in-cell edit, positioned before the text appears.
+        send(WM_IME_STARTCOMPOSITION, 0); check(view.editingInCell(), "IME composition did not start an in-cell edit");
+        // Clicks wait for the composition, whose text the caret cannot index.
+        const LPARAM other = MAKELPARAM(cell.right + px(20), (cell.top + cell.bottom) / 2);
+        send(WM_LBUTTONDOWN, MK_LBUTTON, other); send(WM_LBUTTONUP, 0, other);
+        check(view.editingInCell() && view.caretColumn() == 0, "A click during IME composition ended or moved the in-cell edit");
+        send(WM_IME_ENDCOMPOSITION, 0); send(WM_KEYDOWN, VK_ESCAPE);
+        // Text wider than its cell covers the following cells instead of scrolling.
+        SetFocus(parent);
+        view.moveCaret(2, 0, false);
+        const RECT wide{cell.left, cell.bottom, cell.right, cell.bottom + rowHeight};
+        auto pixels = render(); canvas.pixels = pixels;
+        // Column B's right grid line; the caret frame covers column A's.
+        const int line = wide.right + px(160) - 1;
+        check(canvas.pixel(line, wide.top + thick + 1) == border, "The fixture's grid line is missing");
+        send(WM_KEYDOWN, VK_F2); render();
+        check(view.editingInCell() && canvas.pixel(line, wide.top + thick + 1) == selectedCell,
+            "A wide in-cell edit did not cover the following cell");
+        bool frame = false;
+        for (int x = wide.right + px(160); x < width; ++x) frame |= canvas.pixel(x, wide.top + rowHeight / 2) == accent;
+        check(frame, "A wide in-cell edit's frame did not reach past the following cell");
+        // The formula bar takes over the edit with its text.
+        send(WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(px(78) + px(20), px(17))); send(WM_LBUTTONUP, 0, MAKELPARAM(px(78) + px(20), px(17)));
+        check(view.editing() && !view.editingInCell(), "Clicking the formula bar did not move the edit there");
+        send(WM_KEYDOWN, VK_ESCAPE);
+        // Double-clicking edits in place with the caret under the pointer.
+        SetFocus(window);
+        const LPARAM start = MAKELPARAM(cell.left + px(9), (cell.top + cell.bottom) / 2);
+        send(WM_LBUTTONDOWN, MK_LBUTTON, start); send(WM_LBUTTONUP, 0, start); send(WM_LBUTTONDBLCLK, MK_LBUTTON, start); send(WM_LBUTTONUP, 0, start);
+        check(view.editingInCell(), "Double-clicking did not edit the cell in place");
+        send(WM_CHAR, L'^'); check(buffer->document.text.find(u8"^豆腐 Wy,001") != std::string::npos, "Double-clicking did not place the caret under the pointer");
+        send(WM_KEYDOWN, VK_ESCAPE);
+        view.hide(true);
+    }
+}
 void htmlPreviewSwitching() {
     Viewer viewer;
     const auto instance = GetModuleHandleW(nullptr);
@@ -3891,7 +4013,7 @@ int main(int argc, char** argv) {
             shutdownProgress();
             persistentErrorPopup();
             editorBottomPadding(); editorTailFollowing(); largeFileTailPreview(); largeFileByteScrolling(); largeCsvTable(); largeCsvEditing();
-            csvTables(); htmlPreviewSwitching();
+            csvTables(); csvInCellEditing(); htmlPreviewSwitching();
             terminalAsyncStartup(); terminalProcessShutdown(); terminalImeOutput();
             statusBarLimits(); treeMultipleSelection(); commitMessagePopup(); inlineTreeInput(); inlineTreeCreation(); gitCommitInput(); cellPositions(); colorsAndClipping(); imagePreviews(); fractionalMarkers(); smoothIcons(); windowTargets(); editableDiff(); editorCaret(); delayedLoadingMessages(); imeCellRendering(); imeTerminalInsertion(); imeUiRendering(); imePositions(); editorWordSelection(); editorColumnSelection(); editorWordMovement(); editorWordDeletion(); editorLineShortcuts(); editorWrapping(); diffWrapping(); documentFind(); horizontalWheelScrolling(); continuousViewerScrolling(); selectionAutoScrolling(); terminalGitBashSocketEnvironment(); terminalSelectionAutoScrolling(); themedScrollbars(); quickOpenStability();
             std::cout << "Direct2D rendering tests passed\n";

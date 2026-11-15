@@ -384,7 +384,7 @@ int Renderer::textWidth(const std::wstring& text, bool italic) const {
 void InputLine::update(const Renderer& renderer, const std::wstring& text, size_t caret, size_t anchor,
                        const CompositionText& composition, const RECT& bounds) {
     bounds_ = bounds; composition_ = composition;
-    if (!renderer.uiFont_) { layout_.reset(); caret_ = {bounds.left, bounds.top}; return; }
+    if (!renderer.uiFont_) { layout_.reset(); caret_ = {bounds.left, bounds.top}; width_ = 0; return; }
     caret = std::min(caret, text.size()); anchor = std::min(anchor, text.size());
     selectionBegin_ = std::min(caret, anchor); selectionEnd_ = std::max(caret, anchor);
     compositionBegin_ = selectionBegin_;
@@ -405,6 +405,7 @@ void InputLine::update(const Renderer& renderer, const std::wstring& text, size_
     FLOAT x = 0, y = 0; DWRITE_HIT_TEST_METRICS hit{};
     layout_->HitTestTextPosition(static_cast<UINT32>(caret), FALSE, &x, &y, &hit);
     DWRITE_TEXT_METRICS metrics{}; layout_->GetMetrics(&metrics);
+    width_ = static_cast<int>(std::ceil(metrics.widthIncludingTrailingWhitespace));
     caretWidth_ = std::max(1, static_cast<int>(std::lround(renderer.uiFont_->GetFontSize() / 13.0f)));
     const float available = std::max(0.0f, width - caretWidth_);
     scroll_ = std::clamp(scroll_, 0.0f, std::max(0.0f, metrics.widthIncludingTrailingWhitespace - available));
@@ -433,9 +434,10 @@ void InputLine::range(Renderer& renderer, size_t begin, size_t length, COLORREF 
             static_cast<LONG>(std::ceil(area.left + area.width)), bottom}, color);
     }
 }
-void InputLine::draw(Renderer& renderer, COLORREF color, COLORREF selection, bool showCaret) const {
-    if (!layout_ || empty(bounds_)) return;
-    renderer.target_->PushAxisAlignedClip(rectangle(bounds_), D2D1_ANTIALIAS_MODE_ALIASED);
+void InputLine::draw(Renderer& renderer, COLORREF color, COLORREF selection, bool showCaret, const RECT* clip) const {
+    RECT visible = bounds_;
+    if (!layout_ || empty(bounds_) || (clip && !IntersectRect(&visible, &bounds_, clip))) return;
+    renderer.target_->PushAxisAlignedClip(rectangle(visible), D2D1_ANTIALIAS_MODE_ALIASED);
     range(renderer, selectionBegin_, selectionEnd_ - selectionBegin_, selection);
     const auto attributes = [&](const auto& draw) {
         for (size_t begin = 0; begin < composition_.text.size();) {

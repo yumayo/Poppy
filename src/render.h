@@ -104,9 +104,13 @@ class InputLine {
 public:
     void update(const Renderer& renderer, const std::wstring& text, size_t caret, size_t anchor,
                 const CompositionText& composition, const RECT& bounds);
-    void draw(Renderer& renderer, COLORREF color, COLORREF selection, bool showCaret) const;
+    // clip further limits drawing, such as to a scrolled table's visible body.
+    void draw(Renderer& renderer, COLORREF color, COLORREF selection, bool showCaret, const RECT* clip = nullptr) const;
     POINT caret() const { return caret_; }
     int height() const { return height_; }
+    int caretWidth() const { return caretWidth_; }
+    // The shaped width of the text and preedit, before horizontal scrolling.
+    int width() const { return width_; }
     size_t hit(int x) const;
     void reset() { scroll_ = 0; }
 private:
@@ -117,7 +121,7 @@ private:
     POINT caret_{};
     float scroll_ = 0;
     size_t selectionBegin_ = 0, selectionEnd_ = 0, compositionBegin_ = 0;
-    int height_ = 1, caretWidth_ = 1;
+    int height_ = 1, caretWidth_ = 1, width_ = 0;
 };
 
 // The destination is a child overlay; the dragged tab is an owned popup so it

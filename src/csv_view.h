@@ -20,9 +20,14 @@ public:
     bool active() const { return active_; }
     bool composing() const { return ime_.active(); }
     bool editing() const { return editing_; }
+    // Whether the current edit is drawn in its cell rather than the formula bar.
+    bool editingInCell() const { return editing_ && !formulaEdit_; }
     void refresh();
     void layout();
     void paint();
+    // Draws the view onto a renderer that has already begun, such as the
+    // window's frame in paint() or an offscreen bitmap.
+    void draw();
     bool handle(UINT message, WPARAM a, LPARAM b, LRESULT& result);
     ViewState state() const;
     void restore(const ViewState& state);
@@ -96,6 +101,9 @@ private:
     size_t gridColumns() const { return std::min(CsvTable::maxColumns, table_.columns() + (partial() ? 0 : 1)); }
     RECT formula() const;
     RECT cellRect(CsvPosition cell) const;
+    // Where a cell's value is laid out; an in-cell edit uses the same rect so
+    // its text does not move by a pixel when the edit starts.
+    RECT textRect(CsvPosition cell) const;
     CsvPosition hit(POINT point) const;
     CsvRange selection() const;
     // Whether the selection covers any loaded row, which it does not when both
@@ -123,7 +131,7 @@ private:
     void clear();
     bool apply(const std::optional<CsvReplacement>& replacement, bool join = false);
     void undo(bool redo);
-    void startEdit(bool empty = false);
+    void startEdit(bool empty = false, bool formula = false);
     void finishEdit(bool cancel = false);
     void inputChanged();
     void replaceInput(std::wstring text);
@@ -138,7 +146,7 @@ private:
     CsvTable table_;
     CsvSearch search_;
     UINT dpi_ = 96;
-    bool active_ = false, valid_ = false, editing_ = false, editChanged_ = false, selecting_ = false, inputSelecting_ = false;
+    bool active_ = false, valid_ = false, editing_ = false, formulaEdit_ = false, editChanged_ = false, selecting_ = false, inputSelecting_ = false;
     // Column widths use 96-DPI units; the scroll range uses physical pixels.
     std::vector<int> widths_, edges_;
     int top_ = 0, left_ = 0, resizing_ = -1, resizeX_ = 0, resizeWidth_ = 0, wheel_ = 0;
@@ -155,6 +163,9 @@ private:
     std::chrono::steady_clock::time_point statusTick_;
     static constexpr UINT_PTR statusTimer = 0x5062;
     InputLine input_;
+    // An in-cell edit's frame. Text wider than the cell widens it over the
+    // following columns up to the visible table's right edge.
+    RECT editBox_{};
     ImeComposition ime_;
     std::wstring text_;
     size_t textAnchor_ = 0, textCaret_ = 0;
