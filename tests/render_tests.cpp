@@ -1570,6 +1570,9 @@ void imeCellRendering() {
         check(cursor.x == 8 + 2 * cw && cursor.y + ch <= clip.bottom, "Wrapped IME candidates would leave the text viewport");
     }
 }
+// Composition text is drawn before the shell echoes it. The predicted frame
+// uses the same fixed cells, so it must match the echoed frame pixel for pixel
+// apart from the preedit underline and caret.
 void imeTerminalInsertion() {
     Renderer renderer;
     Bitmap actual, expected;
@@ -1579,18 +1582,17 @@ void imeTerminalInsertion() {
         for (const bool coloredPanel : {false, true}) for (const auto& text : {CompositionText{u"にほんご", {}, 4}, CompositionText{u"日本語", {}, 1}, CompositionText{u"日😀ｱ", {}, 2}}) {
             const int columns = coloredPanel ? 28 : 18, rows = 2;
             const RECT clip{8, 8, 8 + columns * cw, 8 + rows * ch};
-            const std::string suffix = u8"日本😀defghijk";
-            const std::string color = "\x1b[38;2;70;180;210m";
             const std::string base = coloredPanel ? "\x1b[48;2;30;40;50m\x1b[2K" : "";
             TerminalModel model(columns, rows), reference(columns, rows); TerminalDisplay display;
-            model.feed(base + "abc" + color + suffix + "\x1b[0m\x1b[1;4H"); display.update(model, 0, 0, true);
-            const auto preview = display.preedit(text);
-            reference.feed(base + "abc" + utf8(std::wstring(text.text.begin(), text.text.end())) + color + suffix);
-            check(renderer.begin(actual.bitmap.get()), "Cannot render terminal preedit insertion");
+            model.feed(base + "abc"); display.update(model, 0, 0, true);
+            const auto preview = display.predictComposition(text, display.firstRow(), 3);
+            check(!preview.cells.empty() && preview.composition.glyphs.size() == 3, "The terminal did not predict the composition");
+            reference.feed(base + "abc" + utf8(std::wstring(text.text.begin(), text.text.end())));
+            check(renderer.begin(actual.bitmap.get()), "Cannot render the predicted terminal composition");
             renderer.fill(actual.bounds(), panel); renderer.fill(clip, background);
             for (int y = 0; y < rows; ++y) renderer.cells(8, 8 + y * ch, cw, ch, preview.cells[y], columns, clip);
-            renderer.composition(preview.composition, {8, 8}, cw, ch, clip, preview.compositionBackground); finish(renderer); actual.read();
-            check(renderer.begin(expected.bitmap.get()), "Cannot render terminal insertion reference");
+            finish(renderer); actual.read();
+            check(renderer.begin(expected.bitmap.get()), "Cannot render the echoed terminal composition");
             renderer.fill(expected.bounds(), panel); renderer.fill(clip, background);
             for (int y = 0; y < rows; ++y) renderer.cells(8, 8 + y * ch, cw, ch, reference.row(y), columns, clip);
             finish(renderer); expected.read();
@@ -1600,7 +1602,7 @@ void imeTerminalInsertion() {
                     if ((y - clip.top) % ch >= ch - 2) continue;
                     if (x >= caretX && x < caretX + 2 && y >= caretY && y < caretY + ch) continue;
                 }
-                check(actual.pixel(x, y) == expected.pixel(x, y), "Preedit and shifted suffix differ from committed terminal insertion");
+                check(actual.pixel(x, y) == expected.pixel(x, y), "The predicted composition differs from the shell's echo");
             }
         }
     }
