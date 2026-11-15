@@ -3451,10 +3451,11 @@ void ProjectRuntime::Impl::loadTab(bool preserve, int group, bool revealExplorer
     if (!tab.diff && tab.diffKind != GitDiffKind::Commit && tab.diffKind != GitDiffKind::Compare) {
         if (preserve && viewers_[group].tailPaused()) return;
         const auto mode = preserve && viewers_[group].tailPreview() ? FileReadMode::Tail : FileReadMode::Preview;
-        // A file over the preview limit opens at its beginning, or at the
-        // records its tab last showed. A reload that follows the end reads
-        // the end, also once the file outgrows the limit.
-        const uint64_t offset = preserve && viewers_[group].followsTail() ? UINT64_MAX : !preserve && state.file ? state.file->top : 0;
+        // A file over the preview limit opens at its beginning, or where its
+        // tab last showed it. A reload that follows the end, or a tab that
+        // followed it, reads the end, also once the file outgrows the limit.
+        const uint64_t offset = preserve ? (viewers_[group].followsTail() ? UINT64_MAX : 0) :
+            state.file ? (state.file->end ? UINT64_MAX : state.file->top) : 0;
         worker_->submit(L"file:" + std::to_wstring(group), [this, group, path, serial, generation, preserve, state, mode, offset, provider = fileProvider(path)] {
             auto result = readDocument(*provider, path, mode, offset);
             worker_->complete([this, group, result, path, serial, generation, preserve, state] {

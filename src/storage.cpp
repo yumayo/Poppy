@@ -51,6 +51,8 @@ constexpr const char* largeFileViews =
     "ALTER TABLE tabs ADD COLUMN file_cells_caret INTEGER NOT NULL DEFAULT 0;"
     "ALTER TABLE tabs ADD COLUMN file_cells_anchor_column INTEGER NOT NULL DEFAULT 0;"
     "ALTER TABLE tabs ADD COLUMN file_cells_caret_column INTEGER NOT NULL DEFAULT 0;";
+constexpr const char* largeFileEnds =
+    "ALTER TABLE tabs ADD COLUMN file_cells_end INTEGER NOT NULL DEFAULT 0;";
 constexpr const char* appLocations =
     "ALTER TABLE projects ADD COLUMN kind INTEGER NOT NULL DEFAULT 0;"
     "ALTER TABLE projects ADD COLUMN distro TEXT NOT NULL DEFAULT '';"
@@ -173,13 +175,13 @@ void bindFileCells(Statement& statement, int start, const ViewState& state) {
     statement.number(start, state.file.has_value());
     statement.number(start + 1, static_cast<sqlite3_int64>(cells.top)); statement.number(start + 2, static_cast<sqlite3_int64>(cells.record));
     statement.number(start + 3, static_cast<sqlite3_int64>(cells.anchor)); statement.number(start + 4, static_cast<sqlite3_int64>(cells.caret));
-    statement.number(start + 5, static_cast<sqlite3_int64>(cells.anchorColumn)); statement.number(start + 6, static_cast<sqlite3_int64>(cells.caretColumn));
+    statement.number(start + 5, static_cast<sqlite3_int64>(cells.anchorColumn)); statement.number(start + 6, static_cast<sqlite3_int64>(cells.caretColumn)); statement.number(start + 7, cells.end);
 }
 std::optional<ViewState::FileCells> readFileCells(const Statement& statement, int start) {
     if (statement.number(start) == 0) return std::nullopt;
     const auto byte = [&](int column) { return static_cast<uint64_t>(std::max(statement.number(column), sqlite3_int64{0})); };
     const auto cellColumn = [&](int column) { return static_cast<size_t>(bounded(statement.number(column), 0, static_cast<int>(CsvTable::maxColumns - 1))); };
-    return ViewState::FileCells{byte(start + 1), byte(start + 2), byte(start + 3), byte(start + 4), cellColumn(start + 5), cellColumn(start + 6)};
+    return ViewState::FileCells{byte(start + 1), byte(start + 2), byte(start + 3), byte(start + 4), cellColumn(start + 5), cellColumn(start + 6), statement.number(start + 7) != 0};
 }
 void projectSchema(Database& db) {
     schema(db,
@@ -188,7 +190,7 @@ void projectSchema(Database& db) {
         "CREATE TABLE IF NOT EXISTS tabs (position INTEGER PRIMARY KEY, path TEXT NOT NULL, diff INTEGER NOT NULL,"
         " file_top INTEGER NOT NULL, file_left INTEGER NOT NULL, file_anchor INTEGER NOT NULL, file_caret INTEGER NOT NULL, file_after INTEGER NOT NULL,"
         " diff_top INTEGER NOT NULL, diff_left INTEGER NOT NULL, diff_anchor INTEGER NOT NULL, diff_caret INTEGER NOT NULL, diff_after INTEGER NOT NULL, pinned INTEGER NOT NULL);"
-        "CREATE TABLE IF NOT EXISTS expanded (path TEXT PRIMARY KEY);") + projectViews + splitViews + projectConnection + gitComparisons + wrappedViews + wrappedDiffViews + comparisonRepositories + terminalShells + contentSearchState + dockViews + terminalHosts + fileComparisons + terminalPins + largeFileViews).c_str(), {
+        "CREATE TABLE IF NOT EXISTS expanded (path TEXT PRIMARY KEY);") + projectViews + splitViews + projectConnection + gitComparisons + wrappedViews + wrappedDiffViews + comparisonRepositories + terminalShells + contentSearchState + dockViews + terminalHosts + fileComparisons + terminalPins + largeFileViews + largeFileEnds).c_str(), {
         "ALTER TABLE session ADD COLUMN diff_inline INTEGER NOT NULL DEFAULT 0;"
         "UPDATE session SET diff_inline=COALESCE((SELECT diff_inline FROM tabs WHERE diff<>0"
         " ORDER BY (position=(SELECT active_tab FROM session WHERE id=1)) DESC,position LIMIT 1),0);"
@@ -197,7 +199,7 @@ void projectSchema(Database& db) {
         "ALTER TABLE tabs DROP COLUMN file_inline;"
         "ALTER TABLE tabs DROP COLUMN diff_inline;",
         "ALTER TABLE session ADD COLUMN git_tree INTEGER NOT NULL DEFAULT 0;",
-        "ALTER TABLE tabs ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0;", projectViews, splitViews, projectConnection, gitComparisons, wrappedViews, wrappedDiffViews, comparisonRepositories, terminalShells, contentSearchState, dockViews, terminalHosts, fileComparisons, terminalPins, largeFileViews});
+        "ALTER TABLE tabs ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0;", projectViews, splitViews, projectConnection, gitComparisons, wrappedViews, wrappedDiffViews, comparisonRepositories, terminalShells, contentSearchState, dockViews, terminalHosts, fileComparisons, terminalPins, largeFileViews, largeFileEnds});
 }
 }
 struct Storage::Impl {
@@ -303,7 +305,7 @@ std::optional<ProjectSession> Storage::loadProject(const std::string& key, const
         state.diffInline = row.number(6) != 0;
         state.gitTree = row.number(7) != 0;
     }
-    Statement tabs(db, "SELECT path,diff,file_top,file_left,file_anchor,file_caret,file_after,diff_top,diff_left,diff_anchor,diff_caret,diff_after,pinned,file_wrap_offset,diff_wrap_offset,file_cells,file_cells_top,file_cells_record,file_cells_anchor,file_cells_caret,file_cells_anchor_column,file_cells_caret_column FROM tabs ORDER BY position LIMIT 10000");
+    Statement tabs(db, "SELECT path,diff,file_top,file_left,file_anchor,file_caret,file_after,diff_top,diff_left,diff_anchor,diff_caret,diff_after,pinned,file_wrap_offset,diff_wrap_offset,file_cells,file_cells_top,file_cells_record,file_cells_anchor,file_cells_caret,file_cells_anchor_column,file_cells_caret_column,file_cells_end FROM tabs ORDER BY position LIMIT 10000");
     while (tabs.row()) {
         state.tabs.push_back({tabs.text(0), tabs.number(1) != 0, readView(tabs, 2), readView(tabs, 7), tabs.number(12) != 0});
         state.tabs.back().fileView.wrapOffset = position(tabs.number(13));
@@ -389,7 +391,7 @@ void Storage::saveProject(const std::string& key, const std::string& path, const
     session.number(1, state.sidebar); session.number(2, state.terminalHeight); session.number(3, state.terminalVisible);
     session.number(4, state.branchSidebar ? 2 : state.gitSidebar ? 1 : 0); session.number(5, static_cast<sqlite3_int64>(state.activeTab)); session.text(6, state.selected);
     session.number(7, state.diffInline); session.number(8, state.gitTree); session.run();
-    Statement tab(db, "INSERT INTO tabs VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)");
+    Statement tab(db, "INSERT INTO tabs VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)");
     for (size_t i = 0; i < state.tabs.size(); ++i) {
         const auto& value = state.tabs[i];
         tab.number(1, static_cast<sqlite3_int64>(i)); tab.text(2, value.path); tab.number(3, value.diff);

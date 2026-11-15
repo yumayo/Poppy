@@ -2915,6 +2915,25 @@ void largeFileTailPreview() {
         check(!viewer.followsTail(), "An ordinary file above its end followed it");
         viewer.showTail(head(), L"growing.log", true);
         check(viewer.tailPaused() && viewer.state().top == 40, "A file that outgrew the full-read limit moved the rows on screen");
+
+        // A tab's saved rows are kept by file byte, so reopening it places
+        // them in whichever window of the file is read.
+        viewer.showTail(head(), L"large.log");
+        auto shown = viewer.state(); shown.top = 40; viewer.restore(shown);
+        const auto saved = viewer.sessionState();
+        check(saved.file && !saved.file->end && saved.file->top == head()->lines[40], "A large file tab did not save its rows by file byte");
+        auto later = snapshot(20, 100); later->tailOffset = head()->lines[20]; later->tailEndOffset = later->tailOffset + later->text.size();
+        viewer.show(std::make_shared<Document>(), L"ordinary.txt");
+        viewer.showTail(later, L"large.log"); viewer.restore(saved);
+        check(viewer.state().top == 20 && viewer.tailPaused(), "Reopening a large file tab lost its scroll position");
+        // A tab that followed the end reopens following it.
+        viewer.showTail(snapshot(30, 100), L"large.log"); SendMessageW(viewer.window(), WM_VSCROLL, SB_BOTTOM, 0);
+        const auto followed = viewer.sessionState();
+        check(followed.file && followed.file->end, "A large file tab at its end did not save that it followed it");
+        viewer.show(std::make_shared<Document>(), L"ordinary.txt");
+        viewer.showTail(snapshot(60, 100), L"large.log"); viewer.restore(followed);
+        check(atBottom() && !viewer.tailPaused(), "Reopening a large file tab that followed its end did not follow it");
+        viewer.show(std::make_shared<Document>(), L"ordinary.txt");
     }
 }
 void largeCsvTable() {

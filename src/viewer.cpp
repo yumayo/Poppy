@@ -461,12 +461,18 @@ std::wstring Viewer::textStatus() const {
 Viewer::State Viewer::sessionState() const {
     auto saved = state();
     // Offsets in the loaded window mean nothing once another window of the
-    // file is loaded, so a large file's cells are kept by file byte.
-    if (csv_.active() && tailPreview() && csv_.valid()) {
+    // file is loaded, so a large file's rows and cells are kept by file byte.
+    if (!tailPreview()) return saved;
+    if (csv_.active()) {
+        if (!csv_.valid()) return saved;
         const auto carry = captureCsv();
         saved.left = carry.left;
         saved.file = State::FileCells{carry.top, carry.record, carry.anchor, carry.caret, carry.anchorColumn, carry.column};
+    } else {
+        const auto caret = fileByteAt(caret_);
+        saved.file = State::FileCells{fileRowByte(top_), caret, fileByteAt(anchor_), caret};
     }
+    saved.file->end = followsTail();
     return saved;
 }
 Viewer::State Viewer::state() const {
@@ -515,6 +521,7 @@ void Viewer::restore(const State& state) {
         carry.anchor = state.file->anchor; carry.caret = state.file->caret;
         carry.anchorColumn = state.file->anchorColumn; carry.column = state.file->caretColumn; carry.left = state.left;
         placeCsv(carry);
+        if (state.file->end && document_->tailEndOffset >= document_->fileBytes) csv_.scrollToBottom();
         scrollbars(); InvalidateRect(window_, nullptr, FALSE);
         if (statusChanged) statusChanged();
         return;
@@ -526,7 +533,9 @@ void Viewer::restore(const State& state) {
         source.top = static_cast<int>(std::upper_bound(document_->lines.begin(), document_->lines.end(), top) - document_->lines.begin()) - 1;
         source.wrapOffset = top - document_->lines[static_cast<size_t>(std::max(0, source.top))];
         source.anchor = fileTextAt(state.file->anchor); source.caret = fileTextAt(state.file->caret); source.file.reset();
-        restore(source); return;
+        restore(source);
+        if (state.file->end && document_->tailEndOffset >= document_->fileBytes) { scrollbars(true); caretPosition(); }
+        return;
     }
     restoreTop(state);
     caretTrailing_ = false;

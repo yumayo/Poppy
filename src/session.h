@@ -16,12 +16,14 @@ struct ViewState {
     bool after = false;
     // Byte offset of the top continuation within the logical line in top.
     size_t wrapOffset = 0;
-    // A large file's table also names its cells by file byte, since another
+    // A large file's view also names its rows by file byte, since another
     // window of the file may be loaded when the state is restored: the top
-    // row's record, the caret's record, and the anchor / caret cells.
+    // row, the caret's record, and the anchor / caret (a table's cells, with
+    // their columns). end keeps a view that followed the file's end there.
     struct FileCells {
         uint64_t top = 0, record = 0, anchor = 0, caret = 0;
         size_t anchorColumn = 0, caretColumn = 0;
+        bool end = false;
     };
     std::optional<FileCells> file = std::nullopt;
 };
