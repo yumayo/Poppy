@@ -61,6 +61,9 @@ public:
     void message(const std::wstring& text, const ResourceId& path = {});
     void loading(const std::wstring& text, const ResourceId& path = {});
     State state() const;
+    // state() plus, for a large file's table, its cells by file byte, which
+    // restore() places in whichever window of the file is loaded.
+    State sessionState() const;
     void restore(const State& state);
     size_t documentBytes() const;
     bool hasDocument() const { return document_ != nullptr || image_ != nullptr; }
@@ -90,6 +93,7 @@ private:
     };
     std::optional<CsvCarry> present(std::shared_ptr<const Document> document, const ResourceId& path, bool preserve, bool allowHtml);
     CsvCarry captureCsv() const;
+    void placeCsv(const CsvCarry& carry);
     CsvView::Mark csvMark(uint64_t byte, size_t column) const;
     void scrollTable(int vertical);
     bool moveTableCaret(int64_t rows, bool extend);

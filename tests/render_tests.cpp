@@ -3056,6 +3056,31 @@ void largeCsvTable() {
         viewer.showFileWindow(snapshot(middle, 200), L"huge.csv", static_cast<uint64_t>(middle) * 16);
         check(!viewer.csvTable(), "Loading another window lost Source mode");
         viewer.setCsvTable(true); viewer.cancelFileWindowRequest();
+
+        // A tab's saved rows and cells are kept by file byte, so reopening it
+        // places them in whichever window of the file is read.
+        auto placed = viewer.state(); placed.top = 10 * 2; placed.left = 30; placed.anchor = 30 * 16 + 7; placed.caret = 40 * 16; viewer.restore(placed);
+        const auto saved = viewer.sessionState();
+        check(saved.file && saved.file->top == (static_cast<uint64_t>(middle) + 10) * 16 && saved.file->record == (static_cast<uint64_t>(middle) + 40) * 16 &&
+            saved.file->anchor == (static_cast<uint64_t>(middle) + 30) * 16 + 7 && saved.file->caret == (static_cast<uint64_t>(middle) + 40) * 16 &&
+            saved.file->anchorColumn == 1 && saved.file->caretColumn == 0, "A large CSV tab did not save its cells by file byte");
+        viewer.show(std::make_shared<Document>(), L"ordinary.txt");
+        viewer.showTail(snapshot(middle - 50, 200), L"huge.csv"); viewer.restore(saved);
+        const auto reopened = viewer.state();
+        check(reopened.top == 60 * 2 && reopened.anchor == 80 * 16 + 7 && reopened.caret == 90 * 16 && viewer.tailPaused(),
+            "Reopening a large CSV tab lost its scroll position or selected cells");
+        // Saved cells beyond the window read their own record when moved.
+        viewer.show(std::make_shared<Document>(), L"ordinary.txt");
+        viewer.showTail(snapshot(middle + 100, 200), L"huge.csv"); viewer.restore(saved);
+        check(viewer.state().top == 0, "A saved top row above the window did not leave the window's start");
+        key(VK_DOWN);
+        check(requests.back() == (static_cast<uint64_t>(middle) + 40) * 16, "A saved caret outside the window did not move from its own record");
+        viewer.cancelFileWindowRequest();
+        // A file that is no longer large opens at its start.
+        auto small = std::make_shared<Document>(); small->text = record(0) + record(1); indexDocument(*small);
+        viewer.show(small, L"huge.csv"); viewer.restore(saved);
+        check(viewer.state().top == 0 && viewer.state().caret == 0, "Saved large-file bytes were applied to an editable document");
+
         viewer.show(std::make_shared<Document>(), L"ordinary.txt");
         check(!viewer.csvTable() && !viewer.tailPreview(), "Large CSV mode leaked into another file");
     }

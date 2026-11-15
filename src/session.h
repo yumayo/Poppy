@@ -3,6 +3,8 @@
 #include "content_search.h"
 #include "terminal_profile.h"
 #include <cstddef>
+#include <cstdint>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -14,6 +16,14 @@ struct ViewState {
     bool after = false;
     // Byte offset of the top continuation within the logical line in top.
     size_t wrapOffset = 0;
+    // A large file's table also names its cells by file byte, since another
+    // window of the file may be loaded when the state is restored: the top
+    // row's record, the caret's record, and the anchor / caret cells.
+    struct FileCells {
+        uint64_t top = 0, record = 0, anchor = 0, caret = 0;
+        size_t anchorColumn = 0, caretColumn = 0;
+    };
+    std::optional<FileCells> file = std::nullopt;
 };
 struct SavedTab {
     std::string path;

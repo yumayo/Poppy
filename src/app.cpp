@@ -2977,7 +2977,7 @@ void ProjectRuntime::Impl::saveTab() {
     for (int group = 0; group < groupCount(); ++group) {
         const auto index = groupTab(group); auto& view = viewers_[group];
         if (index >= tabs_.size() || !tabs_[index].terminalId.empty() || !view.hasDocument()) continue;
-        auto& tab = tabs_[index]; (tab.diff ? tab.diffView : tab.fileView) = view.state();
+        auto& tab = tabs_[index]; (tab.diff ? tab.diffView : tab.fileView) = view.sessionState();
         if (view.buffer()) tab.buffer = view.buffer();
     }
     keepModifiedEditorTabs(tabs_);
@@ -3451,9 +3451,10 @@ void ProjectRuntime::Impl::loadTab(bool preserve, int group, bool revealExplorer
     if (!tab.diff && tab.diffKind != GitDiffKind::Commit && tab.diffKind != GitDiffKind::Compare) {
         if (preserve && viewers_[group].tailPaused()) return;
         const auto mode = preserve && viewers_[group].tailPreview() ? FileReadMode::Tail : FileReadMode::Preview;
-        // A file over the preview limit opens at its beginning. A reload that
-        // follows the end reads the end, also once the file outgrows the limit.
-        const uint64_t offset = preserve && viewers_[group].followsTail() ? UINT64_MAX : 0;
+        // A file over the preview limit opens at its beginning, or at the
+        // records its tab last showed. A reload that follows the end reads
+        // the end, also once the file outgrows the limit.
+        const uint64_t offset = preserve && viewers_[group].followsTail() ? UINT64_MAX : !preserve && state.file ? state.file->top : 0;
         worker_->submit(L"file:" + std::to_wstring(group), [this, group, path, serial, generation, preserve, state, mode, offset, provider = fileProvider(path)] {
             auto result = readDocument(*provider, path, mode, offset);
             worker_->complete([this, group, result, path, serial, generation, preserve, state] {
@@ -3475,6 +3476,7 @@ void ProjectRuntime::Impl::loadTab(bool preserve, int group, bool revealExplorer
                     auto& tab = tabs_[groupTab(group)];
                     tab.buffer.reset(); tab.searchTarget.reset();
                     viewers_[group].showTail(result->document, path, preserve);
+                    if (!preserve && state.file) viewers_[group].restore(state);
                     countFileLines(path, result->document->fileBytes);
                     status(L"Large file · " + formatByteSize(result->document->fileBytes) + L" · READ ONLY");
                 } else if (result->document) {

@@ -114,15 +114,7 @@ std::optional<Viewer::CsvCarry> Viewer::present(std::shared_ptr<const Document> 
     if (preview) setHtmlPreview(true);
     if (table) setCsvTable(true);
     if (previous && csv_.active()) restore(*previous);
-    if (carry && csv_.active()) {
-        csvMarks_ = *carry;
-        csv_.selectMarks(csvMark(carry->anchor, carry->anchorColumn), csvMark(carry->caret, carry->column), carry->name, carry->value);
-        // Keep the rows on screen in place, so a caret stepping past the old
-        // window scrolls only as far as it must rather than from the new
-        // window's first row. Rows beyond the new window leave its near end.
-        const auto top = csvMark(carry->top, 0);
-        csv_.scrollTo(top.side < 0 ? 0 : top.side > 0 ? std::numeric_limits<int>::max() / 2 : static_cast<int>(csv_.rowAt(top.offset)), carry->left);
-    }
+    if (carry && csv_.active()) placeCsv(*carry);
     if (drag) csv_.holdDrag(false);
     if (statusChanged) statusChanged();
     return carry;
@@ -138,6 +130,15 @@ Viewer::CsvCarry Viewer::captureCsv() const {
     carry.anchorColumn = csv_.anchorColumn(); carry.column = csv_.caretColumn(); carry.left = csv_.left();
     carry.name = csv_.caretName(); carry.value = csv_.caretValue();
     return carry;
+}
+void Viewer::placeCsv(const CsvCarry& carry) {
+    csvMarks_ = carry;
+    csv_.selectMarks(csvMark(carry.anchor, carry.anchorColumn), csvMark(carry.caret, carry.column), carry.name, carry.value);
+    // Keep the rows on screen in place, so a caret stepping past the old
+    // window scrolls only as far as it must rather than from the new
+    // window's first row. Rows beyond the new window leave its near end.
+    const auto top = csvMark(carry.top, 0);
+    csv_.scrollTo(top.side < 0 ? 0 : top.side > 0 ? std::numeric_limits<int>::max() / 2 : static_cast<int>(csv_.rowAt(top.offset)), carry.left);
 }
 CsvView::Mark Viewer::csvMark(uint64_t byte, size_t column) const {
     // Records dropped from either end of the window count as outside it.
@@ -457,6 +458,17 @@ std::wstring Viewer::textStatus() const {
     return mode +
         wide(document_->encoding) + (crlf ? L"  ·  CRLF" : L"  ·  LF");
 }
+Viewer::State Viewer::sessionState() const {
+    auto saved = state();
+    // Offsets in the loaded window mean nothing once another window of the
+    // file is loaded, so a large file's cells are kept by file byte.
+    if (csv_.active() && tailPreview() && csv_.valid()) {
+        const auto carry = captureCsv();
+        saved.left = carry.left;
+        saved.file = State::FileCells{carry.top, carry.record, carry.anchor, carry.caret, carry.anchorColumn, carry.column};
+    }
+    return saved;
+}
 Viewer::State Viewer::state() const {
     if (csv_.active()) return csv_.state();
     if (wrapping() && diff_ && diffLayout_.rows()) {
@@ -492,7 +504,30 @@ void Viewer::restoreTop(const State& state) {
 void Viewer::restore(const State& state) {
     if (!document_) return;
     stopSelection(); clearColumns();
-    if (csv_.active()) { csv_.restore(state); return; }
+    // File bytes name cells of a large file only. A file that has since
+    // shrunk to an editable document opens at its start instead.
+    if (state.file && !tailPreview()) { restore(State{}); return; }
+    if (csv_.active()) {
+        if (!state.file || !csv_.valid()) { csv_.restore(state); return; }
+        // Cells outside the loaded window keep their bytes and columns.
+        CsvCarry carry;
+        carry.top = state.file->top; carry.record = state.file->record;
+        carry.anchor = state.file->anchor; carry.caret = state.file->caret;
+        carry.anchorColumn = state.file->anchorColumn; carry.column = state.file->caretColumn; carry.left = state.left;
+        placeCsv(carry);
+        scrollbars(); InvalidateRect(window_, nullptr, FALSE);
+        if (statusChanged) statusChanged();
+        return;
+    }
+    if (state.file && !document_->lines.empty()) {
+        // The source view of a large file's window places its rows by file byte too.
+        auto source = state;
+        const auto top = fileTextAt(state.file->top);
+        source.top = static_cast<int>(std::upper_bound(document_->lines.begin(), document_->lines.end(), top) - document_->lines.begin()) - 1;
+        source.wrapOffset = top - document_->lines[static_cast<size_t>(std::max(0, source.top))];
+        source.anchor = fileTextAt(state.file->anchor); source.caret = fileTextAt(state.file->caret); source.file.reset();
+        restore(source); return;
+    }
     restoreTop(state);
     caretTrailing_ = false;
     left_ = state.left; after_ = state.after;

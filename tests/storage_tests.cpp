@@ -31,7 +31,9 @@ void execute(const fs::path& path, const char* sql) {
     if (result != SQLITE_OK) throw std::runtime_error(error);
 }
 bool same(const poppy::ViewState& a, const poppy::ViewState& b) {
-    return a.top == b.top && a.left == b.left && a.anchor == b.anchor && a.caret == b.caret && a.after == b.after && a.wrapOffset == b.wrapOffset;
+    return a.top == b.top && a.left == b.left && a.anchor == b.anchor && a.caret == b.caret && a.after == b.after && a.wrapOffset == b.wrapOffset &&
+        a.file.has_value() == b.file.has_value() && (!a.file || (a.file->top == b.file->top && a.file->record == b.file->record &&
+        a.file->anchor == b.file->anchor && a.file->caret == b.file->caret && a.file->anchorColumn == b.file->anchorColumn && a.file->caretColumn == b.file->caretColumn));
 }
 bool same(const poppy::SavedSearch& a, const poppy::SavedSearch& b) {
     if (a.query != b.query || a.status != b.status || a.matchCase != b.matchCase || a.respectIgnore != b.respectIgnore ||
@@ -71,6 +73,8 @@ void roundTripAndIsolation() {
     state.tabs[0].pinned = true; state.tabs[0].displayed = true; state.tabs[1].group = 1; state.tabs[1].displayed = true;
     state.tabs[0].fileView.wrapOffset = 137;
     state.tabs[1].diffView.wrapOffset = 89;
+    // A large CSV's cells lie past the 16 MiB bound on editable offsets.
+    state.tabs[0].fileView.file = poppy::ViewState::FileCells{5'000'000'000ull, 5'000'000'100ull, 4'999'000'000ull, 5'000'000'120ull, 3, 7};
     state.editorRatio = 350; state.terminalRatio = 640; state.rightTabRow = 4; state.terminals[1].group = 1; state.terminals[1].displayed = true;
     poppy::DockLayout dock;
     int leaf = dock.split(0, poppy::DockSide::Bottom);
@@ -240,7 +244,7 @@ void migrateGitLayout() {
     original.expanded = {key}; original.selected = key;
     storage.saveProject(key, key, original);
     execute(storage.projectDirectory(key, key) / "storage.sql",
-        "DROP TABLE split_layout; DROP TABLE tab_groups; DROP TABLE terminal_groups; DROP TABLE view_state; DROP TABLE terminals; DROP TABLE git_collapsed; ALTER TABLE session DROP COLUMN git_tree; ALTER TABLE tabs DROP COLUMN pinned; ALTER TABLE tabs DROP COLUMN file_wrap_offset; ALTER TABLE tabs DROP COLUMN diff_wrap_offset; ALTER TABLE git_comparisons DROP COLUMN repository; PRAGMA user_version=2;");
+        "DROP TABLE split_layout; DROP TABLE tab_groups; DROP TABLE terminal_groups; DROP TABLE view_state; DROP TABLE terminals; DROP TABLE git_collapsed; ALTER TABLE session DROP COLUMN git_tree; ALTER TABLE tabs DROP COLUMN pinned; ALTER TABLE tabs DROP COLUMN file_wrap_offset; ALTER TABLE tabs DROP COLUMN diff_wrap_offset; ALTER TABLE git_comparisons DROP COLUMN repository; ALTER TABLE tabs DROP COLUMN file_cells; ALTER TABLE tabs DROP COLUMN file_cells_top; ALTER TABLE tabs DROP COLUMN file_cells_record; ALTER TABLE tabs DROP COLUMN file_cells_anchor; ALTER TABLE tabs DROP COLUMN file_cells_caret; ALTER TABLE tabs DROP COLUMN file_cells_anchor_column; ALTER TABLE tabs DROP COLUMN file_cells_caret_column; PRAGMA user_version=2;");
     const auto saved = storage.loadProject(key, key);
     original.terminals[0].directory = key;
     check(saved && same(*saved, original), "Migrating version 2 changed existing project state");
@@ -258,7 +262,7 @@ void migratePinnedTabs() {
                      {key + "\\second.cpp", true, {}, {12, 3, 4, 5, true}}};
     storage.saveProject(key, key, original);
     execute(storage.projectDirectory(key, key) / "storage.sql",
-        "DROP TABLE split_layout; DROP TABLE tab_groups; DROP TABLE terminal_groups; DROP TABLE view_state; DROP TABLE terminals; DROP TABLE git_collapsed; ALTER TABLE tabs DROP COLUMN pinned; ALTER TABLE tabs DROP COLUMN file_wrap_offset; ALTER TABLE tabs DROP COLUMN diff_wrap_offset; ALTER TABLE git_comparisons DROP COLUMN repository; PRAGMA user_version=3;");
+        "DROP TABLE split_layout; DROP TABLE tab_groups; DROP TABLE terminal_groups; DROP TABLE view_state; DROP TABLE terminals; DROP TABLE git_collapsed; ALTER TABLE tabs DROP COLUMN pinned; ALTER TABLE tabs DROP COLUMN file_wrap_offset; ALTER TABLE tabs DROP COLUMN diff_wrap_offset; ALTER TABLE git_comparisons DROP COLUMN repository; ALTER TABLE tabs DROP COLUMN file_cells; ALTER TABLE tabs DROP COLUMN file_cells_top; ALTER TABLE tabs DROP COLUMN file_cells_record; ALTER TABLE tabs DROP COLUMN file_cells_anchor; ALTER TABLE tabs DROP COLUMN file_cells_caret; ALTER TABLE tabs DROP COLUMN file_cells_anchor_column; ALTER TABLE tabs DROP COLUMN file_cells_caret_column; PRAGMA user_version=3;");
     const auto saved = storage.loadProject(key, key);
     original.terminals[0].directory = key;
     check(saved && same(*saved, original), "Migrating version 3 changed existing tabs or pinned them");
@@ -285,7 +289,7 @@ void migrateWorkspaceAndTerminals() {
     poppy::ProjectSession original;
     original.terminalHeight = 333; original.terminalVisible = false;
     storage.saveProject(key, key, original);
-    execute(storage.projectDirectory(key,key)/"storage.sql", "DROP TABLE split_layout; DROP TABLE tab_groups; DROP TABLE terminal_groups; DROP TABLE view_state; DROP TABLE terminals; DROP TABLE git_collapsed; ALTER TABLE tabs DROP COLUMN file_wrap_offset; ALTER TABLE tabs DROP COLUMN diff_wrap_offset; ALTER TABLE git_comparisons DROP COLUMN repository; PRAGMA user_version=4;");
+    execute(storage.projectDirectory(key,key)/"storage.sql", "DROP TABLE split_layout; DROP TABLE tab_groups; DROP TABLE terminal_groups; DROP TABLE view_state; DROP TABLE terminals; DROP TABLE git_collapsed; ALTER TABLE tabs DROP COLUMN file_wrap_offset; ALTER TABLE tabs DROP COLUMN diff_wrap_offset; ALTER TABLE git_comparisons DROP COLUMN repository; ALTER TABLE tabs DROP COLUMN file_cells; ALTER TABLE tabs DROP COLUMN file_cells_top; ALTER TABLE tabs DROP COLUMN file_cells_record; ALTER TABLE tabs DROP COLUMN file_cells_anchor; ALTER TABLE tabs DROP COLUMN file_cells_caret; ALTER TABLE tabs DROP COLUMN file_cells_anchor_column; ALTER TABLE tabs DROP COLUMN file_cells_caret_column; PRAGMA user_version=4;");
     auto saved = storage.loadProject(key,key);
     check(saved && saved->terminals.size() == 1 && saved->terminals[0].directory == key && saved->terminalHeight == 333 && !saved->terminalVisible, "Version 4 migration did not preserve terminal layout");
     auto changed = *saved; changed.terminals.push_back(changed.terminals.front());
@@ -299,7 +303,7 @@ void migrateSplitLayout() {
     Fixture fixture; poppy::Storage storage(fixture.directory); const std::string key = "c:/split-migration";
     poppy::ProjectSession original; original.tabs = {{key + "/a.txt", false, {}, {}}, {key + "/b.txt", false, {}, {}}};
     storage.saveProject(key, key, original);
-    execute(storage.projectDirectory(key,key)/"storage.sql", "DROP TABLE split_layout; DROP TABLE tab_groups; DROP TABLE terminal_groups; ALTER TABLE tabs DROP COLUMN file_wrap_offset; ALTER TABLE tabs DROP COLUMN diff_wrap_offset; ALTER TABLE git_comparisons DROP COLUMN repository; PRAGMA user_version=5;");
+    execute(storage.projectDirectory(key,key)/"storage.sql", "DROP TABLE split_layout; DROP TABLE tab_groups; DROP TABLE terminal_groups; ALTER TABLE tabs DROP COLUMN file_wrap_offset; ALTER TABLE tabs DROP COLUMN diff_wrap_offset; ALTER TABLE git_comparisons DROP COLUMN repository; ALTER TABLE tabs DROP COLUMN file_cells; ALTER TABLE tabs DROP COLUMN file_cells_top; ALTER TABLE tabs DROP COLUMN file_cells_record; ALTER TABLE tabs DROP COLUMN file_cells_anchor; ALTER TABLE tabs DROP COLUMN file_cells_caret; ALTER TABLE tabs DROP COLUMN file_cells_anchor_column; ALTER TABLE tabs DROP COLUMN file_cells_caret_column; PRAGMA user_version=5;");
     const auto restored = storage.loadProject(key,key);
     check(restored && same(*restored, original), "Version 5 migration lost the tabs or default layout");
 }
@@ -309,12 +313,12 @@ void migrateWrapping() {
     poppy::ProjectSession state;
     state.tabs.push_back({key + "/long.txt", false, {12, 0, 30, 50, false}, {}});
     storage.saveProject(key, key, state);
-    execute(storage.projectDirectory(key, key) / "storage.sql", "ALTER TABLE tabs DROP COLUMN file_wrap_offset; ALTER TABLE tabs DROP COLUMN diff_wrap_offset; ALTER TABLE git_comparisons DROP COLUMN repository; PRAGMA user_version=8;");
+    execute(storage.projectDirectory(key, key) / "storage.sql", "ALTER TABLE tabs DROP COLUMN file_wrap_offset; ALTER TABLE tabs DROP COLUMN diff_wrap_offset; ALTER TABLE git_comparisons DROP COLUMN repository; ALTER TABLE tabs DROP COLUMN file_cells; ALTER TABLE tabs DROP COLUMN file_cells_top; ALTER TABLE tabs DROP COLUMN file_cells_record; ALTER TABLE tabs DROP COLUMN file_cells_anchor; ALTER TABLE tabs DROP COLUMN file_cells_caret; ALTER TABLE tabs DROP COLUMN file_cells_anchor_column; ALTER TABLE tabs DROP COLUMN file_cells_caret_column; PRAGMA user_version=8;");
     check(same(*storage.loadProject(key, key), state), "Version 8 migration changed the top logical line or selection");
     state.tabs[0].fileView.wrapOffset = 243;
     storage.saveProject(key, key, state);
     check(same(*storage.loadProject(key, key), state), "A migrated tab lost its wrapped scroll position");
-    execute(storage.projectDirectory(key, key) / "storage.sql", "ALTER TABLE tabs DROP COLUMN diff_wrap_offset; ALTER TABLE git_comparisons DROP COLUMN repository; PRAGMA user_version=9;");
+    execute(storage.projectDirectory(key, key) / "storage.sql", "ALTER TABLE tabs DROP COLUMN diff_wrap_offset; ALTER TABLE git_comparisons DROP COLUMN repository; ALTER TABLE tabs DROP COLUMN file_cells; ALTER TABLE tabs DROP COLUMN file_cells_top; ALTER TABLE tabs DROP COLUMN file_cells_record; ALTER TABLE tabs DROP COLUMN file_cells_anchor; ALTER TABLE tabs DROP COLUMN file_cells_caret; ALTER TABLE tabs DROP COLUMN file_cells_anchor_column; ALTER TABLE tabs DROP COLUMN file_cells_caret_column; PRAGMA user_version=9;");
     check(same(*storage.loadProject(key, key), state), "Version 9 migration changed a file's wrapped scroll position");
     state.tabs[0].diffView = {8, 0, 30, 50, true, 113};
     storage.saveProject(key, key, state);
@@ -329,7 +333,7 @@ void terminalShellMigration() {
     state.activeTerminal = "right";
     storage.saveProject(key, key, state);
     const auto db = storage.projectDirectory(key, key) / "storage.sql";
-    execute(db, "DROP TABLE terminal_settings; DROP TABLE terminal_shells; PRAGMA user_version=11;");
+    execute(db, "DROP TABLE terminal_settings; DROP TABLE terminal_shells; ALTER TABLE tabs DROP COLUMN file_cells; ALTER TABLE tabs DROP COLUMN file_cells_top; ALTER TABLE tabs DROP COLUMN file_cells_record; ALTER TABLE tabs DROP COLUMN file_cells_anchor; ALTER TABLE tabs DROP COLUMN file_cells_caret; ALTER TABLE tabs DROP COLUMN file_cells_anchor_column; ALTER TABLE tabs DROP COLUMN file_cells_caret_column; PRAGMA user_version=11;");
     check(same(*storage.loadProject(key, key), state), "Shell migration changed existing names, groups or the PowerShell default");
     state.defaultShell = poppy::TerminalShell::GitBash;
     state.terminals[1].shell = poppy::TerminalShell::GitBash;
@@ -355,7 +359,7 @@ void schemaAndRegistry() {
     {
         poppy::Storage storage(fixture.directory);
         const auto projectDb = storage.projectDirectory("c:\\future", "c:\\future") / "storage.sql";
-        execute(projectDb, "PRAGMA user_version=18");
+        execute(projectDb, "PRAGMA user_version=19");
         rejects([&] { storage.loadProject("c:\\future", "c:\\future"); }, "A newer project schema was overwritten");
         storage.projectDirectory("c:\\invalid", "c:\\invalid");
         execute(appDb, R"(UPDATE projects SET directory='../../escape' WHERE path_key='c:\invalid')");
@@ -369,7 +373,7 @@ void terminalHostMigration() {
     poppy::ProjectSession state; state.terminals[0].directory = key;
     storage.saveProject(key, key, state);
     const auto db = storage.projectDirectory(key, key) / "storage.sql";
-    execute(db, "DROP TABLE terminal_hosts; PRAGMA user_version=14;");
+    execute(db, "DROP TABLE terminal_hosts; ALTER TABLE tabs DROP COLUMN file_cells; ALTER TABLE tabs DROP COLUMN file_cells_top; ALTER TABLE tabs DROP COLUMN file_cells_record; ALTER TABLE tabs DROP COLUMN file_cells_anchor; ALTER TABLE tabs DROP COLUMN file_cells_caret; ALTER TABLE tabs DROP COLUMN file_cells_anchor_column; ALTER TABLE tabs DROP COLUMN file_cells_caret_column; PRAGMA user_version=14;");
     check(same(*storage.loadProject(key, key), state), "Terminal host migration changed existing tabs");
     state.terminals[0].hostSession = "0123456789abcdef0123456789abcdef";
     storage.saveProject(key, key, state);
@@ -390,7 +394,7 @@ void terminalPinMigration() {
     state.terminals[0].hostSession = "0123456789abcdef0123456789abcdef"; state.activeTerminal = "second";
     storage.saveProject(key, key, state);
     const auto db = storage.projectDirectory(key, key) / "storage.sql";
-    execute(db, "DROP TABLE terminal_pins; PRAGMA user_version=16;");
+    execute(db, "DROP TABLE terminal_pins; ALTER TABLE tabs DROP COLUMN file_cells; ALTER TABLE tabs DROP COLUMN file_cells_top; ALTER TABLE tabs DROP COLUMN file_cells_record; ALTER TABLE tabs DROP COLUMN file_cells_anchor; ALTER TABLE tabs DROP COLUMN file_cells_caret; ALTER TABLE tabs DROP COLUMN file_cells_anchor_column; ALTER TABLE tabs DROP COLUMN file_cells_caret_column; PRAGMA user_version=16;");
     check(same(*storage.loadProject(key, key), state), "Terminal pin migration changed existing sessions or pinned them");
     state.terminals[0].pinned = true;
     storage.saveProject(key, key, state);
@@ -450,7 +454,7 @@ void searchRoundTripAndMigration() {
     check(same(*reopened.loadProject(windows, windows), state), "Oversized search overwrote previous results");
     // A real version 12 database has no search tables. Existing sessions must
     // gain empty search state without changing their tabs or terminal settings.
-    execute(db, "DROP TABLE search_state; DROP TABLE search_results; PRAGMA user_version=12;");
+    execute(db, "DROP TABLE search_state; DROP TABLE search_results; ALTER TABLE tabs DROP COLUMN file_cells; ALTER TABLE tabs DROP COLUMN file_cells_top; ALTER TABLE tabs DROP COLUMN file_cells_record; ALTER TABLE tabs DROP COLUMN file_cells_anchor; ALTER TABLE tabs DROP COLUMN file_cells_caret; ALTER TABLE tabs DROP COLUMN file_cells_anchor_column; ALTER TABLE tabs DROP COLUMN file_cells_caret_column; PRAGMA user_version=12;");
     state.searchSidebar = false; state.search = {};
     check(same(*reopened.loadProject(windows, windows), state), "Search migration changed existing session state");
     state.search.query = "absent"; state.search.status = "0 matches · 2 files";
@@ -478,7 +482,7 @@ void fileComparisonRoundTrip() {
     state.tabs.resize(1); state.activeTab = 0;
     storage.saveProject(key, path, state);
     check(same(*storage.loadProject(key, path), state), "Closed file comparisons were retained");
-    execute(storage.projectDirectory(key, path) / "storage.sql", "DROP TABLE file_comparisons; PRAGMA user_version=15;");
+    execute(storage.projectDirectory(key, path) / "storage.sql", "DROP TABLE file_comparisons; ALTER TABLE tabs DROP COLUMN file_cells; ALTER TABLE tabs DROP COLUMN file_cells_top; ALTER TABLE tabs DROP COLUMN file_cells_record; ALTER TABLE tabs DROP COLUMN file_cells_anchor; ALTER TABLE tabs DROP COLUMN file_cells_caret; ALTER TABLE tabs DROP COLUMN file_cells_anchor_column; ALTER TABLE tabs DROP COLUMN file_cells_caret_column; PRAGMA user_version=15;");
     check(same(*storage.loadProject(key, path), state), "File comparison migration changed existing tabs");
 }
 void gitComparisonRoundTrip() {
@@ -502,12 +506,12 @@ void gitComparisonRoundTrip() {
     // A version 10 project gains repository ownership without changing tabs.
     for (auto& tab : state.tabs) tab.gitRoot.clear();
     storage.saveProject(key, key, state);
-    execute(storage.projectDirectory(key, key) / "storage.sql", "ALTER TABLE git_comparisons DROP COLUMN repository; PRAGMA user_version=10;");
+    execute(storage.projectDirectory(key, key) / "storage.sql", "ALTER TABLE git_comparisons DROP COLUMN repository; ALTER TABLE tabs DROP COLUMN file_cells; ALTER TABLE tabs DROP COLUMN file_cells_top; ALTER TABLE tabs DROP COLUMN file_cells_record; ALTER TABLE tabs DROP COLUMN file_cells_anchor; ALTER TABLE tabs DROP COLUMN file_cells_caret; ALTER TABLE tabs DROP COLUMN file_cells_anchor_column; ALTER TABLE tabs DROP COLUMN file_cells_caret_column; PRAGMA user_version=10;");
     check(same(*storage.loadProject(key, key), state), "Repository migration changed existing comparisons");
     // A version 7 project gains comparison metadata without changing tabs.
     state = {}; state.tabs.push_back({key + "/legacy.txt", true, {}, {3, 2, 0, 0, true}});
     storage.saveProject(key, key, state);
-    execute(storage.projectDirectory(key, key) / "storage.sql", "DROP TABLE git_comparisons; ALTER TABLE tabs DROP COLUMN file_wrap_offset; ALTER TABLE tabs DROP COLUMN diff_wrap_offset; PRAGMA user_version=7;");
+    execute(storage.projectDirectory(key, key) / "storage.sql", "DROP TABLE git_comparisons; ALTER TABLE tabs DROP COLUMN file_wrap_offset; ALTER TABLE tabs DROP COLUMN diff_wrap_offset; ALTER TABLE tabs DROP COLUMN file_cells; ALTER TABLE tabs DROP COLUMN file_cells_top; ALTER TABLE tabs DROP COLUMN file_cells_record; ALTER TABLE tabs DROP COLUMN file_cells_anchor; ALTER TABLE tabs DROP COLUMN file_cells_caret; ALTER TABLE tabs DROP COLUMN file_cells_anchor_column; ALTER TABLE tabs DROP COLUMN file_cells_caret_column; PRAGMA user_version=7;");
     check(same(*storage.loadProject(key, key), state), "Version 7 migration changed existing file diff tabs");
 }
 void wslRoundTripAndMigration() {
@@ -517,7 +521,7 @@ void wslRoundTripAndMigration() {
     {
         poppy::Storage storage(fixture.directory); poppy::ProjectSession local; local.sidebar = 301;
         storage.saveProject("c:\\project", windows, local); oldDirectory = storage.projectDirectory("c:\\project",windows);
-        execute(oldDirectory/"storage.sql","DROP TABLE connection; ALTER TABLE tabs DROP COLUMN file_wrap_offset; ALTER TABLE tabs DROP COLUMN diff_wrap_offset; ALTER TABLE git_comparisons DROP COLUMN repository; PRAGMA user_version=6;");
+        execute(oldDirectory/"storage.sql","DROP TABLE connection; ALTER TABLE tabs DROP COLUMN file_wrap_offset; ALTER TABLE tabs DROP COLUMN diff_wrap_offset; ALTER TABLE git_comparisons DROP COLUMN repository; ALTER TABLE tabs DROP COLUMN file_cells; ALTER TABLE tabs DROP COLUMN file_cells_top; ALTER TABLE tabs DROP COLUMN file_cells_record; ALTER TABLE tabs DROP COLUMN file_cells_anchor; ALTER TABLE tabs DROP COLUMN file_cells_caret; ALTER TABLE tabs DROP COLUMN file_cells_anchor_column; ALTER TABLE tabs DROP COLUMN file_cells_caret_column; PRAGMA user_version=6;");
     }
     execute(fixture.directory/"storage.sql","ALTER TABLE projects DROP COLUMN kind; ALTER TABLE projects DROP COLUMN distro; ALTER TABLE projects DROP COLUMN user; ALTER TABLE projects DROP COLUMN remote_root; ALTER TABLE app DROP COLUMN project_list_collapsed; PRAGMA user_version=2;");
     {
