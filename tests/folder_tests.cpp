@@ -564,7 +564,8 @@ void navigationHistoryTests(const fs::path& executable) {
     command(otherViewer, false);
     waitFor([&] { return IsWindowVisible(surface) && focused(left); }, "Cannot return before closing a project");
     click(app.host, px(60), px(44 + projectRowHeight + 24), true);
-    check(!IsWindow(otherSurface), "Navigation project did not close");
+    // A closed project's surface is destroyed once its background shutdown ends.
+    waitFor([&] { return !IsWindow(otherSurface); }, "Navigation project did not close");
     command(left, true);
     check(IsWindowVisible(surface) && focused(left), "Forward reopened a closed project");
 }
@@ -3798,7 +3799,8 @@ void multiProjectTests(const fs::path& executable) {
     select(0);check(app.window==surfaceA,"Dragging a project back to the first row failed");
     open(a.root);check(app.window==surfaceA,"Reopening a registered path duplicated the project");
     const auto oldB=surfaceB;const auto dpi=GetDpiForWindow(app.host);click(app.host,MulDiv(60,dpi,96),MulDiv(44+projectRowHeight+24,dpi,96),true);
-    check(!IsWindow(oldB)&&IsWindow(surfaceA)&&IsWindow(shell) && WaitForSingleObject(shellProcess, 0) == WAIT_TIMEOUT,"Closing an inactive project affected another session");
+    waitFor([&]{return !IsWindow(oldB);},"Closing an inactive project did not finish");
+    check(IsWindow(surfaceA)&&IsWindow(shell) && WaitForSingleObject(shellProcess, 0) == WAIT_TIMEOUT,"Closing an inactive project affected another session");
     click(app.host,px(16),px(22));
     CloseHandle(shellProcess);
     }
@@ -3893,14 +3895,14 @@ void recentProjectTests(const fs::path& executable) {
         palette = show(app, FindWindowExW(surfaceB, nullptr, L"PoppyViewer", nullptr)); send(palette, WM_KEYDOWN, VK_DOWN); send(palette, WM_KEYDOWN, VK_RETURN);
         app.tree(); check(app.window == surfaceA && count(app.host) == 2, "History duplicated an already open project");
         click(app.host, px(60), px(44+projectRowHeight+24), true);
-        check(!IsWindow(surfaceB) && count(app.host) == 1, "History test could not close project B");
+        waitFor([&] { return !IsWindow(surfaceB) && count(app.host) == 1; }, "History test could not close project B");
         palette = show(app, FindWindowExW(surfaceA, nullptr, L"PoppyViewer", nullptr));
         type(palette, L"右 日本語"); click(palette, px(24), px(108));
         app.tree(); waitLines(FindWindowExW(app.window, nullptr, L"PoppyViewer", nullptr), 300);
         check(count(app.host) == 2 && !IsWindowVisible(palette), "History could not reopen a closed project by path");
         // Close both, leaving a saved workspace with no open project.
         click(app.host, px(60), px(44+projectRowHeight+24), true); click(app.host, px(60), px(68), true);
-        check(count(app.host) == 0, "History test did not close all projects");
+        waitFor([&] { return count(app.host) == 0; }, "History test did not close all projects");
     }
     {
         Application app(executable); findHost(app);

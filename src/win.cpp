@@ -308,7 +308,15 @@ void Worker::dispatch() {
 void Worker::cancelPending() { std::lock_guard<std::mutex> lock(mutex_); jobs_.clear(); completions_.clear(); }
 void Worker::drain() {
     Handle done(CreateEventW(nullptr, TRUE, FALSE, nullptr));
-    submit(L"drain", [event = done.value] { SetEvent(event); });
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        // A stopped worker has discarded its queue and never runs the marker,
+        // so nothing is left to wait for. ProjectRuntime's destructor repeats
+        // a completed shutdown, which drains workers that it already stopped.
+        if (stopping_) return;
+        jobs_.emplace_back(L"drain", [event = done.value] { SetEvent(event); });
+    }
+    condition_.notify_one();
     WaitForSingleObject(done.value, INFINITE);
 }
 void Worker::stop() {

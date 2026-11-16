@@ -2,6 +2,7 @@
 #include <fstream>
 #include <iostream>
 #include <stdexcept>
+#include <thread>
 
 namespace {
 using namespace poppy;
@@ -80,10 +81,24 @@ void runners() {
     check(timeout.error == L"Git operation timed out.", "The process runner did not time out");
     unlocked(fixture.root / "timeout");
 }
+void workers() {
+    Worker worker(nullptr);
+    std::atomic<bool> ran{false};
+    worker.submit(L"job", [&] { Sleep(50); ran = true; });
+    worker.drain();
+    check(ran, "Draining a worker returned before its queued job finished");
+    // Closing a project stops its workers, and the project's destructor then
+    // repeats the shutdown, draining them again on the UI thread.
+    worker.stop();
+    Handle drained(CreateEventW(nullptr, TRUE, FALSE, nullptr));
+    // Detached so that a regression reports this failure instead of hanging.
+    std::thread([&worker, event = drained.value] { worker.drain(); SetEvent(event); }).detach();
+    check(WaitForSingleObject(drained.value, 5000) == WAIT_OBJECT_0, "Draining a stopped worker did not return");
+}
 }
 int wmain(int argc, wchar_t** argv) {
     try {
         if (argc == 4) return fixture(argv[1], argv[2], argv[3]);
-        jobs(); runners(); std::cout << "Process lifetime tests passed\n"; return 0;
+        jobs(); runners(); workers(); std::cout << "Process lifetime tests passed\n"; return 0;
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
 }

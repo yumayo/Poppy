@@ -108,6 +108,7 @@ public:
     void complete(std::function<void()> task);
     void dispatch();
     void cancelPending();
+    // Waits until the jobs submitted so far have run. Returns at once after stop().
     void drain();
     void stop();
     const std::atomic<bool>* cancellation() const { return &stopping_; }
