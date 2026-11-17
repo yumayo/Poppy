@@ -246,7 +246,7 @@ bool drawBadgedIcon(IWICBitmap* bitmap, IWICBitmapSource* icon, size_t count) {
     if (FAILED(made.drawing->CreateWicBitmapRenderTarget(bitmap, properties, target.put()))) return false;
     const float size = static_cast<float>(width);
     // Large enough to read at 16 px while leaving most of the app icon visible.
-    const float diameter = std::max(9.0f, std::round(size * 0.62f));
+    const float diameter = std::max(9.0f, std::round(size * 0.5f));
     const std::wstring text = count > 9 ? L"9+" : std::to_wstring(count);
     ComPtr<IDWriteTextFormat> format;
     if (FAILED(made.text->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_BOLD, DWRITE_FONT_STYLE_NORMAL,
