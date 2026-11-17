@@ -3826,7 +3826,8 @@ void countBadge() {
         check(SUCCEEDED(bitmap->CopyPixels(nullptr, size * 4, static_cast<UINT>(pixels.size()), pixels.data())), "Could not read badge pixels");
         const auto at = [&](int x, int y) { return pixels.data() + (y * size + x) * 4; };
         check(at(0, 0)[3] == 0 && at(size - 1, size - 1)[3] == 0, "The badge corners are not transparent");
-        const auto edge = at(size / 2, 2);
+        check(at(size / 2, 1)[3] == 0, "The badge disc fills the whole overlay");
+        const auto edge = at(size / 8 + 2, size / 2);
         check(edge[3] == 255 && edge[2] > 200 && edge[1] < 60 && edge[0] < 60, "The badge disc is not opaque red");
         bool white = false;
         for (int y = size / 4; y < size * 3 / 4; ++y) for (int x = size / 4; x < size * 3 / 4; ++x) white |= at(x, y)[0] > 230 && at(x, y)[1] > 230 && at(x, y)[2] > 230;

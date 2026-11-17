@@ -245,6 +245,8 @@ bool drawCountBadge(IWICBitmap* bitmap, size_t count) {
     ComPtr<ID2D1RenderTarget> target;
     if (FAILED(made.drawing->CreateWicBitmapRenderTarget(bitmap, properties, target.put()))) return false;
     const float size = static_cast<float>(width);
+    // 12 px disc in the 16 px overlay at 100%; it scales with DPI.
+    const float diameter = size * 0.75f, inset = (size - diameter) / 2;
     const std::wstring text = count > 9 ? L"9+" : std::to_wstring(count);
     ComPtr<IDWriteTextFormat> format;
     if (FAILED(made.text->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_BOLD, DWRITE_FONT_STYLE_NORMAL,
@@ -260,7 +262,7 @@ bool drawCountBadge(IWICBitmap* bitmap, size_t count) {
     target->SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
     // ClearType needs an opaque background; the surround is transparent.
     target->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
-    target->FillEllipse(D2D1::Ellipse(D2D1::Point2F(size / 2, size / 2), size / 2, size / 2), red.get());
+    target->FillEllipse(D2D1::Ellipse(D2D1::Point2F(size / 2, size / 2), diameter / 2, diameter / 2), red.get());
     // Segoe UI digits sit slightly high in their line box.
     target->DrawText(text.data(), static_cast<UINT32>(text.size()), format.get(), D2D1::RectF(0, size * 0.03f, size, size), white.get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
     return SUCCEEDED(target->EndDraw());
