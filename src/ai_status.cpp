@@ -115,7 +115,7 @@ bool AiStatus::apply(const AiEvent& event, uint64_t now, bool visible) {
 AiSummary summarizeAi(const std::vector<AiStatus>& terminals) {
     AiSummary result;
     for (const auto& terminal : terminals) if (terminal.detected) {
-        ++result.counts[static_cast<size_t>(terminal.state)]; result.unread |= terminal.unread;
+        ++result.counts[static_cast<size_t>(terminal.state)]; result.unread |= terminal.unread; result.unreadCount += terminal.unread ? 1 : 0;
         if (priority(terminal.state) > priority(result.state)) result.state = terminal.state;
     }
     // Keep the message attached to the representative state. A completed

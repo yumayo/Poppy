@@ -25,6 +25,9 @@ private:
 
 // Initialize on the UI thread before creating windows; failures reach wWinMain.
 void initializeRendering();
+// A red circle with the white count ("9+" above nine) on a transparent
+// background, for a square 32bppPBGRA bitmap such as a taskbar overlay icon.
+bool drawCountBadge(IWICBitmap* bitmap, size_t count);
 
 class Renderer {
 public:

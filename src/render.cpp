@@ -236,6 +236,35 @@ private:
 }
 
 void initializeRendering() { (void)factories(); }
+bool drawCountBadge(IWICBitmap* bitmap, size_t count) {
+    UINT width = 0, height = 0;
+    if (!bitmap || FAILED(bitmap->GetSize(&width, &height)) || !width || width != height) return false;
+    auto& made = factories();
+    const auto properties = D2D1::RenderTargetProperties(D2D1_RENDER_TARGET_TYPE_SOFTWARE,
+        D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED), 96.0f, 96.0f);
+    ComPtr<ID2D1RenderTarget> target;
+    if (FAILED(made.drawing->CreateWicBitmapRenderTarget(bitmap, properties, target.put()))) return false;
+    const float size = static_cast<float>(width);
+    const std::wstring text = count > 9 ? L"9+" : std::to_wstring(count);
+    ComPtr<IDWriteTextFormat> format;
+    if (FAILED(made.text->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_BOLD, DWRITE_FONT_STYLE_NORMAL,
+            DWRITE_FONT_STRETCH_NORMAL, size * (text.size() > 1 ? 0.56f : 0.72f), L"", format.put()))) return false;
+    format->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+    format->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+    format->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+    ComPtr<ID2D1SolidColorBrush> red, white;
+    if (FAILED(target->CreateSolidColorBrush(D2D1::ColorF(0xE5 / 255.0f, 0x1A / 255.0f, 0x1A / 255.0f), red.put())) ||
+        FAILED(target->CreateSolidColorBrush(D2D1::ColorF(1.0f, 1.0f, 1.0f), white.put()))) return false;
+    target->BeginDraw();
+    target->Clear(D2D1::ColorF(0, 0, 0, 0));
+    target->SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+    // ClearType needs an opaque background; the surround is transparent.
+    target->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
+    target->FillEllipse(D2D1::Ellipse(D2D1::Point2F(size / 2, size / 2), size / 2, size / 2), red.get());
+    // Segoe UI digits sit slightly high in their line box.
+    target->DrawText(text.data(), static_cast<UINT32>(text.size()), format.get(), D2D1::RectF(0, size * 0.03f, size, size), white.get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+    return SUCCEEDED(target->EndDraw());
+}
 Renderer::Paint::Paint(Renderer& renderer, HWND window) : renderer_(renderer), window_(window), drawing_(false) {
     BeginPaint(window_, &paint_); drawing_ = renderer_.begin(window_);
 }

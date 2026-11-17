@@ -50,6 +50,8 @@ struct AiStatus {
 struct AiSummary {
     AiState state = AiState::Idle;
     bool unread = false;
+    // Terminals whose finished or waiting turn has not been seen yet.
+    size_t unreadCount = 0;
     std::string activity;
     std::array<size_t, static_cast<size_t>(AiState::Count)> counts{};
 };

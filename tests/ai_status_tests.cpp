@@ -42,6 +42,7 @@ void aggregation(){
     paused.apply(event(R"({"status":"interrupted"})"),4,false);
     auto result=summarizeAi({complete,running,waiting,paused,shell});
     check(result.state==AiState::Waiting && result.unread && result.counts[static_cast<size_t>(AiState::Running)]==1 && result.counts[static_cast<size_t>(AiState::Idle)]==0,"Mixed AI/shell aggregation is incorrect");
+    check(result.unreadCount==3,"Unread terminals were not counted");
     check(summarizeAi({complete,running,paused}).state==AiState::Running,"Completed/interrupted masked a running AI");
     check(summarizeAi({complete,paused}).state==AiState::Paused,"Completion masked interruption");
 }

@@ -130,7 +130,7 @@ if(WIN32)
     target_compile_options(poppy_terminal_host PRIVATE -Wall -Wextra -Wpedantic -pthread)
     target_link_options(poppy_terminal_host PRIVATE -municode -static -pthread)
   endif()
-  add_library(poppy_app SHARED src/workspace.cpp src/app.cpp src/status_bar.cpp src/project_provider.cpp src/wsl_client.cpp src/wsl_dialog.cpp src/ai_status_win.cpp src/terminal_pane.cpp src/viewer.cpp src/find_bar.cpp src/search_pane.cpp src/terminal.cpp src/terminal_host.cpp src/win.cpp src/render.cpp src/tree.cpp src/activity_button.cpp src/scrollbars.cpp src/quick_open.cpp src/Poppy.rc)
+  add_library(poppy_app SHARED src/workspace.cpp src/app.cpp src/status_bar.cpp src/project_provider.cpp src/wsl_client.cpp src/wsl_dialog.cpp src/ai_status_win.cpp src/taskbar_badge.cpp src/terminal_pane.cpp src/viewer.cpp src/find_bar.cpp src/search_pane.cpp src/terminal.cpp src/terminal_host.cpp src/win.cpp src/render.cpp src/tree.cpp src/activity_button.cpp src/scrollbars.cpp src/quick_open.cpp src/Poppy.rc)
   set_target_properties(poppy_app PROPERTIES PREFIX "" OUTPUT_NAME "PoppyApp")
   set_property(SOURCE src/Poppy.rc APPEND PROPERTY OBJECT_DEPENDS
     "${CMAKE_CURRENT_SOURCE_DIR}/src/Poppy.ico"

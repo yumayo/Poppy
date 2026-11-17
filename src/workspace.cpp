@@ -14,6 +14,7 @@
 #include "app_update.h"
 #include "update_title_button.h"
 #include "status_bar.h"
+#include "taskbar_badge.h"
 #include <commctrl.h>
 #include <dwmapi.h>
 #include <shlobj.h>
@@ -119,6 +120,7 @@ private:
     void releaseStoppedProjects();
     bool stopping(HWND window) const;
     void tick();
+    void updateTaskbarBadge();
     void checkUpdate();
     // present paints the spinners now instead of leaving them to WM_PAINT.
     void animateAiStatus(bool present = false);
@@ -160,6 +162,8 @@ private:
     ErrorPopup errors_;
     UpdateTitleButton updateButton_;
     StatusBar statusBar_;
+    TaskbarBadge taskbarBadge_;
+    const UINT taskbarButtonCreated_ = RegisterWindowMessageW(L"TaskbarButtonCreated");
     fs::path installation_, runningRelease_;
     AiEventQueue events_{[this] { PostMessageW(window_, wmAiEvent, 0, 0); }};
     std::unique_ptr<Worker> storageWorker_;
@@ -253,6 +257,9 @@ void Workspace::create(){
     recent_.create(window_,instance_,QuickOpenMode::Projects);recent_.setDpi(dpi_);
     recent_.opened=[this](const ResourceId& path){open(path);};
     const BOOL dark=TRUE;DwmSetWindowAttribute(window_,20,&dark,sizeof(dark));
+    // Explorer sends this when the button exists, also after it restarts; it
+    // is not delivered to an elevated window unless allowed.
+    if(taskbarButtonCreated_)ChangeWindowMessageFilterEx(window_,taskbarButtonCreated_,MSGFLT_ALLOW,nullptr);
     updateButton_.create(window_,instance_);
     tooltips_=CreateWindowExW(WS_EX_TOPMOST,TOOLTIPS_CLASSW,nullptr,WS_POPUP|TTS_ALWAYSTIP|TTS_NOPREFIX,CW_USEDEFAULT,CW_USEDEFAULT,CW_USEDEFAULT,CW_USEDEFAULT,window_,nullptr,instance_,nullptr);
     SendMessageW(tooltips_,TTM_SETMAXTIPWIDTH,0,700);
@@ -589,6 +596,13 @@ void Workspace::tick(){
     trimDocuments();
     if(appDirty_&&now-appChanged_>=650)saveApp();
     animateAiStatus();
+    updateTaskbarBadge();
+}
+// Each unread terminal counts once; viewing it in the foreground acknowledges it.
+void Workspace::updateTaskbarBadge(){
+    size_t unread=0;
+    for(const auto& project:projects_)unread+=project.runtime->summary().unreadCount;
+    taskbarBadge_.update(unread,dpi_);
 }
 void Workspace::checkUpdate() {
     const auto now = GetTickCount64();
@@ -845,7 +859,7 @@ LRESULT CALLBACK Workspace::scrollbarProcedure(HWND window,UINT message,WPARAM a
     }
     return DefWindowProcW(window,message,a,b);
 }
-LRESULT Workspace::handle(UINT m,WPARAM a,LPARAM b){switch(m){
+LRESULT Workspace::handle(UINT m,WPARAM a,LPARAM b){if(m==taskbarButtonCreated_&&m){taskbarBadge_.reset(window_);if(!closing_)updateTaskbarBadge();return 0;}switch(m){
 case WM_CREATE:create();return 0;case WM_PAINT:paint();return 0;case WM_ERASEBKGND:return 1;case WM_SIZE:endProjectDrag();layout();if(!restoring_){appDirty_=true;appChanged_=GetTickCount64();}return 0;
 case WM_GETMINMAXINFO:reinterpret_cast<MINMAXINFO*>(b)->ptMinTrackSize={px(900),px(480)};return 0;
 case WM_DPICHANGED:{endProjectDrag();dpi_=HIWORD(a);renderer_.setDpi(dpi_);scrollbarRenderer_.setDpi(dpi_);statusBar_.setDpi(dpi_);recent_.setDpi(dpi_);errors_.setDpi(dpi_);for(auto& project:projects_)project.runtime->setDpi(dpi_);const auto rect=reinterpret_cast<RECT*>(b);SetWindowPos(window_,nullptr,rect->left,rect->top,rect->right-rect->left,rect->bottom-rect->top,SWP_NOZORDER|SWP_NOACTIVATE);layout();return 0;}
@@ -862,7 +876,7 @@ case wmProjectStopped:{
     releaseStoppedProjects();return 0;
 }
 case WM_APP + 21:{ const auto project = find(static_cast<uint64_t>(a)); if (!project || project->runtime->hasUnsaved()) return 0; const bool active = project == &projects_[active_]; const auto index = static_cast<size_t>(project - projects_.data()); close(index); if (active) for (size_t i = 0; i < projects_.size(); ++i) if (projects_[i].id == static_cast<uint64_t>(b)) { select(i); break; } return 0; }
-case wmAiEvent:for(const auto& event:events_.drain())for(auto& project:projects_)if(project.runtime->apply(event))break;if(!closing_)animateAiStatus();return 0;
+case wmAiEvent:for(const auto& event:events_.drain())for(auto& project:projects_)if(project.runtime->apply(event))break;if(!closing_){animateAiStatus();updateTaskbarBadge();}return 0;
 case WM_TIMER:if(closing_)return 0;if(a==77)Terminal::pump();else if(a==aiAnimationTimerId)animateAiStatus();else if(a==1)tick();return 0;
 case WM_ACTIVATE:if(closing_)return 0;if(LOWORD(a)==WA_INACTIVE)endProjectDrag();else if(!projects_.empty())PostMessageW(projects_[active_].runtime->window(),WM_APP+12,0,0);return 0;
 case WM_SETFOCUS:if(closing_)return 0;if(!projects_.empty())projects_[active_].runtime->activate(true);return 0;
