@@ -1,5 +1,6 @@
 #include "csv_diff_view.h"
 #include "change_marks.h"
+#include "selection_scroll.h"
 #include <algorithm>
 
 namespace poppy {
@@ -10,6 +11,8 @@ namespace {
 constexpr COLORREF removedRow = RGB(36, 30, 36), addedRow = RGB(28, 37, 35);
 constexpr COLORREF removedCell = RGB(66, 41, 48), addedCell = RGB(40, 64, 49);
 constexpr COLORREF missingRow = RGB(26, 29, 35), gridLine = RGB(56, 64, 76);
+// Drawn over the cell's own color, so a selected changed cell keeps its tint.
+constexpr COLORREF selectedCell = RGB(70, 110, 160), activeHeader = RGB(43, 67, 52);
 std::wstring displayValue(std::wstring text) {
     for (auto& ch : text) {
         if (ch == L'\r') ch = L'␍';
@@ -21,7 +24,8 @@ std::wstring displayValue(std::wstring text) {
 }
 void CsvDiffView::show(std::shared_ptr<const CsvComparison> comparison, bool preserve) {
     comparison_ = std::move(comparison); active_ = true;
-    if (!preserve) { top_ = left_ = 0; row_ = column_ = 0; after_ = true; }
+    stopDrag();
+    if (!preserve) { top_ = left_ = 0; row_ = column_ = anchorRow_ = anchorColumn_ = 0; after_ = true; }
     changes_.clear();
     for (size_t i = 0; i < rows(); ++i) {
         const auto& row = comparison_->rows[i];
@@ -31,11 +35,12 @@ void CsvDiffView::show(std::shared_ptr<const CsvComparison> comparison, bool pre
         else changes_.push_back({i, i + 1, removed});
     }
     row_ = std::min(row_, std::max<size_t>(1, rows()) - 1); column_ = std::min(column_, std::max<size_t>(1, columns()) - 1);
+    anchorRow_ = std::min(anchorRow_, std::max<size_t>(1, rows()) - 1); anchorColumn_ = std::min(anchorColumn_, std::max<size_t>(1, columns()) - 1);
     layout(); InvalidateRect(window_, nullptr, FALSE);
     if (statusChanged) statusChanged();
 }
 void CsvDiffView::hide(bool release) {
-    active_ = false;
+    stopDrag(); active_ = false;
     if (release) { comparison_.reset(); changes_ = {}; }
 }
 int CsvDiffView::gutter() const {
@@ -74,10 +79,37 @@ bool CsvDiffView::hit(POINT point, size_t& row, size_t& column, bool& after) con
     }
     return false;
 }
-void CsvDiffView::select(size_t row, size_t column) {
+void CsvDiffView::hitSide(POINT point, bool after, size_t& row, size_t& column) const {
+    const auto area = half(after);
+    const int y = std::max(0, static_cast<int>(point.y) - bodyTop()) / rowHeight() + top_;
+    const int x = std::max(0, static_cast<int>(std::min<LONG>(point.x, area.right - 1)) - static_cast<int>(area.left) - gutter() + left_) / columnWidth();
+    row = std::min(static_cast<size_t>(y), std::max<size_t>(1, rows()) - 1);
+    column = std::min(static_cast<size_t>(x), std::max<size_t>(1, columns()) - 1);
+}
+CsvDiffView::Range CsvDiffView::selection() const {
+    return {std::min(anchorRow_, row_), std::min(anchorColumn_, column_), std::max(anchorRow_, row_), std::max(anchorColumn_, column_)};
+}
+void CsvDiffView::select(size_t row, size_t column, bool extend) {
     row_ = std::min(row, std::max<size_t>(1, rows()) - 1); column_ = std::min(column, std::max<size_t>(1, columns()) - 1);
+    if (!extend) { anchorRow_ = row_; anchorColumn_ = column_; }
     reveal(); InvalidateRect(window_, nullptr, FALSE);
     if (statusChanged) statusChanged();
+}
+void CsvDiffView::drag(POINT point) {
+    dragPoint_ = point;
+    size_t row = 0, column = 0; hitSide(point, after_, row, column);
+    if (dragHeader_ == 1) { anchorColumn_ = 0; column = columns() - 1; }
+    if (dragHeader_ == 2) { anchorRow_ = 0; row = rows() - 1; }
+    if (row == row_ && column == column_) return;
+    // The pointer's cell is already on screen, or the timer scrolls to it.
+    row_ = row; column_ = column;
+    InvalidateRect(window_, nullptr, FALSE);
+    if (statusChanged) statusChanged();
+}
+void CsvDiffView::stopDrag() {
+    if (!selecting_) return;
+    selecting_ = false; KillTimer(window_, dragTimer);
+    if (GetCapture() == window_) ReleaseCapture();
 }
 void CsvDiffView::reveal() {
     const int page = pageRows();
@@ -107,7 +139,7 @@ void CsvDiffView::move(WPARAM key, bool shift, bool ctrl) {
         else if (column < lastColumn) ++column; else if (row < lastRow) { ++row; column = 0; }
         break;
     }
-    select(row, column);
+    select(row, column, shift && key != VK_TAB);
 }
 void CsvDiffView::nextChange(bool backwards) {
     if (changes_.empty()) { MessageBeep(MB_ICONWARNING); return; }
@@ -125,15 +157,36 @@ void CsvDiffView::nextChange(bool backwards) {
 }
 void CsvDiffView::copy() {
     if (!rows()) return;
-    const auto& row = comparison_->rows[row_];
-    if ((after_ ? row.after : row.before) == CsvComparison::none || !copyText(window_, wide(comparison_->value(after_, row_, column_)))) MessageBeep(MB_ICONWARNING);
+    // Like the CSV table, copy Excel-compatible TSV from the side the range
+    // was selected on. Rows that side does not have are left out.
+    const auto range = selection();
+    if ((range.lastRow - range.firstRow + 1) > CsvTable::maxCells / (range.lastColumn - range.firstColumn + 1)) { MessageBeep(MB_ICONWARNING); return; }
+    const bool single = range.firstColumn == range.lastColumn;
+    std::string text; bool any = false;
+    for (size_t r = range.firstRow; r <= range.lastRow; ++r) {
+        const auto& row = comparison_->rows[r];
+        if ((after_ ? row.after : row.before) == CsvComparison::none) continue;
+        if (any) text += "\r\n";
+        any = true;
+        for (size_t c = range.firstColumn; c <= range.lastColumn; ++c) {
+            if (c != range.firstColumn) text += '\t';
+            const auto value = comparison_->value(after_, r, c);
+            text += value.empty() && single ? "\"\"" : csvQuote(value, '\t');
+            if (text.size() > maxFileBytes) { MessageBeep(MB_ICONWARNING); return; }
+        }
+    }
+    if (!any || !copyText(window_, wide(text))) MessageBeep(MB_ICONWARNING);
 }
 std::wstring CsvDiffView::status() const {
     if (!comparison_) return {};
     if (!comparison_->valid()) return L"CSV table unavailable";
     size_t changed = 0;
     for (const auto& row : comparison_->rows) changed += row.changed;
-    return std::to_wstring(changed) + (changed == 1 ? L" changed row" : L" changed rows") + L"  ·  F8: next change  ·  READ ONLY";
+    std::wstring selected;
+    const auto range = selection();
+    if (rows() && (range.firstRow != range.lastRow || range.firstColumn != range.lastColumn))
+        selected = std::to_wstring(range.lastRow - range.firstRow + 1) + L" × " + std::to_wstring(range.lastColumn - range.firstColumn + 1) + L" selected  ·  ";
+    return std::to_wstring(changed) + (changed == 1 ? L" changed row" : L" changed rows") + L"  ·  " + selected + L"F8: next change  ·  READ ONLY";
 }
 void CsvDiffView::paint() {
     Renderer::Paint paint(*renderer_, window_); if (!paint) return;
@@ -162,6 +215,7 @@ void CsvDiffView::drawSide(bool after) {
     const auto& side = after ? comparison_->after : comparison_->before;
     const RECT body{area.left + g, bodyTop(), area.right, area.bottom};
     const COLORREF changedRow = after ? addedRow : removedRow, changedCell = after ? addedCell : removedCell;
+    const auto range = selection();
     for (size_t r = static_cast<size_t>(top_); r < lastRow; ++r) {
         const auto& row = comparison_->rows[r];
         const auto record = after ? row.after : row.before;
@@ -176,10 +230,12 @@ void CsvDiffView::drawSide(bool after) {
             dc.fill(visible, !present && row.changed ? missingRow : !row.changed ? background : comparison_->cellChanged(r, c) ? changedCell : changedRow);
             dc.fill({visible.left, visible.bottom - 1, visible.right, visible.bottom}, gridLine);
             if (cell.right <= body.right) dc.fill({cell.right - 1, visible.top, cell.right, visible.bottom}, gridLine);
+            if (r >= range.firstRow && r <= range.lastRow && c >= range.firstColumn && c <= range.lastColumn)
+                dc.fill({visible.left, visible.top, visible.right - 1, visible.bottom - 1}, selectedCell, after == after_ ? 0.35f : 0.18f);
             dc.label({cell.left + px(7), cell.top, cell.right - px(6), cell.bottom}, visible, displayValue(wide(side.table.value(side.text, {record, c}))), foreground);
         }
         const RECT number{area.left, y, area.left + g, std::min<LONG>(y + rh, area.bottom)};
-        dc.fill(number, row.changed && record != CsvComparison::none ? changedRow : panel);
+        dc.fill(number, r >= range.firstRow && r <= range.lastRow ? activeHeader : row.changed && record != CsvComparison::none ? changedRow : panel);
         if (record != CsvComparison::none)
             dc.label({area.left, y, area.left + g, y + rh}, number, std::to_wstring(record + 1), r == row_ ? accent : muted, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
         dc.fill({number.left, number.bottom - 1, number.right, number.bottom}, border);
@@ -200,6 +256,7 @@ void CsvDiffView::drawSide(bool after) {
     for (size_t c = firstColumn; c < lastColumn; ++c) {
         const RECT cell{origin + static_cast<int>(c) * cw, headerTop(), origin + static_cast<int>(c + 1) * cw, bodyTop()};
         RECT visible{}; if (!IntersectRect(&visible, &cell, &header)) continue;
+        if (c >= range.firstColumn && c <= range.lastColumn) dc.fill(visible, activeHeader);
         dc.label(cell, visible, wide(csvColumnName(c)), c == column_ ? accent : muted, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
         dc.fill({visible.right - 1, visible.top, visible.right, visible.bottom}, border);
     }
@@ -252,14 +309,77 @@ bool CsvDiffView::handle(UINT message, WPARAM a, LPARAM b, LRESULT& result) {
     case WM_SETCURSOR:
         if (LOWORD(b) != HTCLIENT) return false;
         SetCursor(LoadCursorW(nullptr, IDC_ARROW)); result = TRUE; return true;
-    case WM_LBUTTONDOWN: case WM_LBUTTONDBLCLK: case WM_RBUTTONDOWN: {
+    case WM_LBUTTONDOWN: case WM_LBUTTONDBLCLK: {
+        SetFocus(window_); stopDrag();
+        if (!rows()) return true;
+        const POINT point{GET_X_LPARAM(b), GET_Y_LPARAM(b)};
+        const bool shift = (a & MK_SHIFT) != 0;
+        size_t row = 0, column = 0; bool after = true;
+        if (hit(point, row, column, after)) { if (!shift) after_ = after; dragHeader_ = 0; select(row, column, shift); }
+        else {
+            // Row numbers select whole rows, column names whole columns, and
+            // their corner the whole table.
+            int side = -1;
+            for (const bool s : {false, true}) { const auto area = half(s); if (point.x >= area.left && point.x < area.right) side = s; }
+            if (side < 0 || point.y < headerTop()) return true;
+            after_ = side == 1;
+            const auto area = half(after_);
+            const bool gutterHit = point.x < area.left + gutter(), headerHit = point.y < bodyTop();
+            if (gutterHit && headerHit) { anchorRow_ = anchorColumn_ = 0; row_ = rows() - 1; column_ = columns() - 1; InvalidateRect(window_, nullptr, FALSE); if (statusChanged) statusChanged(); return true; }
+            hitSide({gutterHit ? static_cast<LONG>(area.left + gutter()) : point.x, headerHit ? static_cast<LONG>(bodyTop()) : point.y}, after_, row, column);
+            dragHeader_ = gutterHit ? 1 : 2;
+            if (!shift) { anchorRow_ = row; anchorColumn_ = column; }
+            row_ = row; column_ = column;
+            if (dragHeader_ == 1) { anchorColumn_ = 0; column_ = columns() - 1; }
+            else { anchorRow_ = 0; row_ = rows() - 1; }
+            InvalidateRect(window_, nullptr, FALSE); if (statusChanged) statusChanged();
+        }
+        selecting_ = true; dragPoint_ = point; SetCapture(window_); SetTimer(window_, dragTimer, 50, nullptr);
+        return true;
+    }
+    case WM_RBUTTONDOWN: {
+        // A right click inside the range keeps it for the context menu.
         SetFocus(window_);
         size_t row = 0, column = 0; bool after = true;
-        if (hit({GET_X_LPARAM(b), GET_Y_LPARAM(b)}, row, column, after)) { after_ = after; select(row, column); }
+        if (hit({GET_X_LPARAM(b), GET_Y_LPARAM(b)}, row, column, after)) {
+            const auto range = selection();
+            const bool inside = row >= range.firstRow && row <= range.lastRow && column >= range.firstColumn && column <= range.lastColumn;
+            after_ = after;
+            if (!inside) select(row, column); else InvalidateRect(window_, nullptr, FALSE);
+        }
+        return true;
+    }
+    case WM_MOUSEMOVE:
+        if (!selecting_) return false;
+        drag({GET_X_LPARAM(b), GET_Y_LPARAM(b)}); return true;
+    case WM_LBUTTONUP:
+        if (!selecting_) return false;
+        drag({GET_X_LPARAM(b), GET_Y_LPARAM(b)}); stopDrag(); return true;
+    case WM_CANCELMODE: case WM_CAPTURECHANGED:
+        if (selecting_ && (message == WM_CANCELMODE || reinterpret_cast<HWND>(b) != window_)) { selecting_ = false; KillTimer(window_, dragTimer); }
+        return false;
+    case WM_TIMER: {
+        if (a != dragTimer) return false;
+        if (!selecting_) { KillTimer(window_, dragTimer); return true; }
+        // Scroll while the pointer is outside the body, then select through
+        // the cell that scrolled under it.
+        const auto area = half(after_); const auto bounds = Scrollbars::contentRect(window_);
+        const int vertical = dragHeader_ != 2 ? selectionScrollRows(dragPoint_.y, bodyTop(), bounds.bottom, rowHeight()) : 0;
+        const int horizontal = dragHeader_ != 1 ? selectionScrollRows(dragPoint_.x, area.left + gutter(), area.right, px(24)) * px(24) : 0;
+        if (!vertical && !horizontal) return true;
+        const int top = top_, left = left_;
+        top_ += vertical; left_ += horizontal; layout();
+        if (top != top_ || left != left_) {
+            const auto point = dragPoint_;
+            dragPoint_ = {std::clamp<LONG>(point.x, area.left + gutter(), std::max<LONG>(area.left + gutter(), area.right - 1)),
+                std::clamp<LONG>(point.y, bodyTop(), std::max<LONG>(bodyTop(), bounds.bottom - 1))};
+            drag(dragPoint_); dragPoint_ = point;
+            InvalidateRect(window_, nullptr, FALSE); UpdateWindow(window_);
+        }
         return true;
     }
     case WM_CONTEXTMENU: {
-        HMENU menu = CreatePopupMenu(); AppendMenuW(menu, MF_STRING | (rows() ? 0 : MF_GRAYED), 1, L"Copy cell\tCtrl+C");
+        HMENU menu = CreatePopupMenu(); AppendMenuW(menu, MF_STRING | (rows() ? 0 : MF_GRAYED), 1, L"Copy\tCtrl+C");
         POINT p{GET_X_LPARAM(b), GET_Y_LPARAM(b)}; if (p.x == -1) { p = {px(24), bodyTop()}; ClientToScreen(window_, &p); }
         const UINT command = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, p.x, p.y, 0, window_, nullptr); DestroyMenu(menu);
         if (command == 1) copy();
@@ -290,6 +410,8 @@ bool CsvDiffView::handle(UINT message, WPARAM a, LPARAM b, LRESULT& result) {
     case WM_KEYDOWN: {
         const bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0, shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
         if (ctrl && a == 'C') { copy(); return true; }
+        if (ctrl && a == 'A') { if (rows()) { anchorRow_ = anchorColumn_ = 0; row_ = rows() - 1; column_ = columns() - 1; InvalidateRect(window_, nullptr, FALSE); if (statusChanged) statusChanged(); } return true; }
+        if (a == VK_ESCAPE && selecting_) { stopDrag(); return true; }
         if (a == VK_F8) { nextChange(shift); return true; }
         if (a == VK_UP || a == VK_DOWN || a == VK_PRIOR || a == VK_NEXT || a == VK_LEFT || a == VK_RIGHT || a == VK_HOME || a == VK_END || a == VK_TAB) { move(a, shift, ctrl); return true; }
         return false;

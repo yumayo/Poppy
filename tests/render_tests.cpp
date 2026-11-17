@@ -926,6 +926,18 @@ void csvDiffTables() {
         const auto cell = MAKELPARAM(px(52 + 160 + 20), px(34) + rowHeight * 3 + rowHeight / 2);
         SendMessageW(window, WM_LBUTTONDOWN, MK_LBUTTON, cell); SendMessageW(window, WM_LBUTTONUP, 0, cell);
         key('C', true); check(clipboardText(window) == L"banana", "The CSV diff did not copy the selected cell");
+        // Shift+click extends the range; copies are TSV from the clicked side.
+        const auto first = MAKELPARAM(px(52 + 20), px(34) + rowHeight * 2 + rowHeight / 2);
+        SendMessageW(window, WM_LBUTTONDOWN, MK_LBUTTON | MK_SHIFT, first); SendMessageW(window, WM_LBUTTONUP, MK_SHIFT, first);
+        key('C', true); check(clipboardText(window) == L"1\tapple\r\n2\tbanana", "Shift+click did not select a CSV diff range");
+        check(viewer.textStatus().find(L"2 × 2 selected") != std::wstring::npos, "The CSV diff range size is not shown");
+        // On the after side, rows it does not have are left out of the copy.
+        const int middle = (static_cast<int>(Scrollbars::contentRect(window).right) - px(4)) / 2 + px(2);
+        const auto start = MAKELPARAM(middle + px(52 + 20), px(34) + rowHeight * 3 + rowHeight / 2);
+        const auto end = MAKELPARAM(middle + px(52 + 160 + 20), px(34) + rowHeight * 4 + rowHeight / 2);
+        SendMessageW(window, WM_LBUTTONDOWN, MK_LBUTTON, start); SendMessageW(window, WM_MOUSEMOVE, MK_LBUTTON, end); SendMessageW(window, WM_LBUTTONUP, 0, end);
+        key('C', true); check(clipboardText(window) == L"3\tcherry", "Dragging on the after side did not select its range");
+        key(VK_ESCAPE);
         SendMessageW(window, WM_CHAR, 'x', 0); key(VK_DELETE); key(VK_BACK);
         check(buffer->document.text == source && !buffer->dirty(), "The CSV diff table edited the file");
         viewer.setCsvDiffTable(false); check(!viewer.csvDiffTable(), "Split could not leave the CSV diff table");

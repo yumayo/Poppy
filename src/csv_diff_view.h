@@ -16,6 +16,7 @@ public:
     // A reload of the same file keeps the scroll position and selected cell.
     void show(std::shared_ptr<const CsvComparison> comparison, bool preserve);
     void hide(bool release = false);
+    bool dragging() const { return selecting_; }
     bool active() const { return active_; }
     void layout();
     void paint();
@@ -40,7 +41,14 @@ private:
     size_t rows() const { return comparison_ && comparison_->valid() ? comparison_->rows.size() : 0; }
     size_t columns() const { return comparison_ && comparison_->valid() ? std::max<size_t>(1, comparison_->columns) : 0; }
     bool hit(POINT point, size_t& row, size_t& column, bool& after) const;
-    void select(size_t row, size_t column);
+    // The cell under a point on one side, clamped to that side's cells, for
+    // a drag that leaves the table.
+    void hitSide(POINT point, bool after, size_t& row, size_t& column) const;
+    struct Range { size_t firstRow, firstColumn, lastRow, lastColumn; };
+    Range selection() const;
+    void select(size_t row, size_t column, bool extend = false);
+    void drag(POINT point);
+    void stopDrag();
     void reveal();
     void move(WPARAM key, bool shift, bool ctrl);
     void nextChange(bool backwards);
@@ -55,6 +63,13 @@ private:
     UINT dpi_ = 96;
     bool active_ = false, after_ = true;
     int top_ = 0, left_ = 0, wheel_ = 0;
-    size_t row_ = 0, column_ = 0;
+    // The caret and the range's other corner, as aligned rows and columns.
+    size_t row_ = 0, column_ = 0, anchorRow_ = 0, anchorColumn_ = 0;
+    bool selecting_ = false;
+    // A drag that started on the row numbers or column names selects whole
+    // rows (1) or columns (2).
+    int dragHeader_ = 0;
+    POINT dragPoint_{};
+    static constexpr UINT_PTR dragTimer = 0x5064;
 };
 }
