@@ -566,7 +566,7 @@ void Server::git(Request& request) {
     }
     setpgid(child, child); gitChildren_.insert(child); childrenLock.unlock(); close(outputFd.value); outputFd.value = -1;
     fcntl(input.value, F_SETFL, O_NONBLOCK); int status = 0; bool exited = false, eof = false; std::string bytes;
-    const auto deadline = Clock::now() + std::chrono::seconds(15);
+    const auto deadline = Clock::now() + std::chrono::minutes(3);
     auto terminate = [&] {
         kill(-child, SIGKILL);
         if (!exited) while (waitpid(child, &status, 0) < 0 && errno == EINTR) {}

@@ -189,7 +189,7 @@ public:
     FileIndex indexFiles(const ResourceId& root, const std::function<bool()>& cancelled) override { return poppy::indexFiles(root.local(), cancelled); }
     ContentSearchSummary searchContent(const ResourceId& root, const ContentSearchOptions& options,
         const ContentPublish& publish, const std::function<bool()>& cancelled) override { return searchContents(root.local(), options, publish, cancelled); }
-    ProcessResult git(const std::vector<std::wstring>& args, const ResourceId& directory, const std::atomic<bool>* cancelled) override { return runProcess(args, directory.local(), 5000, cancelled); }
+    ProcessResult git(const std::vector<std::wstring>& args, const ResourceId& directory, const std::atomic<bool>* cancelled) override { return runProcess(args, directory.local(), 180000, cancelled); }
     GitRepositoryScan gitRepositories(const ResourceId& root, const std::function<bool()>& cancelled) override { return scanGitRepositories(root.local(), cancelled); }
 };
 }
