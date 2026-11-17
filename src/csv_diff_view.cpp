@@ -4,9 +4,12 @@
 
 namespace poppy {
 namespace {
-constexpr COLORREF removedRow = RGB(62, 39, 45), addedRow = RGB(36, 57, 44);
-constexpr COLORREF removedCell = RGB(112, 50, 60), addedCell = RGB(50, 98, 62);
-constexpr COLORREF missingRow = RGB(26, 29, 35);
+// Subtle tints: a changed row is barely tinted and a changed cell a little
+// more, so the values stay easy to read. Grid lines are lighter than the
+// tints, which keeps them visible on changed rows too.
+constexpr COLORREF removedRow = RGB(36, 30, 36), addedRow = RGB(28, 37, 35);
+constexpr COLORREF removedCell = RGB(66, 41, 48), addedCell = RGB(40, 64, 49);
+constexpr COLORREF missingRow = RGB(26, 29, 35), gridLine = RGB(56, 64, 76);
 std::wstring displayValue(std::wstring text) {
     for (auto& ch : text) {
         if (ch == L'\r') ch = L'␍';
@@ -164,13 +167,15 @@ void CsvDiffView::drawSide(bool after) {
         const auto record = after ? row.after : row.before;
         const int y = bodyTop() + (static_cast<int>(r) - top_) * rh;
         const RECT line{body.left, y, body.right, std::min<LONG>(y + rh, body.bottom)};
-        if (record == CsvComparison::none) dc.fill(line, missingRow);
+        if (record == CsvComparison::none) { dc.fill(line, missingRow); dc.fill({line.left, line.bottom - 1, line.right, line.bottom}, gridLine); }
         else for (size_t c = firstColumn; c < lastColumn; ++c) {
             const RECT cell{origin + static_cast<int>(c) * cw, y, origin + static_cast<int>(c + 1) * cw, y + rh};
             RECT visible{}; if (!IntersectRect(&visible, &cell, &body)) continue;
-            dc.fill(visible, !row.changed ? background : comparison_->cellChanged(r, c) ? changedCell : changedRow);
-            dc.fill({visible.left, visible.bottom - 1, visible.right, visible.bottom}, border);
-            if (cell.right <= body.right) dc.fill({cell.right - 1, visible.top, cell.right, visible.bottom}, border);
+            // A field this side does not have stays empty, like a missing row.
+            const bool present = c < side.table.fields(record);
+            dc.fill(visible, !present && row.changed ? missingRow : !row.changed ? background : comparison_->cellChanged(r, c) ? changedCell : changedRow);
+            dc.fill({visible.left, visible.bottom - 1, visible.right, visible.bottom}, gridLine);
+            if (cell.right <= body.right) dc.fill({cell.right - 1, visible.top, cell.right, visible.bottom}, gridLine);
             dc.label({cell.left + px(7), cell.top, cell.right - px(6), cell.bottom}, visible, displayValue(wide(side.table.value(side.text, {record, c}))), foreground);
         }
         const RECT number{area.left, y, area.left + g, std::min<LONG>(y + rh, area.bottom)};
