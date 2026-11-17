@@ -248,7 +248,7 @@ bool drawCountBadge(IWICBitmap* bitmap, size_t count) {
     const std::wstring text = count > 9 ? L"9+" : std::to_wstring(count);
     ComPtr<IDWriteTextFormat> format;
     if (FAILED(made.text->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_BOLD, DWRITE_FONT_STYLE_NORMAL,
-            DWRITE_FONT_STRETCH_NORMAL, size * (text.size() > 1 ? 0.56f : 0.72f), L"", format.put()))) return false;
+            DWRITE_FONT_STRETCH_NORMAL, size * (text.size() > 1 ? 0.46f : 0.6f), L"", format.put()))) return false;
     format->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
     format->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
     format->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
