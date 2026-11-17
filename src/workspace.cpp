@@ -163,7 +163,6 @@ private:
     UpdateTitleButton updateButton_;
     StatusBar statusBar_;
     TaskbarBadge taskbarBadge_;
-    const UINT taskbarButtonCreated_ = RegisterWindowMessageW(L"TaskbarButtonCreated");
     fs::path installation_, runningRelease_;
     AiEventQueue events_{[this] { PostMessageW(window_, wmAiEvent, 0, 0); }};
     std::unique_ptr<Worker> storageWorker_;
@@ -257,9 +256,7 @@ void Workspace::create(){
     recent_.create(window_,instance_,QuickOpenMode::Projects);recent_.setDpi(dpi_);
     recent_.opened=[this](const ResourceId& path){open(path);};
     const BOOL dark=TRUE;DwmSetWindowAttribute(window_,20,&dark,sizeof(dark));
-    // Explorer sends this when the button exists, also after it restarts; it
-    // is not delivered to an elevated window unless allowed.
-    if(taskbarButtonCreated_)ChangeWindowMessageFilterEx(window_,taskbarButtonCreated_,MSGFLT_ALLOW,nullptr);
+    taskbarBadge_.attach(window_,instance_,IDI_POPPY);
     updateButton_.create(window_,instance_);
     tooltips_=CreateWindowExW(WS_EX_TOPMOST,TOOLTIPS_CLASSW,nullptr,WS_POPUP|TTS_ALWAYSTIP|TTS_NOPREFIX,CW_USEDEFAULT,CW_USEDEFAULT,CW_USEDEFAULT,CW_USEDEFAULT,window_,nullptr,instance_,nullptr);
     SendMessageW(tooltips_,TTM_SETMAXTIPWIDTH,0,700);
@@ -859,7 +856,7 @@ LRESULT CALLBACK Workspace::scrollbarProcedure(HWND window,UINT message,WPARAM a
     }
     return DefWindowProcW(window,message,a,b);
 }
-LRESULT Workspace::handle(UINT m,WPARAM a,LPARAM b){if(m==taskbarButtonCreated_&&m){taskbarBadge_.reset(window_);if(!closing_)updateTaskbarBadge();return 0;}switch(m){
+LRESULT Workspace::handle(UINT m,WPARAM a,LPARAM b){switch(m){
 case WM_CREATE:create();return 0;case WM_PAINT:paint();return 0;case WM_ERASEBKGND:return 1;case WM_SIZE:endProjectDrag();layout();if(!restoring_){appDirty_=true;appChanged_=GetTickCount64();}return 0;
 case WM_GETMINMAXINFO:reinterpret_cast<MINMAXINFO*>(b)->ptMinTrackSize={px(900),px(480)};return 0;
 case WM_DPICHANGED:{endProjectDrag();dpi_=HIWORD(a);renderer_.setDpi(dpi_);scrollbarRenderer_.setDpi(dpi_);statusBar_.setDpi(dpi_);recent_.setDpi(dpi_);errors_.setDpi(dpi_);for(auto& project:projects_)project.runtime->setDpi(dpi_);const auto rect=reinterpret_cast<RECT*>(b);SetWindowPos(window_,nullptr,rect->left,rect->top,rect->right-rect->left,rect->bottom-rect->top,SWP_NOZORDER|SWP_NOACTIVATE);layout();return 0;}
