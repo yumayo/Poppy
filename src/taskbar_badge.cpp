@@ -1,14 +1,21 @@
 #include "taskbar_badge.h"
-#include "render.h"
 #include <algorithm>
 #include <cstring>
+#include <string>
 #include <vector>
 
 namespace poppy {
 namespace {
 // Builds the icon from an in-memory icon resource: user32 only, no GDI bitmap.
-HICON iconFromPixels(const std::vector<BYTE>& pixels, int size) {
-    const UINT stride = static_cast<UINT>(size) * 4, maskStride = (static_cast<UINT>(size) + 31) / 32 * 4;
+HICON createBadgeIcon(size_t count, int size) {
+    ComPtr<IWICImagingFactory> factory;
+    if (FAILED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_IWICImagingFactory, reinterpret_cast<void**>(factory.put())))) return nullptr;
+    ComPtr<IWICBitmap> bitmap;
+    if (FAILED(factory->CreateBitmap(size, size, GUID_WICPixelFormat32bppPBGRA, WICBitmapCacheOnLoad, bitmap.put())) || !drawCountBadge(bitmap.get(), count)) return nullptr;
+    const UINT stride = static_cast<UINT>(size) * 4;
+    std::vector<BYTE> pixels(stride * size);
+    if (FAILED(bitmap->CopyPixels(nullptr, stride, static_cast<UINT>(pixels.size()), pixels.data()))) return nullptr;
+    const UINT maskStride = (static_cast<UINT>(size) + 31) / 32 * 4;
     BITMAPINFOHEADER header{};
     header.biSize = sizeof(header); header.biWidth = size; header.biHeight = size * 2; // Color rows, then the AND mask.
     header.biPlanes = 1; header.biBitCount = 32; header.biCompression = BI_RGB;
@@ -28,47 +35,28 @@ HICON iconFromPixels(const std::vector<BYTE>& pixels, int size) {
     // The zeroed AND mask leaves transparency to the alpha channel.
     return CreateIconFromResourceEx(resource.data(), static_cast<DWORD>(resource.size()), TRUE, 0x00030000, size, size, LR_DEFAULTCOLOR);
 }
-HICON badgedIcon(HINSTANCE instance, int iconId, int size, size_t count) {
-    HICON original = static_cast<HICON>(LoadImageW(instance, MAKEINTRESOURCEW(iconId), IMAGE_ICON, size, size, LR_DEFAULTCOLOR));
-    if (!original) return nullptr;
-    ComPtr<IWICImagingFactory> factory;
-    ComPtr<IWICBitmap> source, bitmap;
-    ComPtr<IWICFormatConverter> converted;
-    std::vector<BYTE> pixels(static_cast<size_t>(size) * size * 4);
-    const bool drawn =
-        SUCCEEDED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_IWICImagingFactory, reinterpret_cast<void**>(factory.put()))) &&
-        SUCCEEDED(factory->CreateBitmapFromHICON(original, source.put())) &&
-        SUCCEEDED(factory->CreateFormatConverter(converted.put())) &&
-        SUCCEEDED(converted->Initialize(source.get(), GUID_WICPixelFormat32bppPBGRA, WICBitmapDitherTypeNone, nullptr, 0, WICBitmapPaletteTypeCustom)) &&
-        SUCCEEDED(factory->CreateBitmap(size, size, GUID_WICPixelFormat32bppPBGRA, WICBitmapCacheOnLoad, bitmap.put())) &&
-        drawBadgedIcon(bitmap.get(), converted.get(), count) &&
-        SUCCEEDED(bitmap->CopyPixels(nullptr, static_cast<UINT>(size) * 4, static_cast<UINT>(pixels.size()), pixels.data()));
-    DestroyIcon(original);
-    return drawn ? iconFromPixels(pixels, size) : nullptr;
 }
+TaskbarBadge::~TaskbarBadge() { if (icon_) DestroyIcon(icon_); }
+void TaskbarBadge::reset(HWND window) {
+    window_ = window; taskbar_.reset(); shown_ = 0; shownDpi_ = 0;
+    if (FAILED(CoCreateInstance(CLSID_TaskbarList, nullptr, CLSCTX_INPROC_SERVER, IID_ITaskbarList3, reinterpret_cast<void**>(taskbar_.put()))) || FAILED(taskbar_->HrInit())) { taskbar_.reset(); return; }
+    apply();
 }
-TaskbarBadge::~TaskbarBadge() { release(); }
-void TaskbarBadge::release() {
-    if (big_) DestroyIcon(big_);
-    if (small_) DestroyIcon(small_);
-    big_ = small_ = nullptr;
-}
-void TaskbarBadge::attach(HWND window, HINSTANCE instance, int iconId) { window_ = window; instance_ = instance; iconId_ = iconId; }
 void TaskbarBadge::update(size_t count, UINT dpi) {
     count_ = count; dpi_ = dpi;
-    if (window_ && (shown_ != count_ || (count_ && shownDpi_ != dpi_))) apply();
+    if (taskbar_ && (shown_ != count_ || (count_ && shownDpi_ != dpi_))) apply();
 }
 void TaskbarBadge::apply() {
-    HICON big = nullptr, small = nullptr;
+    HICON icon = nullptr;
+    std::wstring description;
     if (count_) {
-        big = badgedIcon(instance_, iconId_, GetSystemMetricsForDpi(SM_CXICON, dpi_), count_);
-        small = badgedIcon(instance_, iconId_, GetSystemMetricsForDpi(SM_CXSMICON, dpi_), count_);
-        if (!big || !small) { if (big) DestroyIcon(big); if (small) DestroyIcon(small); return; }
+        icon = createBadgeIcon(count_, GetSystemMetricsForDpi(SM_CXSMICON, dpi_));
+        if (!icon) return;
+        description = std::to_wstring(count_) + (count_ == 1 ? L" unread AI session" : L" unread AI sessions");
     }
-    // Null window icons fall back to the class icons registered with the window.
-    SendMessageW(window_, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(big));
-    SendMessageW(window_, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(small));
-    release();
-    big_ = big; small_ = small; shown_ = count_; shownDpi_ = dpi_;
+    if (FAILED(taskbar_->SetOverlayIcon(window_, icon, count_ ? description.c_str() : nullptr))) { if (icon) DestroyIcon(icon); return; }
+    // The taskbar keeps its own copy of the overlay.
+    if (icon_) DestroyIcon(icon_);
+    icon_ = icon; shown_ = count_; shownDpi_ = dpi_;
 }
 }

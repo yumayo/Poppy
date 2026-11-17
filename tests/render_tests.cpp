@@ -3812,34 +3812,27 @@ void terminalSelectionAutoScrolling() {
         check(GetCapture() != window && GetScrollPos(window, SB_VERT) == saved, "Cancelled terminal selection kept scrolling");
     }
 }
-// The taskbar icon: the app icon stays visible and a red badge with white
-// digits covers its top-right corner.
-void badgedIcon() {
+// The taskbar overlay: an opaque red disc, white digits, a transparent surround.
+void countBadge() {
     ComPtr<IWICImagingFactory> factory;
     check(SUCCEEDED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER,
         __uuidof(IWICImagingFactory), reinterpret_cast<void**>(factory.put()))), "Could not create the WIC factory");
     constexpr int size = 32;
-    // A solid blue square stands in for the application icon.
-    std::vector<BYTE> blue(size * size * 4);
-    for (size_t i = 0; i < blue.size(); i += 4) { blue[i] = 255; blue[i + 3] = 255; }
-    ComPtr<IWICBitmap> icon;
-    check(SUCCEEDED(factory->CreateBitmapFromMemory(size, size, GUID_WICPixelFormat32bppPBGRA, size * 4, static_cast<UINT>(blue.size()), blue.data(), icon.put())), "Could not create the icon bitmap");
     for (const size_t count : {size_t{1}, size_t{12}}) {
         ComPtr<IWICBitmap> bitmap;
         check(SUCCEEDED(factory->CreateBitmap(size, size, GUID_WICPixelFormat32bppPBGRA, WICBitmapCacheOnLoad, bitmap.put())), "Could not create the badge bitmap");
-        check(drawBadgedIcon(bitmap.get(), icon.get(), count), "Could not draw the badged icon");
+        check(drawCountBadge(bitmap.get(), count), "Could not draw the count badge");
         std::vector<BYTE> pixels(size * size * 4);
         check(SUCCEEDED(bitmap->CopyPixels(nullptr, size * 4, static_cast<UINT>(pixels.size()), pixels.data())), "Could not read badge pixels");
         const auto at = [&](int x, int y) { return pixels.data() + (y * size + x) * 4; };
-        const auto isBlue = [](const BYTE* p) { return p[0] > 240 && p[1] < 20 && p[2] < 20 && p[3] == 255; };
-        check(isBlue(at(2, size - 3)) && isBlue(at(2, 2)), "The app icon was not drawn outside the badge");
-        const auto edge = at(size - 3, 10);
-        check(edge[3] == 255 && edge[2] > 200 && edge[1] < 60 && edge[0] < 60, "The top-right badge is not red");
+        check(at(0, 0)[3] == 0 && at(size - 1, size - 1)[3] == 0, "The badge corners are not transparent");
+        const auto edge = at(size / 2, 2);
+        check(edge[3] == 255 && edge[2] > 200 && edge[1] < 60 && edge[0] < 60, "The badge disc is not opaque red");
         bool white = false;
-        for (int y = 0; y < size / 2; ++y) for (int x = size / 2; x < size; ++x) white |= at(x, y)[0] > 230 && at(x, y)[1] > 230 && at(x, y)[2] > 230;
+        for (int y = size / 4; y < size * 3 / 4; ++y) for (int x = size / 4; x < size * 3 / 4; ++x) white |= at(x, y)[0] > 230 && at(x, y)[1] > 230 && at(x, y)[2] > 230;
         check(white, "The badge count is not drawn in white");
     }
-    check(!drawBadgedIcon(nullptr, icon.get(), 1), "A missing badge bitmap was accepted");
+    check(!drawCountBadge(nullptr, 1), "A missing badge bitmap was accepted");
 }
 void themedScrollbars() {
     ScrollbarWindow pane;
@@ -4046,7 +4039,7 @@ int main(int argc, char** argv) {
             editorBottomPadding(); editorTailFollowing(); largeFileTailPreview(); largeFileByteScrolling(); largeCsvTable(); largeCsvEditing();
             csvTables(); csvInCellEditing(); htmlPreviewSwitching();
             terminalAsyncStartup(); terminalProcessShutdown(); terminalImeOutput();
-            statusBarLimits(); treeMultipleSelection(); commitMessagePopup(); inlineTreeInput(); inlineTreeCreation(); gitCommitInput(); cellPositions(); colorsAndClipping(); imagePreviews(); fractionalMarkers(); smoothIcons(); windowTargets(); editableDiff(); editorCaret(); delayedLoadingMessages(); imeCellRendering(); imeTerminalInsertion(); imeUiRendering(); imePositions(); editorWordSelection(); editorColumnSelection(); editorWordMovement(); editorWordDeletion(); editorLineShortcuts(); editorWrapping(); diffWrapping(); documentFind(); horizontalWheelScrolling(); continuousViewerScrolling(); selectionAutoScrolling(); terminalGitBashSocketEnvironment(); terminalSelectionAutoScrolling(); themedScrollbars(); quickOpenStability(); badgedIcon();
+            statusBarLimits(); treeMultipleSelection(); commitMessagePopup(); inlineTreeInput(); inlineTreeCreation(); gitCommitInput(); cellPositions(); colorsAndClipping(); imagePreviews(); fractionalMarkers(); smoothIcons(); windowTargets(); editableDiff(); editorCaret(); delayedLoadingMessages(); imeCellRendering(); imeTerminalInsertion(); imeUiRendering(); imePositions(); editorWordSelection(); editorColumnSelection(); editorWordMovement(); editorWordDeletion(); editorLineShortcuts(); editorWrapping(); diffWrapping(); documentFind(); horizontalWheelScrolling(); continuousViewerScrolling(); selectionAutoScrolling(); terminalGitBashSocketEnvironment(); terminalSelectionAutoScrolling(); themedScrollbars(); quickOpenStability(); countBadge();
             std::cout << "Direct2D rendering tests passed\n";
         }
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; result = 1; }
