@@ -12,6 +12,7 @@
 #include "editor_scroll.h"
 #include "html_preview.h"
 #include "csv_view.h"
+#include "csv_diff_view.h"
 #include "file_tail.h"
 #include <memory>
 
@@ -86,6 +87,11 @@ public:
     bool csvAvailable() const { return !textOnly_ && (htmlAllowed_ || tailPreview()) && document_ && !diff_ && isCsvExtension(path_.extension().native()); }
     void setCsvTable(bool enabled);
     bool csvTable() const { return csv_.active(); }
+    // A single CSV file's complete diff can be compared as two tables. The
+    // choice stays with this pane for the diffs it shows next.
+    bool csvDiffAvailable() const { return !textOnly_ && diff_ && diff_->files.empty() && isCsvExtension(path_.extension().native()); }
+    void setCsvDiffTable(bool enabled);
+    bool csvDiffTable() const { return csvDiff_.active(); }
     HWND window() const { return window_; }
 private:
     static LRESULT CALLBACK procedure(HWND, UINT, WPARAM, LPARAM);
@@ -170,6 +176,10 @@ private:
     Renderer renderer_;
     HtmlPreview html_;
     CsvView csv_;
+    CsvDiffView csvDiff_;
+    bool csvDiffTable_ = true;
+    // Shows or hides the table comparison for the current diff.
+    void updateCsvDiff(bool preserve);
     ImeComposition ime_;
     FindBar findBar_;
     TextSearch search_;

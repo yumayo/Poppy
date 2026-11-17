@@ -421,7 +421,10 @@ private:
     RECT tabBounds(size_t index) const;
     bool htmlTab(int group) const;
     bool csvTab(int group) const;
-    RECT editorModeButton(int group, bool second) const;
+    // A single CSV file's diff, which adds a Table mode after Split and Inline.
+    bool csvDiffTab(int group) const;
+    int editorModeCount(int group) const { return csvDiffTab(group) ? 3 : 2; }
+    RECT editorModeButton(int group, int mode) const;
     bool selectEditorMode(POINT point);
     size_t tabAt(POINT point) const;
     std::optional<TabDrop> tabDropAt(POINT point) const;
@@ -1003,7 +1006,7 @@ void ProjectRuntime::Impl::layout(bool revealTab) {
         for (size_t i = 0; i < tabs_.size(); ++i) if (tabs_[i].group == group) pane.indices.push_back(i);
         pane.tabs = {start, area.top, edge, area.top};
         const auto selected = groupTab(group);
-        const int modeWidth = selected < tabs_.size() && tabs_[selected].diff ? 136 : (htmlTab(group) || csvTab(group)) ? 160 : 0;
+        const int modeWidth = selected < tabs_.size() && tabs_[selected].diff ? (csvDiffTab(group) ? 204 : 136) : (htmlTab(group) || csvTab(group)) ? 160 : 0;
         const bool terminal = selected < tabs_.size() && !tabs_[selected].terminalId.empty();
         const int addWidth = terminal ? std::min(MulDiv(58, dpi_, 96), std::max(0, edge - start)) : 0;
         const int toolsWidth = std::min(MulDiv(modeWidth, dpi_, 96), std::max(0, edge - start - addWidth) / 2);
@@ -1170,11 +1173,12 @@ void ProjectRuntime::Impl::paint() {
             dc.label(pane.dropdown, L"⌄", muted, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
             const bool html = htmlTab(group);
             const bool csv = csvTab(group);
-            const bool secondSelected = html ? viewers_[group].htmlPreview() : csv ? viewers_[group].csvTable() : viewers_[group].diffInline();
-            for (const bool second : {false, true}) {
-                const auto button = editorModeButton(group, second);
-                dc.fill(button, second == secondSelected ? rgb(50, 70, 94) : background);
-                dc.label(button, html || csv ? (second ? (csv ? L"Table" : L"Preview") : L"Source") : (second ? L"Inline" : L"Split"), second == secondSelected ? foreground : muted,
+            const int selectedMode = html ? viewers_[group].htmlPreview() : csv ? viewers_[group].csvTable() :
+                viewers_[group].csvDiffTable() ? 2 : viewers_[group].diffInline();
+            for (int mode = 0; mode < editorModeCount(group); ++mode) {
+                const auto button = editorModeButton(group, mode);
+                dc.fill(button, mode == selectedMode ? rgb(50, 70, 94) : background);
+                dc.label(button, html || csv ? (mode ? (csv ? L"Table" : L"Preview") : L"Source") : (mode == 2 ? L"Table" : mode ? L"Inline" : L"Split"), mode == selectedMode ? foreground : muted,
                     DT_CENTER | DT_VCENTER | DT_SINGLELINE);
             }
             if (pane.overflow()) {
@@ -2842,19 +2846,26 @@ bool ProjectRuntime::Impl::csvTab(int group) const {
     const auto index = groupTab(group);
     return index < tabs_.size() && tabs_[index].terminalId.empty() && !tabs_[index].diff && tabs_[index].diffKind != GitDiffKind::Commit && isCsvExtension(tabs_[index].path.extension().native());
 }
-RECT ProjectRuntime::Impl::editorModeButton(int group, bool second) const {
+bool ProjectRuntime::Impl::csvDiffTab(int group) const {
+    const auto index = groupTab(group);
+    return index < tabs_.size() && tabs_[index].terminalId.empty() && tabs_[index].diff && !tabs_[index].allChanges && isCsvExtension(tabs_[index].path.extension().native());
+}
+RECT ProjectRuntime::Impl::editorModeButton(int group, int mode) const {
     auto rect = editorGroups_[group].tools;
-    const auto middle = rect.left + (rect.right - rect.left) / 2;
-    if (second) rect.left = middle; else rect.right = middle;
+    const int count = editorModeCount(group), width = rect.right - rect.left;
+    const auto left = rect.left;
+    rect.left = left + width * mode / count; rect.right = left + width * (mode + 1) / count;
     return rect;
 }
 bool ProjectRuntime::Impl::selectEditorMode(POINT point) {
-    for (int group = 0; group < groupCount(); ++group) for (const bool second : {false, true}) {
-        const auto button = editorModeButton(group, second);
+    for (int group = 0; group < groupCount(); ++group) for (int mode = 0; mode < editorModeCount(group); ++mode) {
+        const auto button = editorModeButton(group, mode);
         if (!PtInRect(&button, point)) continue;
+        const bool second = mode == 1;
         if (htmlTab(group)) viewers_[group].setHtmlPreview(second);
         else if (csvTab(group)) viewers_[group].setCsvTable(second);
-        else viewers_[group].setDiffLayout(second);
+        else if (mode == 2) viewers_[group].setCsvDiffTable(true);
+        else { viewers_[group].setCsvDiffTable(false); viewers_[group].setDiffLayout(second); }
         SetFocus(viewers_[group].window());
         return true;
     }

@@ -1,5 +1,6 @@
 #include "csv_table.h"
 #include "csv_search.h"
+#include "csv_diff.h"
 #include "edit_buffer.h"
 #include <iostream>
 #include <limits>
@@ -241,7 +242,41 @@ void windowEdits() {
     window("a,b\n", 3, 8, 10, &editable); check(!editable, "A window whose bytes and offsets disagree became editable");
     buffer = load("a,b\n"); check(!buffer.window, "A whole file became a window");
 }
+Document csvDocument(std::string text) {
+    Document document; document.text = std::move(text); indexDocument(document); return document;
+}
+void comparisons() {
+    constexpr auto none = CsvComparison::none;
+    // A changed cell pairs its records; removed and added records stay apart.
+    auto diff = workingDiff(csvDocument("id,name\n1,a\n2,b\n3,c\n"), csvDocument("id,name\n1,a\n3,x\n4,d\n"));
+    auto table = compareCsv(diff);
+    check(table.valid() && table.columns == 2 && table.before.rows() == 4 && table.after.rows() == 4, "CSV comparison tables have incorrect dimensions");
+    check(table.rows.size() == 4 && !table.rows[0].changed && !table.rows[1].changed, "Unchanged records were not paired");
+    check(table.rows[2].before == 2 && table.rows[2].after == 2 && table.rows[2].changed &&
+        table.rows[3].before == 3 && table.rows[3].after == 3, "Changed records were not paired in order");
+    check(!table.cellChanged(0, 1) && table.value(false, 2, 1) == "b" && table.value(true, 2, 1) == "x", "Cell values do not come from their own side");
+    diff = workingDiff(csvDocument("h\n1\n2\n3\n"), csvDocument("h\n1\n3\n"));
+    table = compareCsv(diff);
+    check(table.rows.size() == 4 && table.rows[2].before == 2 && table.rows[2].after == none && table.rows[2].changed &&
+        table.rows[3].before == 3 && table.rows[3].after == 2 && !table.rows[3].changed, "A removed record did not leave an empty row on the other side");
+    // Records spanning several lines and ragged fields compare by value.
+    diff = workingDiff(csvDocument("a,b\n\"x\ny\",1\nz,2\n"), csvDocument("a,b\n\"x\ny\",9\nz,2,\n"));
+    table = compareCsv(diff);
+    check(table.rows.size() == 3 && table.rows[1].before == 1 && table.rows[1].after == 1 && table.rows[1].changed, "A multi-line record was not paired");
+    check(!table.cellChanged(1, 0) && table.cellChanged(1, 1) && table.value(false, 1, 0) == "x\ny", "Multi-line record cells were not compared");
+    check(table.rows[2].changed && !table.cellChanged(2, 1) && table.cellChanged(2, 2), "An added empty field was not a change");
+    // Git patches carry complete files; a new file has no records before it.
+    DiffDocument patch;
+    patch.patch.text = "diff --git a/t.csv b/t.csv\nnew file mode 100644\n--- /dev/null\n+++ b/t.csv\n@@ -0,0 +1,2 @@\n+a,b\n+1,2\n";
+    indexDiff(patch, false, true); table = compareCsv(patch);
+    check(table.valid() && table.before.rows() == 0 && table.after.rows() == 2 && table.rows.size() == 2 && table.rows[0].before == none, "A new file's comparison has records before it");
+    patch.patch.text = "diff --git a/t.csv b/t.csv\n--- a/t.csv\n+++ b/t.csv\n@@ -1,3 +1,3 @@\n a,b\n-1,2\n+1,3\n 4,5\n\\ No newline at end of file\n";
+    indexDiff(patch, false, true); table = compareCsv(patch);
+    check(table.rows.size() == 3 && table.rows[1].changed && !table.cellChanged(1, 0) && table.cellChanged(1, 1) && !table.rows[2].changed, "A Git patch was not compared by cell");
+    diff = workingDiff(csvDocument("a,\"b\n"), csvDocument("a,b\n"));
+    check(!compareCsv(diff).valid(), "An invalid CSV side was compared");
+}
 int main() {
-    try { parsing(); edits(); clipboard(); historyAndEncoding(); rectangularEdits(); search(); windows(); windowEdits(); std::cout << "CSV tests passed\n"; }
+    try { parsing(); edits(); clipboard(); historyAndEncoding(); rectangularEdits(); search(); windows(); windowEdits(); comparisons(); std::cout << "CSV tests passed\n"; }
     catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
 }

@@ -45,6 +45,9 @@ void Viewer::create(HWND parent, HINSTANCE instance, bool textOnly) {
     };
     csv_.moveRows = [this](int64_t rows, bool extend) { return moveTableCaret(rows, extend); };
     csv_.loadRows = [this](int direction) { loadTableRows(direction); };
+    csvDiff_.attach(window_, renderer_, scrollbars_);
+    csvDiff_.inset = [this] { return contentTop(); };
+    csvDiff_.statusChanged = [this] { if (statusChanged) statusChanged(); };
     findBar_.create(window_, instance);
     findBar_.changed = [this] { requestFind(); };
     findBar_.navigate = [this](bool backwards) { findNext(backwards); };
@@ -75,6 +78,7 @@ void Viewer::setDpi(UINT dpi) {
     header_ = MulDiv(34, dpi, 96); baseGutter_ = MulDiv(textOnly_ ? 12 : 70, dpi, 96); updateGutter();
     findBar_.setDpi(dpi);
     csv_.setDpi(dpi);
+    csvDiff_.setDpi(dpi);
     scrollbars(); findLayout(); htmlLayout(); caretPosition(); InvalidateRect(window_, nullptr, FALSE);
 }
 void Viewer::show(std::shared_ptr<const Document> d, const ResourceId& path, bool preserve, bool allowHtml) {
@@ -98,6 +102,7 @@ std::optional<Viewer::CsvCarry> Viewer::present(std::shared_ptr<const Document> 
     const bool table = keep && csvAvailable() ? csv_.active() : true;
     const auto previous = preserve && document_ && !carry ? std::optional<State>(state()) : std::nullopt;
     csv_.hide(!keep);
+    csvDiff_.hide(true);
     html_.hide();
     htmlAllowed_ = allowHtml;
     stopLoading();
@@ -333,6 +338,9 @@ void Viewer::updateGitLines() {
 void Viewer::showDiff(std::shared_ptr<const DiffDocument> d, const ResourceId& path, bool preserve) {
     pendingFileOffset_.reset(); pendingFileRows_ = 0; fileLineBytes_.clear(); csvCarry_.reset();
     csv_.hide(true);
+    // A reload of the same file keeps the table comparison's cells.
+    const bool keepTable = preserve && path_ == path && csvDiff_.active();
+    csvDiff_.hide(!keepTable);
     html_.hide();
     stopLoading();
     stopSelection(); clearColumns();
@@ -346,8 +354,26 @@ void Viewer::showDiff(std::shared_ptr<const DiffDocument> d, const ResourceId& p
     diffChangeRanges_ = changedDiffRows(*diff_, inlineView_);
     if (!preserve) { top_ = left_ = 0; anchor_ = caret_ = 0; after_ = false; }
     else { anchor_ = std::min(anchor_, document_->text.size()); caret_ = std::min(caret_, document_->text.size()); }
+    updateCsvDiff(keepTable);
     scrollbars(); findLayout(); requestFind(false, false, false); caretPosition(); InvalidateRect(window_, nullptr, FALSE);
     if (previous) restore(*previous);
+    if (statusChanged) statusChanged();
+}
+void Viewer::updateCsvDiff(bool preserve) {
+    if (!csvDiffTable_ || !csvDiffAvailable()) { csvDiff_.hide(true); return; }
+    findBar_.close(); KillTimer(window_, findTimer); search_.query("");
+    KillTimer(window_, caretTimer); caretVisible_ = false;
+    csvDiff_.show(std::make_shared<CsvComparison>(compareCsv(*diff_)), preserve);
+}
+void Viewer::setCsvDiffTable(bool enabled) {
+    csvDiffTable_ = enabled;
+    if (!csvDiffAvailable() || enabled == csvDiff_.active()) return;
+    stopSelection(); clearColumns(); ime_.cancel(window_);
+    if (enabled) updateCsvDiff(false);
+    else { csvDiff_.hide(true); layoutDirty_ = true; }
+    scrollbars(); findLayout(); caretPosition();
+    InvalidateRect(window_, nullptr, FALSE);
+    if (diffLayoutChanged) diffLayoutChanged();
     if (statusChanged) statusChanged();
 }
 void Viewer::editDiff(std::shared_ptr<EditBuffer> buffer, std::shared_ptr<const Document> before, const ResourceId& path, bool preserve) {
@@ -378,6 +404,7 @@ void Viewer::refreshBuffer(bool externalUpdate) {
         auto comparison = std::make_shared<DiffDocument>(workingDiff(*diffBefore_, edit_->document));
         document_ = std::shared_ptr<const Document>(comparison, &comparison->patch); diff_ = std::move(comparison);
         diffChangeRanges_ = changedDiffRows(*diff_, inlineView_);
+        if (csvDiff_.active()) updateCsvDiff(true);
         anchor_ = anchor ? diff_->patchOffset(*anchor) : std::min(anchor_, document_->text.size());
         caret_ = caret ? diff_->patchOffset(*caret) : std::min(caret_, document_->text.size());
         layoutDirty_ = true; scrollbars(); restoreTop(previous);
@@ -390,6 +417,7 @@ void Viewer::refreshBuffer(bool externalUpdate) {
 void Viewer::message(const std::wstring& text, const ResourceId& path) {
     pendingFileOffset_.reset(); pendingFileRows_ = 0; fileLineBytes_.clear(); csvCarry_.reset();
     csv_.hide(true);
+    csvDiff_.hide(true);
     html_.hide();
     stopLoading();
     stopSelection(); clearColumns();
@@ -457,6 +485,7 @@ void Viewer::setCsvTable(bool enabled) {
 std::wstring Viewer::textStatus() const {
     if (image_) return std::to_wstring(image_->width) + L" × " + std::to_wstring(image_->height) + L" px";
     // A Git patch does not describe the source files' encoding or line endings.
+    if (csvDiff_.active()) return csvDiff_.status();
     if (!document_ || diff_) return {};
     const auto newline = document_->text.find('\n');
     const bool crlf = newline != std::string::npos && newline > 0 && document_->text[newline - 1] == '\r';
@@ -594,6 +623,7 @@ RECT Viewer::contentRect() const {
 int Viewer::visibleRows() const { const auto r = contentRect(); return std::max(1, (static_cast<int>(r.bottom) - contentTop()) / cellHeight_); }
 void Viewer::scrollbars(bool followTail) {
     if (!window_) return;
+    if (csvDiff_.active()) { csvDiff_.layout(); return; }
     if (csv_.active()) {
         if (followTail) csv_.scrollToBottom();
         csv_.layout(); tailWasPaused_ = tailPaused(); return;
@@ -901,6 +931,7 @@ void Viewer::findLayout() {
 }
 std::optional<std::wstring> Viewer::searchSeed() const {
     if (csv_.active()) return csv_.searchSeed();
+    if (csvDiff_.active()) return {};
     if (!document_ || html_.active() || !columnRanges_.empty() || anchor_ == caret_) return {};
     const size_t begin = std::min(anchor_, caret_), end = std::max(anchor_, caret_);
     if (end - begin > 2048) return {};
@@ -915,6 +946,8 @@ void Viewer::find() {
     const auto seed = csv_.active() && findBar_.visible() ? std::nullopt : searchSeed();
     stopSelection(); clearColumns();
     if (html_.active()) setHtmlPreview(false);
+    // Search runs over the patch text, which the Split / Inline view shows.
+    if (csvDiff_.active()) setCsvDiffTable(false);
     findBar_.show(seed); scrollbars(); findLayout(); requestFind();
     InvalidateRect(window_, nullptr, FALSE);
 }
@@ -1067,6 +1100,7 @@ RECT Viewer::inputRect() const {
 }
 void Viewer::caretPosition(bool reveal) {
     if (csv_.active()) return;
+    if (csvDiff_.active()) { KillTimer(window_, caretTimer); caretVisible_ = false; if (GetFocus() == window_) DestroyCaret(); return; }
     size_t anchor = 0, caret = 0;
     if (!editSelection(anchor, caret)) {
         KillTimer(window_, caretTimer); caretVisible_ = false;
@@ -1095,7 +1129,7 @@ void Viewer::caretPosition(bool reveal) {
     }
 }
 bool Viewer::editSelection(size_t& anchor, size_t& caret) const {
-    if (!edit_ || html_.active() || csv_.active()) return false;
+    if (!edit_ || html_.active() || csv_.active() || csvDiff_.active()) return false;
     if (!diff_) { anchor = anchor_; caret = caret_; return true; }
     if (!after_) return false;
     const auto first = diff_->workingOffset(anchor_), last = diff_->workingOffset(caret_);
@@ -1252,6 +1286,7 @@ void Viewer::paintGitMarks() {
 }
 void Viewer::paint() {
     if (csv_.active()) { csv_.paint(); return; }
+    if (csvDiff_.active()) { csvDiff_.paint(); return; }
     Renderer::Paint paint(renderer_, window_); if (!paint) return;
     auto& dc = renderer_; dc.font(Renderer::Font::Ui);
     const auto r = contentRect();
@@ -1425,6 +1460,15 @@ LRESULT Viewer::handle(UINT m, WPARAM a, LPARAM b) {
     if (scrollbars_.handle(window_, m, a, b, result)) return result;
     if (csv_.active() && m == WM_KEYDOWN && findKey(MSG{window_, m, a, b, 0, {0, 0}})) return 0;
     if (csv_.active() && csv_.handle(m, a, b, result)) return result;
+    if (csvDiff_.active()) {
+        // The table is read only: Ctrl+F switches to the patch to search it,
+        // and keys and input never reach the hidden editable diff.
+        if (m == WM_KEYDOWN && findKey(MSG{window_, m, a, b, 0, {0, 0}})) return 0;
+        if (m == WM_KEYDOWN && a == 'S' && (GetKeyState(VK_CONTROL) & 0x8000)) { if (edit_ && save) save(); return 0; }
+        if (m == WM_SYSKEYDOWN || m == WM_IME_STARTCOMPOSITION || m == WM_IME_COMPOSITION || m == WM_IME_ENDCOMPOSITION) return DefWindowProcW(window_, m, a, b);
+        if (csvDiff_.handle(m, a, b, result)) return result;
+        if (m == WM_KEYDOWN) return 0;
+    }
     switch (m) {
     case WM_PAINT: paint(); return 0;
     case WM_ERASEBKGND: return 1;
@@ -1618,7 +1662,7 @@ LRESULT Viewer::handle(UINT m, WPARAM a, LPARAM b) {
 
 size_t poppy::Viewer::documentBytes() const {
     size_t bytes = textLayout_.bytes() + diffLayout_.bytes() + (document_ ? document_->text.capacity() + document_->lines.capacity() * sizeof(uint32_t) + document_->states.capacity() * sizeof(LexState) : 0);
-    bytes += csv_.bytes();
+    bytes += csv_.bytes() + csvDiff_.bytes();
     bytes += columnRanges_.capacity() * sizeof(ColumnRange);
     bytes += fileLineBytes_.capacity() * sizeof(uint32_t);
     bytes += gitChangedLines_.capacity() / 8;

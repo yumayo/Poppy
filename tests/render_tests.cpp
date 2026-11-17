@@ -894,6 +894,51 @@ void csvTables() {
         viewer.show(readonly, L"ordinary.txt"); check(!viewer.csvAvailable() && !viewer.csvTable(), "CSV mode leaked into a text file");
     }
 }
+// A single CSV file's diff opens as two read-only tables side by side.
+void csvDiffTables() {
+    Viewer viewer;
+    const auto instance = GetModuleHandleW(nullptr);
+    const auto parent = CreateWindowExW(0, L"STATIC", L"CSV diff test", WS_POPUP | WS_CLIPCHILDREN, 0, 0, 1600, 1000, nullptr, nullptr, instance, nullptr);
+    check(parent != nullptr, "Cannot create CSV diff test owner");
+    struct Owner { HWND window; ~Owner() { DestroyWindow(window); } } owner{parent};
+    viewer.create(parent, instance); const auto window = viewer.window();
+    ShowWindow(parent, SW_SHOWNOACTIVATE);
+    BYTE originalKeys[256]{}; GetKeyboardState(originalKeys);
+    struct Keys { BYTE* value; ~Keys() { SetKeyboardState(value); } } keys{originalKeys};
+    const auto key = [&](WPARAM code, bool ctrl = false) {
+        BYTE state[256]{}; state[VK_CONTROL] = ctrl ? 0x80 : 0;
+        SetKeyboardState(state); SendMessageW(window, WM_KEYDOWN, code, 0); SetKeyboardState(originalKeys);
+    };
+    for (const auto dpi : {96u, 144u}) {
+        const auto px = [&](int value) { return MulDiv(value, dpi, 96); };
+        viewer.setDpi(dpi); Renderer metrics; metrics.setDpi(dpi);
+        MoveWindow(window, 0, 0, px(900), px(400), FALSE);
+        const int rowHeight = std::max(px(28), metrics.textHeight() + px(8));
+        auto buffer = std::make_shared<EditBuffer>();
+        const std::string source = "id,name\n1,apple\n3,cherry\n";
+        buffer->document.text = source; indexDocument(buffer->document); buffer->initialize(source);
+        auto before = std::make_shared<Document>(); before->text = "id,name\n1,apple\n2,banana\n3,berry\n"; indexDocument(*before);
+        viewer.editDiff(buffer, before, L"table.csv"); SetFocus(window);
+        check(viewer.csvDiffAvailable() && viewer.csvDiffTable(), "A CSV diff did not open as tables");
+        check(viewer.textStatus().find(L"2 changed rows") == 0, "The CSV diff did not count its changed rows");
+        RedrawWindow(window, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW);
+        // The before side's third record is the removed "2,banana".
+        const auto cell = MAKELPARAM(px(52 + 160 + 20), px(34) + rowHeight * 3 + rowHeight / 2);
+        SendMessageW(window, WM_LBUTTONDOWN, MK_LBUTTON, cell); SendMessageW(window, WM_LBUTTONUP, 0, cell);
+        key('C', true); check(clipboardText(window) == L"banana", "The CSV diff did not copy the selected cell");
+        SendMessageW(window, WM_CHAR, 'x', 0); key(VK_DELETE); key(VK_BACK);
+        check(buffer->document.text == source && !buffer->dirty(), "The CSV diff table edited the file");
+        viewer.setCsvDiffTable(false); check(!viewer.csvDiffTable(), "Split could not leave the CSV diff table");
+        viewer.editDiff(buffer, before, L"table.csv", true); check(!viewer.csvDiffTable(), "A CSV diff reload lost Split mode");
+        viewer.setCsvDiffTable(true); viewer.editDiff(buffer, before, L"table.csv", true); check(viewer.csvDiffTable(), "A CSV diff reload lost Table mode");
+        viewer.find(); check(!viewer.csvDiffTable(), "Searching a CSV diff stayed in the table");
+        viewer.setCsvDiffTable(true); check(viewer.csvDiffTable(), "The CSV diff table did not return after a search");
+        viewer.editDiff(buffer, before, L"notes.txt"); check(!viewer.csvDiffAvailable() && !viewer.csvDiffTable(), "A text diff opened as a table");
+        auto all = std::make_shared<DiffDocument>();
+        all->patch.text = "diff --git a/t.csv b/t.csv\n--- a/t.csv\n+++ b/t.csv\n@@ -1 +1 @@\n-a\n+b\n"; indexDiff(*all, true);
+        viewer.showDiff(all, L"t.csv"); check(!viewer.csvDiffTable(), "A multi-file diff opened as a table");
+    }
+}
 // An in-cell edit lays its text out exactly where the cell drew it: starting
 // the edit changes no pixel except the caret, and the IME uses the cells' font.
 void csvInCellEditing() {
@@ -4038,7 +4083,7 @@ int main(int argc, char** argv) {
             shutdownProgress();
             persistentErrorPopup();
             editorBottomPadding(); editorTailFollowing(); largeFileTailPreview(); largeFileByteScrolling(); largeCsvTable(); largeCsvEditing();
-            csvTables(); csvInCellEditing(); htmlPreviewSwitching();
+            csvTables(); csvDiffTables(); csvInCellEditing(); htmlPreviewSwitching();
             terminalAsyncStartup(); terminalProcessShutdown(); terminalImeOutput();
             statusBarLimits(); treeMultipleSelection(); commitMessagePopup(); inlineTreeInput(); inlineTreeCreation(); gitCommitInput(); cellPositions(); colorsAndClipping(); imagePreviews(); fractionalMarkers(); smoothIcons(); windowTargets(); editableDiff(); editorCaret(); delayedLoadingMessages(); imeCellRendering(); imeTerminalInsertion(); imeUiRendering(); imePositions(); editorWordSelection(); editorColumnSelection(); editorWordMovement(); editorWordDeletion(); editorLineShortcuts(); editorWrapping(); diffWrapping(); documentFind(); horizontalWheelScrolling(); continuousViewerScrolling(); selectionAutoScrolling(); terminalGitBashSocketEnvironment(); terminalSelectionAutoScrolling(); themedScrollbars(); quickOpenStability(); countBadge();
             std::cout << "Direct2D rendering tests passed\n";
