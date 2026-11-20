@@ -79,8 +79,8 @@ struct OpenProject {
     bool missing = false, storageAvailable = true, dirty = false;
     ULONGLONG used = 0, changedAt = 0;
     uint64_t statRequest = 0;
-    // The unread AI count last drawn on the card.
-    size_t paintedUnread = 0;
+    // Whether the card was last drawn with the unread dot.
+    bool paintedUnread = false;
 };
 // A closed project whose workers and terminals are still stopping. Its window
 // stays hidden, and messages to it are dropped until it is destroyed.
@@ -608,7 +608,7 @@ void Workspace::updateUnreadBadges(){
     size_t unread=0;
     for(size_t i=0;i<projects_.size();++i){
         auto& project=projects_[i];const auto count=project.runtime->summary().unreadCount;unread+=count;
-        if(count!=project.paintedUnread){project.paintedUnread=count;const auto card=row(i);InvalidateRect(window_,&card,FALSE);}
+        if((count!=0)!=project.paintedUnread){project.paintedUnread=count!=0;const auto card=row(i);InvalidateRect(window_,&card,FALSE);}
     }
     taskbarBadge_.update(unread,dpi_);
 }
@@ -814,12 +814,11 @@ void Workspace::paint(){
         const int headingBottom=rect.top+px(projectHeadingHeight);
         drawAiStatus(renderer_,aiStatusBounds(rect),summary.state,dpi_);
         const auto title=project.path.filename().empty()?project.path.native():project.path.filename().native();
-        // Unread AI sessions take the card's top-right corner, like the taskbar badge.
+        // A red dot without a count in the card's top-right corner marks unread AI sessions.
         const size_t unread=summary.unreadCount;RECT unreadBounds{rect.right,rect.top,rect.right,rect.top};
-        if(unread){const auto text=std::to_wstring(unread);const int height=px(session_.projectListCollapsed?16:18),width=std::max(height,renderer_.textWidth(text)+px(8));
-            const int inset=px(session_.projectListCollapsed?2:3);
-            unreadBounds={rect.right-inset-width,rect.top+inset,rect.right-inset,rect.top+inset+height};
-            renderer_.fillRounded(unreadBounds,unreadBadge,height/2.0f);renderer_.label(unreadBounds,text,RGB(255,255,255),DT_CENTER|DT_VCENTER|DT_SINGLELINE);}
+        if(unread){const int size=px(session_.projectListCollapsed?8:9),inset=px(session_.projectListCollapsed?6:7);
+            unreadBounds={rect.right-inset-size,rect.top+inset,rect.right-inset,rect.top+inset+size};
+            renderer_.fillRounded(unreadBounds,unreadBadge,size/2.0f);}
         if(session_.projectListCollapsed){
             // Retain both UTF-16 units for an initial outside the BMP.
             const size_t length=title.size()>1&&title[0]>=0xd800&&title[0]<=0xdbff&&title[1]>=0xdc00&&title[1]<=0xdfff?2:1;
