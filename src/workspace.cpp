@@ -47,6 +47,8 @@ constexpr int expandedProjectRowHeight = projectCardHeight + projectCardGap;
 constexpr int collapsedProjectListWidth = 64;
 constexpr int collapsedProjectCardHeight = 56;
 constexpr int statusBarHeight = 26;
+// Matches the taskbar's unread badge.
+constexpr COLORREF unreadBadge = RGB(0xE5, 0x1A, 0x1A);
 fs::path stateDirectory() {
     const DWORD length = GetEnvironmentVariableW(L"APPDATA", nullptr, 0);
     if (length) { std::wstring path(length, 0); const auto count = GetEnvironmentVariableW(L"APPDATA", path.data(), length); if (!count || count >= length) throw std::runtime_error("Cannot read APPDATA"); path.resize(count); return fs::path(path) / L"yumayo" / L"Poppy"; }
@@ -77,6 +79,8 @@ struct OpenProject {
     bool missing = false, storageAvailable = true, dirty = false;
     ULONGLONG used = 0, changedAt = 0;
     uint64_t statRequest = 0;
+    // The unread AI count last drawn on the card.
+    size_t paintedUnread = 0;
 };
 // A closed project whose workers and terminals are still stopping. Its window
 // stays hidden, and messages to it are dropped until it is destroyed.
@@ -120,7 +124,7 @@ private:
     void releaseStoppedProjects();
     bool stopping(HWND window) const;
     void tick();
-    void updateTaskbarBadge();
+    void updateUnreadBadges();
     void checkUpdate();
     // present paints the spinners now instead of leaving them to WM_PAINT.
     void animateAiStatus(bool present = false);
@@ -596,12 +600,16 @@ void Workspace::tick(){
     trimDocuments();
     if(appDirty_&&now-appChanged_>=650)saveApp();
     animateAiStatus();
-    updateTaskbarBadge();
+    updateUnreadBadges();
 }
 // Each unread terminal counts once; viewing it in the foreground acknowledges it.
-void Workspace::updateTaskbarBadge(){
+// Acknowledging does not notify the workspace, so the cards are compared here.
+void Workspace::updateUnreadBadges(){
     size_t unread=0;
-    for(const auto& project:projects_)unread+=project.runtime->summary().unreadCount;
+    for(size_t i=0;i<projects_.size();++i){
+        auto& project=projects_[i];const auto count=project.runtime->summary().unreadCount;unread+=count;
+        if(count!=project.paintedUnread){project.paintedUnread=count;const auto card=row(i);InvalidateRect(window_,&card,FALSE);}
+    }
     taskbarBadge_.update(unread,dpi_);
 }
 void Workspace::checkUpdate() {
@@ -806,6 +814,12 @@ void Workspace::paint(){
         const int headingBottom=rect.top+px(projectHeadingHeight);
         drawAiStatus(renderer_,aiStatusBounds(rect),summary.state,dpi_);
         const auto title=project.path.filename().empty()?project.path.native():project.path.filename().native();
+        // Unread AI sessions take the card's top-right corner, like the taskbar badge.
+        const size_t unread=summary.unreadCount;RECT unreadBounds{rect.right,rect.top,rect.right,rect.top};
+        if(unread){const auto text=std::to_wstring(unread);const int height=px(session_.projectListCollapsed?16:18),width=std::max(height,renderer_.textWidth(text)+px(8));
+            const int inset=px(session_.projectListCollapsed?2:3);
+            unreadBounds={rect.right-inset-width,rect.top+inset,rect.right-inset,rect.top+inset+height};
+            renderer_.fillRounded(unreadBounds,unreadBadge,height/2.0f);renderer_.label(unreadBounds,text,RGB(255,255,255),DT_CENTER|DT_VCENTER|DT_SINGLELINE);}
         if(session_.projectListCollapsed){
             // Retain both UTF-16 units for an initial outside the BMP.
             const size_t length=title.size()>1&&title[0]>=0xd800&&title[0]<=0xdbff&&title[1]>=0xdc00&&title[1]<=0xdfff?2:1;
@@ -815,22 +829,30 @@ void Workspace::paint(){
         const auto secondary=subtitle(i);
         const auto running=summary.counts[static_cast<size_t>(AiState::Running)];
         const bool showRunning=running&&summary.state!=AiState::Running;
-        // Match the Source Control badge in the card's top-right corner.
-        const size_t changes=project.runtime->gitChanges();RECT badge{rect.right,rect.top,rect.right,rect.top};
-        if(changes){const auto text=std::to_wstring(changes);const int height=px(18),width=std::max(height,renderer_.textWidth(text)+px(8));
-            badge={rect.right-px(6)-width,rect.top+px(3),rect.right-px(6),rect.top+px(3)+height};
-            renderer_.fillRounded(badge,accent,height/2.0f);renderer_.label(badge,text,background,DT_CENTER|DT_VCENTER|DT_SINGLELINE);}
-        const int textLeft=rect.left+px(32),textRight=std::min<int>(rect.right-px(showRunning?24:8),changes?badge.left-px(4):rect.right);
+        const int textLeft=rect.left+px(32),textRight=std::min<int>(rect.right-px(showRunning?24:8),unread?unreadBounds.left-px(4):rect.right);
+        // The Source Control badge follows the title, before the WSL distribution.
+        const size_t changes=project.runtime->gitChanges();
+        const auto changesText=changes?std::to_wstring(changes):std::wstring{};
+        const int changesHeight=px(18),changesWidth=changes?std::max(changesHeight,renderer_.textWidth(changesText)+px(8)):0;
+        const int changesSpace=changes?changesWidth+px(6):0;
+        const bool twoLines=!project.path.wsl()&&!secondary.empty();
+        const int titleBottom=twoLines?rect.top+px(23):headingBottom;
+        int titleRight=0;
         if(project.path.wsl()){
-            const int available=std::max(0,textRight-textLeft-px(8));
+            const int available=std::max(0,textRight-textLeft-px(8)-changesSpace);
             const int secondaryWidth=std::min(renderer_.textWidth(secondary),available/2);
-            const int titleRight=textLeft+std::min(renderer_.textWidth(title),available-secondaryWidth);
+            titleRight=textLeft+std::min(renderer_.textWidth(title),available-secondaryWidth);
             renderer_.label({textLeft,rect.top,titleRight,headingBottom},title,project.missing?muted:foreground);
-            renderer_.label({titleRight+px(8),rect.top,textRight,headingBottom},secondary,muted);
+            renderer_.label({titleRight+changesSpace+px(8),rect.top,textRight,headingBottom},secondary,muted);
         }else{
-            renderer_.label({textLeft,rect.top,textRight,secondary.empty()?headingBottom:rect.top+px(23)},title,project.missing?muted:foreground);
-            if(!secondary.empty())renderer_.label({textLeft,rect.top+px(20),textRight,headingBottom},secondary,muted);
+            titleRight=textLeft+std::min(renderer_.textWidth(title),std::max(0,textRight-textLeft-changesSpace));
+            renderer_.label({textLeft,rect.top,titleRight,titleBottom},title,project.missing?muted:foreground);
+            if(twoLines)renderer_.label({textLeft,rect.top+px(20),textRight,headingBottom},secondary,muted);
         }
+        // Narrow cards leave out the badge rather than cover the unread count.
+        if(changes&&titleRight+changesSpace<=textRight){const int top=(rect.top+titleBottom-changesHeight)/2;
+            const RECT badge{titleRight+px(6),top,titleRight+px(6)+changesWidth,top+changesHeight};
+            renderer_.fillRounded(badge,accent,changesHeight/2.0f);renderer_.label(badge,changesText,background,DT_CENTER|DT_VCENTER|DT_SINGLELINE);}
         renderer_.label({rect.left+px(32),headingBottom,rect.right-px(8),headingBottom+px(projectMessageLineHeight)*projectMessageLines},
             wide(summary.activity),muted,DT_LEFT|DT_TOP|DT_WORDBREAK|DT_END_ELLIPSIS,false,px(projectMessageLineHeight));
         if(showRunning)renderer_.label({rect.right-px(24),rect.top+px(20),rect.right-px(3),headingBottom},std::to_wstring(running),accent);
@@ -859,7 +881,7 @@ LRESULT CALLBACK Workspace::scrollbarProcedure(HWND window,UINT message,WPARAM a
     }
     return DefWindowProcW(window,message,a,b);
 }
-LRESULT Workspace::handle(UINT m,WPARAM a,LPARAM b){if(m==taskbarButtonCreated_&&m){taskbarBadge_.reset(window_);if(!closing_)updateTaskbarBadge();return 0;}switch(m){
+LRESULT Workspace::handle(UINT m,WPARAM a,LPARAM b){if(m==taskbarButtonCreated_&&m){taskbarBadge_.reset(window_);if(!closing_)updateUnreadBadges();return 0;}switch(m){
 case WM_CREATE:create();return 0;case WM_PAINT:paint();return 0;case WM_ERASEBKGND:return 1;case WM_SIZE:endProjectDrag();layout();if(!restoring_){appDirty_=true;appChanged_=GetTickCount64();}return 0;
 case WM_GETMINMAXINFO:reinterpret_cast<MINMAXINFO*>(b)->ptMinTrackSize={px(900),px(480)};return 0;
 case WM_DPICHANGED:{endProjectDrag();dpi_=HIWORD(a);renderer_.setDpi(dpi_);scrollbarRenderer_.setDpi(dpi_);statusBar_.setDpi(dpi_);recent_.setDpi(dpi_);errors_.setDpi(dpi_);for(auto& project:projects_)project.runtime->setDpi(dpi_);const auto rect=reinterpret_cast<RECT*>(b);SetWindowPos(window_,nullptr,rect->left,rect->top,rect->right-rect->left,rect->bottom-rect->top,SWP_NOZORDER|SWP_NOACTIVATE);layout();return 0;}
@@ -876,7 +898,7 @@ case wmProjectStopped:{
     releaseStoppedProjects();return 0;
 }
 case WM_APP + 21:{ const auto project = find(static_cast<uint64_t>(a)); if (!project || project->runtime->hasUnsaved()) return 0; const bool active = project == &projects_[active_]; const auto index = static_cast<size_t>(project - projects_.data()); close(index); if (active) for (size_t i = 0; i < projects_.size(); ++i) if (projects_[i].id == static_cast<uint64_t>(b)) { select(i); break; } return 0; }
-case wmAiEvent:for(const auto& event:events_.drain())for(auto& project:projects_)if(project.runtime->apply(event))break;if(!closing_){animateAiStatus();updateTaskbarBadge();}return 0;
+case wmAiEvent:for(const auto& event:events_.drain())for(auto& project:projects_)if(project.runtime->apply(event))break;if(!closing_){animateAiStatus();updateUnreadBadges();}return 0;
 case WM_TIMER:if(closing_)return 0;if(a==77)Terminal::pump();else if(a==aiAnimationTimerId)animateAiStatus();else if(a==1)tick();return 0;
 case WM_ACTIVATE:if(closing_)return 0;if(LOWORD(a)==WA_INACTIVE)endProjectDrag();else if(!projects_.empty())PostMessageW(projects_[active_].runtime->window(),WM_APP+12,0,0);return 0;
 case WM_SETFOCUS:if(closing_)return 0;if(!projects_.empty())projects_[active_].runtime->activate(true);return 0;
