@@ -181,7 +181,10 @@ void TerminalPane::activateSession(const std::string& id) {
 }
 void TerminalPane::acknowledge() {
     if (GetForegroundWindow() != GetAncestor(window_, GA_ROOT) || IsIconic(GetAncestor(window_, GA_ROOT))) return;
-    for (const auto& session : sessions_) if (session->configuration.displayed && IsWindowVisible(session->terminal->window())) session->ai.acknowledge();
+    bool cleared = false;
+    for (const auto& session : sessions_) if (session->ai.unread && session->configuration.displayed && IsWindowVisible(session->terminal->window())) { session->ai.acknowledge(); cleared = true; }
+    // Remove the tab's unread dot.
+    if (cleared) { InvalidateRect(window_, nullptr, FALSE); if (dockParent_) InvalidateRect(dockParent_, nullptr, FALSE); }
 }
 bool TerminalPane::animateAiStatus(bool present) {
     if (dockParent_) {
@@ -330,6 +333,7 @@ void TerminalPane::paint(){
         const bool selected = sessions_[i]->configuration.displayed;
         renderer_.fill(rect,selected?panel:background);if(selected)renderer_.fill({rect.left,header_-2,rect.right,header_},accent);
         drawAiStatus(renderer_,{rect.left,0,rect.left+unit,header_},sessions_[i]->ai.state,dpi_);
+        if(sessions_[i]->ai.unread)drawUnreadDot(renderer_,{rect.left,0,rect.left+unit,header_},dpi_);
         renderer_.label({rect.left+unit,0,rect.right-unit,header_},sessionName(*sessions_[i]),foreground);
         renderer_.label({rect.right-unit,0,rect.right,header_},L"×",muted,DT_CENTER|DT_VCENTER|DT_SINGLELINE);
     }

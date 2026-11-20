@@ -47,8 +47,6 @@ constexpr int expandedProjectRowHeight = projectCardHeight + projectCardGap;
 constexpr int collapsedProjectListWidth = 64;
 constexpr int collapsedProjectCardHeight = 56;
 constexpr int statusBarHeight = 26;
-// Matches the taskbar's unread badge.
-constexpr COLORREF unreadBadge = RGB(0xE5, 0x1A, 0x1A);
 fs::path stateDirectory() {
     const DWORD length = GetEnvironmentVariableW(L"APPDATA", nullptr, 0);
     if (length) { std::wstring path(length, 0); const auto count = GetEnvironmentVariableW(L"APPDATA", path.data(), length); if (!count || count >= length) throw std::runtime_error("Cannot read APPDATA"); path.resize(count); return fs::path(path) / L"yumayo" / L"Poppy"; }
@@ -818,7 +816,7 @@ void Workspace::paint(){
         const size_t unread=summary.unreadCount;RECT unreadBounds{rect.right,rect.top,rect.right,rect.top};
         if(unread){const int size=px(session_.projectListCollapsed?8:9),inset=px(session_.projectListCollapsed?6:7);
             unreadBounds={rect.right-inset-size,rect.top+inset,rect.right-inset,rect.top+inset+size};
-            renderer_.fillRounded(unreadBounds,unreadBadge,size/2.0f);}
+            renderer_.fillRounded(unreadBounds,unreadColor,size/2.0f);}
         if(session_.projectListCollapsed){
             // Retain both UTF-16 units for an initial outside the BMP.
             const size_t length=title.size()>1&&title[0]>=0xd800&&title[0]<=0xdbff&&title[1]>=0xdc00&&title[1]<=0xdfff?2:1;

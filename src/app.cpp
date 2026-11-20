@@ -1142,7 +1142,11 @@ void ProjectRuntime::Impl::paint() {
             const auto title = titleFor(tabs_[i]);
             if (!tabs_[i].terminalId.empty()) {
                 const auto index = terminalIndex(tabs_[i].terminalId);
-                if (index < terminal_.dockCount()) drawAiStatus(dc, {rect.left, rect.top, rect.left + scaled(26), rect.bottom}, terminal_.dockStatus(index).state, dpi_);
+                if (index < terminal_.dockCount()) {
+                    const RECT icon{rect.left, rect.top, rect.left + scaled(26), rect.bottom};
+                    drawAiStatus(dc, icon, terminal_.dockStatus(index).state, dpi_);
+                    if (terminal_.dockStatus(index).unread) drawUnreadDot(dc, icon, dpi_);
+                }
             }
             const auto badge = tabBadge(tabs_[i], rect);
             if (badge.right > badge.left) {
