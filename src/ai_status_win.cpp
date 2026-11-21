@@ -26,9 +26,9 @@ void drawAiStatus(Renderer& dc, RECT rect, AiState state, UINT dpi) {
     else if (state == AiState::Unknown) dc.ellipse({x-size/2,y-size/2,x+size/2,y+size/2},color,unit);
     else dc.label(rect, state == AiState::Failed ? L"!" : L"?", color, DT_CENTER|DT_VCENTER|DT_SINGLELINE);
 }
-void drawUnreadDot(Renderer& dc, RECT rect, UINT dpi) {
-    const int size = MulDiv(7, dpi, 96), x = (rect.left+rect.right)/2 + MulDiv(7, dpi, 96), y = (rect.top+rect.bottom)/2 - MulDiv(7, dpi, 96);
-    const RECT dot{x-size/2, y-size/2, x-size/2+size, y-size/2+size};
+void drawUnreadDot(Renderer& dc, int closeCenter, int top, UINT dpi) {
+    const int size = MulDiv(7, dpi, 96), right = closeCenter - MulDiv(6, dpi, 96), y = top + MulDiv(5, dpi, 96);
+    const RECT dot{right-size, y, right, y+size};
     dc.fillRounded(dot, unreadColor, size/2.0f);
 }
 }

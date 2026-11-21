@@ -9,6 +9,7 @@ std::string newSessionId();
 void drawAiStatus(Renderer& renderer, RECT rect, AiState state, UINT dpi);
 // Matches the taskbar's unread badge.
 constexpr COLORREF unreadColor = RGB(0xE5, 0x1A, 0x1A);
-// A small red dot on the top-right of the status icon drawn in the same rect.
-void drawUnreadDot(Renderer& renderer, RECT rect, UINT dpi);
+// A small red dot at the top of a tab, just left of its close button
+// centered at closeCenter.
+void drawUnreadDot(Renderer& renderer, int closeCenter, int top, UINT dpi);
 }

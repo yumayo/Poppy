@@ -333,7 +333,7 @@ void TerminalPane::paint(){
         const bool selected = sessions_[i]->configuration.displayed;
         renderer_.fill(rect,selected?panel:background);if(selected)renderer_.fill({rect.left,header_-2,rect.right,header_},accent);
         drawAiStatus(renderer_,{rect.left,0,rect.left+unit,header_},sessions_[i]->ai.state,dpi_);
-        if(sessions_[i]->ai.unread)drawUnreadDot(renderer_,{rect.left,0,rect.left+unit,header_},dpi_);
+        if(sessions_[i]->ai.unread)drawUnreadDot(renderer_,rect.right-unit/2,0,dpi_);
         renderer_.label({rect.left+unit,0,rect.right-unit,header_},sessionName(*sessions_[i]),foreground);
         renderer_.label({rect.right-unit,0,rect.right,header_},L"×",muted,DT_CENTER|DT_VCENTER|DT_SINGLELINE);
     }

@@ -1143,9 +1143,8 @@ void ProjectRuntime::Impl::paint() {
             if (!tabs_[i].terminalId.empty()) {
                 const auto index = terminalIndex(tabs_[i].terminalId);
                 if (index < terminal_.dockCount()) {
-                    const RECT icon{rect.left, rect.top, rect.left + scaled(26), rect.bottom};
-                    drawAiStatus(dc, icon, terminal_.dockStatus(index).state, dpi_);
-                    if (terminal_.dockStatus(index).unread) drawUnreadDot(dc, icon, dpi_);
+                    drawAiStatus(dc, {rect.left, rect.top, rect.left + scaled(26), rect.bottom}, terminal_.dockStatus(index).state, dpi_);
+                    if (terminal_.dockStatus(index).unread) drawUnreadDot(dc, rect.right - scaled(16), rect.top, dpi_);
                 }
             }
             const auto badge = tabBadge(tabs_[i], rect);
