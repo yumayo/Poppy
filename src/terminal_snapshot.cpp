@@ -36,8 +36,9 @@ TerminalModel TerminalModel::fromSnapshot(std::string_view bytes) {
     model.parse_ = static_cast<Parse>(in.bounded(0, static_cast<unsigned>(Parse::Charset)));
     model.sequence_ = in.string(256); model.utf8_ = in.string(3); model.title_ = in.string(1024);
     const auto row = [&](std::vector<Cell>& cells, int& wrapped, bool history) {
-        const auto width = in.bounded(history ? 2 : columns, history ? 500 : columns);
-        wrapped = static_cast<int>(in.bounded(0, width)); cells.resize(width);
+        const auto width = in.bounded(history ? 0 : columns, history ? 500 : columns);
+        // History rows omit trailing blanks, so their wrap point may exceed their width.
+        wrapped = static_cast<int>(in.bounded(0, history ? 500 : width)); cells.resize(width);
         for (auto& cell : cells) {
             cell.ch = static_cast<char32_t>(in.bounded(0, 0x10ffff));
             if (cell.ch >= 0xd800 && cell.ch <= 0xdfff) in.invalid();
@@ -49,10 +50,10 @@ TerminalModel TerminalModel::fromSnapshot(std::string_view bytes) {
         screen->savedX = static_cast<int>(in.bounded(0, 499)); screen->savedY = static_cast<int>(in.bounded(0, 199)); screen->wrap = in.flag();
         for (int y = 0; y < rows; ++y) row(screen->cells[y], screen->wrapped[y], false);
     }
-    const auto count = in.bounded(0, 1000);
+    const auto count = in.bounded(0, static_cast<uint32_t>(historyLineLimit));
     for (uint32_t i = 0; i < count; ++i) {
         HistoryRow line; row(line.cells, line.wrapped, true); model.historyCells_ += line.cells.size();
-        if (model.historyCells_ > 131072) in.invalid();
+        if (model.historyCells_ > historyCellLimit) in.invalid();
         model.history_.push_back(std::move(line));
     }
     in.finish(); return model;

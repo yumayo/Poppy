@@ -1,5 +1,6 @@
 #include "terminal_host.h"
 #include "ai_status.h"
+#include "terminal_model.h"
 #include <algorithm>
 
 namespace poppy {
@@ -79,8 +80,9 @@ std::string encodeUpdate(const TerminalHostUpdate& update) {
     out.string(update.data); out.string(update.status); out.string(update.relayError); out.string(update.diagnostic); return std::move(out.bytes);
 }
 TerminalHostUpdate decodeUpdate(std::string_view bytes) {
-    Reader in(bytes); TerminalHostUpdate update; update.snapshot = in.flag(); update.running = in.flag(); update.relay = in.flag(); update.scroll = in.bounded(0, 1000);
-    update.data = in.string(8 * 1024 * 1024); update.status = in.string(8192); update.relayError = in.string(65536); update.diagnostic = in.string(128);
+    Reader in(bytes); TerminalHostUpdate update; update.snapshot = in.flag(); update.running = in.flag(); update.relay = in.flag(); update.scroll = in.bounded(0, static_cast<uint32_t>(historyLineLimit));
+    // A full scrollback snapshot is up to about 26 MiB; maxPacket bounds the whole update.
+    update.data = in.string(); update.status = in.string(8192); update.relayError = in.string(65536); update.diagnostic = in.string(128);
     in.finish(); return update;
 }
 }
@@ -140,7 +142,7 @@ void TerminalHostClient::close(bool preserve, size_t scroll) {
     std::exception_ptr failure;
     if (pipe_) {
         try {
-            terminalWire::Writer out; if (preserve) out.number(std::min<size_t>(scroll, 1000));
+            terminalWire::Writer out; if (preserve) out.number(std::min(scroll, historyLineLimit));
             terminalWire::writePacket(pipe_.value, preserve ? Op::Detach : Op::Stop, out.bytes);
             if (response().op != Op::Ack) throw std::runtime_error("Terminal host did not acknowledge shutdown");
         } catch (...) { failure = std::current_exception(); preserve = false; }

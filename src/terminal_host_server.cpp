@@ -241,7 +241,7 @@ int serve(const std::string& session) {
                 else if (packet.op == Op::Resize) {
                     const auto columns = static_cast<int>(in.bounded(2, 500)), rows = static_cast<int>(in.bounded(1, 200)); in.finish(); engine.resize(columns, rows);
                 } else if (packet.op == Op::Detach) {
-                    const auto scroll = in.bounded(0, 1000); in.finish(); engine.detach(scroll);
+                    const auto scroll = in.bounded(0, static_cast<uint32_t>(historyLineLimit)); in.finish(); engine.detach(scroll);
                     expires = GetTickCount64() + 120000; detachedOwner = std::move(owner); detached = true; writePacket(pipe.value, Op::Ack, {}); break;
                 } else if (packet.op == Op::Stop) { in.finish(); writePacket(pipe.value, Op::Ack, {}); quit = true; break; }
                 else throw std::runtime_error("Invalid terminal request");

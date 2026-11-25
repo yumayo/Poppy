@@ -15,6 +15,9 @@ struct Cell {
     Color fg = foreground, bg = background;
     bool continuation = false;
 };
+// Scrollback holds at most 10,000 lines AND 2,000,000 cells (about 31 MiB,
+// i.e. 10,000 lines of 200 columns). Trailing default blanks are not stored.
+inline constexpr size_t historyLineLimit = 10000, historyCellLimit = historyLineLimit * 200;
 class TerminalModel {
 public:
     TerminalModel(int columns = 80, int rows = 24);

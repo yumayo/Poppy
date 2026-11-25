@@ -84,9 +84,15 @@ void TerminalModel::scrollUp(int count) {
     auto& s = active(); count = std::clamp(count, 1, bottom_ - top_ + 1);
     for (int i = 0; i < count; ++i) {
         if (!alternate_ && top_ == 0 && bottom_ == rows_ - 1) {
-            historyCells_ += s.cells.front().size(); history_.push_back({std::move(s.cells.front()), s.wrapped.front()});
-            // At most 1,000 lines AND 131,072 cells (roughly 2 MiB).
-            while (history_.size() > 1000 || historyCells_ > 131072) { historyCells_ -= history_.front().cells.size(); history_.pop_front(); ++firstRow_; }
+            // The renderer pads history rows with default cells, so trailing default
+            // blanks carry no information and only consume the cell budget.
+            auto& line = s.cells.front(); const Cell empty{};
+            const auto used = std::find_if(line.rbegin(), line.rend(), [&](const Cell& c) {
+                return c.ch != empty.ch || c.fg != empty.fg || c.bg != empty.bg || c.continuation;
+            }).base();
+            std::vector<Cell> cells(line.begin(), used);
+            historyCells_ += cells.size(); history_.push_back({std::move(cells), s.wrapped.front()});
+            while (history_.size() > historyLineLimit || historyCells_ > historyCellLimit) { historyCells_ -= history_.front().cells.size(); history_.pop_front(); ++firstRow_; }
         }
         if (top_ > 0) s.wrapped[top_ - 1] = 0;
         for (int y = top_; y < bottom_; ++y) { s.cells[y] = std::move(s.cells[y + 1]); s.wrapped[y] = s.wrapped[y + 1]; }

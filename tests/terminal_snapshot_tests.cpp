@@ -22,7 +22,11 @@ void continuation() {
 }
 void boundedHistory() {
     TerminalModel original(500, 200);
-    for (int i = 0; i < 2200; ++i) original.feed("line " + std::to_string(i) + u8" 日本語\r\n");
+    for (size_t i = 0; i < poppy::historyLineLimit + 200; ++i) original.feed("line " + std::to_string(i) + u8" 日本語\r\n");
+    check(original.historySize() == poppy::historyLineLimit, "History line budget was not reached");
+    const std::string full(500, 'x');
+    for (size_t i = 0; i < poppy::historyCellLimit / 500 + 400; ++i) original.feed(full + "\r\n");
+    check(original.historySize() == poppy::historyCellLimit / 500, "History cell budget was not reached");
     original.resize(23, 7);
     original.feed("abcdefghijklmnopqrstuvw01234567890123456789\r\n");
     original.feed("\x1b[?1049h\x1b[35mAI screen\x1b[?2004h");

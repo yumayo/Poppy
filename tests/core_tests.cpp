@@ -122,11 +122,14 @@ void terminalTests() {
     check(wideEnd.row(0)[2].ch == U'あ' && wideEnd.row(0)[3].continuation, "resize keeps a complete wide glyph at right edge");
     wideEnd.resize(3, 3); check(wideEnd.row(0)[2].ch == U' ', "resize removes clipped wide glyph");
 
-    TerminalModel bounded(500, 2);
-    for (int i = 0; i < 2000; ++i) bounded.feed("x\r\n");
-    check(bounded.historySize() <= 131072 / 500, "history cell budget enforced");
-    bounded.resize(8, 2); for (int i = 0; i < 2000; ++i) bounded.feed("x\r\n");
-    check(bounded.historySize() <= 1000, "history line budget enforced across resizes");
+    TerminalModel bounded(500, 2); const std::string full(500, 'x');
+    for (size_t i = 0; i < historyCellLimit / 500 + 100; ++i) bounded.feed(full + "\r\n");
+    check(bounded.historySize() == historyCellLimit / 500, "history cell budget enforced");
+    bounded.resize(8, 2); for (size_t i = 0; i < historyLineLimit + 100; ++i) bounded.feed("x\r\n");
+    check(bounded.historySize() == historyLineLimit, "history line budget enforced across resizes");
+    check(line(bounded, 0, 1) == "x" && bounded.row(0, 1).size() == 1, "history omits trailing default blanks");
+    TerminalModel colored(8, 2); colored.feed("\x1b[44m\x1b[2Ka\r\n\x1b[0m\r\n");
+    check(colored.row(0, 1).size() == 8, "history keeps colored trailing blanks");
     check(sizeof(Cell) <= 16, "cell memory budget");
 }
 void terminalTitleTests() {
@@ -371,7 +374,7 @@ void terminalSelectionScrollTests() {
     check(wide.hasSelection() && wide.selectedText() == "日本😀", "a delayed scroll commit preserves selected text");
 
     TerminalModel bounded(8, 2); TerminalDisplay history;
-    for (int i = 0; i < 1002; ++i) bounded.feed("row\r\n");
+    for (size_t i = 0; i < historyLineLimit + 2; ++i) bounded.feed("row\r\n");
     history.update(bounded, 0, 0, true);
     history.beginSelection(0); history.extendSelection(bounded, 3);
     bounded.feed("next\r\n"); history.changed(); history.update(bounded, 1, 40);
