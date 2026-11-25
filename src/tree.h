@@ -32,6 +32,11 @@ public:
     void reparent(TreeItem id, TreeItem parent) { if (model_.reparent(id, parent)) changed(); }
     void expand(TreeItem id, bool expanded);
     void collapseAll();
+    // Show only this item's subtree with the item as the top row; 0 shows all.
+    void setRoot(TreeItem id);
+    TreeItem root() const { return model_.root(); }
+    // The first visible row: the shown root, or the first top-level item.
+    TreeItem rootRow() const;
     void select(TreeItem id, bool activate = true);
     void addSelection(TreeItem id) { if (!model_.selected(id) && model_.select(id, true, false)) changed(); }
     void showSelection(bool centered = false) { ensureVisible(centered); changed(); }

@@ -45,9 +45,11 @@ namespace {
 constexpr UINT_PTR timerId = 1;
 constexpr UINT_PTR tabDragTimerId = 2;
 constexpr size_t maxEntries = 10000, maxTreeNodes = 50000, maxLines = 1000000;
-constexpr int explorerCommand = 2, gitCommand = 3, searchCommand = 7;
+constexpr int explorerCommand = 2, gitCommand = 3, searchCommand = 7, contextCommand = 8;
 constexpr UINT gitViewTreeCommand = 0x5301, gitViewListCommand = 0x5302;
-enum class Sidebar { Explorer, Git, Search };
+enum class Sidebar { Explorer, Git, Search, Context };
+// CONTEXT shows this project-root folder as its own Explorer.
+constexpr wchar_t contextFolderName[] = L".context";
 using Entry = ProviderEntry;
 struct Node {
     ResourceId path; uint64_t id;
@@ -323,6 +325,12 @@ private:
     void layout(bool revealTab = true);
     void paint();
     void selectSidebar(Sidebar sidebar, bool toggle = false, const std::optional<std::wstring>& seed = {});
+    // EXPLORER and CONTEXT share one tree; CONTEXT shows only .context's subtree.
+    bool explorerSidebar() const { return activeSidebar_ == Sidebar::Explorer || activeSidebar_ == Sidebar::Context; }
+    TreeItem findContextFolder() const;
+    bool inContextFolder(TreeItem item) const;
+    // Returns true when the tree window's visibility changed.
+    bool syncContextTree();
     RECT collapseButton() const;
     void collapseSidebar();
     RECT moreButton() const;
@@ -453,7 +461,13 @@ private:
     bool statusDirty_ = true;
     size_t partialFolders_ = 0;
     std::optional<WatchUsage> watchUsage_;
-    ActivityButton explorerActivity_, searchActivity_;
+    ActivityButton explorerActivity_, contextActivity_, searchActivity_;
+    // The .context folder item, and whether the tree currently shows only it.
+    TreeItem contextRoot_ = 0;
+    bool contextTree_ = false;
+    // Each view keeps its own scroll position and selection in the shared tree.
+    struct TreeView { int top = 0, left = 0; TreeItem selection = 0; };
+    TreeView explorerView_, contextView_;
     // One Source Control button per repository; each shows only its own repository.
     std::vector<std::unique_ptr<ActivityButton>> gitActivities_;
     ResourceId gitRepository_;
@@ -783,15 +797,17 @@ void ProjectRuntime::Impl::create() {
         else if (collapsedGitPaths_.size() < maxTreeNodes) collapsedGitPaths_.insert(path);
         if (source->directory && !source->group) refreshAllChanges();
     };
-    explorerActivity_.create(window_, instance_, L"Explorer", explorerCommand, false); explorerButton_ = explorerActivity_.window();
-    searchActivity_.create(window_, instance_, L"Search", searchCommand, false, false, true); searchButton_ = searchActivity_.window();
+    explorerActivity_.create(window_, instance_, L"Explorer", explorerCommand, Renderer::Icon::Explorer); explorerButton_ = explorerActivity_.window();
+    contextActivity_.create(window_, instance_, L"Context", contextCommand, Renderer::Icon::Context);
+    searchActivity_.create(window_, instance_, L"Search", searchCommand, Renderer::Icon::Search); searchButton_ = searchActivity_.window();
     explorerActivity_.clicked = [this] { selectSidebar(Sidebar::Explorer, true); };
+    contextActivity_.clicked = [this] { selectSidebar(Sidebar::Context, true); };
     searchActivity_.clicked = [this] { selectSidebar(Sidebar::Search, true); };
     explorerActivity_.select(true);
     tooltips_ = CreateWindowExW(WS_EX_TOPMOST, TOOLTIPS_CLASSW, nullptr, WS_POPUP | TTS_ALWAYSTIP | TTS_NOPREFIX, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, window_, nullptr, instance_, nullptr);
-    for (const auto button : {explorerButton_, searchButton_}) {
+    for (const auto button : {explorerButton_, contextActivity_.window(), searchButton_}) {
         TOOLINFOW tip{}; tip.cbSize = sizeof(tip); tip.uFlags = TTF_IDISHWND | TTF_SUBCLASS; tip.hwnd = window_; tip.uId = reinterpret_cast<UINT_PTR>(button);
-        tip.lpszText = const_cast<wchar_t*>(button == explorerButton_ ? L"Explorer (Ctrl+Shift+E)" : L"Search (Ctrl+Shift+F)");
+        tip.lpszText = const_cast<wchar_t*>(button == explorerButton_ ? L"Explorer (Ctrl+Shift+E)" : button == searchButton_ ? L"Search (Ctrl+Shift+F)" : L"Context (.context)");
         SendMessageW(tooltips_, TTM_ADDTOOLW, 0, reinterpret_cast<LPARAM>(&tip));
     }
     resizeGitActivities(1);
@@ -951,7 +967,7 @@ void ProjectRuntime::Impl::pruneGroups() {
 void ProjectRuntime::Impl::dpi(UINT value) {
     dpi_ = value; renderer_.setDpi(dpi_);
     explorer_.setDpi(dpi_); changes_.setDpi(dpi_, 28);
-    explorerActivity_.setDpi(dpi_); searchActivity_.setDpi(dpi_); for (auto& button : gitActivities_) button->setDpi(dpi_); searchPane_.setDpi(dpi_);
+    explorerActivity_.setDpi(dpi_); contextActivity_.setDpi(dpi_); searchActivity_.setDpi(dpi_); for (auto& button : gitActivities_) button->setDpi(dpi_); searchPane_.setDpi(dpi_);
     splitter_ = MulDiv(5, dpi_, 96);
     activityWidth_ = MulDiv(48, dpi_, 96); sidebarHeader_ = MulDiv(34, dpi_, 96); gitHeader_ = MulDiv(78, dpi_, 96);
     gitCommit_.setDpi(dpi_);
@@ -960,6 +976,7 @@ void ProjectRuntime::Impl::dpi(UINT value) {
 }
 void ProjectRuntime::Impl::layout(bool revealTab) {
     if (!tree_) return;
+    syncContextTree();
     RECT r{}; GetClientRect(window_, &r);
     const int width = static_cast<int>(r.right), height = static_cast<int>(r.bottom);
     const int side = sidebarVisible_ ? std::clamp(MulDiv(sidebar_, dpi_, 96), MulDiv(130, dpi_, 96), std::max(MulDiv(130, dpi_, 96), width - activityWidth_ - splitter_ - MulDiv(250, dpi_, 96))) : 0;
@@ -982,7 +999,7 @@ void ProjectRuntime::Impl::layout(bool revealTab) {
     moreHover_ = PtInRect(&moreTip.rect, pointer) != FALSE;
     sidebarSplitter_ = sidebarOnRight ? RECT{editorRight, 0, sidebarLeft, content} : RECT{sidebarRect_.right, 0, editorLeft, content};
     const int gitTop = sidebarHeader_ + gitHeader_;
-    const bool showExplorer = sidebarVisible_ && activeSidebar_ == Sidebar::Explorer && !root_.empty();
+    const bool showExplorer = sidebarVisible_ && (activeSidebar_ == Sidebar::Explorer || (activeSidebar_ == Sidebar::Context && contextRoot_)) && !root_.empty();
     const bool showGitFiles = sidebarVisible_ && activeSidebar_ == Sidebar::Git && changes_.child();
     normalizeGroups();
     if (revealTab && !dockGeometry_.panes.empty() && std::none_of(dockGeometry_.panes.begin(), dockGeometry_.panes.end(), [this](const DockPlacement& pane) { return pane.group == focusedGroup_; })) terminalVisible_ = true;
@@ -1053,7 +1070,8 @@ void ProjectRuntime::Impl::layout(bool revealTab) {
     const int activityButtonLeft = activityLeft + (sidebarOnRight ? 1 : 0);
     std::vector<Placement> panes{
         {explorerButton_, activityButtonLeft, 0, activityWidth_ - 1, activityWidth_, SWP_SHOWWINDOW},
-        {searchButton_, activityButtonLeft, activityWidth_, activityWidth_ - 1, activityWidth_, SWP_SHOWWINDOW},
+        {contextActivity_.window(), activityButtonLeft, activityWidth_, activityWidth_ - 1, activityWidth_, SWP_SHOWWINDOW},
+        {searchButton_, activityButtonLeft, 2 * activityWidth_, activityWidth_ - 1, activityWidth_, SWP_SHOWWINDOW},
         {tree_, sidebarLeft, sidebarHeader_, side, std::max(0, content - sidebarHeader_), showExplorer ? SWP_SHOWWINDOW : SWP_HIDEWINDOW},
         {gitTree_, sidebarLeft, gitTop, side, std::max(0, content - gitTop), showGitFiles ? SWP_SHOWWINDOW : SWP_HIDEWINDOW},
         {gitCommit_.window(), sidebarLeft + MulDiv(12, dpi_, 96), sidebarHeader_ + MulDiv(8, dpi_, 96), std::max(0, side - MulDiv(24, dpi_, 96)), MulDiv(62, dpi_, 96), sidebarVisible_ && activeSidebar_ == Sidebar::Git ? SWP_SHOWWINDOW : SWP_HIDEWINDOW},
@@ -1061,7 +1079,7 @@ void ProjectRuntime::Impl::layout(bool revealTab) {
         {terminal_.container(), 0, 0, 0, 0, SWP_HIDEWINDOW}
     };
     for (size_t i = 0; i < gitActivities_.size(); ++i)
-        panes.push_back({gitActivities_[i]->window(), activityButtonLeft, static_cast<int>(2 + i) * activityWidth_, activityWidth_ - 1, activityWidth_, SWP_SHOWWINDOW});
+        panes.push_back({gitActivities_[i]->window(), activityButtonLeft, static_cast<int>(3 + i) * activityWidth_, activityWidth_ - 1, activityWidth_, SWP_SHOWWINDOW});
     for (int group = 0; group < groupCount(); ++group) {
         const auto& rect = editorGroups_[group].body;
         const auto selected = groupTab(group);
@@ -1109,7 +1127,7 @@ void ProjectRuntime::Impl::paint() {
         dc.fill(sidebarRect_, panel);
         const int left = sidebarRect_.left + scaled(14), edge = sidebarRect_.right - scaled(12), top = sidebarHeader_;
         const auto collapse = collapseButton();
-        dc.label({left, 0, collapse.right ? collapse.left - scaled(6) : edge, top}, activeSidebar_ == Sidebar::Explorer ? L"EXPLORER" : activeSidebar_ == Sidebar::Git ? L"SOURCE CONTROL" : L"SEARCH", foreground);
+        dc.label({left, 0, collapse.right ? collapse.left - scaled(6) : edge, top}, activeSidebar_ == Sidebar::Explorer ? L"EXPLORER" : activeSidebar_ == Sidebar::Context ? L"CONTEXT" : activeSidebar_ == Sidebar::Git ? L"SOURCE CONTROL" : L"SEARCH", foreground);
         if (collapse.right) {
             if (collapseHover_) dc.fill(collapse, RGB(255, 255, 255), 0.10f);
             auto icon = collapse; InflateRect(&icon, -scaled(4), -scaled(4));
@@ -1130,6 +1148,11 @@ void ProjectRuntime::Impl::paint() {
             }
         } else if (root_.empty()) {
             dc.label({left, top + scaled(16), edge, sidebarRect_.bottom - scaled(12)}, L"Open a folder with Ctrl+O to browse files.", muted, DT_LEFT | DT_TOP | DT_WORDBREAK);
+        } else if (activeSidebar_ == Sidebar::Context && !contextRoot_) {
+            const auto rootNode = node(rootItem_);
+            const std::wstring message = !rootNode || !rootNode->loaded ? L"Loading…" :
+                std::wstring(L"No ") + contextFolderName + L" folder in this project.\nCreate one at the project root to show it here.";
+            dc.label({left, top + scaled(16), edge, sidebarRect_.bottom - scaled(12)}, message, muted, DT_LEFT | DT_TOP | DT_WORDBREAK);
         }
     }
     {
@@ -1200,8 +1223,14 @@ void ProjectRuntime::Impl::selectSidebar(Sidebar sidebar, bool toggle, const std
     if (!sidebarVisible_) { SetFocus(selectedWindow()); return; }
     if (sidebar == Sidebar::Search) { searchPane_.focus(seed); return; }
     if (sidebar == Sidebar::Git) refreshGit();
-    if (sidebar == Sidebar::Explorer) explorer_.showSelection();
-    SetFocus(sidebar == Sidebar::Explorer ? (IsWindowVisible(tree_) ? tree_ : explorerButton_) : (IsWindowVisible(gitTree_) ? gitTree_ : gitButton()));
+    if (sidebar == Sidebar::Context) {
+        // The project root lists .context; load it when Explorer never has.
+        if (const auto root = node(rootItem_); root && !root->loaded && !root->loading) requestDirectory(rootItem_);
+        InvalidateRect(window_, &sidebarRect_, FALSE);
+    }
+    if (explorerSidebar()) explorer_.showSelection();
+    const HWND button = sidebar == Sidebar::Context ? contextActivity_.window() : explorerButton_;
+    SetFocus(explorerSidebar() ? (IsWindowVisible(tree_) ? tree_ : button) : (IsWindowVisible(gitTree_) ? gitTree_ : gitButton()));
 }
 RECT ProjectRuntime::Impl::collapseButton() const {
     if (!sidebarVisible_ || activeSidebar_ == Sidebar::Search) return {};
@@ -1228,7 +1257,15 @@ void ProjectRuntime::Impl::moreMenu() {
 }
 void ProjectRuntime::Impl::collapseSidebar() {
     if (!sidebarVisible_ || activeSidebar_ == Sidebar::Search) return;
-    if (activeSidebar_ == Sidebar::Explorer) {
+    if (activeSidebar_ == Sidebar::Context) {
+        const auto folder = node(contextRoot_); if (!folder) return;
+        pendingExplorerFile_.clear(); pendingTreeSelection_.clear(); pendingTreeSelections_.clear();
+        // Collapse only .context's subtree; the rest of Explorer keeps its state.
+        forgetExpanded(folder->path);
+        for (const auto& pair : nodes_) if (const auto n = node(pair.second); n && folder->path.contains(n->path)) n->expandRequested = false;
+        explorer_.collapseAll();
+        if (IsWindowVisible(tree_)) SetFocus(tree_);
+    } else if (activeSidebar_ == Sidebar::Explorer) {
         pendingExplorerFile_.clear(); pendingTreeSelection_.clear(); pendingTreeSelections_.clear();
         expandedPaths_.clear();
         // Pending directory completions must not reopen the tree after this action.
@@ -1293,6 +1330,39 @@ const GitResult* ProjectRuntime::Impl::selectedRepository() const {
     for (const auto& repo : git_->repositories) if (pathKey(repo->root) == pathKey(gitRepository_)) return repo.get();
     return git_->repositories.front().get();
 }
+TreeItem ProjectRuntime::Impl::findContextFolder() const {
+    if (!rootItem_) return 0;
+    const auto folder = [this](TreeItem item) {
+        const auto value = explorer_.item(item); const auto n = node(item);
+        return value && value->parent == rootItem_ && n && n->directory && !n->unsupported && n->path.filename().native() == contextFolderName;
+    };
+    if (folder(contextRoot_)) return contextRoot_;
+    for (auto child = explorer_.child(rootItem_); child; child = explorer_.next(child)) if (folder(child)) return child;
+    return 0;
+}
+bool ProjectRuntime::Impl::inContextFolder(TreeItem item) const {
+    if (!contextRoot_) return false;
+    for (; item; item = explorer_.item(item) ? explorer_.item(item)->parent : 0) if (item == contextRoot_) return true;
+    return false;
+}
+bool ProjectRuntime::Impl::syncContextTree() {
+    const bool context = activeSidebar_ == Sidebar::Context, shown = !contextTree_ || contextRoot_;
+    const auto folder = findContextFolder();
+    const bool switched = context != contextTree_, moved = folder != contextRoot_;
+    if (switched) (contextTree_ ? contextView_ : explorerView_) = {explorer_.top(), explorer_.left(), explorer_.selection()};
+    contextTree_ = context; contextRoot_ = folder;
+    if (switched || moved) {
+        // Without .context the tree is hidden, so its root does not matter.
+        explorer_.setRoot(context ? folder : 0);
+        if (context && folder) if (const auto value = explorer_.item(folder); value && value->expandable && !value->expanded) explorer_.expand(folder, true);
+        if (switched) {
+            const auto& view = context ? contextView_ : explorerView_;
+            if (explorer_.item(view.selection) && (!context || inContextFolder(view.selection))) explorer_.select(view.selection, false);
+            explorer_.restoreScroll(view.top, view.left);
+        }
+    }
+    return shown != (!context || folder);
+}
 HWND ProjectRuntime::Impl::gitButton() const {
     const auto repo = selectedRepository();
     if (repo && gitActivities_.size() == git_->repositories.size())
@@ -1303,6 +1373,7 @@ void ProjectRuntime::Impl::selectActivities() {
     const auto repo = selectedRepository();
     const bool git = sidebarVisible_ && activeSidebar_ == Sidebar::Git;
     explorerActivity_.select(sidebarVisible_ && activeSidebar_ == Sidebar::Explorer);
+    contextActivity_.select(sidebarVisible_ && activeSidebar_ == Sidebar::Context);
     searchActivity_.select(sidebarVisible_ && activeSidebar_ == Sidebar::Search);
     for (size_t i = 0; i < gitActivities_.size(); ++i)
         gitActivities_[i]->select(git && (gitActivities_.size() == 1 || (git_ && i < git_->repositories.size() && git_->repositories[i].get() == repo)));
@@ -1318,7 +1389,7 @@ void ProjectRuntime::Impl::resizeGitActivities(size_t count) {
     while (gitActivities_.size() < count) {
         const auto index = gitActivities_.size();
         auto button = std::make_unique<ActivityButton>();
-        button->create(window_, instance_, L"Source Control", gitCommand, true);
+        button->create(window_, instance_, L"Source Control", gitCommand, Renderer::Icon::SourceControl);
         button->setDpi(dpi_);
         button->clicked = [this, index] { selectGitRepository(index); };
         const auto window = button->window();
@@ -2083,7 +2154,9 @@ void ProjectRuntime::Impl::newFile() {
         if (!n->directory) parent = explorer_.item(parent)->parent;
     } else parent = rootItem_;
     if (!canCreateItem(parent)) return;
-    quickOpen_.close(); selectSidebar(Sidebar::Explorer);
+    quickOpen_.close();
+    // CONTEXT can show the new item only inside .context.
+    if (!sidebarVisible_ || activeSidebar_ != Sidebar::Context || !inContextFolder(parent)) selectSidebar(Sidebar::Explorer);
     pendingExplorerFile_.clear();
     explorer_.createItem(parent, false, node(selected) ? selected : parent);
 }
@@ -2623,7 +2696,7 @@ ProjectSession ProjectRuntime::Impl::saveSession() {
     normalizeGroups(); state.dockLayout = dock_.save();
     state.wslUid = wslUid_;
     state.sidebar = sidebar_; state.terminalHeight = terminalHeight_; state.terminalVisible = terminalVisible_;
-    state.gitSidebar = activeSidebar_ == Sidebar::Git;
+    state.gitSidebar = activeSidebar_ == Sidebar::Git; state.contextSidebar = activeSidebar_ == Sidebar::Context;
     state.searchSidebar = activeSidebar_ == Sidebar::Search; state.search = searchPane_.snapshot();
     state.diffInline = viewer().diffInline(); state.gitTree = gitTreeView_; state.firstTabRow = editorGroups_[0].firstRow; state.rightTabRow = editorGroups_[1].firstRow; state.editorRatio = editorRatio_;
     saveEditorTabs(state, tabs_, activeTab_);
@@ -2631,7 +2704,9 @@ ProjectSession ProjectRuntime::Impl::saveSession() {
     if (!pendingExplorerFile_.empty()) state.selected = pendingExplorerFile_.u8string();
     else if (!pendingTreeSelection_.empty()) state.selected = pendingTreeSelection_.u8string();
     else if (const auto selected = node(explorer_.selection())) state.selected = selected->path.u8string();
-    state.explorerTop = restoredScroll_ ? explorer_.top() : restoreExplorerTop_; state.explorerLeft = restoredScroll_ ? explorer_.left() : restoreExplorerLeft_;
+    // While CONTEXT is shown, the tree's scroll belongs to .context.
+    state.explorerTop = !restoredScroll_ ? restoreExplorerTop_ : contextTree_ ? explorerView_.top : explorer_.top();
+    state.explorerLeft = !restoredScroll_ ? restoreExplorerLeft_ : contextTree_ ? explorerView_.left : explorer_.left();
     state.gitTop = git_ ? changes_.top() : restoreGitTop_; state.gitLeft = git_ ? changes_.left() : restoreGitLeft_;
     if (const auto selected = sourceNode(changes_.selection())) state.gitSelected = utf8(selected->path);
     else state.gitSelected = pendingGitSelection_;
@@ -2665,7 +2740,7 @@ void ProjectRuntime::Impl::restoreProject(const ProjectSession& original) {
     for (auto& view : viewers_) view.setDiffLayout(state.diffInline);
     gitTreeView_ = state.gitTree;
     sidebar_ = state.sidebar; terminalHeight_ = state.terminalHeight; terminalVisible_ = state.terminalVisible;
-    activeSidebar_ = state.searchSidebar ? Sidebar::Search : (state.branchSidebar || state.gitSidebar) ? Sidebar::Git : Sidebar::Explorer;
+    activeSidebar_ = state.searchSidebar ? Sidebar::Search : state.contextSidebar ? Sidebar::Context : (state.branchSidebar || state.gitSidebar) ? Sidebar::Git : Sidebar::Explorer;
     searchPane_.restore(state.search);
     searchActivity_.select(activeSidebar_ == Sidebar::Search); searchPane_.active(active_ && activeSidebar_ == Sidebar::Search);
     selectActivities();
@@ -2736,8 +2811,14 @@ void ProjectRuntime::Impl::requestDirectory(TreeItem item) {
             n->loaded = result->error.empty();
             applyDirectory(found->second, n, *result);
             if (n->loaded) explorer_.expand(found->second, true);
+            if (found->second == rootItem_ && activeSidebar_ == Sidebar::Context) {
+                if (syncContextTree()) layout(false);
+                InvalidateRect(window_, &sidebarRect_, FALSE);
+            }
             if (!restoredScroll_ && std::none_of(nodes_.begin(), nodes_.end(), [this](const auto& pair) { const auto value = node(pair.second); return value && value->loading; })) {
-                explorer_.restoreScroll(restoreExplorerTop_, restoreExplorerLeft_); restoredScroll_ = true;
+                if (contextTree_) { explorerView_.top = restoreExplorerTop_; explorerView_.left = restoreExplorerLeft_; }
+                else explorer_.restoreScroll(restoreExplorerTop_, restoreExplorerLeft_);
+                restoredScroll_ = true;
             }
             if (result->error.empty()) revealPendingFile();
             else if (n->path.contains(pendingExplorerFile_)) pendingExplorerFile_.clear();
@@ -2786,6 +2867,8 @@ void ProjectRuntime::Impl::revealActiveFile() {
     if (activeTab_ >= tabs_.size() || !tabs_[activeTab_].terminalId.empty() || tabs_[activeTab_].allChanges) return;
     const auto& path = tabs_[activeTab_].path;
     if (path.empty() || !root_.contains(path) || pathKey(path) == pathKey(root_)) return;
+    // CONTEXT cannot show files outside .context.
+    if (contextTree_) { const auto folder = node(contextRoot_); if (!folder || !folder->path.contains(path)) return; }
     pendingTreeSelection_.clear(); pendingTreeSelections_.clear();
     pendingExplorerFile_ = path;
     revealPendingFile();
@@ -4182,7 +4265,7 @@ bool ProjectRuntime::Impl::key(const MSG& message) {
         if (key && message.wParam == VK_F6 && GetFocus() != terminal_.window()) { showDiff(); return true; }
         if (key && message.wParam == VK_F7 && GetFocus() != terminal_.window()) { const bool inlineView = !viewer().diffInline(); for (auto& view : viewers_) view.setDiffLayout(inlineView); return true; }
         if (key && message.wParam == VK_TAB && GetFocus() != terminal_.window() && std::none_of(viewers_.begin(), viewers_.end(), [](const Viewer& view) { return GetFocus() == view.window(); })) {
-            const HWND files = !sidebarVisible_ ? explorerButton_ : activeSidebar_ == Sidebar::Search ? searchPane_.window() : activeSidebar_ == Sidebar::Explorer ? (IsWindowVisible(tree_) ? tree_ : explorerButton_) : (IsWindowVisible(gitTree_) ? gitTree_ : gitButton());
+            const HWND files = !sidebarVisible_ ? explorerButton_ : activeSidebar_ == Sidebar::Search ? searchPane_.window() : explorerSidebar() ? (IsWindowVisible(tree_) ? tree_ : activeSidebar_ == Sidebar::Context ? contextActivity_.window() : explorerButton_) : (IsWindowVisible(gitTree_) ? gitTree_ : gitButton());
             SetFocus(GetFocus() == files ? viewer().window() : terminalVisible_ ? terminal_.window() : files); return true;
         }
 

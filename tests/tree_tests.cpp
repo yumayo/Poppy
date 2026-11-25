@@ -203,7 +203,32 @@ void gitChangeLayouts() {
         "A large Git change list lost files");
 }
 }
+void displayRoot() {
+    TreeModel tree;
+    const auto root = tree.insert(0, L"project", true, 0, 0);
+    const auto context = tree.insert(root, L".context", true, 0, 0);
+    const auto note = tree.insert(context, L"note.md", false, 0, 0);
+    const auto other = tree.insert(root, L"src", true, 0, 0);
+    tree.expand(root, true); tree.expand(context, true);
+    check(tree.visible().size() == 4, "All roots must show without a display root");
+    tree.setRoot(context);
+    auto rows = tree.visible();
+    check(rows.size() == 2 && rows[0].item == context && rows[0].depth == 0 && rows[1].item == note && rows[1].depth == 1,
+        "A display root must be the single top row with its subtree");
+    tree.expand(root, false);
+    check(tree.visible().size() == 2, "Collapsing an ancestor hid the display root");
+    tree.selectAll(false);
+    check(tree.selections() == std::vector<TreeItem>{note}, "Select All selected the display root or hidden items");
+    tree.expand(root, true); tree.select(other);
+    check(tree.selections().empty(), "A hidden selection was reported as visible");
+    tree.erase(context);
+    check(tree.visible().empty() && tree.root() == context, "A removed display root must show no rows");
+    tree.setRoot(0);
+    check(tree.visible().size() == 2, "Clearing the display root did not show every root");
+    tree.setRoot(root); tree.clear();
+    check(!tree.root(), "Clearing the tree kept its display root");
+}
 int main() {
-    try { hierarchy(); orderingAndRemoval(); largeAndDeepTrees(); movingSubtrees(); multipleSelection(); gitChangeVisibility(); gitChangeLayouts(); std::cout << "Tree model tests passed.\n"; return 0; }
+    try { displayRoot(); hierarchy(); orderingAndRemoval(); largeAndDeepTrees(); movingSubtrees(); multipleSelection(); gitChangeVisibility(); gitChangeLayouts(); std::cout << "Tree model tests passed.\n"; return 0; }
     catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
 }

@@ -3,8 +3,8 @@
 #include <algorithm>
 
 namespace poppy {
-void ActivityButton::create(HWND parent, HINSTANCE instance, const wchar_t* title, int id, bool git, bool branch, bool search) {
-    git_ = git; branch_ = branch; search_ = search; title_ = title; dpi_ = GetDpiForWindow(parent); renderer_.setDpi(dpi_);
+void ActivityButton::create(HWND parent, HINSTANCE instance, const wchar_t* title, int id, Renderer::Icon icon) {
+    icon_ = icon; title_ = title; dpi_ = GetDpiForWindow(parent); renderer_.setDpi(dpi_);
     WNDCLASSW cls{}; cls.lpfnWndProc = procedure; cls.hInstance = instance; cls.lpszClassName = activityButtonClassName;
     cls.hCursor = LoadCursorW(nullptr, IDC_ARROW); RegisterClassW(&cls);
     window_ = CreateWindowExW(0, activityButtonClassName, title, WS_CHILD | WS_VISIBLE | WS_TABSTOP,
@@ -41,8 +41,7 @@ void ActivityButton::paint() {
     renderer_.fill(rect, selected_ || (mousePressed_ && hover_) || keyPressed_ ? panel : hover_ && enabled ? RGB(34, 39, 47) : background);
     const COLORREF color = !enabled ? border : selected_ ? foreground : muted;
     const int size = MulDiv(24, dpi_, 96), x = (rect.right - size) / 2, y = (rect.bottom - size) / 2;
-    renderer_.icon(search_ ? Renderer::Icon::Search : branch_ ? Renderer::Icon::Branch : git_ ? Renderer::Icon::SourceControl : Renderer::Icon::Explorer,
-        {x, y, x + size, y + size}, color);
+    renderer_.icon(icon_, {x, y, x + size, y + size}, color);
     if (badgeCount_) {
         const auto text = std::to_wstring(badgeCount_);
         const int height = MulDiv(20, dpi_, 96), padding = MulDiv(4, dpi_, 96);

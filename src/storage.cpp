@@ -301,6 +301,8 @@ std::optional<ProjectSession> Storage::loadProject(const std::string& key, const
         if (!row.row()) return std::nullopt;
         state.sidebar = bounded(row.number(0), 130, 10000); state.terminalHeight = bounded(row.number(1), 100, 10000);
         state.terminalVisible = row.number(2) != 0; state.gitSidebar = row.number(3) == 1; state.branchSidebar = row.number(3) == 2;
+        // 3 is CONTEXT; older versions read it as EXPLORER.
+        state.contextSidebar = row.number(3) == 3;
         state.activeTab = static_cast<size_t>(bounded(row.number(4), 0, static_cast<int>(maxSavedTabs - 1))); state.selected = row.text(5);
         state.diffInline = row.number(6) != 0;
         state.gitTree = row.number(7) != 0;
@@ -389,7 +391,7 @@ void Storage::saveProject(const std::string& key, const std::string& path, const
     db.exec("DELETE FROM tabs; DELETE FROM expanded;");
     Statement session(db, "INSERT OR REPLACE INTO session VALUES(1,?,?,?,?,?,?,?,?)");
     session.number(1, state.sidebar); session.number(2, state.terminalHeight); session.number(3, state.terminalVisible);
-    session.number(4, state.branchSidebar ? 2 : state.gitSidebar ? 1 : 0); session.number(5, static_cast<sqlite3_int64>(state.activeTab)); session.text(6, state.selected);
+    session.number(4, state.contextSidebar ? 3 : state.branchSidebar ? 2 : state.gitSidebar ? 1 : 0); session.number(5, static_cast<sqlite3_int64>(state.activeTab)); session.text(6, state.selected);
     session.number(7, state.diffInline); session.number(8, state.gitTree); session.run();
     Statement tab(db, "INSERT INTO tabs VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)");
     for (size_t i = 0; i < state.tabs.size(); ++i) {

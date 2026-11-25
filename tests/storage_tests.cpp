@@ -45,7 +45,7 @@ bool same(const poppy::SavedSearch& a, const poppy::SavedSearch& b) {
     return true;
 }
 bool same(const poppy::ProjectSession& a, const poppy::ProjectSession& b) {
-    if (a.dockLayout != b.dockLayout || a.wslUid != b.wslUid || a.defaultShell != b.defaultShell || a.searchSidebar != b.searchSidebar || !same(a.search, b.search)) return false;
+    if (a.dockLayout != b.dockLayout || a.wslUid != b.wslUid || a.defaultShell != b.defaultShell || a.searchSidebar != b.searchSidebar || a.contextSidebar != b.contextSidebar || !same(a.search, b.search)) return false;
     if (a.sidebar != b.sidebar || a.terminalHeight != b.terminalHeight || a.terminalVisible != b.terminalVisible ||
         a.gitSidebar != b.gitSidebar || a.branchSidebar != b.branchSidebar || a.diffInline != b.diffInline || a.gitTree != b.gitTree || a.activeTab != b.activeTab || a.expanded != b.expanded || a.selected != b.selected || a.tabs.size() != b.tabs.size() || a.explorerTop != b.explorerTop || a.explorerLeft != b.explorerLeft ||
         a.gitTop != b.gitTop || a.gitLeft != b.gitLeft || a.firstTabRow != b.firstTabRow || a.rightTabRow != b.rightTabRow || a.editorRatio != b.editorRatio || a.terminalRatio != b.terminalRatio || a.gitSelected != b.gitSelected ||
@@ -464,6 +464,22 @@ void searchRoundTripAndMigration() {
     reopened.saveProject(linux.key(), linux.serialized(), state);
     check(same(*reopened.loadProject(linux.key(), linux.serialized()), state), "A new empty search retained old rows");
 }
+void contextSidebarRoundTrip() {
+    Fixture fixture;
+    const std::string key = "c:/context";
+    poppy::ProjectSession state;
+    state.contextSidebar = true;
+    {
+        poppy::Storage storage(fixture.directory);
+        storage.saveProject(key, key, state);
+    }
+    poppy::Storage reopened(fixture.directory);
+    const auto loaded = reopened.loadProject(key, key);
+    check(loaded && same(*loaded, state) && !loaded->gitSidebar && !loaded->branchSidebar, "The CONTEXT sidebar did not survive restart");
+    state.contextSidebar = false; state.gitSidebar = true;
+    reopened.saveProject(key, key, state);
+    check(same(*reopened.loadProject(key, key), state), "Leaving CONTEXT was not saved");
+}
 void fileComparisonRoundTrip() {
     Fixture fixture; poppy::Storage storage(fixture.directory);
     const auto root = poppy::ResourceId::wsl("Ubuntu", "/project/日本語");
@@ -542,7 +558,7 @@ void wslRoundTripAndMigration() {
 }
 int main() {
     try {
-        roundTripAndIsolation(); migrateProjectListState(); atomicSave(); projectHistory(); migrateProjectLayout(); migrateGitLayout(); migratePinnedTabs(); migrateWorkspaceAndTerminals(); migrateSplitLayout(); migrateWrapping(); terminalShellMigration(); terminalHostMigration(); terminalPinMigration(); schemaAndRegistry(); searchRoundTripAndMigration(); fileComparisonRoundTrip(); gitComparisonRoundTrip(); wslRoundTripAndMigration();
+        roundTripAndIsolation(); migrateProjectListState(); atomicSave(); projectHistory(); migrateProjectLayout(); migrateGitLayout(); migratePinnedTabs(); migrateWorkspaceAndTerminals(); migrateSplitLayout(); migrateWrapping(); terminalShellMigration(); terminalHostMigration(); terminalPinMigration(); schemaAndRegistry(); searchRoundTripAndMigration(); contextSidebarRoundTrip(); fileComparisonRoundTrip(); gitComparisonRoundTrip(); wslRoundTripAndMigration();
         std::cout << "Storage tests passed\n";
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
 }

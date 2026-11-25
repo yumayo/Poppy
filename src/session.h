@@ -74,6 +74,8 @@ struct ProjectSession {
     std::vector<SavedTerminal> terminals = {SavedTerminal{}};
     TerminalShell defaultShell = TerminalShell::PowerShell;
     bool searchSidebar = false;
+    // CONTEXT: Explorer showing only the project's .context folder.
+    bool contextSidebar = false;
     SavedSearch search;
 };
 struct AppSession {

@@ -37,6 +37,10 @@ public:
     TreeItem next(TreeItem item) const;
     TreeItem parent(TreeItem item) const;
     size_t size() const { return nodes_.size(); }
+    // Show only this item's subtree, with the item as the single top row.
+    // 0 shows every root. A removed item shows no rows.
+    void setRoot(TreeItem item) { if (root_ != item) { root_ = item; dirty_ = true; } }
+    TreeItem root() const { return root_; }
     const std::vector<Row>& visible() const;
     std::vector<std::pair<TreeItem, uintptr_t>> erase(TreeItem item);
     std::vector<std::pair<TreeItem, uintptr_t>> eraseChildren(TreeItem parent);
@@ -48,7 +52,7 @@ private:
     void eraseSubtree(TreeItem item, std::vector<std::pair<TreeItem, uintptr_t>>& removed);
     std::unordered_map<TreeItem, Node> nodes_;
     std::vector<TreeItem> roots_;
-    TreeItem next_ = 1, selection_ = 0;
+    TreeItem next_ = 1, selection_ = 0, root_ = 0;
     TreeItem anchor_ = 0;
     std::unordered_set<TreeItem> selected_;
     mutable bool dirty_ = true;

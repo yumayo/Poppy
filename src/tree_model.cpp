@@ -109,7 +109,8 @@ const std::vector<TreeModel::Row>& TreeModel::visible() const {
     if (!dirty_) return rows_;
     rows_.clear();
     std::vector<Row> pending;
-    for (auto it = roots_.rbegin(); it != roots_.rend(); ++it) pending.push_back({*it, 0});
+    if (root_) { if (nodes_.count(root_)) pending.push_back({root_, 0}); }
+    else for (auto it = roots_.rbegin(); it != roots_.rend(); ++it) pending.push_back({*it, 0});
     while (!pending.empty()) {
         const auto row = pending.back(); pending.pop_back(); rows_.push_back(row);
         const auto& node = nodes_.at(row.item);
@@ -155,7 +156,7 @@ std::vector<std::pair<TreeItem, uintptr_t>> TreeModel::eraseChildren(TreeItem pa
 std::vector<std::pair<TreeItem, uintptr_t>> TreeModel::clear() {
     std::vector<std::pair<TreeItem, uintptr_t>> removed; removed.reserve(nodes_.size());
     for (const auto& pair : nodes_) removed.emplace_back(pair.first, pair.second.data);
-    nodes_.clear(); roots_.clear(); rows_.clear(); selected_.clear(); selection_ = anchor_ = 0; dirty_ = true; return removed;
+    nodes_.clear(); roots_.clear(); rows_.clear(); selected_.clear(); selection_ = anchor_ = root_ = 0; dirty_ = true; return removed;
 }
 void TreeModel::sort(TreeItem parent, const std::function<bool(uintptr_t, uintptr_t)>& compare) {
     const auto found = nodes_.find(parent);

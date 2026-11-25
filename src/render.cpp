@@ -17,7 +17,7 @@ struct Factories {
     ComPtr<IDWriteFactory> text;
     ComPtr<IDWriteTypography> typography;
     ComPtr<ID2D1StrokeStyle> iconStroke;
-    std::array<ComPtr<ID2D1PathGeometry>, static_cast<size_t>(Renderer::Icon::Restart) + 1> icons;
+    std::array<ComPtr<ID2D1PathGeometry>, static_cast<size_t>(Renderer::Icon::Context) + 1> icons;
     Factories() {
         check(D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, drawing.put()), "Direct2D initialization failed");
         check(DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory), reinterpret_cast<IUnknown**>(text.put())), "DirectWrite initialization failed");
@@ -139,6 +139,12 @@ struct Factories {
                 sink->AddArc(D2D1::ArcSegment({20, 15}, {9, 9}, 0, D2D1_SWEEP_DIRECTION_COUNTER_CLOCKWISE, D2D1_ARC_SIZE_LARGE));
                 sink->EndFigure(D2D1_FIGURE_END_OPEN);
                 path({{13, 7}, {19, 7}, {19, 1}});
+                break;
+            case Renderer::Icon::Context:
+                // An open book: the project's notes for AI sessions.
+                path({{12, 7}, {8, 5}, {2, 5}, {2, 19}, {8, 19}, {12, 21}});
+                path({{12, 7}, {16, 5}, {22, 5}, {22, 19}, {16, 19}, {12, 21}});
+                path({{12, 7}, {12, 21}});
                 break;
             }
             check(sink->Close(), "Icon geometry completion failed");

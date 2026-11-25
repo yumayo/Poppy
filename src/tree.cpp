@@ -78,12 +78,23 @@ void Tree::collapseAll() {
     // Include retained descendants of already collapsed folders. Collect first
     // because expansion callbacks may change the hierarchy.
     std::vector<TreeItem> items;
-    for (auto id = child(); id; id = next(id)) items.push_back(id);
+    if (const auto root = model_.root()) { if (item(root)) items.push_back(root); }
+    else for (auto id = child(); id; id = next(id)) items.push_back(id);
     for (size_t i = 0; i < items.size(); ++i)
         for (auto id = child(items[i]); id; id = next(id)) items.push_back(id);
     for (auto it = items.rbegin(); it != items.rend(); ++it) expand(*it, false);
     top_ = left_ = 0; changed();
 }
+void Tree::setRoot(TreeItem id) {
+    if (model_.root() == id) return;
+    ime_.cancel(window_); endDrag(); finishRename(false);
+    model_.setRoot(id);
+    // Hidden rows must not stay the target of keyboard commands such as paste.
+    const auto& visible = model_.visible();
+    if (selection() && std::none_of(visible.begin(), visible.end(), [this](const TreeModel::Row& row) { return row.item == selection(); })) model_.select(0);
+    top_ = left_ = 0; changed();
+}
+TreeItem Tree::rootRow() const { const auto& visible = model_.visible(); return visible.empty() ? 0 : visible.front().item; }
 void Tree::select(TreeItem id, bool activate) {
     if (!model_.select(id)) return;
     ensureVisible(); changed();
@@ -223,8 +234,8 @@ void Tree::updateDrag(POINT point) {
     }
     const auto content = Scrollbars::contentRect(window_);
     auto target = PtInRect(&content, point) ? hit(point.y) : 0;
-    // Empty space below the rows belongs to the project root.
-    if (!target && PtInRect(&content, point)) target = child();
+    // Empty space below the rows belongs to the top row: the project root or the shown folder.
+    if (!target && PtInRect(&content, point)) target = rootRow();
     const auto sources = selections(true);
     if (!canDrag || !selectionAllowed(canDrag) || !canDrop || sources.empty() ||
         !std::all_of(sources.begin(), sources.end(), [&](TreeItem id) { return canDrop(id, target); })) target = 0;
@@ -267,7 +278,7 @@ bool Tree::updateExternalDrop(POINT screen, const std::vector<std::wstring>& fil
     auto point = screen; ScreenToClient(window_, &point);
     const auto content = Scrollbars::contentRect(window_);
     auto target = PtInRect(&content, point) ? hit(point.y) : 0;
-    if (!target && PtInRect(&content, point)) target = child();
+    if (!target && PtInRect(&content, point)) target = rootRow();
     // Files use their containing folder, matching clipboard paste.
     if (const auto value = item(target); value && !value->expandable) target = value->parent;
     if (rename_ || drag_ || !target || !dropFilesRequested || !canDropFiles || !canDropFiles(target, files)) {
@@ -570,7 +581,7 @@ LRESULT Tree::handle(UINT m, WPARAM a, LPARAM b) {
         return 0;
     }
     case WM_GETDLGCODE: return DLGC_WANTARROWS | DLGC_WANTCHARS;
-    case WM_SETFOCUS: if (!selection() && child()) select(child(), false); imePosition(); InvalidateRect(window_, nullptr, FALSE); return 0;
+    case WM_SETFOCUS: if (!selection() && rootRow()) select(rootRow(), false); imePosition(); InvalidateRect(window_, nullptr, FALSE); return 0;
     case WM_KILLFOCUS: ime_.cancel(window_); DestroyCaret(); InvalidateRect(window_, nullptr, FALSE); return 0;
     // Windows sends DBLCLK instead of the second DOWN during rapid clicks.
     case WM_LBUTTONDOWN: case WM_LBUTTONDBLCLK: {
@@ -672,7 +683,7 @@ LRESULT Tree::handle(UINT m, WPARAM a, LPARAM b) {
             return 0;
         }
         case VK_F4: if (id && actionClicked && actionLabel && !actionLabel(id).empty()) actionClicked(id); return 0;
-        case VK_LEFT: if (node && node->expanded) expand(id, false); else if (node && node->parent) select(node->parent); return 0;
+        case VK_LEFT: if (node && node->expanded) expand(id, false); else if (node && node->parent && id != model_.root()) select(node->parent); return 0;
         case VK_RIGHT: if (node && node->expandable) { if (!node->expanded) expand(id, true); else if (child(id)) select(child(id)); } return 0;
         case VK_RETURN: if (node && activateOnClick && activateOnClick(id)) { select(id); return 0; } [[fallthrough]];
         case VK_SPACE: if (node && node->expandable) expand(id, !node->expanded); else select(id); return 0;
@@ -706,7 +717,7 @@ LRESULT Tree::handle(UINT m, WPARAM a, LPARAM b) {
     case treeCanUndo: return canUndo && canUndo();
     case treeCanRedo: return canRedo && canRedo();
     case treeGetNext: switch (static_cast<TreeRelation>(a)) {
-        case TreeRelation::Root: return static_cast<LRESULT>(child());
+        case TreeRelation::Root: return static_cast<LRESULT>(rootRow());
         case TreeRelation::Child: return static_cast<LRESULT>(child(static_cast<TreeItem>(b)));
         case TreeRelation::Next: return static_cast<LRESULT>(next(static_cast<TreeItem>(b)));
         case TreeRelation::Parent: return static_cast<LRESULT>(model_.parent(static_cast<TreeItem>(b)));
