@@ -38,6 +38,7 @@
 #include <memory>
 #include <optional>
 #include <set>
+#include <utility>
 #include <stdexcept>
 
 namespace poppy {
@@ -56,6 +57,10 @@ struct Node {
     bool directory, loaded = false, loading = false, reparse = false;
     // Keep expansion intent while loading, even when an empty item cannot expand.
     bool expandRequested = false;
+    // Loading only so CONTEXT can reach a nested .context; Explorer stays collapsed.
+    bool preload = false;
+    // The last listing failed; CONTEXT retries it only after a refresh.
+    bool loadFailed = false;
     bool unsupported = false, truncated = false, ignored = false; std::wstring label;
 };
 bool explorerLess(uintptr_t a, uintptr_t b) {
@@ -132,7 +137,11 @@ struct TabDrag {
     std::optional<TabDrop> target;
 };
 struct GitEntry { ResourceId path; wchar_t state; bool staged = false, changed = false; char index = ' ', worktree = ' '; std::string previousPath; };
-struct GitResult { ResourceId root; std::wstring branch, error; std::vector<GitEntry> entries; size_t changed = 0, untracked = 0; bool truncated = false, unsupportedNames = false; };
+struct GitResult {
+    ResourceId root; std::wstring branch, error; std::vector<GitEntry> entries; size_t changed = 0, untracked = 0; bool truncated = false, unsupportedNames = false;
+    // The repository root has a .context folder, shown by its own CONTEXT button.
+    bool context = false;
+};
 struct GitWorkspace {
     GitRepositoryScan scan;
     std::vector<std::shared_ptr<GitResult>> repositories;
@@ -274,6 +283,9 @@ std::shared_ptr<GitWorkspace> readGitWorkspace(ProjectProvider& provider, const 
             repo->root = candidate;
         }
         if (std::any_of(result->roots.begin(), result->roots.end(), [&](const ResourceId& root) { return pathKey(root) == pathKey(repo->root); })) continue;
+        // The opened folder always has its own CONTEXT button.
+        if (pathKey(repo->root) != pathKey(directory) && directory.contains(repo->root))
+            repo->context = provider.listDirectory(repo->root / std::wstring(contextFolderName)).error.empty();
         result->roots.push_back(repo->root); result->repositories.push_back(std::move(repo));
     }
     if (!result->repositories.empty()) result->error = result->repositories.size() == 1 ? result->repositories.front()->error : std::wstring{};
@@ -327,7 +339,12 @@ private:
     void selectSidebar(Sidebar sidebar, bool toggle = false, const std::optional<std::wstring>& seed = {});
     // EXPLORER and CONTEXT share one tree; CONTEXT shows only .context's subtree.
     bool explorerSidebar() const { return activeSidebar_ == Sidebar::Explorer || activeSidebar_ == Sidebar::Context; }
-    TreeItem findContextFolder() const;
+    // The selected CONTEXT button's folder: the project root or a repository root.
+    const ResourceId& contextOwner() const;
+    ResourceId contextFolder() const { return contextOwner() / std::wstring(contextFolderName); }
+    // Finds the selected .context item. A nested one may need its unloaded
+    // ancestors loaded first; that ancestor is returned through pending.
+    TreeItem findContextFolder(TreeItem* pending = nullptr) const;
     bool inContextFolder(TreeItem item) const;
     // Returns true when the tree window's visibility changed.
     bool syncContextTree();
@@ -366,7 +383,8 @@ private:
     ProjectSession saveSession();
     void restoreProject(const ProjectSession& state);
     void forgetExpanded(const ResourceId& path);
-    void requestDirectory(TreeItem item);
+    // expand=false only loads the children, for CONTEXT's path to a nested .context.
+    void requestDirectory(TreeItem item, bool expand = true);
     void applyDirectory(TreeItem item, Node* node, const DirectoryResult& result);
     void revealActiveFile();
     void revealPendingFile();
@@ -461,13 +479,23 @@ private:
     bool statusDirty_ = true;
     size_t partialFolders_ = 0;
     std::optional<WatchUsage> watchUsage_;
-    ActivityButton explorerActivity_, contextActivity_, searchActivity_;
+    ActivityButton explorerActivity_, searchActivity_;
     // The .context folder item, and whether the tree currently shows only it.
     TreeItem contextRoot_ = 0;
-    bool contextTree_ = false;
+    bool contextTree_ = false, contextLoading_ = false;
     // Each view keeps its own scroll position and selection in the shared tree.
     struct TreeView { int top = 0, left = 0; TreeItem selection = 0; };
-    TreeView explorerView_, contextView_;
+    TreeView explorerView_;
+    // CONTEXT views by .context path; contextKey_ is the one the tree shows.
+    std::map<std::wstring, TreeView> contextViews_;
+    std::wstring contextKey_;
+    // One CONTEXT button for the project root, then one per repository with .context.
+    std::vector<std::unique_ptr<ActivityButton>> contextActivities_;
+    std::vector<ResourceId> contextOwners_;
+    ResourceId contextOwner_;
+    HWND contextButton() const;
+    void syncContextActivities();
+    void selectContext(size_t index);
     // One Source Control button per repository; each shows only its own repository.
     std::vector<std::unique_ptr<ActivityButton>> gitActivities_;
     ResourceId gitRepository_;
@@ -798,18 +826,17 @@ void ProjectRuntime::Impl::create() {
         if (source->directory && !source->group) refreshAllChanges();
     };
     explorerActivity_.create(window_, instance_, L"Explorer", explorerCommand, Renderer::Icon::Explorer); explorerButton_ = explorerActivity_.window();
-    contextActivity_.create(window_, instance_, L"Context", contextCommand, Renderer::Icon::Context);
     searchActivity_.create(window_, instance_, L"Search", searchCommand, Renderer::Icon::Search); searchButton_ = searchActivity_.window();
     explorerActivity_.clicked = [this] { selectSidebar(Sidebar::Explorer, true); };
-    contextActivity_.clicked = [this] { selectSidebar(Sidebar::Context, true); };
     searchActivity_.clicked = [this] { selectSidebar(Sidebar::Search, true); };
     explorerActivity_.select(true);
     tooltips_ = CreateWindowExW(WS_EX_TOPMOST, TOOLTIPS_CLASSW, nullptr, WS_POPUP | TTS_ALWAYSTIP | TTS_NOPREFIX, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, window_, nullptr, instance_, nullptr);
-    for (const auto button : {explorerButton_, contextActivity_.window(), searchButton_}) {
+    for (const auto button : {explorerButton_, searchButton_}) {
         TOOLINFOW tip{}; tip.cbSize = sizeof(tip); tip.uFlags = TTF_IDISHWND | TTF_SUBCLASS; tip.hwnd = window_; tip.uId = reinterpret_cast<UINT_PTR>(button);
-        tip.lpszText = const_cast<wchar_t*>(button == explorerButton_ ? L"Explorer (Ctrl+Shift+E)" : button == searchButton_ ? L"Search (Ctrl+Shift+F)" : L"Context (.context)");
+        tip.lpszText = const_cast<wchar_t*>(button == explorerButton_ ? L"Explorer (Ctrl+Shift+E)" : L"Search (Ctrl+Shift+F)");
         SendMessageW(tooltips_, TTM_ADDTOOLW, 0, reinterpret_cast<LPARAM>(&tip));
     }
+    syncContextActivities();
     resizeGitActivities(1);
     TOOLINFOW collapseTip{}; collapseTip.cbSize = sizeof(collapseTip); collapseTip.uFlags = TTF_SUBCLASS;
     collapseTip.hwnd = window_; collapseTip.uId = 50; collapseTip.lpszText = const_cast<wchar_t*>(L"Collapse All");
@@ -967,7 +994,7 @@ void ProjectRuntime::Impl::pruneGroups() {
 void ProjectRuntime::Impl::dpi(UINT value) {
     dpi_ = value; renderer_.setDpi(dpi_);
     explorer_.setDpi(dpi_); changes_.setDpi(dpi_, 28);
-    explorerActivity_.setDpi(dpi_); contextActivity_.setDpi(dpi_); searchActivity_.setDpi(dpi_); for (auto& button : gitActivities_) button->setDpi(dpi_); searchPane_.setDpi(dpi_);
+    explorerActivity_.setDpi(dpi_); for (auto& button : contextActivities_) button->setDpi(dpi_); searchActivity_.setDpi(dpi_); for (auto& button : gitActivities_) button->setDpi(dpi_); searchPane_.setDpi(dpi_);
     splitter_ = MulDiv(5, dpi_, 96);
     activityWidth_ = MulDiv(48, dpi_, 96); sidebarHeader_ = MulDiv(34, dpi_, 96); gitHeader_ = MulDiv(78, dpi_, 96);
     gitCommit_.setDpi(dpi_);
@@ -1070,16 +1097,17 @@ void ProjectRuntime::Impl::layout(bool revealTab) {
     const int activityButtonLeft = activityLeft + (sidebarOnRight ? 1 : 0);
     std::vector<Placement> panes{
         {explorerButton_, activityButtonLeft, 0, activityWidth_ - 1, activityWidth_, SWP_SHOWWINDOW},
-        {contextActivity_.window(), activityButtonLeft, activityWidth_, activityWidth_ - 1, activityWidth_, SWP_SHOWWINDOW},
-        {searchButton_, activityButtonLeft, 2 * activityWidth_, activityWidth_ - 1, activityWidth_, SWP_SHOWWINDOW},
+        {searchButton_, activityButtonLeft, static_cast<int>(1 + contextActivities_.size()) * activityWidth_, activityWidth_ - 1, activityWidth_, SWP_SHOWWINDOW},
         {tree_, sidebarLeft, sidebarHeader_, side, std::max(0, content - sidebarHeader_), showExplorer ? SWP_SHOWWINDOW : SWP_HIDEWINDOW},
         {gitTree_, sidebarLeft, gitTop, side, std::max(0, content - gitTop), showGitFiles ? SWP_SHOWWINDOW : SWP_HIDEWINDOW},
         {gitCommit_.window(), sidebarLeft + MulDiv(12, dpi_, 96), sidebarHeader_ + MulDiv(8, dpi_, 96), std::max(0, side - MulDiv(24, dpi_, 96)), MulDiv(62, dpi_, 96), sidebarVisible_ && activeSidebar_ == Sidebar::Git ? SWP_SHOWWINDOW : SWP_HIDEWINDOW},
         {searchPane_.window(), sidebarLeft, sidebarHeader_, side, std::max(0, content - sidebarHeader_), sidebarVisible_ && activeSidebar_ == Sidebar::Search ? SWP_SHOWWINDOW : SWP_HIDEWINDOW},
         {terminal_.container(), 0, 0, 0, 0, SWP_HIDEWINDOW}
     };
+    for (size_t i = 0; i < contextActivities_.size(); ++i)
+        panes.push_back({contextActivities_[i]->window(), activityButtonLeft, static_cast<int>(1 + i) * activityWidth_, activityWidth_ - 1, activityWidth_, SWP_SHOWWINDOW});
     for (size_t i = 0; i < gitActivities_.size(); ++i)
-        panes.push_back({gitActivities_[i]->window(), activityButtonLeft, static_cast<int>(3 + i) * activityWidth_, activityWidth_ - 1, activityWidth_, SWP_SHOWWINDOW});
+        panes.push_back({gitActivities_[i]->window(), activityButtonLeft, static_cast<int>(2 + contextActivities_.size() + i) * activityWidth_, activityWidth_ - 1, activityWidth_, SWP_SHOWWINDOW});
     for (int group = 0; group < groupCount(); ++group) {
         const auto& rect = editorGroups_[group].body;
         const auto selected = groupTab(group);
@@ -1149,9 +1177,10 @@ void ProjectRuntime::Impl::paint() {
         } else if (root_.empty()) {
             dc.label({left, top + scaled(16), edge, sidebarRect_.bottom - scaled(12)}, L"Open a folder with Ctrl+O to browse files.", muted, DT_LEFT | DT_TOP | DT_WORDBREAK);
         } else if (activeSidebar_ == Sidebar::Context && !contextRoot_) {
-            const auto rootNode = node(rootItem_);
-            const std::wstring message = !rootNode || !rootNode->loaded ? L"Loading…" :
-                std::wstring(L"No ") + contextFolderName + L" folder in this project.\nCreate one at the project root to show it here.";
+            const bool project = pathKey(contextOwner()) == pathKey(root_);
+            const std::wstring message = contextLoading_ ? L"Loading…" : project ?
+                std::wstring(L"No ") + contextFolderName + L" folder in this project.\nCreate one at the project root to show it here." :
+                std::wstring(L"No ") + contextFolderName + L" folder in " + repositoryLabel(contextOwner()) + L".";
             dc.label({left, top + scaled(16), edge, sidebarRect_.bottom - scaled(12)}, message, muted, DT_LEFT | DT_TOP | DT_WORDBREAK);
         }
     }
@@ -1223,13 +1252,10 @@ void ProjectRuntime::Impl::selectSidebar(Sidebar sidebar, bool toggle, const std
     if (!sidebarVisible_) { SetFocus(selectedWindow()); return; }
     if (sidebar == Sidebar::Search) { searchPane_.focus(seed); return; }
     if (sidebar == Sidebar::Git) refreshGit();
-    if (sidebar == Sidebar::Context) {
-        // The project root lists .context; load it when Explorer never has.
-        if (const auto root = node(rootItem_); root && !root->loaded && !root->loading) requestDirectory(rootItem_);
-        InvalidateRect(window_, &sidebarRect_, FALSE);
-    }
+    // layout() already started loading the way to .context.
+    if (sidebar == Sidebar::Context) InvalidateRect(window_, &sidebarRect_, FALSE);
     if (explorerSidebar()) explorer_.showSelection();
-    const HWND button = sidebar == Sidebar::Context ? contextActivity_.window() : explorerButton_;
+    const HWND button = sidebar == Sidebar::Context ? contextButton() : explorerButton_;
     SetFocus(explorerSidebar() ? (IsWindowVisible(tree_) ? tree_ : button) : (IsWindowVisible(gitTree_) ? gitTree_ : gitButton()));
 }
 RECT ProjectRuntime::Impl::collapseButton() const {
@@ -1330,14 +1356,31 @@ const GitResult* ProjectRuntime::Impl::selectedRepository() const {
     for (const auto& repo : git_->repositories) if (pathKey(repo->root) == pathKey(gitRepository_)) return repo.get();
     return git_->repositories.front().get();
 }
-TreeItem ProjectRuntime::Impl::findContextFolder() const {
-    if (!rootItem_) return 0;
-    const auto folder = [this](TreeItem item) {
-        const auto value = explorer_.item(item); const auto n = node(item);
-        return value && value->parent == rootItem_ && n && n->directory && !n->unsupported && n->path.filename().native() == contextFolderName;
+const ResourceId& ProjectRuntime::Impl::contextOwner() const {
+    for (const auto& owner : contextOwners_) if (pathKey(owner) == pathKey(contextOwner_)) return owner;
+    return root_;
+}
+TreeItem ProjectRuntime::Impl::findContextFolder(TreeItem* pending) const {
+    if (pending) *pending = 0;
+    if (!rootItem_ || root_.empty()) return 0;
+    const auto target = contextFolder();
+    const auto folder = [&](TreeItem item) {
+        const auto n = node(item);
+        return explorer_.item(item) && n && n->directory && !n->unsupported && pathKey(n->path) == pathKey(target);
     };
     if (folder(contextRoot_)) return contextRoot_;
-    for (auto child = explorer_.child(rootItem_); child; child = explorer_.next(child)) if (folder(child)) return child;
+    // Walk only the target's ancestors; retained children stay usable while a refresh reloads them.
+    for (auto item = rootItem_; const auto n = node(item);) {
+        if (folder(item)) return item;
+        if (!n->directory || n->reparse || n->unsupported || !n->path.contains(target)) return 0;
+        auto child = explorer_.child(item);
+        for (; child; child = explorer_.next(child)) if (const auto value = node(child); value && !value->unsupported && value->path.contains(target)) break;
+        if (!child) {
+            if (!n->loaded && pending) *pending = item;
+            return 0;
+        }
+        item = child;
+    }
     return 0;
 }
 bool ProjectRuntime::Impl::inContextFolder(TreeItem item) const {
@@ -1347,21 +1390,89 @@ bool ProjectRuntime::Impl::inContextFolder(TreeItem item) const {
 }
 bool ProjectRuntime::Impl::syncContextTree() {
     const bool context = activeSidebar_ == Sidebar::Context, shown = !contextTree_ || contextRoot_;
-    const auto folder = findContextFolder();
-    const bool switched = context != contextTree_, moved = folder != contextRoot_;
-    if (switched) (contextTree_ ? contextView_ : explorerView_) = {explorer_.top(), explorer_.left(), explorer_.selection()};
-    contextTree_ = context; contextRoot_ = folder;
+    const auto key = context ? pathKey(contextFolder()) : std::wstring{};
+    TreeItem pending = 0;
+    const auto folder = findContextFolder(&pending);
+    contextLoading_ = context && pending;
+    if (context) {
+        // Reload the path to .context after a refresh, without expanding it in Explorer.
+        for (TreeItem item = folder; item && item != rootItem_;) {
+            const auto value = explorer_.item(item); if (!value) break;
+            item = value->parent;
+            if (const auto n = node(item); n && !n->loaded && !n->loading && !n->loadFailed) requestDirectory(item, item == rootItem_);
+        }
+        if (pending) if (const auto n = node(pending); n && !n->loading && !n->loadFailed) requestDirectory(pending, pending == rootItem_);
+    }
+    const bool switched = context != contextTree_ || key != contextKey_, moved = folder != contextRoot_;
+    if (switched) (contextTree_ ? contextViews_[contextKey_] : explorerView_) = {explorer_.top(), explorer_.left(), explorer_.selection()};
+    contextTree_ = context; contextKey_ = key; contextRoot_ = folder;
     if (switched || moved) {
         // Without .context the tree is hidden, so its root does not matter.
         explorer_.setRoot(context ? folder : 0);
         if (context && folder) if (const auto value = explorer_.item(folder); value && value->expandable && !value->expanded) explorer_.expand(folder, true);
         if (switched) {
-            const auto& view = context ? contextView_ : explorerView_;
+            const auto saved = context ? contextViews_.find(key) : contextViews_.end();
+            const auto view = !context ? explorerView_ : saved != contextViews_.end() ? saved->second : TreeView{};
             if (explorer_.item(view.selection) && (!context || inContextFolder(view.selection))) explorer_.select(view.selection, false);
             explorer_.restoreScroll(view.top, view.left);
         }
     }
     return shown != (!context || folder);
+}
+HWND ProjectRuntime::Impl::contextButton() const {
+    for (size_t i = 0; i < contextActivities_.size() && i < contextOwners_.size(); ++i)
+        if (pathKey(contextOwners_[i]) == pathKey(contextOwner())) return contextActivities_[i]->window();
+    return contextActivities_.front()->window();
+}
+void ProjectRuntime::Impl::syncContextActivities() {
+    std::vector<ResourceId> owners{root_};
+    if (git_) for (const auto& repo : git_->repositories)
+        if (repo->context && pathKey(repo->root) != pathKey(root_)) owners.push_back(repo->root);
+    const bool resized = contextActivities_.size() != owners.size();
+    while (contextActivities_.size() > owners.size()) {
+        const auto button = contextActivities_.back()->window();
+        TOOLINFOW tip{}; tip.cbSize = sizeof(tip); tip.hwnd = window_; tip.uId = reinterpret_cast<UINT_PTR>(button);
+        SendMessageW(tooltips_, TTM_DELTOOLW, 0, reinterpret_cast<LPARAM>(&tip));
+        if (GetFocus() == button) SetFocus(contextActivities_.front()->window());
+        DestroyWindow(button); contextActivities_.pop_back();
+    }
+    while (contextActivities_.size() < owners.size()) {
+        const auto index = contextActivities_.size();
+        auto button = std::make_unique<ActivityButton>();
+        button->create(window_, instance_, L"Context", contextCommand, Renderer::Icon::Context);
+        button->setDpi(dpi_);
+        button->clicked = [this, index] { selectContext(index); };
+        const auto window = button->window();
+        // The palette must clip every pane beneath it.
+        SetWindowLongPtrW(window, GWL_STYLE, GetWindowLongPtrW(window, GWL_STYLE) | WS_CLIPSIBLINGS);
+        TOOLINFOW tip{}; tip.cbSize = sizeof(tip); tip.uFlags = TTF_IDISHWND | TTF_SUBCLASS; tip.hwnd = window_; tip.uId = reinterpret_cast<UINT_PTR>(window);
+        tip.lpszText = const_cast<wchar_t*>(L"Context (.context)");
+        SendMessageW(tooltips_, TTM_ADDTOOLW, 0, reinterpret_cast<LPARAM>(&tip));
+        contextActivities_.push_back(std::move(button));
+    }
+    contextOwners_ = std::move(owners);
+    const bool multiple = contextOwners_.size() > 1;
+    for (size_t i = 0; i < contextActivities_.size(); ++i) {
+        const auto& owner = contextOwners_[i];
+        auto title = !multiple ? std::wstring(L"Context") :
+            L"Context: " + (i == 0 ? (root_.filename().empty() ? root_.native() : root_.filename().native()) : repositoryLabel(owner));
+        auto& button = *contextActivities_[i];
+        button.setTitle(title);
+        title += std::wstring(L" (") + contextFolderName + L")";
+        TOOLINFOW tip{}; tip.cbSize = sizeof(tip); tip.hwnd = window_; tip.uId = reinterpret_cast<UINT_PTR>(button.window()); tip.lpszText = title.data();
+        SendMessageW(tooltips_, TTM_UPDATETIPTEXTW, 0, reinterpret_cast<LPARAM>(&tip));
+    }
+    selectActivities();
+    // A removed button's .context falls back to the project root's.
+    if (resized) layout(false);
+    else if (activeSidebar_ == Sidebar::Context && syncContextTree()) layout(false);
+    if (activeSidebar_ == Sidebar::Context) InvalidateRect(window_, &sidebarRect_, FALSE);
+}
+void ProjectRuntime::Impl::selectContext(size_t index) {
+    if (index >= contextOwners_.size()) return;
+    if (pathKey(contextOwners_[index]) == pathKey(contextOwner())) { selectSidebar(Sidebar::Context, true); return; }
+    contextOwner_ = contextOwners_[index];
+    selectSidebar(Sidebar::Context);
 }
 HWND ProjectRuntime::Impl::gitButton() const {
     const auto repo = selectedRepository();
@@ -1373,7 +1484,9 @@ void ProjectRuntime::Impl::selectActivities() {
     const auto repo = selectedRepository();
     const bool git = sidebarVisible_ && activeSidebar_ == Sidebar::Git;
     explorerActivity_.select(sidebarVisible_ && activeSidebar_ == Sidebar::Explorer);
-    contextActivity_.select(sidebarVisible_ && activeSidebar_ == Sidebar::Context);
+    const bool context = sidebarVisible_ && activeSidebar_ == Sidebar::Context;
+    for (size_t i = 0; i < contextActivities_.size(); ++i)
+        contextActivities_[i]->select(context && i < contextOwners_.size() && pathKey(contextOwners_[i]) == pathKey(contextOwner()));
     searchActivity_.select(sidebarVisible_ && activeSidebar_ == Sidebar::Search);
     for (size_t i = 0; i < gitActivities_.size(); ++i)
         gitActivities_[i]->select(git && (gitActivities_.size() == 1 || (git_ && i < git_->repositories.size() && git_->repositories[i].get() == repo)));
@@ -1463,6 +1576,7 @@ void ProjectRuntime::Impl::sortHistory(TreeItem item) {
 void ProjectRuntime::Impl::updateGitFiles() {
     const size_t gitChanges = git_ ? git_->changed + git_->untracked : 0;
     syncGitActivities();
+    syncContextActivities();
     if (gitChanges_ != gitChanges) { gitChanges_ = gitChanges; if (owner_ && owner_->changed) owner_->changed(); }
     std::wstring selected = wide(pendingGitSelection_);
     const int oldTop = changes_.top(), oldLeft = changes_.left();
@@ -2675,6 +2789,8 @@ void ProjectRuntime::Impl::connectRemote() {
                 pendingTreeSelection_ = relocateResource(pendingTreeSelection_, previous, root_);
                 pendingExplorerFile_ = relocateResource(pendingExplorerFile_, previous, root_);
                 gitRepository_ = relocateResource(gitRepository_, previous, root_);
+                contextOwner_ = relocateResource(contextOwner_, previous, root_);
+                for (auto& owner : contextOwners_) owner = relocateResource(owner, previous, root_);
                 for (auto& tab : tabs_) { tab.path = relocateResource(tab.path, previous, root_); tab.gitRoot = relocateResource(tab.gitRoot, previous, root_); tab.comparePath = relocateResource(tab.comparePath, previous, root_); }
                 for (const auto& weak : navigationTabs_) if (const auto entry = weak.lock()) {
                     entry->tab.path = relocateResource(entry->tab.path, previous, root_);
@@ -2789,10 +2905,12 @@ void ProjectRuntime::Impl::forgetExpanded(const ResourceId& path) {
         else ++iterator;
     }
 }
-void ProjectRuntime::Impl::requestDirectory(TreeItem item) {
+void ProjectRuntime::Impl::requestDirectory(TreeItem item, bool expand) {
     const auto n = node(item); if (!n || !n->directory || n->reparse || (root_.wsl() && !connected_)) return;
-    n->expandRequested = true;
-    expandedPaths_[pathKey(n->path)] = n->path;
+    if (expand) {
+        n->expandRequested = true;
+        expandedPaths_[pathKey(n->path)] = n->path;
+    } else n->preload = true;
     if (n->loading) return;
     n->loading = true; const auto path = n->path; const auto id = n->id, generation = generation_;
     worker_->submit(L"dir:" + std::to_wstring(id), [this, path, id, generation] {
@@ -2807,11 +2925,13 @@ void ProjectRuntime::Impl::requestDirectory(TreeItem item) {
             if (generation != generation_) return;
             const auto found = nodes_.find(id); if (found == nodes_.end()) return;
             auto n = node(found->second); if (!n) return; n->loading = false;
-            if (!n->expandRequested) { n->loaded = false; return; }
-            n->loaded = result->error.empty();
+            const bool preload = std::exchange(n->preload, false);
+            if (!n->expandRequested && !preload) { n->loaded = false; return; }
+            n->loaded = result->error.empty(); n->loadFailed = !n->loaded;
             applyDirectory(found->second, n, *result);
-            if (n->loaded) explorer_.expand(found->second, true);
-            if (found->second == rootItem_ && activeSidebar_ == Sidebar::Context) {
+            if (n->loaded && n->expandRequested) explorer_.expand(found->second, true);
+            // Any listing can be on the way to the selected .context.
+            if (activeSidebar_ == Sidebar::Context) {
                 if (syncContextTree()) layout(false);
                 InvalidateRect(window_, &sidebarRect_, FALSE);
             }
@@ -3933,13 +4053,20 @@ void ProjectRuntime::Impl::refresh(bool force) {
     if (files) quickOpen_.refresh();
     filesDirty_ = false;
     if (files) {
-        for (const auto& pair : nodes_) if (auto n = node(pair.second); n && n->directory) n->loaded = false;
+        for (const auto& pair : nodes_) if (auto n = node(pair.second); n && n->directory) n->loaded = n->loadFailed = false;
         for (const auto& pair : nodes_) {
             const auto n = node(pair.second); if (!n || !n->expandRequested) continue;
-            auto item = explorer_.item(pair.second); bool visible = true;
-            while (item && item->parent) { item = explorer_.item(item->parent); if (item && !item->expanded) { visible = false; break; } }
+            // CONTEXT shows its .context subtree even while Explorer keeps the ancestors collapsed.
+            auto id = pair.second; bool visible = true;
+            while (id != explorer_.root()) {
+                const auto item = explorer_.item(id); if (!item || !item->parent) break;
+                id = item->parent;
+                if (const auto parent = explorer_.item(id); parent && !parent->expanded) { visible = false; break; }
+            }
             if (visible) requestDirectory(pair.second);
         }
+        // Reload the path to the selected .context too.
+        if (activeSidebar_ == Sidebar::Context && syncContextTree()) layout(false);
     }
     refreshGit(files);
     const bool showingGitChanges = std::any_of(tabs_.begin(), tabs_.end(), [](const Tab& tab) { return tab.displayed && tab.diff && tab.comparePath.empty() && tab.diffKind != GitDiffKind::Commit && tab.diffKind != GitDiffKind::Compare; });
@@ -4265,7 +4392,7 @@ bool ProjectRuntime::Impl::key(const MSG& message) {
         if (key && message.wParam == VK_F6 && GetFocus() != terminal_.window()) { showDiff(); return true; }
         if (key && message.wParam == VK_F7 && GetFocus() != terminal_.window()) { const bool inlineView = !viewer().diffInline(); for (auto& view : viewers_) view.setDiffLayout(inlineView); return true; }
         if (key && message.wParam == VK_TAB && GetFocus() != terminal_.window() && std::none_of(viewers_.begin(), viewers_.end(), [](const Viewer& view) { return GetFocus() == view.window(); })) {
-            const HWND files = !sidebarVisible_ ? explorerButton_ : activeSidebar_ == Sidebar::Search ? searchPane_.window() : explorerSidebar() ? (IsWindowVisible(tree_) ? tree_ : activeSidebar_ == Sidebar::Context ? contextActivity_.window() : explorerButton_) : (IsWindowVisible(gitTree_) ? gitTree_ : gitButton());
+            const HWND files = !sidebarVisible_ ? explorerButton_ : activeSidebar_ == Sidebar::Search ? searchPane_.window() : explorerSidebar() ? (IsWindowVisible(tree_) ? tree_ : activeSidebar_ == Sidebar::Context ? contextButton() : explorerButton_) : (IsWindowVisible(gitTree_) ? gitTree_ : gitButton());
             SetFocus(GetFocus() == files ? viewer().window() : terminalVisible_ ? terminal_.window() : files); return true;
         }
 
