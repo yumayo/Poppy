@@ -897,7 +897,14 @@ case wmProjectStopped:{
 case WM_APP + 21:{ const auto project = find(static_cast<uint64_t>(a)); if (!project || project->runtime->hasUnsaved()) return 0; const bool active = project == &projects_[active_]; const auto index = static_cast<size_t>(project - projects_.data()); close(index); if (active) for (size_t i = 0; i < projects_.size(); ++i) if (projects_[i].id == static_cast<uint64_t>(b)) { select(i); break; } return 0; }
 case wmAiEvent:for(const auto& event:events_.drain())for(auto& project:projects_)if(project.runtime->apply(event))break;if(!closing_){animateAiStatus();updateUnreadBadges();}return 0;
 case WM_TIMER:if(closing_)return 0;if(a==77)Terminal::pump();else if(a==aiAnimationTimerId)animateAiStatus();else if(a==1)tick();return 0;
-case WM_ACTIVATE:if(closing_)return 0;if(LOWORD(a)==WA_INACTIVE)endProjectDrag();else if(!projects_.empty())PostMessageW(projects_[active_].runtime->window(),WM_APP+12,0,0);return 0;
+case WM_ACTIVATE:
+    if(closing_)return 0;
+    if(LOWORD(a)==WA_INACTIVE){endProjectDrag();if(!projects_.empty())projects_[active_].runtime->rememberFocus();return 0;}
+    if(projects_.empty())return 0;
+    PostMessageW(projects_[active_].runtime->window(),WM_APP+12,0,0);
+    // WM_SETFOCUS restores the control that was focused when the window was deactivated.
+    if(!HIWORD(a)&&!IsChild(window_,GetFocus()))SetFocus(window_);
+    return 0;
 case WM_SETFOCUS:if(closing_)return 0;if(!projects_.empty())projects_[active_].runtime->activate(true);return 0;
 case WM_XBUTTONDOWN:case WM_XBUTTONDBLCLK:navigate(GET_XBUTTON_WPARAM(a)==XBUTTON2);return TRUE;
 case WM_XBUTTONUP:return TRUE;

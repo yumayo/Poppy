@@ -17,6 +17,8 @@ public:
     void create(HWND parent, HINSTANCE instance, AiEventQueue* hooks);
     void initialize(const ResourceId& path, const ProjectSession& state, bool saved);
     void activate(bool active);
+    // Records the focused control so activation can return to it.
+    void rememberFocus();
     void shutdown(ShutdownProgress* progress = nullptr, bool preserveTerminals = false);
     // Call only after every project has stopped using shared WSL connections.
     void disconnect(ShutdownProgress* progress = nullptr);

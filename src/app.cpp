@@ -4320,16 +4320,22 @@ bool ProjectRuntime::canClose() {
 }
 void ProjectRuntime::revalidate() { PostMessageW(window(), WM_APP+13, 0, 0); }
 void ProjectRuntime::initialize(const ResourceId& path, const ProjectSession& state, bool saved) { if (saved) impl_->initialState_ = state; impl_->openFolder(path); }
+void ProjectRuntime::rememberFocus() {
+    // Only a control inside this project can be restored; keep the last one otherwise.
+    const HWND focus = GetFocus();
+    if (!focus || !IsChild(window(), focus)) return;
+    impl_->lastFocus_ = focus;
+    if (impl_->terminal_.contains(focus)) impl_->focusedPane_ = "terminal";
+    else if (focus == impl_->tree_) impl_->focusedPane_ = "explorer";
+    else if (focus == impl_->gitTree_) impl_->focusedPane_ = "git";
+    else if (focus == impl_->viewer().window() || IsChild(impl_->viewer().window(), focus)) impl_->focusedPane_ = "viewer";
+}
 void ProjectRuntime::activate(bool active) {
     impl_->active_ = active;
     impl_->searchPane_.active(active && impl_->sidebarVisible_ && impl_->activeSidebar_ == Sidebar::Search);
     if (active && impl_->root_.wsl() && !impl_->connected_ && impl_->provider_ && impl_->provider_->state() == ConnectionState::Disconnected) impl_->connectRemote();
     if (!active) {
-        impl_->saveTab(); impl_->lastFocus_ = GetFocus();
-        if (impl_->lastFocus_ && impl_->lastFocus_ == impl_->terminal_.window()) impl_->focusedPane_ = "terminal";
-        else if (impl_->lastFocus_ == impl_->tree_) impl_->focusedPane_ = "explorer";
-        else if (impl_->lastFocus_ == impl_->gitTree_) impl_->focusedPane_ = "git";
-        else if (impl_->lastFocus_ == impl_->viewer().window() || IsChild(impl_->viewer().window(), impl_->lastFocus_)) impl_->focusedPane_ = "viewer";
+        impl_->saveTab(); rememberFocus();
         impl_->quickOpen_.close(false); impl_->comparePicker_.close(false); impl_->endTabDrag(); ShowWindow(window(), SW_HIDE);
     }
     else {
